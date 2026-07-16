@@ -1,0 +1,23 @@
+# Windows x64 / CPython 3.12 runtime artifact lock for MOKU 1.0.0.
+# Every installable artifact is pinned by SHA-256. proxy-tools is a locally
+# reproduced wheel because PyPI publishes only a legacy source archive.
+--require-hashes
+--only-binary=:all:
+--find-links ./third_party/wheels
+
+bottle==0.13.4 \
+    --hash=sha256:045684fbd2764eac9cdeb824861d1551d113e8b683d8d26e296898d3dd99a12e
+cffi==2.1.0 \
+    --hash=sha256:c97f080ea627e2863524c5af3836e2270b5f5dfff1f104392b959f8df0c5d384
+clr-loader==0.3.1 \
+    --hash=sha256:cbad189de20d202a7d621956b0fc38049e13c9bf7ca2923441eff725cd121aa1
+proxy-tools==0.1.0 \
+    --hash=sha256:e9c3763d867f00a88c203686480d67950c04f210d8be71c861800bc7e9b53b40
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+pythonnet==3.1.0 \
+    --hash=sha256:7bdd4de03df3547a48122a3989265c8b31d5be0d19dadffa009eec7df8085e0b
+pywebview==6.2.1 \
+    --hash=sha256:9d07275f53894ab4d5e2e0e996227193e7187dec276d9b624dccbce029216b46
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8

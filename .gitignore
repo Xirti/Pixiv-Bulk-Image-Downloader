@@ -1,0 +1,43 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime state and user-owned content
+downloads/
+logs/
+*.log
+.env
+.env.*
+!.env.example
+
+# Build and release output
+build/
+dist/
+release/
+*.zip
+
+# Local test output and downloaded artwork
+custom-download-test/
+test-*.json
+tests/*_result.json
+tests/*-evidence.json
+tests/*.png
+tests/*.jpg
+
+# Internal local audit records (contain machine-specific paths)
+profile.md
+项目完结报告.md
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
