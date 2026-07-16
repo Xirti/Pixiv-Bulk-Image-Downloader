@@ -8,6 +8,7 @@
 *.yaml text eol=lf
 *.json text eol=lf
 *.lock text eol=lf
+third_party/proxy-tools/LICENSE.txt text eol=lf
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.bat text eol=crlf

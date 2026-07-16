@@ -30,6 +30,10 @@ EXPECTED_HASHES = {
 
 
 class DependencyLockTests(unittest.TestCase):
+    def test_vendored_license_is_checked_out_with_hash_stable_line_endings(self):
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("third_party/proxy-tools/LICENSE.txt text eol=lf", attributes)
+
     @staticmethod
     def _locked_rows(text: str) -> dict[str, str]:
         pattern = re.compile(
