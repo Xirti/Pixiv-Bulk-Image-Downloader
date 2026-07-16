@@ -289,8 +289,9 @@ class BuildManifestTests(unittest.TestCase):
             result = self._run_release(root)
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            release = root / "release" / "v1.0.0"
-            archive = release / "MOKU-v1.0.0-windows-x64.zip"
+            version = build_manifest.__version__
+            release = root / "release" / f"v{version}"
+            archive = release / f"MOKU-v{version}-windows-x64.zip"
             self.assertTrue(archive.is_file())
             self.assertTrue((release / "SHA256SUMS.txt").is_file())
             with zipfile.ZipFile(archive) as packaged:
@@ -311,7 +312,7 @@ class BuildManifestTests(unittest.TestCase):
             result = self._run_release(root)
 
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertFalse((root / "release" / "v1.0.0").exists())
+            self.assertFalse((root / "release" / f"v{build_manifest.__version__}").exists())
 
     @unittest.skipUnless(sys.platform == "win32", "PowerShell integration is Windows-only")
     def test_skip_build_release_rejects_license_changed_after_build(self):
@@ -323,7 +324,7 @@ class BuildManifestTests(unittest.TestCase):
             result = self._run_release(root)
 
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertFalse((root / "release" / "v1.0.0").exists())
+            self.assertFalse((root / "release" / f"v{build_manifest.__version__}").exists())
 
     def test_release_script_rehashes_moved_archive_and_cleans_partial_output(self):
         release = (ROOT / "make-release.ps1").read_text(encoding="utf-8-sig")

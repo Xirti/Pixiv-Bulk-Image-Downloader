@@ -21,7 +21,7 @@
 
 - [x] Run `powershell -ExecutionPolicy Bypass -File .\make-release.ps1`.
 - [ ] Use `-SkipBuild` only when the source, build inputs, license, and every file in `dist\MOKU` still match `BUILD_MANIFEST.json`.
-- [ ] Commit the source and tag the exact verified commit as `v1.0.0`.
+- [ ] Commit the source and tag the exact verified commit as `v1.0.1`.
 - [ ] Create a GitHub Release from that tag.
-- [ ] Upload the ZIP and `SHA256SUMS.txt` from `release\v1.0.0`.
+- [ ] Upload the ZIP and `SHA256SUMS.txt` from `release\v1.0.1`.
 - [ ] Verify the downloaded ZIP hash from another directory.

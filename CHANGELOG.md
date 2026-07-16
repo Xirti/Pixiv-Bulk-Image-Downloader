@@ -2,6 +2,14 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.1] - 2026-07-16
+
+### Fixed
+
+- Restored Windows PowerShell module discovery in `-NoProfile` CI subprocesses while preserving fail-closed Python Authenticode verification.
+- Preserved the vendored `proxy-tools` license byte hash across Windows and CI checkouts with explicit LF normalization.
+- Updated pinned GitHub Actions to Node.js 24-compatible major versions.
+
 ## [1.0.0] - 2026-07-16
 
 ### Added
