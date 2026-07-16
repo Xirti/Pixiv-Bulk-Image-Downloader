@@ -4,6 +4,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $Root
 
 $SecurityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+$env:PSModulePath = (Join-Path $PSHOME 'Modules') + [IO.Path]::PathSeparator + $env:PSModulePath
 Import-Module -Name $SecurityModule -ErrorAction Stop
 $PythonCommand = Get-Command python.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
 $Python = [IO.Path]::GetFullPath([string]$PythonCommand.Source)

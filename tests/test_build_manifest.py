@@ -341,6 +341,7 @@ class BuildManifestTests(unittest.TestCase):
         for script in (build, release):
             self.assertIn("Get-Command python.exe -CommandType Application", script)
             self.assertIn("Microsoft.PowerShell.Security.psd1", script)
+            self.assertIn("$env:PSModulePath", script)
             self.assertLess(script.index("Microsoft.PowerShell.Security.psd1"), script.index("Get-AuthenticodeSignature"))
             self.assertIn("sys.implementation.name", script)
             self.assertIn("CPython 3.12", script)
