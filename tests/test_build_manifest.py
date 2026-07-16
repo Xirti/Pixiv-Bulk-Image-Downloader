@@ -340,6 +340,8 @@ class BuildManifestTests(unittest.TestCase):
         release = (ROOT / "make-release.ps1").read_text(encoding="utf-8-sig")
         for script in (build, release):
             self.assertIn("Get-Command python.exe -CommandType Application", script)
+            self.assertIn("Microsoft.PowerShell.Security.psd1", script)
+            self.assertLess(script.index("Microsoft.PowerShell.Security.psd1"), script.index("Get-AuthenticodeSignature"))
             self.assertIn("sys.implementation.name", script)
             self.assertIn("CPython 3.12", script)
             self.assertIn("MOKU.PixivTagGallery.BuildRelease", script)

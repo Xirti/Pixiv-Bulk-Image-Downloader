@@ -36,4 +36,4 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Synchronized artwork/image-capability state and revalidate in-flight R-18 image/download authorization after network reads.
 - Complete staging cleanup before returning download success or failure responses, so the HTTP result matches the final filesystem state.
 - Replaced unbounded logs with 5 MiB rotation and removed temporary WebView2 paths from cleanup warnings.
-- Removed Android, non-Windows UI backends, x86/ARM64 loaders, and debug symbols from the Windows x64 frozen closure.
+- Removed Android, non-Windows UI backends, unnecessary x86/ARM64 product components, and debug symbols from the Windows x64 frozen closure while retaining the small pywebview loader runtimes required during import.

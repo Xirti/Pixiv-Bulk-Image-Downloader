@@ -15,6 +15,8 @@ if (-not $SkipBuild) {
   if ($LASTEXITCODE -ne 0) { throw 'Portable build failed' }
 }
 
+$SecurityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+Import-Module -Name $SecurityModule -ErrorAction Stop
 $PythonCommand = Get-Command python.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
 $Python = [IO.Path]::GetFullPath([string]$PythonCommand.Source)
 $PythonSignature = Get-AuthenticodeSignature -LiteralPath $Python
