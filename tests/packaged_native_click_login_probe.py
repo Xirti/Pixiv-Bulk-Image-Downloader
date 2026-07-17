@@ -302,8 +302,14 @@ def main() -> None:
 
         actual_port = free_port()
         actual, actual_base, actual_hwnd = launch(exe, actual_root, actual_port)
-        health = local_json(actual_base + "api/health")
-        protected_headers = {"X-MOKU-Request-Token": str(health["requestToken"])}
+        health = local_json(
+            actual_base + "api/health",
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        protected_headers = {
+            "X-MOKU-Request-Token": str(health["requestToken"]),
+            "Sec-Fetch-Site": "same-origin",
+        }
         status = wait_until(
             lambda: (
                 value if (value := local_json(actual_base + "api/status", headers=protected_headers))

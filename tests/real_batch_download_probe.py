@@ -20,7 +20,11 @@ def wait_health(port: int) -> str:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1) as response:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/health",
+                headers={"Sec-Fetch-Site": "same-origin"},
+            )
+            with urllib.request.urlopen(request, timeout=1) as response:
                 if response.status == 200:
                     return json.loads(response.read())["requestToken"]
         except OSError:

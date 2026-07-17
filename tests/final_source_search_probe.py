@@ -47,7 +47,10 @@ def main() -> None:
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             try:
-                status, health = request_json(base + "/api/health", 1)
+                status, health = request_json(
+                    base + "/api/health", 1,
+                    {"Sec-Fetch-Site": "same-origin"},
+                )
                 if status == 200 and health.get("instanceId") == "final-source-search-probe":
                     break
             except OSError:

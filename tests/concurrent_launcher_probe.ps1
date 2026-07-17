@@ -22,7 +22,7 @@ foreach ($worker in $workers) {
 $lines = [IO.File]::ReadAllLines($log)
 $newLines = @($lines | Select-Object -Skip $before)
 $runtime = Get-Content -LiteralPath $runtimeFile -Raw -Encoding UTF8 | ConvertFrom-Json
-$health = (Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:$($runtime.port)/api/health") -TimeoutSec 5).Content | ConvertFrom-Json
+$health = (Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:$($runtime.port)/api/health") -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 5).Content | ConvertFrom-Json
 $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalAddress -eq '127.0.0.1' -and $_.LocalPort -ge 48721 -and $_.LocalPort -le 48730 })
 [pscustomobject]@{
   workers = $workers.Count

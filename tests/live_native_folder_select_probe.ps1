@@ -11,7 +11,7 @@ Remove-Item -LiteralPath $responseFile -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $Initial -Force | Out-Null
 $uri = "http://127.0.0.1:$($runtime.port)/api/system/select-folder"
 $origin = "http://127.0.0.1:$($runtime.port)"
-$health = (Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:$($runtime.port)/api/health") -TimeoutSec 5).Content | ConvertFrom-Json
+$health = (Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:$($runtime.port)/api/health") -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 5).Content | ConvertFrom-Json
 $requestToken = [string]$health.requestToken
 $body = (@{ initial = $Initial } | ConvertTo-Json -Compress).Replace("'", "''")
 $lines = @(
@@ -85,7 +85,7 @@ if (-not $requestProcess.WaitForExit(15000)) {
 }
 if (-not (Test-Path -LiteralPath $responseFile)) { throw 'response file missing' }
 $result = Get-Content -LiteralPath $responseFile -Raw -Encoding UTF8 | ConvertFrom-Json
-$postHealth = (Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:$($runtime.port)/api/health") -TimeoutSec 5).Content | ConvertFrom-Json
+$postHealth = (Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:$($runtime.port)/api/health") -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 5).Content | ConvertFrom-Json
 [pscustomobject]@{
   DialogTitle = $dialogTitle
   DialogClass = $dialogClass

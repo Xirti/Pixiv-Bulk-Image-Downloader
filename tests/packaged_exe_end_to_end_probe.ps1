@@ -40,7 +40,7 @@ $env:MOKU_ENABLE_TEST_FIXTURES = '1'
       try {
         $runtime = Get-Content -LiteralPath $descriptorFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $base = "http://127.0.0.1:$([int]$runtime.port)"
-        $health = Invoke-RestMethod -Uri ($base + '/api/health') -TimeoutSec 3
+        $health = Invoke-RestMethod -Uri ($base + '/api/health') -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 3
         if ($health.ok) { break }
       } catch {}
     }
@@ -123,7 +123,7 @@ public static class MokuPackagedProbeNative {
     $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)
     $files += [pscustomobject]@{ path = $file.FullName; bytes = $file.Length; svg = $text.StartsWith('<svg') }
   }
-  $healthAfter = Invoke-RestMethod -Uri ($base + '/api/health') -TimeoutSec 5
+  $healthAfter = Invoke-RestMethod -Uri ($base + '/api/health') -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 5
   [pscustomobject]@{
     exe = $Exe
     exePid = $process.Id

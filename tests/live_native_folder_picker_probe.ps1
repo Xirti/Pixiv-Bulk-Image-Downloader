@@ -10,7 +10,7 @@ Remove-Item -LiteralPath $responseFile -Force -ErrorAction SilentlyContinue
 $requestScript = Join-Path $env:TEMP 'moku-folder-probe-request.ps1'
 $uri = "http://127.0.0.1:$($runtime.port)/api/system/select-folder"
 $origin = "http://127.0.0.1:$($runtime.port)"
-$health = (Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:$($runtime.port)/api/health") -TimeoutSec 5).Content | ConvertFrom-Json
+$health = (Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:$($runtime.port)/api/health") -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 5).Content | ConvertFrom-Json
 $requestToken = [string]$health.requestToken
 $bodyObject = @{ initial = $Initial }
 $body = $bodyObject | ConvertTo-Json -Compress
