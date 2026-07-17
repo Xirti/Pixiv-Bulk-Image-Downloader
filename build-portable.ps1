@@ -118,7 +118,7 @@ try {
       try {
         $runtimeData = Get-Content -LiteralPath $descriptorFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $base = "http://127.0.0.1:$([int]$runtimeData.port)/"
-        $healthResponse = Invoke-WebRequest -UseBasicParsing -Uri ($base + 'api/health') -TimeoutSec 3
+        $healthResponse = Invoke-WebRequest -UseBasicParsing -Uri ($base + 'api/health') -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 3
         $health = $healthResponse.Content | ConvertFrom-Json
         $page = Invoke-WebRequest -UseBasicParsing -Uri $base -TimeoutSec 3
         $style = Invoke-WebRequest -UseBasicParsing -Uri ($base + 'style.css') -TimeoutSec 3

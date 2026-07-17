@@ -2,6 +2,15 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.4] - 2026-07-17
+
+### Fixed
+
+- Use Pixiv's current JSON `/ajax/search/users?nick=...` response for exact `author:` resolution, including both list and keyed user payloads.
+- Do not expose the loopback request capability to headerless health probes; same-origin desktop/browser readiness checks now identify themselves explicitly.
+- Return download paths relative to the selected save directory instead of leaking local absolute paths through the HTTP API.
+- Reject malformed or negative remote `Content-Length` values before reading a Pixiv response.
+
 ## [1.0.3] - 2026-07-17
 
 ### Fixed

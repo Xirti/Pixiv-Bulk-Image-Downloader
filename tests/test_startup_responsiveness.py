@@ -69,7 +69,9 @@ class StartupResponsivenessTests(unittest.TestCase):
         ):
             moku_app.wait_ready("http://127.0.0.1:45678/", "expected-instance", timeout=1)
 
-        read_json.assert_called_once_with("http://127.0.0.1:45678/api/health")
+        read_json.assert_called_once_with(
+            "http://127.0.0.1:45678/api/health", same_origin=True,
+        )
         self.assertEqual(urls, [
             ("http://127.0.0.1:45678/", 3),
             ("http://127.0.0.1:45678/style.css", 3),

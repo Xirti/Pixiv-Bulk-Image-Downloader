@@ -29,7 +29,10 @@ const esc = (value) => String(value).replace(
 
 async function getRequestToken() {
   if (!requestTokenPromise) {
-    requestTokenPromise = fetch("/api/health", { cache: "no-store" })
+    requestTokenPromise = fetch("/api/health", {
+      cache: "no-store",
+      headers: { "Sec-Fetch-Site": "same-origin" },
+    })
       .then((response) => {
         if (!response.ok) throw new Error("本机服务未准备好");
         return response.json();

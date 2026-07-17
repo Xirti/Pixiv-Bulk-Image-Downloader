@@ -54,7 +54,10 @@ def main() -> None:
                 time.sleep(0.1)
         else:
             raise TimeoutError("source server did not become healthy")
-        protected_headers = {"X-MOKU-Request-Token": str(health["requestToken"])}
+        protected_headers = {
+            "X-MOKU-Request-Token": str(health["requestToken"]),
+            "Sec-Fetch-Site": "same-origin",
+        }
 
         query = urllib.parse.urlencode({
             "tag": "猫 犬", "page": 1, "mode": "safe",

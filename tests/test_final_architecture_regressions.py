@@ -62,7 +62,10 @@ class FinalArchitectureRegressionTests(unittest.TestCase):
             self.assertNotIn("requestToken", body)
 
     def test_health_is_the_only_headerless_api_get(self):
-        host = {"Host": f"127.0.0.1:{self.httpd.server_port}"}
+        host = {
+            "Host": f"127.0.0.1:{self.httpd.server_port}",
+            "Sec-Fetch-Site": "same-origin",
+        }
         status, health = self.raw_request("GET", "/api/health", headers=host)
         self.assertEqual(status, 200)
         self.assertEqual(health["requestToken"], server.REQUEST_TOKEN)

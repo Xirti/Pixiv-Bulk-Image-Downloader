@@ -27,7 +27,7 @@ def main() -> None:
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_port}"
-    host = {"Host": f"127.0.0.1:{httpd.server_port}"}
+    host = {"Host": f"127.0.0.1:{httpd.server_port}", "Sec-Fetch-Site": "same-origin"}
     try:
         health_status, _, raw = get(base, "/api/health", headers=host)
         health = json.loads(raw)

@@ -74,8 +74,10 @@ def _local_opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def read_json(url: str, timeout: float = 3.0) -> dict:
-    with _local_opener().open(url, timeout=timeout) as response:
+def read_json(url: str, timeout: float = 3.0, *, same_origin: bool = False) -> dict:
+    headers = {"Sec-Fetch-Site": "same-origin"} if same_origin else {}
+    request = urllib.request.Request(url, headers=headers)
+    with _local_opener().open(request, timeout=timeout) as response:
         if response.status != 200:
             raise RuntimeError(f"HTTP {response.status}")
         data = json.loads(response.read(1024 * 1024))
@@ -107,7 +109,7 @@ def healthy_runtime(runtime: dict | None) -> str | None:
         return None
     url = f"http://127.0.0.1:{port}/"
     try:
-        health = read_json(url + "api/health")
+        health = read_json(url + "api/health", same_origin=True)
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
         return None
     if health.get("protocolVersion") != protocol or health.get("applicationId") != application_id or health.get("codeGeneration") != code_generation or health.get("instanceId") != instance_id:
@@ -120,7 +122,7 @@ def wait_ready(url: str, instance_id: str, timeout: float = 30.0) -> None:
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            health = read_json(url + "api/health")
+            health = read_json(url + "api/health", same_origin=True)
             if health.get("instanceId") != instance_id:
                 raise RuntimeError("backend instance mismatch")
             for path in ("", "style.css", "app.js"):

@@ -23,6 +23,7 @@ class WindowedServerTests(unittest.TestCase):
                 ) as response:
                     payload = json.loads(response.read())
             self.assertTrue(payload["ok"])
+            self.assertNotIn("requestToken", payload)
         finally:
             httpd.shutdown()
             httpd.server_close()

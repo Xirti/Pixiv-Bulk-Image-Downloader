@@ -54,12 +54,12 @@ def main():
             if descriptor.is_file():
                 try:
                     row=json.loads(descriptor.read_text(encoding='utf-8-sig'));base=f"http://127.0.0.1:{int(row['port'])}"
-                    status,health,_=request_json(base+'/api/health',2)
+                    status,health,_=request_json(base+'/api/health',2,{'Sec-Fetch-Site':'same-origin'})
                     if status==200 and health.get('instanceId')==row.get('instanceId'):break
                 except (OSError,ValueError,KeyError,json.JSONDecodeError):pass
             time.sleep(.15)
         else:raise TimeoutError('packaged backend not healthy')
-        protected_headers={'X-MOKU-Request-Token':str(health['requestToken'])}
+        protected_headers={'X-MOKU-Request-Token':str(health['requestToken']),'Sec-Fetch-Site':'same-origin'}
         pages={};thumbs={}
         for page,timeout in ((1,120),(2,120),(8,180)):
             started=time.monotonic();status,data,_=request_json(search_url(base,page),timeout,protected_headers);elapsed=time.monotonic()-started

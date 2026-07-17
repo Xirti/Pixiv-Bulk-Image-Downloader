@@ -167,6 +167,15 @@ def valid_request_token(handler) -> bool:
     return bool(supplied) and hmac.compare_digest(supplied, REQUEST_TOKEN)
 
 
+def health_request_may_disclose_token(handler) -> bool:
+    """Only same-origin browser traffic may receive the process capability."""
+    if not trusted_local_request(handler):
+        return False
+    fetch_site = str(handler.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    origin = str(handler.headers.get("Origin") or "").strip()
+    return fetch_site in {"same-origin", "same-site"} or bool(origin)
+
+
 class LocalThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
@@ -417,8 +426,13 @@ def pixiv_request(
                     raise PixivPolicyError("Pixiv 重定向到了不允许的地址")
                 content_type = response.headers.get_content_type()
                 length = response.headers.get("Content-Length")
-                if length and int(length) > max_bytes:
-                    raise PixivPolicyError("远程响应过大")
+                if length:
+                    try:
+                        declared_length = int(length)
+                    except (TypeError, ValueError) as exc:
+                        raise PixivPolicyError("Pixiv 返回了无效的 Content-Length") from exc
+                    if declared_length < 0 or declared_length > max_bytes:
+                        raise PixivPolicyError("远程响应过大")
                 raw = response.read(max_bytes + 1)
                 if len(raw) > max_bytes:
                     raise PixivPolicyError("远程响应过大")
@@ -793,36 +807,34 @@ def _user_rows(payload: object) -> list[dict]:
     return []
 
 
-def _author_rows_from_search_page(raw: bytes, content_type: str) -> list[dict]:
-    if content_type != "text/html":
-        raise PixivPolicyError("Pixiv 画师搜索返回了非 HTML 数据")
-    try:
-        page = raw.decode("utf-8")
-    except UnicodeError as exc:
-        raise PixivPolicyError("Pixiv 画师搜索页面无法解析") from exc
-    match = re.search(
-        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
-        page, flags=re.DOTALL | re.IGNORECASE,
-    )
-    if match is None:
-        raise PixivPolicyError("Pixiv 画师搜索页面缺少结果数据")
-    try:
-        next_data = json.loads(match.group(1))
-        page_props = next_data["props"]["pageProps"]
-        state = json.loads(page_props["serverSerializedPreloadedState"])
-        users = state["userData"]["users"]
-    except (json.JSONDecodeError, TypeError, KeyError) as exc:
-        raise PixivPolicyError("Pixiv 画师搜索结果格式异常") from exc
-    if not isinstance(users, dict):
+def _author_rows_from_payload(payload: object) -> list[dict]:
+    if not isinstance(payload, dict):
         raise PixivPolicyError("Pixiv 画师搜索结果格式异常")
-    ordered_ids = page_props.get("userIds") if isinstance(page_props, dict) else []
-    rows = [users.get(str(user_id)) for user_id in ordered_ids] if isinstance(ordered_ids, list) else []
-    return [row for row in rows if isinstance(row, dict)]
+    page = payload.get("page")
+    users = payload.get("users")
+    if not isinstance(page, dict) or not isinstance(users, (list, dict)):
+        raise PixivPolicyError("Pixiv 画师搜索结果格式异常")
+    ordered_ids = page.get("userIds")
+    if not isinstance(ordered_ids, list) or len(ordered_ids) > 100:
+        raise PixivPolicyError("Pixiv 画师搜索结果格式异常")
+    allowed_ids = {
+        str(user_id) for user_id in ordered_ids
+        if str(user_id).isascii() and str(user_id).isdigit()
+    }
+    rows = users.values() if isinstance(users, dict) else users
+    normalized_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("id") or row.get("userId") or "")
+        if row_id in allowed_ids:
+            normalized_rows.append(row)
+    return normalized_rows
 
 
 def resolve_author_user(author: str) -> tuple[str, str]:
-    raw, content_type = pixiv_request(build_user_search_url(author), max_bytes=8 * 1024 * 1024)
-    rows = _author_rows_from_search_page(raw, content_type)
+    body = pixiv_json(build_user_search_url(author)).get("body") or {}
+    rows = _author_rows_from_payload(body)
     target = str(author).strip().casefold()
     exact = next((
         row for row in rows
@@ -1232,6 +1244,19 @@ def publish_staged_files(staging_root: Path, staged: list[tuple[Path, Path]]) ->
     return [final for final, _backup in published]
 
 
+def public_saved_files(save_root: Path, saved: list[Path]) -> list[str]:
+    root = Path(save_root).resolve()
+    result: list[str] = []
+    for path in saved:
+        resolved = Path(path).resolve()
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError as exc:
+            raise PixivPolicyError("保存结果超出目标目录") from exc
+        result.append(relative.as_posix())
+    return result
+
+
 class Handler(SimpleHTTPRequestHandler):
     request_body_timeout = 15.0
 
@@ -1332,15 +1357,17 @@ class Handler(SimpleHTTPRequestHandler):
         if self._reject_untrusted_api_get(request.path):
             return
         if request.path == "/api/health":
-            return self.send_json({
+            payload = {
                 "ok": True,
                 "applicationId": APPLICATION_ID,
                 "codeGeneration": CODE_GENERATION,
                 "instanceId": INSTANCE_ID,
                 "protocolVersion": PROTOCOL_VERSION,
                 "version": __version__,
-                "requestToken": REQUEST_TOKEN,
-            })
+            }
+            if health_request_may_disclose_token(self):
+                payload["requestToken"] = REQUEST_TOKEN
+            return self.send_json(payload)
         if request.path == "/api/status":
             auth = auth_status_snapshot()
             logged_in = bool(auth["loggedIn"])
@@ -1550,7 +1577,7 @@ class Handler(SimpleHTTPRequestHandler):
                 ))
             saved = publish_staged_files(staging_root, staged)
             response_payload = {
-                "ok": True, "saved": [str(path) for path in saved],
+                "ok": True, "saved": public_saved_files(save_root, saved),
                 "artworks": len(normalized), "pages": total_pages,
             }
             response_status = 200
@@ -1591,7 +1618,7 @@ class Handler(SimpleHTTPRequestHandler):
             )
             saved = publish_staged_files(staging_root, staged)
             response_payload = {
-                "ok": True, "saved": [str(path) for path in saved],
+                "ok": True, "saved": public_saved_files(save_root, saved),
                 "quality": quality, "source": "pixiv",
             }
             response_status = 200

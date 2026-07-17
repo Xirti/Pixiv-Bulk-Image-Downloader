@@ -36,6 +36,11 @@ PYWEBVIEW_REQUIRED_LOADER_RUNTIMES = (
     "runtimes/win-x64/",
     "runtimes/win-x86/",
 )
+ALLOWED_TOP_LEVEL_METADATA = (
+    "clr_loader-0.3.1.dist-info",
+    "pythonnet-3.1.0.dist-info",
+    "pywebview-6.2.1.dist-info",
+)
 
 
 def filter_windows_x64(rows):
@@ -51,6 +56,10 @@ def filter_windows_x64(rows):
             for prefix in WINDOWS_X64_EXCLUDED_MODULES
         ):
             continue
+        if ".dist-info/" in normalized:
+            metadata_name = normalized.split(".dist-info/", 1)[0].split("/")[-1] + ".dist-info"
+            if metadata_name not in ALLOWED_TOP_LEVEL_METADATA:
+                continue
         filtered.append(row)
     return filtered
 

@@ -129,8 +129,8 @@ def build_user_search_url(author: str) -> str:
     clean = str(author or "").strip()[:60]
     if not clean:
         raise PixivPolicyError("empty Pixiv author name")
-    query = urllib.parse.urlencode({"nick": clean, "s_mode": "s_usr"})
-    return f"https://www.pixiv.net/search/users?{query}"
+    query = urllib.parse.urlencode({"nick": clean, "s_mode": "s_usr", "lang": "zh"})
+    return f"https://www.pixiv.net/ajax/search/users?{query}"
 
 
 def build_user_profile_all_url(user_id: str) -> str:

@@ -116,7 +116,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                 root,
             )
             self.assertEqual(status, 200)
-            saved = Path(body["saved"][0])
+            saved = root / Path(body["saved"][0])
             self.assertEqual(saved.parent, root)
             self.assertTrue(saved.exists())
 

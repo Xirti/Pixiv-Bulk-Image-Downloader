@@ -77,7 +77,11 @@ class WorkflowRegressionTests(unittest.TestCase):
         )
         try:
             wait_health(port)
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as response:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/health",
+                headers={"Sec-Fetch-Site": "same-origin"},
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
                 data = json.loads(response.read())
             self.assertEqual(data.get("instanceId"), instance_id)
             self.assertEqual(data.get("protocolVersion"), 5)

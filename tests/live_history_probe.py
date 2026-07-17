@@ -25,8 +25,8 @@ def main() -> None:
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_port}"
     try:
-        health = get_json(base, "/api/health", 60)
-        headers = {"X-MOKU-Request-Token": str(health["requestToken"])}
+        health = get_json(base, "/api/health", 60, {"Sec-Fetch-Site": "same-origin"})
+        headers = {"X-MOKU-Request-Token": str(health["requestToken"]), "Sec-Fetch-Site": "same-origin"}
         status = get_json(base, "/api/status", 60, headers)
         pages = {}
         for page in (1, 17, 18):

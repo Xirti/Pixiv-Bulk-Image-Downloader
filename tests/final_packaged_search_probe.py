@@ -54,7 +54,10 @@ def main() -> None:
                 try:
                     runtime = json.loads(descriptor.read_text(encoding="utf-8-sig"))
                     base = f"http://127.0.0.1:{int(runtime['port'])}"
-                    status, health = request_json(base + "/api/health", 2)
+                    status, health = request_json(
+                        base + "/api/health", 2,
+                        {"Sec-Fetch-Site": "same-origin"},
+                    )
                     if status == 200 and health.get("instanceId") == runtime.get("instanceId"):
                         break
                 except (OSError, ValueError, KeyError, json.JSONDecodeError):
@@ -62,7 +65,10 @@ def main() -> None:
             time.sleep(0.15)
         else:
             raise TimeoutError("packaged backend did not become healthy")
-        protected_headers = {"X-MOKU-Request-Token": str(health["requestToken"])}
+        protected_headers = {
+            "X-MOKU-Request-Token": str(health["requestToken"]),
+            "Sec-Fetch-Site": "same-origin",
+        }
 
         query = urllib.parse.urlencode({
             "tag": "猫 犬", "page": 1, "mode": "safe",
