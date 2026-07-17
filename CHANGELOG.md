@@ -2,6 +2,13 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.3] - 2026-07-17
+
+### Fixed
+
+- Resolve exact `author:` queries through Pixiv's current `/search/users` page instead of the removed AJAX user-search route.
+- Parse the bounded `__NEXT_DATA__` user result set and keep exact creator-name and user-ID filtering.
+
 ## [1.0.2] - 2026-07-17
 
 ### Added

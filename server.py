@@ -793,9 +793,36 @@ def _user_rows(payload: object) -> list[dict]:
     return []
 
 
+def _author_rows_from_search_page(raw: bytes, content_type: str) -> list[dict]:
+    if content_type != "text/html":
+        raise PixivPolicyError("Pixiv 画师搜索返回了非 HTML 数据")
+    try:
+        page = raw.decode("utf-8")
+    except UnicodeError as exc:
+        raise PixivPolicyError("Pixiv 画师搜索页面无法解析") from exc
+    match = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        page, flags=re.DOTALL | re.IGNORECASE,
+    )
+    if match is None:
+        raise PixivPolicyError("Pixiv 画师搜索页面缺少结果数据")
+    try:
+        next_data = json.loads(match.group(1))
+        page_props = next_data["props"]["pageProps"]
+        state = json.loads(page_props["serverSerializedPreloadedState"])
+        users = state["userData"]["users"]
+    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+        raise PixivPolicyError("Pixiv 画师搜索结果格式异常") from exc
+    if not isinstance(users, dict):
+        raise PixivPolicyError("Pixiv 画师搜索结果格式异常")
+    ordered_ids = page_props.get("userIds") if isinstance(page_props, dict) else []
+    rows = [users.get(str(user_id)) for user_id in ordered_ids] if isinstance(ordered_ids, list) else []
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def resolve_author_user(author: str) -> tuple[str, str]:
-    body = pixiv_json(build_user_search_url(author)).get("body") or {}
-    rows = _user_rows(body)
+    raw, content_type = pixiv_request(build_user_search_url(author), max_bytes=8 * 1024 * 1024)
+    rows = _author_rows_from_search_page(raw, content_type)
     target = str(author).strip().casefold()
     exact = next((
         row for row in rows

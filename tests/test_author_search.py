@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -44,7 +45,7 @@ class AuthorSearchRegressionTests(unittest.TestCase):
         with self.assertRaises(SearchInputError):
             parse_search_query("pid:not-a-number")
 
-    def test_author_resolution_supports_real_nested_user_preview_shape(self):
+    def test_legacy_nested_user_preview_parser_remains_bounded(self):
         payload = {
             "body": {
                 "userPreviews": [
@@ -53,8 +54,50 @@ class AuthorSearchRegressionTests(unittest.TestCase):
                 ]
             }
         }
-        with patch.object(server, "pixiv_json", return_value=payload):
+        self.assertEqual(server._user_rows(payload["body"])[0]["userId"], "42")
+
+    def test_author_resolution_supports_current_next_page_shape(self):
+        preloaded = {
+            "userData": {
+                "users": {
+                    "42": {"id": "42", "name": "目标画师"},
+                    "99": {"id": "99", "name": "相似名称"},
+                }
+            }
+        }
+        next_data = {
+            "props": {"pageProps": {
+                "userIds": [42, 99],
+                "serverSerializedPreloadedState": json.dumps(preloaded, ensure_ascii=False),
+            }}
+        }
+        html = (
+            '<html><script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(next_data, ensure_ascii=False)
+            + "</script></html>"
+        ).encode()
+        with patch.object(server, "pixiv_request", return_value=(html, "text/html")):
             self.assertEqual(server.resolve_author_user("目标画师"), ("42", "目标画师"))
+
+    def test_author_resolution_uses_current_search_users_route(self):
+        preloaded = {"userData": {"users": {"42": {"id": "42", "name": "目标画师"}}}}
+        next_data = {"props": {"pageProps": {
+            "userIds": [42], "serverSerializedPreloadedState": json.dumps(preloaded, ensure_ascii=False),
+        }}}
+        html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps(next_data, ensure_ascii=False)
+            + "</script>"
+        ).encode()
+        requested = []
+        with patch.object(
+            server, "pixiv_request",
+            side_effect=lambda url, **_kwargs: (requested.append(url) or html, "text/html"),
+        ):
+            self.assertEqual(server.resolve_author_user("目标画师"), ("42", "目标画师"))
+        self.assertEqual(len(requested), 1)
+        self.assertIn("/search/users?", requested[0])
+        self.assertNotIn("/ajax/search/users/", requested[0])
 
     def test_author_search_fetches_only_resolved_user_works(self):
         with patch.object(server, "resolve_author_user", return_value=("42", "目标画师")), patch.object(

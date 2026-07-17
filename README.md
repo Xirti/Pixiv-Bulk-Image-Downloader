@@ -2,7 +2,7 @@
 
 MOKU is a local-first Windows desktop app for browsing and saving Pixiv artwork by tag. The desktop UI runs in pywebview with the Microsoft Edge WebView2 runtime, while a loopback-only Python service handles Pixiv requests, image proxying, native folder selection, and file writes.
 
-Current source version: **1.0.2**.
+Current source version: **1.0.3**.
 
 This project is independent and is not affiliated with Pixiv.
 
@@ -122,9 +122,9 @@ The build script fingerprints its inputs before and after PyInstaller, runs the 
 
 ### Current verified portable artifact
 
-The current `1.0.2` portable build is produced from a clean, hash-locked Python 3.12 environment after the full test suite passes. Frozen-service, native folder selection, file-write, official login-window, and usage-guide/network probes are also exercised before release. Live Pixiv probes require a currently usable Pixiv network route.
+The current `1.0.3` portable build is produced from a clean, hash-locked Python 3.12 environment after the full test suite passes. Frozen-service, native folder selection, file-write, official login-window, and usage-guide/network probes are also exercised before release. Live Pixiv probes require a currently usable Pixiv network route.
 
-The authoritative executable and archive hashes are generated after each verified build in `dist\MOKU\SHA256.txt` and `release\v1.0.2\SHA256SUMS.txt`. Keeping generated hashes out of this source file avoids a self-referential build fingerprint.
+The authoritative executable and archive hashes are generated after each verified build in `dist\MOKU\SHA256.txt` and `release\v1.0.3\SHA256SUMS.txt`. Keeping generated hashes out of this source file avoids a self-referential build fingerprint.
 
 The build script verifies that the frozen backend generation is `exe-sha256:<MOKU.exe hash>`, generates third-party license notices, removes smoke-test logs, and writes the authoritative `SHA256.txt`.
 
