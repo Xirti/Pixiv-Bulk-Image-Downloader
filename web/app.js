@@ -9,6 +9,7 @@ let searchController = null;
 let detailController = null;
 let requestTokenPromise = null;
 let viewGeneration = 0;
+let lockedDeckPage = null;
 const MAX_SELECTED_ARTWORKS = 12;
 const MAX_SELECTED_PAGES = 120;
 const selectedArtworkIds = new Set();
@@ -97,6 +98,7 @@ function installImageFallbacks(root = document) {
 }
 
 function clearDetail(message = "选择一件作品查看详情") {
+  lockedDeckPage = null;
   activeArtworkId = null;
   $("#dTitle").textContent = message;
   $("#dDesc").textContent = "";
@@ -181,7 +183,7 @@ async function search(tag, page = 1) {
     pageNumbers = Array.isArray(data.availablePages) ? data.availablePages : (Array.isArray(data.pageNumbers) ? data.pageNumbers : [currentPage]);
     firstAvailablePage = pageNumbers.length ? Number(pageNumbers[0]) : currentPage;
     preloadedThrough = Number(data.preloadedThrough) || currentPage;
-    $("#tagTitle").textContent = Array.isArray(data.tags) ? data.tags.join(" + ") : (data.tag || cleanTag);
+    $("#tagTitle").textContent = data.label || (Array.isArray(data.tags) && data.tags.length ? data.tags.join(" + ") : (data.tag || cleanTag));
     const preloadStatus = data.preloadedThrough > currentPage ? ` · 已预加载至第 ${data.preloadedThrough} 页` : "";
     const historyStatus = data.budgetExhausted ? " · 本次加载达到请求预算，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到历史末尾");
     $("#count").textContent = `已加载 ${data.total} 件 · 第 ${currentPage} 页 · 每页 ${data.perPage || 36} 件${preloadStatus}${historyStatus}${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 个高密度日期受平台截断` : ""}`;
@@ -282,6 +284,7 @@ async function select(index) {
 }
 
 function renderDetail(item, index) {
+  lockedDeckPage = null;
   $("#dTitle").textContent = item.title;
   $("#dDesc").textContent = item.description;
   $("#dArtist").textContent = item.artist;
@@ -327,51 +330,57 @@ function renderDetail(item, index) {
   const middle = (visible - 1) / 2;
   $("#deck").innerHTML = Array.from({ length: visible }, (_, page) => {
     const delta = page - middle;
-    const angle = delta * 7.5;
-    const shift = delta * 70;
-    const lift = Math.abs(delta) * 12;
+    const angle = delta * 3.2;
+    const lift = Math.abs(delta) * 4;
     const fallback = `/api/image/${(currentPage - 1) * 12 + index}/${page}?size=preview`;
     const src = item.pageImages?.[page]?.regular || item.thumb || fallback;
-    return `<button class="deck-card" data-page="${page}" style="--i:${page};--z:${page + 1};--angle:${angle}deg;--shift:${shift}px;--lift:${lift}px" aria-label="第 ${page + 1} 张" aria-pressed="false"><img src="${src}" alt="${esc(item.title)} 第 ${page + 1} 张" loading="lazy" decoding="async"><span>${page + 1} / ${item.pages}</span></button>`;
+    return `<button class="deck-card" data-page="${page}" style="--i:${page};--angle:${angle}deg;--lift:${lift}px" aria-label="第 ${page + 1} 张" aria-pressed="false"><img src="${src}" alt="${esc(item.title)} 第 ${page + 1} 张" loading="lazy" decoding="async"><span>${page + 1} / ${item.pages}</span></button>`;
   }).join("");
   installImageFallbacks($("#deck"));
 
   $("#deck").querySelectorAll(".deck-card").forEach((card) => {
-    card.onmouseenter = () => focusDeckStack(card);
-    card.onmouseleave = resetDeckFan;
+    card.onmouseenter = () => previewDeckCard(card);
+    card.onmouseleave = () => { if (lockedDeckPage === null) resetDeckFan(); };
+    card.onclick = () => toggleDeckCard(card);
   });
   $("#viewAll").hidden = item.pages <= visible;
-  $("#deckHint").textContent = item.pages > visible ? `鼠标滑过牌堆预览前 ${visible} 张，共 ${item.pages} 张` : "鼠标滑过时，当前卡牌置顶，两侧反向叠放";
+  $("#deckHint").textContent = item.pages > visible ? `预览前 ${visible} 张，共 ${item.pages} 张；点击一张固定，再点一次取消` : "轻移鼠标预览；点击一张固定，再点一次取消";
   $("#quality").innerHTML = item.qualities.map((quality) => `<option value="${quality.id}">${esc(quality.label)} · ${quality.width} × ${quality.height}</option>`).join("");
   $("#format").innerHTML = item.formats.map((format) => `<option value="${format.id}">${esc(format.label)}</option>`).join("");
   $("#download").disabled = false;
   updateFormatHint();
 }
 
-function focusDeckStack(center) {
+function previewDeckCard(card) {
+  if (lockedDeckPage !== null) return;
+  resetDeckFan();
+  card.classList.add("deck-preview");
+}
+
+function toggleDeckCard(card) {
+  const page = Number(card.dataset.page);
+  if (lockedDeckPage !== null && lockedDeckPage !== page) return;
+  if (lockedDeckPage === page) {
+    lockedDeckPage = null;
+    resetDeckFan();
+    $("#deckHint").textContent = "已取消固定；轻移鼠标预览，点击一张可再次固定";
+    return;
+  }
+  lockedDeckPage = page;
   const cards = [...$("#deck").querySelectorAll(".deck-card")];
-  const focus = Number(center.dataset.page);
-  cards.forEach((card) => {
-    const delta = Number(card.dataset.page) - focus;
-    const distance = Math.abs(delta);
-    card.style.setProperty("--focus-distance", String(distance));
-    card.style.setProperty("--hover-slide", `${delta * (34 - Math.min(distance, 3) * 3)}px`);
-    card.style.setProperty("--hover-turn", `${delta * 3.2}deg`);
-    card.style.setProperty("--hover-rise", `${distance * 9}px`);
-    card.style.zIndex = String(delta === 0 ? 30 : 20 - distance);
-    card.classList.toggle("hover-center", delta === 0);
-    card.classList.add("deck-hovering");
+  cards.forEach((row) => {
+    const selected = Number(row.dataset.page) === page;
+    row.classList.toggle("deck-locked", selected);
+    row.classList.toggle("deck-inert", !selected);
+    row.setAttribute("aria-pressed", String(selected));
   });
+  $("#deckHint").textContent = `已固定第 ${page + 1} 张；其他牌保持不动，再点当前牌取消`;
 }
 
 function resetDeckFan() {
   $("#deck").querySelectorAll(".deck-card").forEach((card) => {
-    card.classList.remove("hover-center", "deck-hovering");
-    card.style.removeProperty("--hover-slide");
-    card.style.removeProperty("--hover-turn");
-    card.style.removeProperty("--hover-rise");
-    card.style.removeProperty("--focus-distance");
-    card.style.removeProperty("z-index");
+    card.classList.remove("deck-preview", "deck-locked", "deck-inert");
+    card.setAttribute("aria-pressed", "false");
   });
 }
 

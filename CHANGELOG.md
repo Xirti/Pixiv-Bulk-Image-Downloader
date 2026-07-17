@@ -2,6 +2,19 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.2] - 2026-07-17
+
+### Added
+
+- Exact Pixiv creator search with `pid:` / `pid：` and `author:` / `author：` queries.
+
+### Fixed
+
+- Parse Pixiv's nested `userPreviews[].user` response before exact author-name matching.
+- Reject works whose `userId` does not match the resolved creator.
+- Replace overlapping absolute-positioned deck cards with a non-overlapping flex row.
+- Reduce pointer preview travel and keep every other card stationary while one card is locked.
+
 ## [1.0.1] - 2026-07-16
 
 ### Fixed

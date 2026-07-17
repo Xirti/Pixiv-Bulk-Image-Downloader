@@ -118,6 +118,45 @@ def build_search_url(tag: str, page: int, mode: str = "safe", start_date=None, e
     return f"https://www.pixiv.net/ajax/search/artworks/{encoded}?{query}"
 
 
+def _validated_user_id(user_id: str) -> str:
+    clean = str(user_id or "").strip()
+    if not clean.isascii() or not clean.isdigit():
+        raise PixivPolicyError("invalid Pixiv user id")
+    return clean
+
+
+def build_user_search_url(author: str) -> str:
+    clean = str(author or "").strip()[:60]
+    if not clean:
+        raise PixivPolicyError("empty Pixiv author name")
+    encoded = urllib.parse.quote(clean, safe="")
+    query = urllib.parse.urlencode({"word": clean, "s_mode": "s_usr", "type": "user", "lang": "zh"})
+    return f"https://www.pixiv.net/ajax/search/users/{encoded}?{query}"
+
+
+def build_user_profile_all_url(user_id: str) -> str:
+    return f"https://www.pixiv.net/ajax/user/{_validated_user_id(user_id)}/profile/all?lang=zh"
+
+
+def build_user_profile_works_url(user_id: str, artwork_ids) -> str:
+    clean_user_id = _validated_user_id(user_id)
+    ids: list[str] = []
+    seen: set[str] = set()
+    for artwork_id in artwork_ids:
+        clean = str(artwork_id or "").strip()
+        if not clean.isascii() or not clean.isdigit() or clean in seen:
+            continue
+        seen.add(clean)
+        ids.append(clean)
+        if len(ids) >= 48:
+            break
+    if not ids:
+        raise PixivPolicyError("empty Pixiv artwork id list")
+    params = [("ids[]", artwork_id) for artwork_id in ids]
+    params.extend((("work_category", "illustManga"), ("is_first_page", "0"), ("lang", "zh")))
+    return f"https://www.pixiv.net/ajax/user/{clean_user_id}/profile/illusts?{urllib.parse.urlencode(params)}"
+
+
 def _proxy_image(url: str) -> str:
     if not is_allowed_pixiv_url(url, image_only=True):
         raise PixivPolicyError("invalid image host")

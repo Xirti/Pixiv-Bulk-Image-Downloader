@@ -1,4 +1,4 @@
-# Windows x64 / CPython 3.12 runtime artifact lock for MOKU 1.0.1.
+# Windows x64 / CPython 3.12 runtime artifact lock for MOKU 1.0.2.
 # Every installable artifact is pinned by SHA-256. proxy-tools is a locally
 # reproduced wheel because PyPI publishes only a legacy source archive.
 --require-hashes

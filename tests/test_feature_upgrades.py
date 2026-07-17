@@ -45,10 +45,11 @@ class FeatureUpgradeTests(unittest.TestCase):
         self.assertIn("MAX_BATCH_PAGES", SERVER)
         self.assertIn("selected_pages", SERVER)
 
-    def test_deck_hover_has_stable_trapezoid_state_without_drawn_click(self):
-        self.assertIn("focusDeckStack", APP)
-        self.assertNotIn("toggleDeckCard(card)", APP)
-        self.assertIn("--focus-distance", APP)
+    def test_deck_click_locks_one_card_and_ignores_other_cards(self):
+        self.assertIn("toggleDeckCard(card)", APP)
+        self.assertIn("lockedDeckPage", APP)
+        self.assertIn('row.classList.toggle("deck-inert", !selected)', APP)
+        self.assertIn('row.setAttribute("aria-pressed", String(selected))', APP)
 
 
 if __name__ == "__main__":

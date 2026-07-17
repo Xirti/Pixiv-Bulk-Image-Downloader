@@ -28,8 +28,8 @@ from pathlib import Path
 from auth_store import delete_session, session_cookie_header
 from folder_picker import select_folder
 from network_config import normalize_loopback_proxy
-from pixiv_adapter import PixivPolicyError, build_search_url, is_allowed_pixiv_url, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
-from search_service import SearchInputError, SearchPageCache, parse_search_tags, prefetch_item_count, resolve_source_modes
+from pixiv_adapter import PixivPolicyError, build_search_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
+from search_service import SearchInputError, SearchPageCache, parse_search_query, parse_search_tags, prefetch_item_count, resolve_source_modes
 from version import __version__
 
 CODE_GENERATION_FILES = (
@@ -771,6 +771,148 @@ def _search_sort_key(item: dict) -> tuple[str, int]:
     return str(item.get("date") or ""), artwork_number
 
 
+def _user_rows(payload: object) -> list[dict]:
+    """Extract Pixiv user rows, including the real userPreviews[].user shape."""
+    if isinstance(payload, list):
+        result: list[dict] = []
+        for value in payload:
+            if not isinstance(value, dict):
+                continue
+            nested = value.get("user")
+            result.append(nested if isinstance(nested, dict) else value)
+        return result
+    if not isinstance(payload, dict):
+        return []
+    nested_user = payload.get("user")
+    if isinstance(nested_user, dict):
+        return [nested_user]
+    for key in ("data", "users", "userPreviews"):
+        rows = _user_rows(payload.get(key))
+        if rows:
+            return rows
+    return []
+
+
+def resolve_author_user(author: str) -> tuple[str, str]:
+    body = pixiv_json(build_user_search_url(author)).get("body") or {}
+    rows = _user_rows(body)
+    target = str(author).strip().casefold()
+    exact = next((
+        row for row in rows
+        if str(row.get("name") or row.get("userName") or "").strip().casefold() == target
+    ), None)
+    if exact is None:
+        raise SearchInputError(f"未找到名称完全匹配“{author}”的 Pixiv 画师；可改用 pid:数字 精确搜索")
+    user_id = str(exact.get("userId") or exact.get("id") or "")
+    if not user_id.isascii() or not user_id.isdigit():
+        raise SearchInputError("Pixiv 未返回有效的画师用户 ID")
+    return user_id, str(exact.get("name") or exact.get("userName") or author)
+
+
+def load_user_profile_ids(user_id: str) -> list[str]:
+    body = pixiv_json(build_user_profile_all_url(user_id)).get("body") or {}
+    if not isinstance(body, dict):
+        raise PixivPolicyError("Pixiv 画师作品索引格式异常")
+    ids: set[str] = set()
+    for category in ("illusts", "manga"):
+        rows = body.get(category)
+        candidates = rows.keys() if isinstance(rows, dict) else (rows if isinstance(rows, list) else [])
+        for artwork_id in candidates:
+            clean = str(artwork_id or "")
+            if clean.isascii() and clean.isdigit():
+                ids.add(clean)
+    return sorted(ids, key=int, reverse=True)
+
+
+def load_user_profile_works(user_id: str, artwork_ids: list[str]) -> list[dict]:
+    body = pixiv_json(build_user_profile_works_url(user_id, artwork_ids)).get("body") or {}
+    works = body.get("works") if isinstance(body, dict) else None
+    if works is None and isinstance(body, dict):
+        works = body
+    rows = list(works.values()) if isinstance(works, dict) else (works if isinstance(works, list) else [])
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def search_user_results(
+    query_kind: str, target: str, scope: str, page: int,
+    work_type: str, include_ai: bool, *, authorized: bool,
+) -> dict:
+    resolve_source_modes(scope, authorized=authorized)
+    user_id, resolved_name = resolve_author_user(target) if query_kind == "author" else (target, "")
+    page = max(1, int(page))
+    session_key = ((query_kind, target.casefold()), scope, work_type, bool(include_ai))
+    desired_items = prefetch_item_count(page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD)
+
+    with search_session_lock(session_key):
+        session = _touch_search_session(session_key)
+        if "profileIds" not in session or session.get("targetUserId") != user_id:
+            session["profileIds"] = load_user_profile_ids(user_id)
+            session["profileOffset"] = 0
+            session["targetUserId"] = user_id
+            session["artist"] = resolved_name
+        ids = session["profileIds"]
+        while len(session["items"]) < desired_items and int(session["profileOffset"]) < len(ids):
+            start = int(session["profileOffset"])
+            batch_ids = ids[start:start + 48]
+            session["profileOffset"] = start + len(batch_ids)
+            raw_rows = load_user_profile_works(user_id, batch_ids)
+            incoming: list[dict] = []
+            for raw in raw_rows:
+                if str(raw.get("userId") or "") != user_id:
+                    continue
+                restriction = int(raw.get("xRestrict", -1))
+                if scope == "safe" and restriction != 0:
+                    continue
+                if scope == "r18" and restriction != 1:
+                    continue
+                try:
+                    candidate = normalize_search_item(raw, allow_r18=scope in {"r18", "all"})
+                except PixivPolicyError:
+                    continue
+                if work_type != "all" and candidate["workType"] != work_type:
+                    continue
+                if not include_ai and candidate["aiGenerated"]:
+                    continue
+                incoming.append(candidate)
+            incoming.sort(key=_search_sort_key, reverse=True)
+            for candidate in incoming:
+                if candidate["id"] not in session["seen"]:
+                    session["seen"].add(candidate["id"])
+                    session["items"].append(candidate)
+
+        loaded = len(session["items"])
+        exhausted = int(session["profileOffset"]) >= len(ids)
+        complete_through = loaded // SEARCH_PER_PAGE
+        if exhausted and loaded:
+            complete_through = (loaded + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE
+        cache_through = min(page + SEARCH_PREFETCH_AHEAD, complete_through)
+        page_rows = {
+            number: session["items"][(number - 1) * SEARCH_PER_PAGE:number * SEARCH_PER_PAGE]
+            for number in range(1, cache_through + 1)
+        }
+        SEARCH_PAGE_CACHE.store_pages(session_key, page, page_rows)
+        selected = SEARCH_PAGE_CACHE.get_page(session_key, page) or []
+        available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
+        prune_search_image_tokens(session_key, retained_pages=set(available_pages), replace_page=page)
+        authorized_items = [
+            authorize_item_images(copy.deepcopy(item), search_session=session_key, search_page=page)
+            for item in selected
+        ]
+        artist = str(session.get("artist") or resolved_name or f"Pixiv 用户 {user_id}")
+        return {
+            "tag": target, "tags": [], "label": artist,
+            "artist": artist, "searchType": query_kind, "targetUserId": user_id, "scope": scope,
+            "total": loaded, "reportedTotal": len(ids), "page": page,
+            "pages": available_pages[-1] if available_pages else 1,
+            "pageNumbers": available_pages, "availablePages": available_pages,
+            "preloadedThrough": SEARCH_PAGE_CACHE.preloaded_through(session_key),
+            "items": authorized_items, "perPage": SEARCH_PER_PAGE, "hasMore": not exhausted,
+            "budgetExhausted": False, "truncatedDates": [],
+            "workType": work_type, "includeAi": bool(include_ai),
+            "mode": "pixiv-user-search",
+        }
+
+
 def search_pixiv_results(
     tag_query: str,
     scope: str,
@@ -782,7 +924,13 @@ def search_pixiv_results(
 ) -> dict:
     if work_type not in {"all", "illustration", "manga", "ugoira"}:
         raise SearchInputError("不支持的作品类型")
-    tags = parse_search_tags(tag_query)
+    query = parse_search_query(tag_query)
+    if query.kind in {"pid", "author"}:
+        return search_user_results(
+            query.kind, query.value, scope, page, work_type, include_ai,
+            authorized=authorized,
+        )
+    tags = parse_search_tags(query.value)
     modes = resolve_source_modes(scope, authorized=authorized)
     page = max(1, int(page))
     session_key = (tags, scope, work_type, bool(include_ai))

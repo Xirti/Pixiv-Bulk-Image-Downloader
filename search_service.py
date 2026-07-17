@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Hashable, Iterable
@@ -7,6 +8,26 @@ from typing import Any, Hashable, Iterable
 
 class SearchInputError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class SearchQuery:
+    kind: str
+    value: str
+
+
+def parse_search_query(value: str, *, max_length: int = 60) -> SearchQuery:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(?is)(pid|author)\s*[:：]\s*(.*)", text)
+    if not match:
+        return SearchQuery("tags", text or "原创")
+    kind = match.group(1).casefold()
+    target = match.group(2).strip()[:max_length]
+    if not target:
+        raise SearchInputError(f"{kind} 搜索缺少目标")
+    if kind == "pid" and (not target.isascii() or not target.isdigit()):
+        raise SearchInputError("pid 必须是 Pixiv 画师主页中的纯数字用户 ID")
+    return SearchQuery(kind, target)
 
 
 def parse_search_tags(value: str, *, max_tags: int = 6, max_length: int = 60) -> tuple[str, ...]:
