@@ -200,12 +200,18 @@ def _start_webview(url: str, storage_path: Path, proxy: str) -> None:
     from desktop_client import start_desktop
 
     inherited = os.environ.get("WEBVIEW2_USER_DATA_FOLDER")
+    inherited_pythonnet_runtime = os.environ.get("PYTHONNET_RUNTIME")
     try:
         os.environ.pop("WEBVIEW2_USER_DATA_FOLDER", None)
+        os.environ["PYTHONNET_RUNTIME"] = "netfx"
         start_desktop(url, storage_path, proxy)
     finally:
         if inherited is not None:
             os.environ["WEBVIEW2_USER_DATA_FOLDER"] = inherited
+        if inherited_pythonnet_runtime is None:
+            os.environ.pop("PYTHONNET_RUNTIME", None)
+        else:
+            os.environ["PYTHONNET_RUNTIME"] = inherited_pythonnet_runtime
 
 
 def remove_webview_profile(path: Path) -> bool:

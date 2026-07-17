@@ -34,6 +34,16 @@ class MinimalClientTests(unittest.TestCase):
         self.assertIn("launcher.log", launcher)
         self.assertIn("launch-moku.ps1", wrapper)
 
+    def test_vbs_launcher_starts_the_desktop_host_directly_without_shell_quoting(self):
+        vbs = (ROOT / "MOKU启动.vbs").read_text(encoding="utf-8")
+        self.assertIn('CreateObject("WScript.Shell")', vbs)
+        self.assertIn('app = projectDir & "\\moku_app.py"', vbs)
+        self.assertIn('"%LocalAppData%"', vbs)
+        self.assertIn('\\Programs\\Python\\Python312\\pythonw.exe', vbs)
+        self.assertIn('("PYTHONNET_RUNTIME") = "netfx"', vbs)
+        self.assertIn("shell.Run command, 1, False", vbs)
+        self.assertNotIn("launch-moku.ps1", vbs)
+
 
 if __name__ == "__main__":
     unittest.main()

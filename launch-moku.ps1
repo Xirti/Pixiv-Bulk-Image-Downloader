@@ -39,7 +39,7 @@ if (Test-Path -LiteralPath $runtimeFile) {
     $runtime = Get-Content -LiteralPath $runtimeFile -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([int]$runtime.protocolVersion -eq $protocolVersion -and [string]$runtime.applicationId -eq $applicationId -and [string]$runtime.codeGeneration -eq $codeGeneration -and [int]$runtime.port -ge 1 -and [int]$runtime.port -le 65535 -and [string]$runtime.instanceId) {
       $candidateUrl = "http://127.0.0.1:$([int]$runtime.port)/"
-      $candidate = Invoke-WebRequest -UseBasicParsing -Uri ($candidateUrl+'api/health') -TimeoutSec 3
+      $candidate = Invoke-WebRequest -UseBasicParsing -Uri ($candidateUrl+'api/health') -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 3
       $candidateHealth = $candidate.Content | ConvertFrom-Json
       if ($candidate.StatusCode -eq 200 -and [int]$candidateHealth.protocolVersion -eq $protocolVersion -and [string]$candidateHealth.applicationId -eq $applicationId -and [string]$candidateHealth.codeGeneration -eq $codeGeneration -and [string]$candidateHealth.instanceId -eq [string]$runtime.instanceId -and [string]$candidateHealth.requestToken) {
         $url = $candidateUrl; $instanceId = [string]$runtime.instanceId; Log "reuse pid=$([int]$runtime.pid) url=$url instance=$instanceId"
@@ -65,7 +65,7 @@ $health = $null; $page = $null; $style = $null; $script = $null; $ready = $false
 $deadline=(Get-Date).AddSeconds(60)
 while((Get-Date)-lt $deadline){
   try {
-    $health=Invoke-WebRequest -UseBasicParsing -Uri ($url.TrimEnd('/')+'/api/health') -TimeoutSec 3
+    $health=Invoke-WebRequest -UseBasicParsing -Uri ($url.TrimEnd('/')+'/api/health') -Headers @{ 'Sec-Fetch-Site' = 'same-origin'; Host = ([Uri]$url).Authority } -TimeoutSec 3
     $page=Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 3
     $style=Invoke-WebRequest -UseBasicParsing -Uri ($url+'style.css') -TimeoutSec 3
     $script=Invoke-WebRequest -UseBasicParsing -Uri ($url+'app.js') -TimeoutSec 3

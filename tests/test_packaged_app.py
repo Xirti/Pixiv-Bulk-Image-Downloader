@@ -123,6 +123,22 @@ class PackagedAppTests(unittest.TestCase):
             self.assertEqual(moku_app.os.environ.get("WEBVIEW2_USER_DATA_FOLDER"), "foreign-profile")
         self.assertEqual(observed, [None])
 
+    def test_desktop_host_forces_netfx_for_pywebview_and_restores_environment(self):
+        import moku_app
+
+        import desktop_client
+
+        observed = []
+        with patch.dict(moku_app.os.environ, {"PYTHONNET_RUNTIME": "coreclr"}, clear=False), patch.object(
+            desktop_client, "start_desktop",
+            side_effect=lambda *_args: observed.append(moku_app.os.environ.get("PYTHONNET_RUNTIME")),
+        ):
+            moku_app._start_webview(
+                "http://127.0.0.1:45678/", Path("C:/tmp/moku-profile"), ""
+            )
+            self.assertEqual(moku_app.os.environ.get("PYTHONNET_RUNTIME"), "coreclr")
+        self.assertEqual(observed, ["netfx"])
+
     def test_desktop_host_uses_disposable_profile_and_removes_it_after_close(self):
         import moku_app
 
