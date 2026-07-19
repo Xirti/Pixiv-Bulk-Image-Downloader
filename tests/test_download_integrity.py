@@ -20,6 +20,8 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
         self.httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
+        self.network_refresh = patch.object(server, "ensure_network_opener_current")
+        self.network_refresh.start()
         self.token = "batch-test-token"
         self.artwork_id = "990001"
         self.remote_urls = [
@@ -52,6 +54,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             )
 
     def tearDown(self):
+        self.network_refresh.stop()
         server.PIXIV_CACHE.clear()
         server.PIXIV_CACHE.update(self._old_cache)
         server.IMAGE_TOKENS.clear()
