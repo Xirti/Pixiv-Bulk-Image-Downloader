@@ -2,6 +2,26 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.5] - 2026-07-18
+
+### Added
+
+- Strict multi-tag AND search using `;` or `；` separators; spaces remain part of one tag.
+- Optional bounded anime-oriented tag aliases, disabled by default.
+- A collection basket for up to 100 artworks and 1,000 selected images, with windowed page selection for large works.
+- Image-first adaptive download chunks and optional artwork grouping.
+
+### Changed
+
+- Save one search batch into a shared tag, author, or artwork context folder instead of creating one folder per artwork.
+- Apply the same context-folder rule to single-artwork downloads.
+- Restyle the interface with a low-cost lunar monochrome theme while preserving the existing workflow and startup budget.
+
+### Fixed
+
+- Keep exact and alias-expanded search sessions in separate cache namespaces.
+- Validate every multi-tag result against all requested tag groups after Pixiv response normalization.
+
 ## [1.0.4] - 2026-07-17
 
 ### Fixed

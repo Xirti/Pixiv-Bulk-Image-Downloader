@@ -181,6 +181,10 @@ def launch(exe: Path, root: Path, port: int):
         "LOCALAPPDATA": str(local_app_data),
         "MOKU_RUNTIME_DIR": str(runtime_dir),
         "MOKU_MUTEX_NAME": "Local\\MOKU.NativeClick." + os.urandom(12).hex(),
+        # LOCALAPPDATA does not isolate Windows Credential Manager. Prevent
+        # this destructive click probe from reading or deleting the user's
+        # real remembered Pixiv authorization.
+        "MOKU_DISABLE_PERSISTENT_SESSION": "1",
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": (
             f"--remote-debugging-address=127.0.0.1 --remote-debugging-port={port} "
             "--remote-allow-origins=http://127.0.0.1"

@@ -83,6 +83,24 @@ if (Test-Path -LiteralPath (Join-Path $Dist 'logs')) { throw 'Runtime logs remai
 $DownloadFiles = @(Get-ChildItem -LiteralPath (Join-Path $Dist 'downloads') -File -Recurse -ErrorAction SilentlyContinue)
 if ($DownloadFiles.Count) { throw 'Downloaded files remain in dist\MOKU\downloads' }
 
+try {
+  $env:MOKU_PROBE_EXE = $Exe
+  & $Python -B (Join-Path $Root 'tests\packaged_visual_style_probe.py') --exe $Exe
+  if ($LASTEXITCODE -ne 0) { throw 'Packaged visual style probe failed' }
+  & $Python -B (Join-Path $Root 'tests\final_packaged_search_probe.py')
+  if ($LASTEXITCODE -ne 0) { throw 'Packaged search probe failed' }
+  & $Python -B (Join-Path $Root 'tests\final_packaged_tag_cache_probe.py')
+  if ($LASTEXITCODE -ne 0) { throw 'Packaged tag/cache probe failed' }
+} finally {
+  Remove-Item Env:MOKU_PROBE_EXE -ErrorAction SilentlyContinue
+}
+$ProbeLogs = Join-Path $Dist 'logs'
+if (Test-Path -LiteralPath $ProbeLogs) { Remove-Item -LiteralPath $ProbeLogs -Recurse -Force }
+$DownloadFiles = @(Get-ChildItem -LiteralPath (Join-Path $Dist 'downloads') -File -Recurse -ErrorAction SilentlyContinue)
+if ($DownloadFiles.Count) { throw 'Packaged probes left downloaded files in dist\MOKU\downloads' }
+& $Python -I -B (Join-Path $Root 'build_manifest.py') 'verify' $BuildManifest $Exe
+if ($LASTEXITCODE -ne 0) { throw 'Packaged probes changed the verified distribution' }
+
 $ReleaseRoot = Join-Path $Root "release\v$Version"
 if (Test-Path -LiteralPath $ReleaseRoot) {
   throw "Release directory already exists: $ReleaseRoot"

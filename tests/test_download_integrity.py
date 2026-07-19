@@ -79,12 +79,15 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
-    def post_single(self, root: Path, create_folder: bool = False) -> tuple[int, dict]:
+    def post_single(
+        self, root: Path, create_folder: bool = False, context: dict | None = None,
+    ) -> tuple[int, dict]:
         body = json.dumps({
             "id": self.artwork_id,
             "quality": "regular",
             "saveRoot": str(root),
             "createFolder": create_folder,
+            **({"context": context} if context is not None else {}),
         }).encode("utf-8")
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.httpd.server_port}/api/pixiv/download",
@@ -120,6 +123,79 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             self.assertEqual(saved.parent, root)
             self.assertTrue(saved.exists())
 
+    def test_batch_download_uses_one_context_folder_for_all_artworks(self):
+        with tempfile.TemporaryDirectory(prefix="moku-batch-context-test-") as raw_root, patch.object(
+            server, "pixiv_request", return_value=(PNG, "image/png")
+        ):
+            root = Path(raw_root)
+            status, body = self.post(
+                {
+                    "groups": [{"id": self.artwork_id, "pages": [0, 1]}],
+                    "quality": "regular",
+                    "createFolder": True,
+                    "groupArtworks": False,
+                    "context": {"kind": "tags", "value": "猫；夜景"},
+                },
+                root,
+            )
+            self.assertEqual(status, 200)
+            saved = [root / Path(relative) for relative in body["saved"]]
+            self.assertTrue(all(path.parent == root / "tag_猫；夜景" for path in saved))
+            self.assertTrue(all(path.exists() for path in saved))
+
+    def test_batch_download_can_group_each_artwork_inside_context_folder(self):
+        with tempfile.TemporaryDirectory(prefix="moku-batch-group-test-") as raw_root, patch.object(
+            server, "pixiv_request", return_value=(PNG, "image/png")
+        ):
+            root = Path(raw_root)
+            status, body = self.post(
+                {
+                    "groups": [{"id": self.artwork_id, "pages": [0]}],
+                    "quality": "regular",
+                    "createFolder": True,
+                    "groupArtworks": True,
+                    "context": {"kind": "tags", "value": "猫；夜景"},
+                },
+                root,
+            )
+            self.assertEqual(status, 200)
+            saved = root / Path(body["saved"][0])
+            self.assertEqual(saved.parent.parent, root / "tag_猫；夜景")
+            self.assertTrue(saved.parent.name.endswith(f"_{self.artwork_id}"))
+            self.assertTrue(saved.exists())
+
+    def test_publish_rejects_reparse_parent_before_replace(self):
+        with tempfile.TemporaryDirectory(prefix="moku-publish-reparse-test-") as raw_root:
+            root = Path(raw_root)
+            staging = root / ".staging"
+            staging.mkdir()
+            temporary = staging / "payload.png"
+            temporary.write_bytes(PNG)
+            final = root / "tag_test" / "payload.png"
+            with patch.object(
+                server,
+                "_is_link_or_reparse",
+                side_effect=lambda path: Path(path).name == "tag_test",
+            ):
+                with self.assertRaises(server.PixivPolicyError):
+                    server.publish_staged_files(
+                        staging, [(temporary, final)], save_root=root,
+                    )
+            self.assertFalse(final.exists())
+
+    def test_single_download_uses_current_search_context_folder(self):
+        with tempfile.TemporaryDirectory(prefix="moku-single-context-test-") as raw_root, patch.object(
+            server, "pixiv_request", return_value=(PNG, "image/png")
+        ):
+            root = Path(raw_root)
+            status, body = self.post_single(
+                root, create_folder=True, context={"kind": "author", "value": "测试画师"},
+            )
+            self.assertEqual(status, 200)
+            saved = [root / Path(relative) for relative in body["saved"]]
+            self.assertTrue(all(path.parent == root / "author_测试画师" for path in saved))
+            self.assertTrue(all(path.exists() for path in saved))
+
     def test_batch_failure_publishes_no_partial_files(self):
         calls = 0
 
@@ -139,6 +215,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                     "groups": [{"id": self.artwork_id, "pages": [0, 1]}],
                     "quality": "regular",
                     "createFolder": True,
+                    "context": {"kind": "tags", "value": "测试"},
                 },
                 root,
             )

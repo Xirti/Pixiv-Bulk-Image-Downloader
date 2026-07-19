@@ -1,4 +1,5 @@
 import json
+import os
 
 import tempfile
 import time
@@ -87,6 +88,8 @@ def main() -> None:
                 ],
                 "quality": "regular",
                 "saveRoot": str(output_root),
+                "createFolder": True,
+                "context": {"kind": "tags", "value": "回归"},
             }
             request = urllib.request.Request(
                 f"http://127.0.0.1:{port}/api/pixiv/batch-download",
@@ -94,6 +97,7 @@ def main() -> None:
                 headers={
                     "Content-Type": "application/json",
                     "X-MOKU-Request-Token": request_token,
+                    "Sec-Fetch-Site": "same-origin",
                 },
                 method="POST",
             )
@@ -102,7 +106,7 @@ def main() -> None:
                 status = response.status
             files = []
             for raw_path in result["saved"]:
-                path = Path(raw_path)
+                path = output_root / Path(raw_path)
                 raw = path.read_bytes()
                 files.append({
                     "path": str(path),
@@ -112,7 +116,10 @@ def main() -> None:
                     "exists": path.exists(),
                 })
             report = {"http": status, "payload": payload, "response": result, "files": files, "outputRoot": str(output_root)}
-            OUTPUT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            # Routine verification must not mutate a tracked build input and
+            # invalidate the already verified executable manifest.
+            if os.environ.get("MOKU_WRITE_PROBE_RESULT", "").strip() == "1":
+                OUTPUT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             print(json.dumps(report, ensure_ascii=False, indent=2))
             assert status == 200
             assert result["artworks"] == 2 and result["pages"] == 2

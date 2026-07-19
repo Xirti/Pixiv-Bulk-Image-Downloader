@@ -101,8 +101,9 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertNotIn("完成后关闭", HTML + APP)
         self.assertIn("--radius", STYLE)
         self.assertIn("button,input:not([type=checkbox]):not([type=radio]),select", STYLE)
-        self.assertIn(".path-picker{gap:8px}", STYLE)
-        self.assertIn(".path-picker button{border-radius:var(--radius)}", STYLE)
+        self.assertIn(".path-picker{display:flex;gap:8px}", STYLE)
+        self.assertIn("#browseFolder{", STYLE)
+        self.assertIn("border-radius:var(--radius)", STYLE)
         self.assertIn("focus-visible", STYLE)
 
 
@@ -154,14 +155,14 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn('class="detail-content"', HTML)
         self.assertIn('id="collectionPages"', HTML)
         self.assertIn('id="batchCollections"', HTML)
-        self.assertLess(HTML.index('class="detail-content"'), HTML.index('id="batchWorkspace"'))
+        self.assertLess(HTML.index('id="detail"'), HTML.index('id="batchPicker"'))
         self.assertIn("openBatchCollection", APP)
         self.assertIn("selectedPagesByArtwork", APP)
         self.assertIn("returnToBatch", APP)
         self.assertIn("page-select", STYLE)
 
     def test_batch_summary_is_immediate_and_detail_is_loaded_on_navigation(self):
-        batch_block = APP[APP.index("async function renderBatchWorkspace"):APP.index("async function openBatchCollection")]
+        batch_block = APP[APP.index("function renderBatchPicker"):APP.index("function selectedGroups")]
         detail_start = APP.index("async function openBatchCollection")
         detail_end = APP.index('$("#returnToBatch").onclick', detail_start)
         detail_block = APP[detail_start:detail_end]

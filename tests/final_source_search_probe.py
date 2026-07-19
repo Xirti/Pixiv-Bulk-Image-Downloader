@@ -63,8 +63,8 @@ def main() -> None:
         }
 
         query = urllib.parse.urlencode({
-            "tag": "猫 犬", "page": 1, "mode": "safe",
-            "workType": "all", "includeAi": "true",
+            "tag": "猫；犬", "page": 1, "mode": "safe",
+            "workType": "all", "includeAi": "true", "fuzzy": "false",
         })
         started = time.monotonic()
         status, search = request_json(base + "/api/pixiv/search?" + query, 90, protected_headers)
@@ -72,9 +72,16 @@ def main() -> None:
         ids = [str(row.get("id")) for row in search.get("items", [])]
         assert status == 200
         assert search.get("tags") == ["猫", "犬"]
-        assert search.get("availablePages") == [1, 2, 3, 4]
-        assert search.get("preloadedThrough") == 4
-        assert len(ids) == 36 and len(ids) == len(set(ids))
+        assert search.get("fuzzy") is False
+        available_pages = search.get("availablePages") or []
+        assert all(isinstance(value, int) and value >= 1 for value in available_pages)
+        if available_pages:
+            assert available_pages == list(range(1, available_pages[-1] + 1))
+            assert search.get("preloadedThrough") == available_pages[-1]
+        else:
+            assert search.get("preloadedThrough") == 0
+        assert len(ids) <= 36 and len(ids) == len(set(ids))
+        assert all({"猫", "犬"}.issubset({str(tag) for tag in row.get("tags") or []}) for row in search.get("items", []))
 
         account_status, account = request_json(base + "/api/status", 10, protected_headers)
         assert account_status == 200

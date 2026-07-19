@@ -2,16 +2,17 @@
 
 MOKU is a local-first Windows desktop app for browsing and saving Pixiv artwork by tag. The desktop UI runs in pywebview with the Microsoft Edge WebView2 runtime, while a loopback-only Python service handles Pixiv requests, image proxying, native folder selection, and file writes.
 
-Current release: **1.0.4**.
+Current source version: **1.0.5**.
 
-Download the verified Windows x64 package from the [MOKU 1.0.4 release](https://github.com/Xirti/MOKU/releases/tag/v1.0.4). Extract the complete ZIP and run `MOKU.exe`; do not copy the EXE by itself.
+Download the latest published Windows x64 package from the [MOKU releases page](https://github.com/Xirti/MOKU/releases). Extract the complete ZIP and run `MOKU.exe`; do not copy the EXE by itself. A locally verified 1.0.5 package can be built from this source tree with `make-release.ps1`.
 
 This project is independent and is not affiliated with Pixiv.
 
 ## Features
 
 - Real Pixiv tag search with bounded historical date windows
-- Space-separated multi-tag search with OR semantics (`cat night city`)
+- Strict multi-tag AND search using `;` or `；` separators (`cat;night city`); spaces remain inside one tag
+- Optional bounded anime-oriented tag aliases, disabled by default
 - Exact creator-only search by Pixiv user ID (`pid:123456`) or exact creator name (`author:name`); ASCII and full-width colons are equivalent
 - Three content scopes:
   - public all-ages
@@ -23,7 +24,9 @@ This project is independent and is not affiliated with Pixiv.
 - Three pages prefetched ahead of the current page
 - Sliding result cache: six previous pages are retained; older pages and their temporary search-preview tokens are released
 - Result-data prefetch without downloading thumbnails from unopened pages; search previews use `no-store`
-- Multi-page artwork preview and selective batch download
+- Collection basket for up to 100 artworks and 1,000 selected images
+- Image-first adaptive download chunks, optional artwork grouping, and one shared search-context folder
+- Multi-page artwork preview with windowed page selection and selective batch download
 - Native Windows folder picker
 - An offline in-app Usage Guide with an explicit anonymous Pixiv/CDN network diagnosis
 - Direct, local Windows system-proxy, environment-proxy, and TUN-compatible network paths
@@ -124,7 +127,7 @@ The build script fingerprints its inputs before and after PyInstaller, runs the 
 
 ### Current verified portable artifact
 
-The current `1.0.4` portable build is produced from a hash-locked Python 3.12 dependency set after the full test suite passes. Frozen-service, native folder selection, file-write, official login-window, and usage-guide/network probes are also exercised before release. Live Pixiv probes require a currently usable Pixiv network route.
+The current source version is `1.0.5`. Its portable build is produced from a hash-locked Python 3.12 dependency set after the full test suite passes. Frozen-service, native folder selection, file-write, official login-window, and usage-guide/network probes are exercised before release. Live Pixiv probes require a currently usable Pixiv network route.
 
 The authoritative executable and archive hashes are published beside the release ZIP in `SHA256SUMS.txt`. Keeping generated hashes out of this source file avoids a self-referential build fingerprint. The checksum is a one-way file fingerprint; it contains no account, cookie, local path, or identity data.
 
@@ -134,7 +137,7 @@ The build script verifies that the frozen backend generation is `exe-sha256:<MOK
 
 ## Distribution status
 
-MOKU 1.0.4 is published as a portable Windows x64 ZIP. The repository includes the MIT License, pinned Windows CI, `SECURITY.md`, `PRIVACY.md`, third-party notices, a release checklist, and a fail-closed release-asset generator. Distribute and extract the whole `MOKU` folder, not `MOKU.exe` alone.
+MOKU 1.0.5 is prepared as a portable Windows x64 ZIP. The repository includes the MIT License, pinned Windows CI, `SECURITY.md`, `PRIVACY.md`, third-party notices, a release checklist, and a fail-closed release-asset generator. Distribute and extract the whole `MOKU` folder, not `MOKU.exe` alone.
 
 The binary is not Authenticode-signed, so Windows SmartScreen may display an unknown-publisher warning. Verify the downloaded ZIP against `SHA256SUMS.txt` before running it.
 

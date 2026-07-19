@@ -21,10 +21,11 @@ class _LocalResponse:
 
 
 class _RemoteResponse:
-    def __init__(self, url, payload=b'{}', fail_read=False):
+    def __init__(self, url, payload=b'{}', fail_read=False, declared_length=None):
         self._url = url
         self._payload = payload
         self._fail_read = fail_read
+        self._declared_length = declared_length
         self.headers = self
 
     def __enter__(self):
@@ -40,6 +41,8 @@ class _RemoteResponse:
         return "application/json"
 
     def get(self, name, default=None):
+        if name == "Content-Length" and self._declared_length is not None:
+            return str(self._declared_length)
         return default
 
     def read(self, _limit):
@@ -118,6 +121,29 @@ class StartupResponsivenessTests(unittest.TestCase):
 
         self.assertEqual(raw, b'{"ok":true}')
         self.assertEqual(content_type, "application/json")
+        self.assertEqual(opener.calls, 2)
+
+    def test_pixiv_request_retries_declared_length_mismatch(self):
+        url = "https://www.pixiv.net/ajax/test"
+        responses = [
+            _RemoteResponse(url, payload=b"short", declared_length=20),
+            _RemoteResponse(url, payload=b'{"ok":true}', declared_length=11),
+        ]
+
+        class Opener:
+            calls = 0
+
+            def open(self, _request, timeout):
+                self.calls += 1
+                return responses.pop(0)
+
+        opener = Opener()
+        with patch.object(server, "PIXIV_OPENER", opener), patch.object(
+            server, "session_cookie_header", return_value={}
+        ), patch.object(server.time, "sleep", return_value=None):
+            raw, _content_type = server.pixiv_request(url)
+
+        self.assertEqual(raw, b'{"ok":true}')
         self.assertEqual(opener.calls, 2)
 
 

@@ -41,8 +41,8 @@ class FeatureUpgradeTests(unittest.TestCase):
 
     def test_batch_download_endpoint_is_bounded_and_page_selective(self):
         self.assertIn('"/api/pixiv/batch-download"', SERVER)
-        self.assertIn("MAX_BATCH_ARTWORKS", SERVER)
-        self.assertIn("MAX_BATCH_PAGES", SERVER)
+        self.assertIn("DOWNLOAD_CHUNK_ARTWORKS", SERVER)
+        self.assertIn("DOWNLOAD_CHUNK_PAGES", SERVER)
         self.assertIn("selected_pages", SERVER)
 
     def test_deck_click_locks_one_card_and_ignores_other_cards(self):

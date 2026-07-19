@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import re
+import threading
 from ctypes import wintypes
 
 TARGET = "MOKU.Pixiv.PHPSESSID"
 CRED_TYPE_GENERIC = 1
 CRED_PERSIST_LOCAL_MACHINE = 2
 _MEMORY_SESSION = ""
+_SESSION_LOCK = threading.RLock()
 
 
 class CREDENTIALW(ctypes.Structure):
@@ -36,7 +39,14 @@ def validate_session_value(value: str) -> str:
     return value
 
 
+def persistent_session_disabled() -> bool:
+    """Return true only for explicitly isolated automated probes."""
+    return os.environ.get("MOKU_DISABLE_PERSISTENT_SESSION", "").strip() == "1"
+
+
 def write_persistent_session(value: str) -> None:
+    if persistent_session_disabled():
+        return
     value = validate_session_value(value)
     raw = value.encode("utf-16-le")
     blob = (ctypes.c_ubyte * len(raw)).from_buffer_copy(raw)
@@ -46,6 +56,8 @@ def write_persistent_session(value: str) -> None:
 
 
 def read_persistent_session() -> str:
+    if persistent_session_disabled():
+        return ""
     pointer = ctypes.POINTER(CREDENTIALW)()
     if not advapi32.CredReadW(TARGET, CRED_TYPE_GENERIC, 0, ctypes.byref(pointer)):
         return ""
@@ -60,31 +72,37 @@ def read_persistent_session() -> str:
 
 
 def delete_persistent_session() -> None:
+    if persistent_session_disabled():
+        return
     advapi32.CredDeleteW(TARGET, CRED_TYPE_GENERIC, 0)
 
 
 def delete_session() -> None:
-    clear_memory_session()
-    delete_persistent_session()
+    with _SESSION_LOCK:
+        clear_memory_session()
+        delete_persistent_session()
 
 
 def clear_memory_session() -> None:
     global _MEMORY_SESSION
-    _MEMORY_SESSION = ""
+    with _SESSION_LOCK:
+        _MEMORY_SESSION = ""
 
 
 def store_session(value: str, remember: bool = False) -> None:
     global _MEMORY_SESSION
     value = validate_session_value(value)
-    _MEMORY_SESSION = value
-    if remember:
-        write_persistent_session(value)
-    else:
-        delete_persistent_session()
+    with _SESSION_LOCK:
+        _MEMORY_SESSION = value
+        if remember:
+            write_persistent_session(value)
+        else:
+            delete_persistent_session()
 
 
 def read_session() -> str:
-    return _MEMORY_SESSION or read_persistent_session()
+    with _SESSION_LOCK:
+        return _MEMORY_SESSION or read_persistent_session()
 
 
 # Backward-compatible name for existing callers/tests.

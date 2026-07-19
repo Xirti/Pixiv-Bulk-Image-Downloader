@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server
+from unittest.mock import patch
 
 
 def get(base: str, path: str, *, headers: dict | None = None, timeout: int = 120):
@@ -35,9 +36,10 @@ def main() -> None:
         no_token_status, _, no_token_raw = get(
             base, "/api/pixiv/search?tag=%E7%8C%AB&page=1&mode=r18", headers=host
         )
-        r18_status, _, r18_raw = get(
-            base, "/api/pixiv/search?tag=%E7%8C%AB&page=1&mode=r18", headers=protected
-        )
+        with patch.object(server, "session_cookie_header", return_value={}):
+            r18_status, _, r18_raw = get(
+                base, "/api/pixiv/search?tag=%E7%8C%AB&page=1&mode=r18", headers=protected
+            )
         removed_status, _, removed_raw = get(base, "/api/background/random", headers=protected)
         cross_status, _, cross_raw = get(
             base, "/api/health", headers={**host, "Sec-Fetch-Site": "cross-site"}

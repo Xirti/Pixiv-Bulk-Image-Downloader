@@ -1,3 +1,4 @@
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -59,6 +60,61 @@ class AuthSessionValidationTests(unittest.TestCase):
         self.assertIsNone(server.SEARCH_PAGE_CACHE.get_page(r18_key, 1))
         self.assertIsNone(server.SEARCH_PAGE_CACHE.get_page(all_key, 1))
         self.assertIsNotNone(server.SEARCH_PAGE_CACHE.get_page(safe_key, 1))
+
+    def test_logout_generation_blocks_inflight_restricted_search_commit(self):
+        started = threading.Event()
+        released = threading.Event()
+        errors = []
+
+        def restricted_source(*_args, **_kwargs):
+            started.set()
+            released.wait(timeout=3)
+            return {"rows": [], "hasMore": False, "budgetExhausted": False, "truncatedDates": []}
+
+        def run_search():
+            try:
+                server.search_pixiv_results(
+                    "猫", "all", 1, "all", True, authorized=True,
+                    authorization_epoch=server.authorization_generation(),
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(server, "load_search_source", side_effect=restricted_source):
+            worker = threading.Thread(target=run_search)
+            worker.start()
+            self.assertTrue(started.wait(timeout=2))
+            server.clear_authorized_state()
+            released.set()
+            worker.join(timeout=3)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(errors)
+        self.assertIsInstance(errors[0], server.AuthorizationRevokedError)
+        self.assertFalse(any(
+            server.search_session_scope(key) in {"r18", "all"}
+            for key in server.SEARCH_SESSIONS
+        ))
+
+    def test_history_cache_structure_is_guarded_during_parallel_sessions_and_clear(self):
+        errors = []
+
+        def mutate(worker: int):
+            try:
+                for index in range(120):
+                    server._history_state("猫", "safe", ("session", worker, index))
+                    if index % 9 == 0:
+                        server.clear_authorized_state()
+            except Exception as exc:
+                errors.append(exc)
+
+        workers = [threading.Thread(target=mutate, args=(index,)) for index in range(6)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":

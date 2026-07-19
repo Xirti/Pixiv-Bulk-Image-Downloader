@@ -10,11 +10,20 @@ let detailController = null;
 let requestTokenPromise = null;
 let viewGeneration = 0;
 let lockedDeckPage = null;
-const MAX_SELECTED_ARTWORKS = 12;
-const MAX_SELECTED_PAGES = 120;
+let pendingNavigationPage = null;
+let activeSearchContext = { kind: "tags", value: "猫耳" };
+let currentDetailItem = null;
+let collectionPageOffset = 0;
+const MAX_SELECTED_ARTWORKS = 100;
+const MAX_SELECTED_PAGES = 1000;
+const DOWNLOAD_CHUNK_ARTWORKS = 20;
+const DOWNLOAD_CHUNK_PAGES = 200;
+const DETAIL_PAGE_WINDOW = 48;
 const selectedArtworkIds = new Set();
 const selectedArtworks = new Map();
 const selectedPagesByArtwork = new Map();
+const selectedContextByArtwork = new Map();
+const archivedArtworkIds = new Set();
 
 const $ = (selector) => document.querySelector(selector);
 const grid = $("#grid");
@@ -101,6 +110,9 @@ function installImageFallbacks(root = document) {
 }
 
 function clearDetail(message = "选择一件作品查看详情") {
+  document.body.classList.remove("collection-basket-open");
+  $("#detail").hidden = false;
+  $("#batchPicker").hidden = true;
   lockedDeckPage = null;
   activeArtworkId = null;
   $("#dTitle").textContent = message;
@@ -112,6 +124,7 @@ function clearDetail(message = "选择一件作品查看详情") {
   $("#dTags").innerHTML = "";
   $("#deck").innerHTML = "";
   $("#collectionPages").innerHTML = "";
+  $("#collectionPageMore").hidden = true;
   $("#returnToBatch").hidden = true;
   $("#deckHint").textContent = "点击搜索结果后加载作品详情";
   $("#quality").innerHTML = "";
@@ -126,12 +139,48 @@ function clearDetail(message = "选择一件作品查看详情") {
 
 function updateSelectionBar() {
   const count = selectedArtworkIds.size;
+  const pages = selectedPageCount();
   $("#selectionBar").hidden = count === 0;
-  $("#selectionCount").textContent = `已选 ${count} 件`;
+  $("#selectionCount").textContent = `采集篮 ${count}/${MAX_SELECTED_ARTWORKS} 个作品 · ${pages}/${MAX_SELECTED_PAGES} 张图片${archivedArtworkIds.size ? ` · 已归档 ${archivedArtworkIds.size}` : ""}`;
 }
 
 function selectedPageCount() {
-  return [...selectedPagesByArtwork.values()].reduce((total, pages) => total + pages.size, 0);
+  return [...selectedArtworkIds].reduce(
+    (total, id) => total + (selectedPagesByArtwork.get(id)?.size || 0),
+    0,
+  );
+}
+
+function currentPageSelectionIds() {
+  return new Set(items.map((item) => item.id).filter((id) => selectedArtworkIds.has(id) && !archivedArtworkIds.has(id)));
+}
+
+function detachCurrentSelection() {
+  const currentIds = currentPageSelectionIds();
+  currentIds.forEach((id) => archivedArtworkIds.add(id));
+  updateSelectionBar();
+  return currentIds.size;
+}
+
+function clearCurrentSelection() {
+  const currentIds = currentPageSelectionIds();
+  currentIds.forEach((id) => {
+    selectedArtworkIds.delete(id);
+    selectedArtworks.delete(id);
+    selectedPagesByArtwork.delete(id);
+    selectedContextByArtwork.delete(id);
+  });
+  updateSelectionBar();
+  return currentIds.size;
+}
+
+function clearAllSelection() {
+  selectedArtworkIds.clear();
+  selectedArtworks.clear();
+  selectedPagesByArtwork.clear();
+  selectedContextByArtwork.clear();
+  archivedArtworkIds.clear();
+  updateSelectionBar();
 }
 
 function toggleArtworkSelection(item, checked) {
@@ -148,6 +197,7 @@ function toggleArtworkSelection(item, checked) {
     }
     selectedArtworkIds.add(item.id);
     selectedArtworks.set(item.id, item);
+    selectedContextByArtwork.set(item.id, { ...activeSearchContext });
     if (!selectedPagesByArtwork.has(item.id)) {
       selectedPagesByArtwork.set(item.id, new Set(Array.from({ length: item.pages }, (_, page) => page)));
     }
@@ -155,6 +205,8 @@ function toggleArtworkSelection(item, checked) {
     selectedArtworkIds.delete(item.id);
     selectedArtworks.delete(item.id);
     selectedPagesByArtwork.delete(item.id);
+    selectedContextByArtwork.delete(item.id);
+    archivedArtworkIds.delete(item.id);
   }
   updateSelectionBar();
   return true;
@@ -169,6 +221,10 @@ async function search(tag, page = 1) {
   const cleanTag = String(tag || "").trim() || "原创";
   activeTagQuery = cleanTag;
   const mode = $("#safety").value || "safe";
+  const contextMatch = cleanTag.match(/^\s*(pid|author)\s*[:：]\s*(.+)$/i);
+  activeSearchContext = contextMatch
+    ? { kind: contextMatch[1].toLowerCase(), value: contextMatch[2].trim() }
+    : { kind: "tags", value: cleanTag };
 
   searchButton.disabled = true;
   searchButton.textContent = "正在寻找…";
@@ -177,7 +233,14 @@ async function search(tag, page = 1) {
   $("#count").textContent = "正在加载当前页";
 
   try {
-    const query = new URLSearchParams({ tag: cleanTag, page: String(page), mode, workType: $("#workType").value || "all", includeAi: String($("#includeAi").checked) });
+    const query = new URLSearchParams({
+      tag: cleanTag,
+      page: String(page),
+      mode,
+      workType: $("#workType").value || "all",
+      includeAi: String($("#includeAi").checked),
+      fuzzy: String(Boolean($("#fuzzySearch")?.checked)),
+    });
     const data = await fetchJson(`/api/pixiv/search?${query}`, { signal: controller.signal }, 90000);
     if (controller !== searchController) return;
 
@@ -189,7 +252,8 @@ async function search(tag, page = 1) {
     $("#tagTitle").textContent = data.label || (Array.isArray(data.tags) && data.tags.length ? data.tags.join(" + ") : (data.tag || cleanTag));
     const preloadStatus = data.preloadedThrough > currentPage ? ` · 已预加载至第 ${data.preloadedThrough} 页` : "";
     const historyStatus = data.budgetExhausted ? " · 本次加载达到请求预算，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到历史末尾");
-    $("#count").textContent = `已加载 ${data.total} 件 · 第 ${currentPage} 页 · 每页 ${data.perPage || 36} 件${preloadStatus}${historyStatus}${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 个高密度日期受平台截断` : ""}`;
+    const fuzzyLabel = data.fuzzy ? " · 别名扩展已启用" : "";
+    $("#count").textContent = `已加载 ${data.total} 件 · 第 ${currentPage} 页 · 每页 ${data.perPage || 36} 件${fuzzyLabel}${preloadStatus}${historyStatus}${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 个高密度日期受平台截断` : ""}`;
     render();
     renderPagination();
     clearDetail();
@@ -248,8 +312,7 @@ function renderPagination() {
   pagination.innerHTML = `<button ${currentPage <= firstAvailablePage ? "disabled" : ""} data-page="${currentPage - 1}" aria-label="上一页">←</button>${pageNumbers.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" data-page="${number}">${number}</button>`).join("")}<button ${currentPage >= preloadedThrough ? "disabled" : ""} data-page="${currentPage + 1}" aria-label="下一页">→</button>`;
   pagination.querySelectorAll("button:not([disabled])").forEach((button) => {
     button.onclick = () => {
-      search(activeTagQuery, Number(button.dataset.page));
-      $("#gallery").scrollIntoView({ behavior: "auto" });
+      navigateToPage(Number(button.dataset.page));
     };
   });
 }
@@ -288,6 +351,8 @@ async function select(index) {
 
 function renderDetail(item, index) {
   lockedDeckPage = null;
+  currentDetailItem = item;
+  collectionPageOffset = 0;
   $("#dTitle").textContent = item.title;
   $("#dDesc").textContent = item.description;
   $("#dArtist").textContent = item.artist;
@@ -295,39 +360,8 @@ function renderDetail(item, index) {
   $("#dBookmarks").textContent = Number(item.bookmarks || 0).toLocaleString();
   $("#dDate").textContent = item.date;
   $("#dTags").innerHTML = item.tags.map((tag) => `<span>#${esc(tag)}</span>`).join("");
-  const chosenPages = selectedPagesByArtwork.get(item.id) || new Set((item.pageImages || []).map((_, page) => page));
-  selectedPagesByArtwork.set(item.id, chosenPages);
-  $("#collectionPages").innerHTML = (item.pageImages || []).map((page, pageNo) => `<label class="page-select"><input type="checkbox" data-collection-page="${pageNo}" ${chosenPages.has(pageNo) ? "checked" : ""}><img src="${page.regular}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${pageNo + 1}</span></label>`).join("");
-  installImageFallbacks($("#collectionPages"));
-  $("#collectionPages").querySelectorAll("[data-collection-page]").forEach((box) => {
-    box.onchange = () => {
-      let set = selectedPagesByArtwork.get(item.id);
-      const page = Number(box.dataset.collectionPage);
-      if (box.checked) {
-        if (!set) {
-          set = new Set();
-          selectedPagesByArtwork.set(item.id, set);
-        }
-        if (!set.has(page) && selectedPageCount() >= MAX_SELECTED_PAGES) {
-          box.checked = false;
-          $("#toast").textContent = `一次最多选择 ${MAX_SELECTED_PAGES} 张图片`;
-          return;
-        }
-        set.add(page);
-      } else if (set) {
-        set.delete(page);
-      }
-      if (set?.size) {
-        selectedArtworks.set(item.id, item);
-        selectedArtworkIds.add(item.id);
-      } else {
-        selectedPagesByArtwork.delete(item.id);
-        selectedArtworks.delete(item.id);
-        selectedArtworkIds.delete(item.id);
-      }
-      updateSelectionBar();
-    };
-  });
+  const chosenPages = selectedPagesByArtwork.get(item.id) || new Set();
+  renderCollectionPageWindow(item, chosenPages);
 
   const visible = Math.min(item.pages, 4);
   const middle = (visible - 1) / 2;
@@ -352,6 +386,60 @@ function renderDetail(item, index) {
   $("#format").innerHTML = item.formats.map((format) => `<option value="${format.id}">${esc(format.label)}</option>`).join("");
   $("#download").disabled = false;
   updateFormatHint();
+}
+
+function renderCollectionPageWindow(item = currentDetailItem, chosenPages = selectedPagesByArtwork.get(item?.id)) {
+  if (!item) return;
+  const pages = item.pageImages || [];
+  const start = collectionPageOffset;
+  const end = Math.min(pages.length, start + DETAIL_PAGE_WINDOW);
+  $("#collectionPages").innerHTML = pages.slice(start, end).map((page, localIndex) => {
+    const pageNo = start + localIndex;
+    return `<label class="page-select"><input type="checkbox" data-collection-page="${pageNo}" ${chosenPages?.has(pageNo) ? "checked" : ""}><img src="${page.regular}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${pageNo + 1}</span></label>`;
+  }).join("");
+  installImageFallbacks($("#collectionPages"));
+  $("#collectionPages").querySelectorAll("[data-collection-page]").forEach((box) => {
+    box.onchange = () => {
+      let set = selectedPagesByArtwork.get(item.id);
+      const page = Number(box.dataset.collectionPage);
+      if (box.checked) {
+        if (!selectedArtworkIds.has(item.id) && selectedArtworkIds.size >= MAX_SELECTED_ARTWORKS) {
+          box.checked = false;
+          $("#toast").textContent = `一次最多选择 ${MAX_SELECTED_ARTWORKS} 个作品`;
+          return;
+        }
+        if (!set) {
+          set = new Set();
+          selectedPagesByArtwork.set(item.id, set);
+        }
+        if (!set.has(page) && selectedPageCount() >= MAX_SELECTED_PAGES) {
+          box.checked = false;
+          $("#toast").textContent = `一次最多选择 ${MAX_SELECTED_PAGES} 张图片`;
+          return;
+        }
+        set.add(page);
+      } else if (set) {
+        set.delete(page);
+      }
+      if (set?.size) {
+        selectedArtworks.set(item.id, item);
+        selectedArtworkIds.add(item.id);
+        if (!selectedContextByArtwork.has(item.id)) {
+          selectedContextByArtwork.set(item.id, { ...activeSearchContext });
+        }
+      } else {
+        selectedPagesByArtwork.delete(item.id);
+        selectedArtworks.delete(item.id);
+        selectedArtworkIds.delete(item.id);
+        selectedContextByArtwork.delete(item.id);
+        archivedArtworkIds.delete(item.id);
+      }
+      updateSelectionBar();
+    };
+  });
+  const more = $("#collectionPageMore");
+  more.hidden = pages.length <= DETAIL_PAGE_WINDOW;
+  more.textContent = `${start + 1}–${Math.max(start + 1, end)} / ${pages.length} · 显示后 ${DETAIL_PAGE_WINDOW} 张`;
 }
 
 function previewDeckCard(card) {
@@ -408,25 +496,167 @@ function closeAllViewer() {
 
 $("#viewAll").onclick = openAllViewer;
 $("#closeViewer").onclick = closeAllViewer;
+$("#collectionPageMore").onclick = () => {
+  if (!currentDetailItem) return;
+  const pageCount = (currentDetailItem.pageImages || []).length;
+  collectionPageOffset = collectionPageOffset + DETAIL_PAGE_WINDOW >= pageCount
+    ? 0
+    : collectionPageOffset + DETAIL_PAGE_WINDOW;
+  renderCollectionPageWindow();
+};
 
-async function renderBatchWorkspace() {
+function renderBatchWorkspace() {
   const chosen = [...selectedArtworks.values()];
   if (!chosen.length) return;
+  document.body.classList.add("collection-basket-open");
+  $("#batchPicker").hidden = true;
+  $("#detail").hidden = false;
   $("#batchWorkspace").hidden = false;
   $("#deck").innerHTML = "";
   $("#collectionPages").innerHTML = "";
+  $("#collectionPageMore").hidden = true;
   $("#viewAll").hidden = true;
-  $("#dTitle").textContent = "多作品打包下载";
-  $("#dDesc").textContent = "右侧按合集列出摘要；点“详细查看”进入该合集并选择具体图片。";
-  $("#batchSummary").textContent = `${chosen.length} 个作品`;
+  $("#returnToBatch").hidden = true;
+  $("#dTitle").textContent = "采集篮下载";
+  $("#dDesc").textContent = "确认保存位置与清晰度，然后用唯一的下载按钮保存；作品与内部图片在独立筛选页调整。";
+  $("#batchSummary").textContent = `${chosen.length} 个作品 · ${selectedPageCount()} 张图片`;
+}
+
+function renderBatchPicker() {
+  const chosen = [...selectedArtworks.values()];
+  if (!chosen.length) return;
+  document.body.classList.add("collection-basket-open");
+  $("#detail").hidden = true;
+  $("#batchPicker").hidden = false;
   $("#batchCollections").innerHTML = chosen.map((item) => {
-    const selected = selectedPagesByArtwork.get(item.id);
-    const selectedCount = selected ? selected.size : item.pages;
-    return `<button class="batch-collection" data-open-collection="${item.id}"><img src="${item.thumb}" alt=""><span><b>${esc(item.title)}</b><small>${esc(item.artist)} · 已选 ${selectedCount}/${item.pages} 张</small></span><strong>详细查看 →</strong></button>`;
+    const selectedCount = selectedPagesByArtwork.get(item.id)?.size || 0;
+    return `<button class="batch-collection" data-open-collection="${item.id}"><img src="${item.thumb}" alt="${esc(item.title)}" loading="lazy" decoding="async"><span><b>${esc(item.title)}</b><small>${esc(item.artist)} · 已选 ${selectedCount}/${item.pages} 张</small></span><strong>筛选图片 →</strong></button>`;
   }).join("");
   installImageFallbacks($("#batchCollections"));
-  $("#batchCollections").querySelectorAll("[data-open-collection]").forEach((button) => { button.onclick = () => openBatchCollection(button.dataset.openCollection); });
+  $("#batchCollections").querySelectorAll("[data-open-collection]").forEach((button) => {
+    button.onclick = () => openBatchCollection(button.dataset.openCollection);
+  });
 }
+
+function selectedGroups() {
+  return [...selectedArtworks.keys()]
+    .map((id) => ({
+      id,
+      pages: [...(selectedPagesByArtwork.get(id) || [])].sort((a, b) => a - b),
+      context: selectedContextByArtwork.get(id) || activeSearchContext,
+    }))
+    .filter((group) => group.pages.length);
+}
+
+function contextKey(context) {
+  return `${context?.kind || "tags"}\u0000${context?.value || ""}`;
+}
+
+function planContextDownloadChunks(groups) {
+  const buckets = new Map();
+  for (const group of groups) {
+    const key = contextKey(group.context);
+    if (!buckets.has(key)) buckets.set(key, { context: group.context, groups: [] });
+    buckets.get(key).groups.push({ id: group.id, pages: group.pages });
+  }
+  return [...buckets.values()].flatMap((bucket) =>
+    planDownloadChunks(bucket.groups).map((chunk) => ({ ...chunk, context: bucket.context }))
+  );
+}
+
+function setDownloadButtonState(button, text, disabled) {
+  button.disabled = disabled;
+  button.textContent = text;
+}
+
+function downloadPayload(item, sourceIndex) {
+  if (item.source === "pixiv") {
+    return {
+      endpoint: "/api/pixiv/download",
+      body: { id: item.id, quality: $("#quality").value, saveRoot: $("#saveRoot").value.trim(), createFolder: $("#createFolder").checked, context: activeSearchContext },
+      timeout: 120000,
+    };
+  }
+  return {
+    endpoint: "/api/download",
+    body: { index: (currentPage - 1) * 12 + sourceIndex, pages: item.pages, quality: $("#quality").value, format: $("#format").value, tag: $("#tagTitle").textContent },
+    timeout: 120000,
+  };
+}
+
+function scrollToResults() {
+  $("#gallery").scrollIntoView({ behavior: "auto" });
+}
+
+function planDownloadChunks(groups) {
+  const chunks = [];
+  let current = [];
+  let pageCount = 0;
+  for (const group of groups) {
+    if (group.pages.length > DOWNLOAD_CHUNK_PAGES) {
+      throw new Error(`作品 ${group.id} 单独超过 ${DOWNLOAD_CHUNK_PAGES} 张，无法安全分块`);
+    }
+    if (current.length && (
+      pageCount + group.pages.length > DOWNLOAD_CHUNK_PAGES
+      || current.length >= DOWNLOAD_CHUNK_ARTWORKS
+    )) {
+      chunks.push({ groups: current, pageCount });
+      current = [];
+      pageCount = 0;
+    }
+    current.push(group);
+    pageCount += group.pages.length;
+  }
+  if (current.length) chunks.push({ groups: current, pageCount });
+  return chunks;
+}
+
+function openCapacityDialog(targetPage) {
+  pendingNavigationPage = targetPage;
+  const dialog = $("#capacityDialog");
+  if (dialog?.showModal) dialog.showModal();
+}
+
+function navigateToPage(page) {
+  if (currentPageSelectionIds().size > 0) {
+    openCapacityDialog(page);
+    return;
+  }
+  search(activeTagQuery, page);
+  scrollToResults();
+}
+
+function archiveAndContinue() {
+  const page = pendingNavigationPage;
+  pendingNavigationPage = null;
+  const detached = detachCurrentSelection();
+  $("#capacityDialog")?.close();
+  if (page !== null) {
+    $("#toast").textContent = `已将当前 ${detached} 个作品放入采集篮；继续翻页不会下载原图`;
+    search(activeTagQuery, page);
+    scrollToResults();
+  }
+}
+
+function clearAndContinue() {
+  const page = pendingNavigationPage;
+  pendingNavigationPage = null;
+  clearCurrentSelection();
+  $("#capacityDialog")?.close();
+  if (page !== null) {
+    search(activeTagQuery, page);
+    scrollToResults();
+  }
+}
+
+function cancelCapacityDecision() {
+  pendingNavigationPage = null;
+  $("#capacityDialog")?.close();
+}
+
+$("#archiveAndContinue").onclick = archiveAndContinue;
+$("#clearAndContinue").onclick = clearAndContinue;
+$("#cancelCapacity").onclick = cancelCapacityDecision;
 
 async function openBatchCollection(id) {
   let item = selectedArtworks.get(id);
@@ -436,6 +666,8 @@ async function openBatchCollection(id) {
     item = await fetchJson(`/api/pixiv/artwork/${item.id}`, {}, 18000);
     selectedArtworks.set(item.id, item);
   }
+  $("#batchPicker").hidden = true;
+  $("#detail").hidden = false;
   $("#batchWorkspace").hidden = true;
   $("#returnToBatch").hidden = false;
   activeArtworkId = item.id;
@@ -443,21 +675,53 @@ async function openBatchCollection(id) {
   $("#detail").scrollIntoView({ behavior: "auto" });
 }
 
-$("#returnToBatch").onclick = async () => { $("#returnToBatch").hidden = true; await renderBatchWorkspace(); };
-$("#clearSelection").onclick = () => { selectedArtworkIds.clear(); selectedArtworks.clear(); selectedPagesByArtwork.clear(); render(); updateSelectionBar(); };
-$("#openBatch").onclick = async () => { await renderBatchWorkspace(); $("#detail").scrollIntoView({ behavior: "auto" }); };
+$("#returnToBatch").onclick = () => renderBatchPicker();
+$("#openBatchPicker").onclick = () => renderBatchPicker();
+$("#closeBatchPicker").onclick = () => { renderBatchWorkspace(); $("#detail").scrollIntoView({ behavior: "auto" }); };
+$("#clearSelection").onclick = () => { clearAllSelection(); document.body.classList.remove("collection-basket-open"); render(); };
+$("#openBatch").onclick = () => { renderBatchWorkspace(); $("#detail").scrollIntoView({ behavior: "auto" }); };
+
 $("#batchDownload").onclick = async () => {
-  const groups = [...selectedArtworks.keys()].map((id) => ({ id, pages: [...(selectedPagesByArtwork.get(id) || [])].sort((a,b) => a-b) })).filter((group) => group.pages.length);
+  const groups = selectedGroups();
   if (!groups.length) {
     $("#toast").textContent = "请至少选择一张图片";
     return;
   }
-  const button = $("#batchDownload"); button.disabled = true; button.textContent = "正在打包保存…";
+  let chunks;
   try {
-    const data = await fetchJson("/api/pixiv/batch-download", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ groups, quality:$("#quality").value || "regular", saveRoot:$("#saveRoot").value.trim(), createFolder:$("#createFolder").checked }) }, 300000);
-    $("#toast").textContent = `已保存 ${data.saved.length} 张图片`;
-  } catch (error) { $("#toast").textContent = `批量下载失败：${error.message}`; }
-  finally { button.disabled = false; button.textContent = "下载已勾选图片"; }
+    chunks = planContextDownloadChunks(groups);
+  } catch (error) {
+    $("#toast").textContent = error.message;
+    return;
+  }
+  const button = $("#batchDownload");
+  setDownloadButtonState(button, "准备保存…", true);
+  let savedCount = 0;
+  try {
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      setDownloadButtonState(button, `正在保存第 ${index + 1}/${chunks.length} 批…`, true);
+      const data = await fetchJson("/api/pixiv/batch-download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          groups: chunk.groups,
+          quality: $("#quality").value || "regular",
+          saveRoot: $("#saveRoot").value.trim(),
+          createFolder: $("#createFolder").checked,
+          groupArtworks: Boolean($("#groupArtworks")?.checked),
+          context: chunk.context,
+        }),
+      }, 300000);
+      savedCount += Array.isArray(data.saved) ? data.saved.length : chunk.pageCount;
+    }
+    $("#toast").textContent = `已保存 ${savedCount} 张图片，共 ${chunks.length} 批`;
+  } catch (error) {
+    const prefix = savedCount ? `已保存 ${savedCount} 张；后续` : "批量下载";
+    $("#toast").textContent = `${prefix}失败：${error.message}`;
+  } finally {
+    setDownloadButtonState(button, "下载采集篮已勾选图片", false);
+  }
 };
 
 addEventListener("keydown", (event) => {
@@ -477,8 +741,12 @@ $("#format").onchange = updateFormatHint;
 $("#searchForm").onsubmit = (event) => {
   event.preventDefault();
   search($("#tag").value, 1);
-  $("#gallery").scrollIntoView({ behavior: "auto" });
+  scrollToResults();
 };
+
+$("#fuzzySearch")?.addEventListener("change", () => {
+  if ($("#tag").value.trim()) search($("#tag").value, 1);
+});
 
 $("#browseFolder").onclick = async () => {
   const button = $("#browseFolder");
@@ -514,24 +782,19 @@ $("#download").onclick = async () => {
   if (!item) return;
   const sourceIndex = Math.max(0, items.findIndex((row) => row.id === item.id));
   const button = $("#download");
-  button.disabled = true;
-  button.textContent = "正在保存…";
+  setDownloadButtonState(button, "正在保存…", true);
   try {
-    const endpoint = item.source === "pixiv" ? "/api/pixiv/download" : "/api/download";
-    const payload = item.source === "pixiv"
-      ? { id: item.id, quality: $("#quality").value, saveRoot: $("#saveRoot").value.trim(), createFolder: $("#createFolder").checked }
-      : { index: (currentPage - 1) * 12 + sourceIndex, pages: item.pages, quality: $("#quality").value, format: $("#format").value, tag: $("#tagTitle").textContent };
-    const data = await fetchJson(endpoint, {
+    const request = downloadPayload(item, sourceIndex);
+    const data = await fetchJson(request.endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    }, 120000);
+      body: JSON.stringify(request.body),
+    }, request.timeout);
     $("#toast").textContent = `已保存 ${data.saved.length} 张：${data.saved[0]}`;
   } catch (error) {
     $("#toast").textContent = `保存失败：${error.message || "未知错误"}`;
   } finally {
-    button.disabled = false;
-    button.innerHTML = "下载本作品 <span>↓</span>";
+    setDownloadButtonState(button, "下载本作品 ↓", false);
   }
 };
 

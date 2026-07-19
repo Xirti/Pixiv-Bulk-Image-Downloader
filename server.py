@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import copy
+import ctypes
+from ctypes import wintypes
 import hashlib
 import hmac
 import http.client
@@ -28,14 +30,14 @@ from pathlib import Path
 from auth_store import delete_session, session_cookie_header
 from folder_picker import select_folder
 from network_config import normalize_loopback_proxy
-from pixiv_adapter import PixivPolicyError, build_search_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
-from search_service import SearchInputError, SearchPageCache, parse_search_query, parse_search_tags, prefetch_item_count, resolve_source_modes
+from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
+from search_service import SearchInputError, SearchPageCache, build_search_tag_groups, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes
 from version import __version__
 
 CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
-    "pixiv_adapter.py", "search_service.py", "version.py",
+    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "version.py",
     "web/index.html", "web/app.js", "web/style.css",
 )
 
@@ -70,8 +72,8 @@ ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
 DOWNLOADS = ROOT / "downloads"
 DOWNLOADS.mkdir(exist_ok=True)
-MAX_BATCH_ARTWORKS = 12
-MAX_BATCH_PAGES = 120
+DOWNLOAD_CHUNK_ARTWORKS = 20
+DOWNLOAD_CHUNK_PAGES = 200
 MAX_HISTORY_REQUESTS = 24
 MAX_HISTORY_SECONDS = 45.0
 SEARCH_PER_PAGE = 36
@@ -193,7 +195,25 @@ SEARCH_PAGE_CACHE = SearchPageCache(keep_behind=SEARCH_KEEP_BEHIND, max_sessions
 SEARCH_SESSIONS: OrderedDict[tuple, dict] = OrderedDict()
 SEARCH_SOURCE_OFFSETS: dict[tuple, int] = {}
 SEARCH_SESSION_LOCKS: weakref.WeakValueDictionary[tuple, threading.Lock] = weakref.WeakValueDictionary()
-SEARCH_SESSION_LOCKS_GUARD = threading.Lock()
+SEARCH_SESSION_LOCKS_GUARD = threading.RLock()
+AUTHORIZATION_GENERATION = 0
+
+
+class AuthorizationRevokedError(PixivPolicyError):
+    pass
+
+
+def authorization_generation() -> int:
+    with SEARCH_SESSION_LOCKS_GUARD:
+        return AUTHORIZATION_GENERATION
+
+
+def assert_authorization_generation(expected: int | None) -> None:
+    if expected is None:
+        return
+    with SEARCH_SESSION_LOCKS_GUARD:
+        if AUTHORIZATION_GENERATION != expected:
+            raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新发起搜索")
 
 
 def cache_pixiv_item(item: dict) -> dict:
@@ -242,16 +262,30 @@ def pixiv_item_for_download(artwork_id: str, *, allow_r18: bool) -> dict:
     return pixiv_detail(artwork_id, allow_r18=allow_r18)
 
 
+def search_session_scope(session_key: tuple) -> str:
+    if session_key and session_key[0] == "tags" and len(session_key) >= 3:
+        return str(session_key[2])
+    if session_key and session_key[0] == "user" and len(session_key) >= 5:
+        return str(session_key[4])
+    return str(session_key[1]) if len(session_key) >= 2 else ""
+
+
 def clear_authorized_state() -> None:
-    with PIXIV_STATE_LOCK:
-        for token, row in list(IMAGE_TOKENS.items()):
-            if len(row) >= 4 and row[3] == "r18": IMAGE_TOKENS.pop(token, None)
-        for artwork_id, item in list(PIXIV_CACHE.items()):
-            if item.get("restriction") == "r18": PIXIV_CACHE.pop(artwork_id, None)
-        for key in list(HISTORY_CACHE):
-            if len(key) >= 2 and key[1] == "r18": HISTORY_CACHE.pop(key, None)
-    for session_key in list(SEARCH_SESSIONS):
-        if len(session_key) >= 2 and session_key[1] in {"r18", "all"}:
+    global AUTHORIZATION_GENERATION
+    with SEARCH_SESSION_LOCKS_GUARD:
+        AUTHORIZATION_GENERATION += 1
+        restricted_sessions = [
+            session_key for session_key in SEARCH_SESSIONS
+            if search_session_scope(session_key) in {"r18", "all"}
+        ]
+        with PIXIV_STATE_LOCK:
+            for token, row in list(IMAGE_TOKENS.items()):
+                if len(row) >= 4 and row[3] == "r18": IMAGE_TOKENS.pop(token, None)
+            for artwork_id, item in list(PIXIV_CACHE.items()):
+                if item.get("restriction") == "r18": PIXIV_CACHE.pop(artwork_id, None)
+            for key in list(HISTORY_CACHE):
+                if len(key) >= 2 and key[1] == "r18": HISTORY_CACHE.pop(key, None)
+        for session_key in restricted_sessions:
             _drop_search_session(session_key)
 
 
@@ -426,6 +460,7 @@ def pixiv_request(
                     raise PixivPolicyError("Pixiv 重定向到了不允许的地址")
                 content_type = response.headers.get_content_type()
                 length = response.headers.get("Content-Length")
+                declared_length = None
                 if length:
                     try:
                         declared_length = int(length)
@@ -436,6 +471,8 @@ def pixiv_request(
                 raw = response.read(max_bytes + 1)
                 if len(raw) > max_bytes:
                     raise PixivPolicyError("远程响应过大")
+                if declared_length is not None and len(raw) != declared_length:
+                    raise http.client.IncompleteRead(raw, declared_length)
                 return raw, content_type
         except urllib.error.HTTPError as exc:
             if not should_retry_status(exc.code) or attempt == attempt_count - 1:
@@ -566,26 +603,27 @@ def history_cache_key(tag: str, mode: str, namespace: tuple | None = None) -> tu
 
 def _history_state(tag: str, mode: str, namespace: tuple | None = None) -> dict:
     key = history_cache_key(tag, mode, namespace)
-    state = HISTORY_CACHE.get(key)
-    if state is None:
-        state = {
-            "items": [], "ids": set(), "queue": [], "nextEnd": date.today(),
-            "baseOffset": 0, "exhausted": False, "budgetExhausted": False,
-            "truncatedDates": [], "touched": time.monotonic(),
-        }
-        HISTORY_CACHE[key] = state
-    state["touched"] = time.monotonic()
-    if len(HISTORY_CACHE) > MAX_HISTORY_SOURCES:
-        with _HISTORY_LOCKS_GUARD:
-            active_keys = set(_HISTORY_LOCKS)
-        candidates = sorted(
-            (row.get("touched", 0.0), cache_key)
-            for cache_key, row in HISTORY_CACHE.items()
-            if cache_key != key and cache_key not in active_keys
-        )
-        for _touched, stale_key in candidates[: len(HISTORY_CACHE) - MAX_HISTORY_SOURCES]:
-            HISTORY_CACHE.pop(stale_key, None)
-    return state
+    with SEARCH_SESSION_LOCKS_GUARD:
+        state = HISTORY_CACHE.get(key)
+        if state is None:
+            state = {
+                "items": [], "ids": set(), "queue": [], "nextEnd": date.today(),
+                "baseOffset": 0, "exhausted": False, "budgetExhausted": False,
+                "truncatedDates": [], "touched": time.monotonic(),
+            }
+            HISTORY_CACHE[key] = state
+        state["touched"] = time.monotonic()
+        if len(HISTORY_CACHE) > MAX_HISTORY_SOURCES:
+            with _HISTORY_LOCKS_GUARD:
+                active_keys = set(_HISTORY_LOCKS)
+            candidates = sorted(
+                (row.get("touched", 0.0), cache_key)
+                for cache_key, row in HISTORY_CACHE.items()
+                if cache_key != key and cache_key not in active_keys
+            )
+            for _touched, stale_key in candidates[: len(HISTORY_CACHE) - MAX_HISTORY_SOURCES]:
+                HISTORY_CACHE.pop(stale_key, None)
+        return state
 
 
 def _queue_older_window(state: dict) -> None:
@@ -670,27 +708,28 @@ def extend_history(
 
 
 def reset_search_caches() -> None:
-    with PIXIV_STATE_LOCK:
+    with SEARCH_SESSION_LOCKS_GUARD, PIXIV_STATE_LOCK:
         for token, row in list(IMAGE_TOKENS.items()):
             if len(row) >= 6:
                 IMAGE_TOKENS.pop(token, None)
         HISTORY_CACHE.clear()
-    SEARCH_PAGE_CACHE.clear()
-    SEARCH_SESSIONS.clear()
-    SEARCH_SOURCE_OFFSETS.clear()
+        SEARCH_PAGE_CACHE.clear()
+        SEARCH_SESSIONS.clear()
+        SEARCH_SOURCE_OFFSETS.clear()
 
 
 def _drop_search_session(session_key: tuple) -> None:
-    prune_search_image_tokens(session_key)
-    SEARCH_SESSIONS.pop(session_key, None)
-    SEARCH_PAGE_CACHE.drop(session_key)
-    for source_key in [key for key in SEARCH_SOURCE_OFFSETS if key[0] == session_key]:
-        SEARCH_SOURCE_OFFSETS.pop(source_key, None)
-    for history_key in [
-        key for key in HISTORY_CACHE
-        if isinstance(key, tuple) and len(key) == 4 and key[0] == "search" and key[1] == session_key
-    ]:
-        HISTORY_CACHE.pop(history_key, None)
+    with SEARCH_SESSION_LOCKS_GUARD:
+        prune_search_image_tokens(session_key)
+        SEARCH_SESSIONS.pop(session_key, None)
+        SEARCH_PAGE_CACHE.drop(session_key)
+        for source_key in [key for key in SEARCH_SOURCE_OFFSETS if key[0] == session_key]:
+            SEARCH_SOURCE_OFFSETS.pop(source_key, None)
+        for history_key in [
+            key for key in HISTORY_CACHE
+            if isinstance(key, tuple) and len(key) == 4 and key[0] == "search" and key[1] == session_key
+        ]:
+            HISTORY_CACHE.pop(history_key, None)
 
 
 def search_session_lock(session_key: tuple) -> threading.Lock:
@@ -724,13 +763,14 @@ def _touch_search_session(session_key: tuple) -> dict:
 
 
 def _trim_history_source(session_key: tuple, tag: str, mode: str) -> None:
-    state = HISTORY_CACHE.get(history_cache_key(tag, mode, session_key))
-    if not state:
-        return
-    offsets = [
-        offset for (_session, source_tag, source_mode), offset in SEARCH_SOURCE_OFFSETS.items()
-        if _session == session_key and source_tag == tag and source_mode == mode
-    ]
+    with SEARCH_SESSION_LOCKS_GUARD:
+        state = HISTORY_CACHE.get(history_cache_key(tag, mode, session_key))
+        if not state:
+            return
+        offsets = [
+            offset for (_session, source_tag, source_mode), offset in SEARCH_SOURCE_OFFSETS.items()
+            if _session == session_key and source_tag == tag and source_mode == mode
+        ]
     if not offsets:
         return
     base = int(state.get("baseOffset", 0))
@@ -762,10 +802,12 @@ def load_search_source(
     )
     source_key = (session_key, tag, mode)
     base = int(state.get("baseOffset", 0))
-    offset = max(base, int(SEARCH_SOURCE_OFFSETS.get(source_key, base)))
+    with SEARCH_SESSION_LOCKS_GUARD:
+        offset = max(base, int(SEARCH_SOURCE_OFFSETS.get(source_key, base)))
     start = min(len(state["items"]), max(0, offset - base))
     rows = list(state["items"][start:])
-    SEARCH_SOURCE_OFFSETS[source_key] = base + len(state["items"])
+    with SEARCH_SESSION_LOCKS_GUARD:
+        SEARCH_SOURCE_OFFSETS[source_key] = base + len(state["items"])
     has_more = not state["exhausted"] or bool(state["queue"])
     result = {
         "rows": rows,
@@ -874,12 +916,16 @@ def load_user_profile_works(user_id: str, artwork_ids: list[str]) -> list[dict]:
 
 def search_user_results(
     query_kind: str, target: str, scope: str, page: int,
-    work_type: str, include_ai: bool, *, authorized: bool,
+    work_type: str, include_ai: bool, *, authorized: bool, fuzzy: bool = False,
+    authorization_epoch: int | None = None,
 ) -> dict:
     resolve_source_modes(scope, authorized=authorized)
     user_id, resolved_name = resolve_author_user(target) if query_kind == "author" else (target, "")
     page = max(1, int(page))
-    session_key = ((query_kind, target.casefold()), scope, work_type, bool(include_ai))
+    session_key = (
+        "user", query_kind, target.casefold(), user_id,
+        scope, work_type, bool(include_ai), bool(fuzzy),
+    )
     desired_items = prefetch_item_count(page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD)
 
     with search_session_lock(session_key):
@@ -937,6 +983,13 @@ def search_user_results(
             authorize_item_images(copy.deepcopy(item), search_session=session_key, search_page=page)
             for item in selected
         ]
+        if scope in {"r18", "all"}:
+            try:
+                assert_authorization_generation(authorization_epoch)
+            except AuthorizationRevokedError:
+                prune_search_image_tokens(session_key)
+                _drop_search_session(session_key)
+                raise
         artist = str(session.get("artist") or resolved_name or f"Pixiv 用户 {user_id}")
         return {
             "tag": target, "tags": [], "label": artist,
@@ -960,6 +1013,8 @@ def search_pixiv_results(
     include_ai: bool,
     *,
     authorized: bool,
+    fuzzy: bool = False,
+    authorization_epoch: int | None = None,
 ) -> dict:
     if work_type not in {"all", "illustration", "manga", "ugoira"}:
         raise SearchInputError("不支持的作品类型")
@@ -967,12 +1022,13 @@ def search_pixiv_results(
     if query.kind in {"pid", "author"}:
         return search_user_results(
             query.kind, query.value, scope, page, work_type, include_ai,
-            authorized=authorized,
+            authorized=authorized, fuzzy=fuzzy, authorization_epoch=authorization_epoch,
         )
     tags = parse_search_tags(query.value)
+    tag_groups = build_search_tag_groups(query.value, fuzzy=fuzzy)
     modes = resolve_source_modes(scope, authorized=authorized)
     page = max(1, int(page))
-    session_key = (tags, scope, work_type, bool(include_ai))
+    session_key = ("tags", tag_groups, scope, work_type, bool(include_ai), bool(fuzzy))
     desired_items = prefetch_item_count(
         page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD,
     )
@@ -985,7 +1041,8 @@ def search_pixiv_results(
             session = _touch_search_session(session_key)
         absolute_loaded = int(session["baseIndex"]) + len(session["items"])
         budget = {"started": time.monotonic(), "requests": 0}
-        sources = [(tag, mode) for tag in tags for mode in modes]
+        source_tags = tuple(dict.fromkeys(alias for group in tag_groups for alias in group))
+        sources = [(tag, mode) for tag in source_tags for mode in modes]
         rounds = 0
         while absolute_loaded < desired_items and rounds < 8:
             missing = desired_items - absolute_loaded
@@ -997,7 +1054,8 @@ def search_pixiv_results(
                 source_key = (tag, mode)
                 if session["sourceDone"].get(source_key):
                     continue
-                absolute_offset = int(SEARCH_SOURCE_OFFSETS.get((session_key, tag, mode), 0))
+                with SEARCH_SESSION_LOCKS_GUARD:
+                    absolute_offset = int(SEARCH_SOURCE_OFFSETS.get((session_key, tag, mode), 0))
                 source = load_search_source(
                     session_key, tag, mode, absolute_offset + per_source,
                     mode == "r18", budget,
@@ -1019,6 +1077,8 @@ def search_pixiv_results(
                     incoming.append(candidate)
             incoming.sort(key=_search_sort_key, reverse=True)
             for candidate in incoming:
+                if not matches_tag_groups(candidate.get("tags") or [], tag_groups):
+                    continue
                 artwork_id = candidate["id"]
                 if artwork_id in session["seen"]:
                     continue
@@ -1067,8 +1127,15 @@ def search_pixiv_results(
             authorize_item_images(copy.deepcopy(item), search_session=session_key, search_page=page)
             for item in selected
         ]
+        if scope in {"r18", "all"}:
+            try:
+                assert_authorization_generation(authorization_epoch)
+            except AuthorizationRevokedError:
+                prune_search_image_tokens(session_key)
+                _drop_search_session(session_key)
+                raise
         return {
-            "tag": " ".join(tags), "tags": list(tags), "scope": scope,
+            "tag": "；".join(tags), "tags": list(tags), "tagGroups": [list(group) for group in tag_groups], "fuzzy": bool(fuzzy), "scope": scope,
             "total": int(session["baseIndex"]) + len(session["items"]), "reportedTotal": None,
             "page": page, "pages": available_pages[-1] if available_pages else 1,
             "pageNumbers": available_pages, "availablePages": available_pages,
@@ -1076,7 +1143,7 @@ def search_pixiv_results(
             "items": authorized_items, "perPage": SEARCH_PER_PAGE, "hasMore": has_more,
             "budgetExhausted": bool(session["budgetExhausted"]),
             "truncatedDates": sorted(session["truncatedDates"], reverse=True),
-            "workType": work_type, "includeAi": bool(include_ai),
+            "workType": work_type, "includeAi": bool(include_ai), "fuzzy": bool(fuzzy),
             "mode": "pixiv-authorized-all" if scope == "all" else (
                 "pixiv-authorized-r18" if scope == "r18" else "pixiv-public-history"
             ),
@@ -1172,7 +1239,8 @@ def approved_image_url(proxy_url: str, artwork_id: str) -> str:
 
 def stage_artwork_pages(
     item: dict, selected_pages: list[int], quality: str, save_root: Path,
-    create_folder: bool, staging_root: Path,
+    create_folder: bool, staging_root: Path, *, download_context: dict | None = None,
+    group_artwork: bool = False,
 ) -> list[tuple[Path, Path]]:
     artwork_id = str(item.get("id") or "")
     page_images = item.get("pageImages")
@@ -1180,6 +1248,7 @@ def stage_artwork_pages(
         raise PixivPolicyError("作品详情不完整")
     folder = resolve_download_target(
         save_root, str(item.get("title") or ""), artwork_id, create_folder,
+        context=download_context, group_artwork=group_artwork,
     )
     stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
     staged: list[tuple[Path, Path]] = []
@@ -1204,26 +1273,137 @@ def stage_artwork_pages(
     return staged
 
 
-def publish_staged_files(staging_root: Path, staged: list[tuple[Path, Path]]) -> list[Path]:
+def _is_link_or_reparse(path: Path) -> bool:
+    target = Path(path)
+    if target.is_symlink() or bool(getattr(target, "is_junction", lambda: False)()):
+        return True
+    if os.name != "nt" or not target.exists():
+        return False
+    attributes = ctypes.windll.kernel32.GetFileAttributesW(str(target))
+    return attributes != 0xFFFFFFFF and bool(attributes & 0x400)
+
+
+def _validated_publish_parent(save_root: Path, final: Path) -> Path:
+    root = Path(save_root).resolve()
+    if not root.is_dir():
+        raise PixivPolicyError("保存根目录不存在")
+    if _is_link_or_reparse(root):
+        raise PixivPolicyError("保存根目录不能是链接或重解析点")
+    candidate = Path(final)
+    try:
+        relative = candidate.relative_to(save_root)
+    except ValueError as exc:
+        raise PixivPolicyError("保存路径超出目标目录") from exc
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.exists():
+            if not current.is_dir() or _is_link_or_reparse(current):
+                raise PixivPolicyError("保存目录包含链接或重解析点")
+        else:
+            current.mkdir()
+            if _is_link_or_reparse(current):
+                raise PixivPolicyError("保存目录包含链接或重解析点")
+    resolved_parent = current.resolve()
+    if not resolved_parent.is_dir():
+        raise PixivPolicyError("保存目录不存在")
+    try:
+        resolved_parent.relative_to(root)
+    except ValueError as exc:
+        raise PixivPolicyError("保存路径超出目标目录") from exc
+    return resolved_parent / relative.name
+
+
+class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+def _directory_identity(path: Path) -> tuple[int, int, int]:
+    if os.name != "nt":
+        stat = Path(path).stat()
+        return int(stat.st_dev), int(stat.st_ino), 0
+
+    create_file = ctypes.windll.kernel32.CreateFileW
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path), 0x80, 0x7, None, 3,
+        0x02000000 | 0x00200000, None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError()
+    info = BY_HANDLE_FILE_INFORMATION()
+    try:
+        if not ctypes.windll.kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            raise ctypes.WinError()
+        if info.dwFileAttributes & 0x400:
+            raise PixivPolicyError("保存目录包含链接或重解析点")
+        return (
+            int(info.dwVolumeSerialNumber),
+            (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow),
+            int(info.dwFileAttributes),
+        )
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _replace_after_parent_identity_check(source: Path, destination: Path) -> None:
+    before = _directory_identity(destination.parent)
+    if _directory_identity(destination.parent) != before:
+        raise PixivPolicyError("保存目录在发布前发生变化")
+    os.replace(source, destination)
+    if _directory_identity(destination.parent) != before:
+        raise PixivPolicyError("保存目录在发布时发生变化")
+
+
+def _remove_publish_directory(path: Path) -> None:
+    if _is_link_or_reparse(path):
+        return
+    path.rmdir()
+
+
+def publish_staged_files(
+    staging_root: Path, staged: list[tuple[Path, Path]], *, save_root: Path | None = None,
+) -> list[Path]:
     """Publish a completed batch and restore replaced files if publishing fails."""
     backup_root = staging_root / ".backups"
     published: list[tuple[Path, Path | None]] = []
     created_dirs: list[Path] = []
     try:
         for index, (temporary, final) in enumerate(staged):
-            if not final.parent.exists():
+            parent_existed = final.parent.exists()
+            if save_root is not None:
+                final = _validated_publish_parent(save_root, final)
+            elif not final.parent.exists():
                 final.parent.mkdir(parents=True, exist_ok=True)
+            if not parent_existed:
                 created_dirs.append(final.parent)
             backup = None
             if final.exists():
+                if _is_link_or_reparse(final) or not final.is_file():
+                    raise PixivPolicyError("目标文件不是普通文件")
                 backup = backup_root / f"{index}.bak"
                 backup.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(final, backup)
+                if save_root is not None:
+                    final = _validated_publish_parent(save_root, final)
+                _replace_after_parent_identity_check(final, backup)
             try:
-                os.replace(temporary, final)
+                if save_root is not None:
+                    final = _validated_publish_parent(save_root, final)
+                _replace_after_parent_identity_check(temporary, final)
             except Exception:
                 if backup is not None and backup.exists():
-                    os.replace(backup, final)
+                    _replace_after_parent_identity_check(backup, final)
                 raise
             published.append((final, backup))
     except Exception:
@@ -1232,12 +1412,12 @@ def publish_staged_files(staging_root: Path, staged: list[tuple[Path, Path]]) ->
                 if final.exists():
                     final.unlink()
                 if backup is not None and backup.exists():
-                    os.replace(backup, final)
+                    _replace_after_parent_identity_check(backup, final)
             except OSError:
                 pass
         for directory in reversed(created_dirs):
             try:
-                directory.rmdir()
+                _remove_publish_directory(directory)
             except OSError:
                 pass
         raise
@@ -1429,16 +1609,22 @@ class Handler(SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(request.query)
         tag_query = query.get("tag", ["原创"])[0]
         search_scope = query.get("mode", ["safe"])[0]
+        if search_scope in {"r18", "all"} and not validated_session():
+            return self.send_json({"error": "R-18搜索需要先完成Pixiv账户授权"}, 403)
         work_type = query.get("workType", ["all"])[0]
         include_ai = query.get("includeAi", ["false"])[0].lower() == "true"
+        fuzzy = query.get("fuzzy", ["false"])[0].lower() == "true"
         try:
             page = max(1, int(query.get("page", ["1"])[0]))
         except ValueError:
             page = 1
         try:
+            session_authorized = validated_session()
+            authorization_epoch = authorization_generation() if search_scope in {"r18", "all"} else None
             result = search_pixiv_results(
                 tag_query, search_scope, page, work_type, include_ai,
-                authorized=validated_session(),
+                authorized=session_authorized, fuzzy=fuzzy,
+                authorization_epoch=authorization_epoch,
             )
             return self.send_json(result)
         except SearchInputError as exc:
@@ -1537,29 +1723,68 @@ class Handler(SimpleHTTPRequestHandler):
             raise RequestInputError(400, "createFolder 必须是布尔值")
         return quality, create_folder
 
+    @staticmethod
+    def _download_context(data: dict, *, required: bool = False) -> dict | None:
+        raw = data.get("context")
+        if raw is None and not required:
+            return None
+        if not isinstance(raw, dict):
+            raise RequestInputError(400, "下载目录上下文无效")
+        try:
+            return build_download_context(raw.get("kind"), raw.get("value"))
+        except PixivPolicyError as exc:
+            raise RequestInputError(400, "下载目录上下文无效") from exc
+
+    @staticmethod
+    def _normalized_download_groups(groups: object) -> OrderedDict[str, set[int]]:
+        if not isinstance(groups, list) or not 1 <= len(groups) <= DOWNLOAD_CHUNK_ARTWORKS:
+            raise RequestInputError(400, "批量选择范围无效")
+        normalized: OrderedDict[str, set[int]] = OrderedDict()
+        for group in groups:
+            if not isinstance(group, dict):
+                raise RequestInputError(400, "批量作品格式无效")
+            artwork_id = str(group.get("id") or "")
+            pages = group.get("pages")
+            if not artwork_id.isdigit() or not isinstance(pages, list) or not pages:
+                raise RequestInputError(400, "作品或图片页码无效")
+            if any(not isinstance(page, int) or isinstance(page, bool) or page < 0 for page in pages):
+                raise RequestInputError(400, "图片页码无效")
+            normalized.setdefault(artwork_id, set()).update(pages)
+        return normalized
+
     def _post_pixiv_batch_download(self, data: dict):
         try:
             quality, create_folder = self._download_options(data)
             save_root = self._save_root(data)
+            download_context = self._download_context(data, required=create_folder)
+            group_artworks = data.get("groupArtworks", False)
+            if not isinstance(group_artworks, bool):
+                raise RequestInputError(400, "groupArtworks 必须是布尔值")
         except RequestInputError as exc:
             return self.send_json({"error": str(exc)}, exc.status)
-        groups = data.get("groups")
-        if not isinstance(groups, list) or not 1 <= len(groups) <= MAX_BATCH_ARTWORKS:
-            return self.send_json({"error": "批量选择范围无效"}, 400)
-        normalized: OrderedDict[str, set[int]] = OrderedDict()
-        for group in groups:
-            if not isinstance(group, dict):
-                return self.send_json({"error": "批量作品格式无效"}, 400)
-            artwork_id = str(group.get("id") or "")
-            pages = group.get("pages")
-            if not artwork_id.isdigit() or not isinstance(pages, list) or not pages:
-                return self.send_json({"error": "作品或图片页码无效"}, 400)
-            if any(not isinstance(page, int) or isinstance(page, bool) or page < 0 for page in pages):
-                return self.send_json({"error": "图片页码无效"}, 400)
-            normalized.setdefault(artwork_id, set()).update(pages)
+        try:
+            normalized = self._normalized_download_groups(data.get("groups"))
+        except RequestInputError as exc:
+            return self.send_json({"error": str(exc)}, exc.status)
         total_pages = sum(len(pages) for pages in normalized.values())
-        if total_pages > MAX_BATCH_PAGES:
-            return self.send_json({"error": "一次最多下载120张图片"}, 400)
+        if total_pages > DOWNLOAD_CHUNK_PAGES:
+            return self.send_json({"error": f"单次下载最多处理 {DOWNLOAD_CHUNK_PAGES} 张图片"}, 400)
+        chunk_groups = [{"id": artwork_id, "pages": sorted(pages)} for artwork_id, pages in normalized.items()]
+        try:
+            chunks = plan_download_chunks(
+                chunk_groups,
+                max_artworks=DOWNLOAD_CHUNK_ARTWORKS,
+                max_pages=DOWNLOAD_CHUNK_PAGES,
+            )
+        except SearchInputError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        if len(chunks) > 1:
+            return self.send_json({
+                "error": "请求必须按图片优先分块提交",
+                "chunks": len(chunks),
+                "maxPagesPerChunk": DOWNLOAD_CHUNK_PAGES,
+                "maxArtworksPerChunk": DOWNLOAD_CHUNK_ARTWORKS,
+            }, 400)
 
         staging_root = None
         try:
@@ -1574,8 +1799,9 @@ class Handler(SimpleHTTPRequestHandler):
                 selected_pages = sorted(page_set)
                 staged.extend(stage_artwork_pages(
                     item, selected_pages, quality, save_root, create_folder, staging_root,
+                    download_context=download_context, group_artwork=group_artworks,
                 ))
-            saved = publish_staged_files(staging_root, staged)
+            saved = publish_staged_files(staging_root, staged, save_root=save_root)
             response_payload = {
                 "ok": True, "saved": public_saved_files(save_root, saved),
                 "artworks": len(normalized), "pages": total_pages,
@@ -1598,6 +1824,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             quality, create_folder = self._download_options(data)
             save_root = self._save_root(data)
+            download_context = self._download_context(data, required=False)
         except RequestInputError as exc:
             return self.send_json({"error": str(exc)}, exc.status)
 
@@ -1614,9 +1841,9 @@ class Handler(SimpleHTTPRequestHandler):
                 raise PixivPolicyError("作品详情不完整")
             staged = stage_artwork_pages(
                 item, list(range(len(page_images))), quality, save_root,
-                create_folder, staging_root,
+                create_folder, staging_root, download_context=download_context,
             )
-            saved = publish_staged_files(staging_root, staged)
+            saved = publish_staged_files(staging_root, staged, save_root=save_root)
             response_payload = {
                 "ok": True, "saved": public_saved_files(save_root, saved),
                 "quality": quality, "source": "pixiv",

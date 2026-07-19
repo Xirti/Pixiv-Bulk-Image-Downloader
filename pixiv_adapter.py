@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import re
 import urllib.parse
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +81,17 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
     if not is_allowed_pixiv_url(source_thumb, image_only=True):
         raise PixivPolicyError("invalid image host")
     proxy = "/api/pixiv/image?" + urllib.parse.urlencode({"url": source_thumb})
-    tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
+    raw_tags = raw.get("tags")
+    if isinstance(raw_tags, dict):
+        raw_tags = raw_tags.get("tags") or raw_tags.get("data") or []
+    tags = raw_tags if isinstance(raw_tags, list) else []
+    normalized_tags = []
+    for tag in tags[:30]:
+        if isinstance(tag, dict):
+            tag = tag.get("tag") or tag.get("name") or ""
+        clean_tag = str(tag).strip()
+        if clean_tag:
+            normalized_tags.append(clean_tag)
     return {
         "id": artwork_id,
         "restriction": "r18" if restriction == 1 else "safe",
@@ -88,7 +99,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
         "title": str(raw.get("title") or "未命名作品"),
         "artist": str(raw.get("userName") or "未知画师"),
         "userId": str(raw.get("userId") or ""),
-        "tags": [str(tag) for tag in tags[:30]],
+        "tags": normalized_tags,
         "pages": max(1, int(raw.get("pageCount") or 1)),
         "width": max(0, int(raw.get("width") or 0)),
         "height": max(0, int(raw.get("height") or 0)),
@@ -185,9 +196,52 @@ def safe_artwork_stem(title: str, artwork_id: str) -> str:
     return f"{clean}_{artwork_id}" if clean else f"pixiv_{artwork_id}"
 
 
-def resolve_download_target(root: Path, title: str, artwork_id: str, create_folder: bool) -> Path:
+def normalize_tag_for_match(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
+
+
+def matches_tag_groups(tags: list[str], groups: tuple[tuple[str, ...], ...]) -> bool:
+    """Return True only when every AND group matches a real Pixiv tag exactly."""
+    actual = {normalize_tag_for_match(tag) for tag in tags}
+    return bool(actual) and all(
+        any(normalize_tag_for_match(alias) in actual for alias in group)
+        for group in groups
+    )
+
+
+def safe_context_folder_name(kind: str, value: str) -> str:
+    prefix = {"tags": "tag", "tag": "tag", "author": "author", "pid": "pid"}.get(str(kind), "search")
+    clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', str(value or ''))
+    clean = re.sub(r"\s+", " ", clean).strip(" ._")[:100] or "未命名"
+    if clean.upper() in {"CON", "PRN", "AUX", "NUL", "COM1", "LPT1"}:
+        clean = "_" + clean
+    return f"{prefix}_{clean}"
+
+
+def build_download_context(kind: str, value: str) -> dict[str, str]:
+    clean_kind = str(kind or "tags").strip().casefold()
+    if clean_kind not in {"tags", "author", "pid"}:
+        raise PixivPolicyError("invalid download context")
+    clean_value = str(value or "").strip()[:120]
+    if not clean_value:
+        raise PixivPolicyError("empty download context")
+    return {"kind": clean_kind, "value": clean_value, "folder": safe_context_folder_name(clean_kind, clean_value)}
+
+
+def resolve_download_target(
+    root: Path, title: str, artwork_id: str, create_folder: bool,
+    *, context: dict[str, str] | None = None, group_artwork: bool = False,
+) -> Path:
     root = Path(root)
-    return root / safe_artwork_stem(title, artwork_id) if create_folder else root
+    if not create_folder:
+        return root
+    if context:
+        folder = str(context.get("folder") or safe_context_folder_name(context.get("kind", "tags"), context.get("value", "")))
+        if Path(folder).is_absolute() or any(part in {".", ".."} for part in Path(folder).parts):
+            raise PixivPolicyError("invalid download context folder")
+        target = root / folder
+        return target / safe_artwork_stem(title, artwork_id) if group_artwork else target
+    return root / safe_artwork_stem(title, artwork_id)
 
 
 def safe_download_name(artwork_id: str, page: int, extension: str) -> str:

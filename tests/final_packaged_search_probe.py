@@ -38,6 +38,7 @@ def main() -> None:
         "MOKU_RUNTIME_DIR": str(runtime_dir),
         "MOKU_MUTEX_NAME": "Local\\MOKU.PackagedSearch." + os.urandom(12).hex(),
         "MOKU_NO_BROWSER": "1",
+        "MOKU_DISABLE_PERSISTENT_SESSION": "1",
         "MOKU_TEST_EXIT_AFTER_SECONDS": "180",
     })
     process = subprocess.Popen(
@@ -71,8 +72,8 @@ def main() -> None:
         }
 
         query = urllib.parse.urlencode({
-            "tag": "猫 犬", "page": 1, "mode": "safe",
-            "workType": "all", "includeAi": "true",
+            "tag": "猫；犬", "page": 1, "mode": "safe",
+            "workType": "all", "includeAi": "true", "fuzzy": "false",
         })
         started = time.monotonic()
         status, search = request_json(base + "/api/pixiv/search?" + query, 90, protected_headers)
@@ -80,23 +81,26 @@ def main() -> None:
         ids = [str(row.get("id")) for row in search.get("items", [])]
         assert status == 200, search.get("error")
         assert search.get("tags") == ["猫", "犬"]
-        assert search.get("availablePages") == [1, 2, 3, 4]
-        assert search.get("preloadedThrough") == 4
-        assert len(ids) == 36 and len(ids) == len(set(ids))
+        assert search.get("fuzzy") is False
+        available_pages = search.get("availablePages") or []
+        assert all(isinstance(value, int) and value >= 1 for value in available_pages)
+        if available_pages:
+            assert available_pages == list(range(1, available_pages[-1] + 1))
+            assert search.get("preloadedThrough") == available_pages[-1]
+        else:
+            assert search.get("preloadedThrough") == 0
+        assert len(ids) <= 36 and len(ids) == len(set(ids))
+        assert all({"猫", "犬"}.issubset({str(tag) for tag in row.get("tags") or []}) for row in search.get("items", []))
 
         status_code, account = request_json(base + "/api/status", 10, protected_headers)
         assert status_code == 200
-        connected = bool(account.get("loggedIn"))
+        assert account.get("loggedIn") is False
         all_query = urllib.parse.urlencode({
             "tag": "猫", "page": 1, "mode": "all",
             "workType": "all", "includeAi": "true",
         })
         all_status, all_result = request_json(base + "/api/pixiv/search?" + all_query, 90, protected_headers)
-        if connected:
-            assert all_status == 200, all_result.get("error")
-            assert all_result.get("scope") == "all"
-        else:
-            assert all_status == 403
+        assert all_status == 403, all_result
 
         print(json.dumps({
             "ok": True,
@@ -107,7 +111,7 @@ def main() -> None:
             "availablePages": search["availablePages"],
             "preloadedThrough": search["preloadedThrough"],
             "elapsedSeconds": round(elapsed, 3),
-            "accountConnected": connected,
+            "accountConnected": False,
             "allScopeStatus": all_status,
         }, ensure_ascii=False))
     finally:

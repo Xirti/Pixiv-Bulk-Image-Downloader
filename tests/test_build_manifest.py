@@ -234,10 +234,56 @@ class BuildManifestTests(unittest.TestCase):
             release.index("$ReleaseRoot ="),
         )
 
+    def test_release_metadata_describes_v105_search_and_collection_contract(self):
+        version = (ROOT / "version.py").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        portable = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
+
+        self.assertIn('__version__ = "1.0.5"', version)
+        self.assertIn("Strict multi-tag AND search", readme)
+        self.assertIn("100 artworks and 1,000 selected images", readme)
+        self.assertIn("## [1.0.5]", changelog)
+        self.assertIn("Separate multiple tags with ; or ；", portable)
+        self.assertNotIn("Space-separated tags use OR semantics", portable)
+
+    def test_real_batch_probe_does_not_mutate_tracked_evidence_by_default(self):
+        probe = (ROOT / "tests" / "real_batch_download_probe.py").read_text(encoding="utf-8")
+        self.assertIn('os.environ.get("MOKU_WRITE_PROBE_RESULT"', probe)
+        self.assertNotIn(
+            '\n            OUTPUT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")',
+            probe,
+        )
+
+    def test_release_closure_includes_packaged_v105_probes(self):
+        release = (ROOT / "make-release.ps1").read_text(encoding="utf-8-sig")
+        for probe in (
+            "packaged_visual_style_probe.py",
+            "final_packaged_search_probe.py",
+            "final_packaged_tag_cache_probe.py",
+        ):
+            self.assertIn(probe, release)
+
+    def test_packaged_search_probes_disable_persistent_credentials_and_assert_logged_out(self):
+        for name in ("final_packaged_search_probe.py", "final_packaged_tag_cache_probe.py"):
+            probe = (ROOT / "tests" / name).read_text(encoding="utf-8")
+            self.assertIn("MOKU_DISABLE_PERSISTENT_SESSION", probe)
+            self.assertIn('account.get("loggedIn") is', probe)
+            self.assertIn("all_status", probe)
+            self.assertIn("403", probe)
+
     def _prepare_release_sandbox(self, root: Path) -> None:
         self._copy_build_inputs(root)
         shutil.copyfile(ROOT / "make-release.ps1", root / "make-release.ps1")
         shutil.copyfile(ROOT / "CHANGELOG.md", root / "CHANGELOG.md")
+        tests = root / "tests"
+        tests.mkdir(exist_ok=True)
+        for probe in (
+            "packaged_visual_style_probe.py",
+            "final_packaged_search_probe.py",
+            "final_packaged_tag_cache_probe.py",
+        ):
+            (tests / probe).write_text("raise SystemExit(0)\n", encoding="utf-8")
         (root / "LICENSE").write_text("TEST-ONLY LICENSE\n", encoding="utf-8")
         dist = root / "dist" / "MOKU"
         internal = dist / "_internal"
@@ -329,6 +375,8 @@ class BuildManifestTests(unittest.TestCase):
     def test_release_script_rehashes_moved_archive_and_cleans_partial_output(self):
         release = (ROOT / "make-release.ps1").read_text(encoding="utf-8-sig")
 
+        self.assertIn("$ProbeLogs", release)
+        self.assertIn("Remove-Item -LiteralPath $ProbeLogs -Recurse -Force", release)
         self.assertIn("$ReleaseComplete = $false", release)
         self.assertIn("$ReleaseComplete = $true", release)
         self.assertIn("$FinalArchiveHash", release)

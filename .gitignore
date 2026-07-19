@@ -34,6 +34,8 @@ tests/*.jpg
 # Internal local audit records (contain machine-specific paths)
 profile.md
 项目完结报告.md
+MOKU-v*-当前阶段总结.md
+.hermes/
 
 # Editor and OS files
 .vscode/

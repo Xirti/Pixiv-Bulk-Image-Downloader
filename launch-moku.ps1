@@ -14,7 +14,7 @@ function Log([string]$message) { Add-Content -LiteralPath $log -Value "$(Get-Dat
 $generationFiles = @(
   'server.py', 'auth_store.py', 'fixture_gallery.py', 'folder_picker.py',
   'pixiv_login.py', 'moku_app.py', 'desktop_client.py',
-  'network_config.py', 'pixiv_adapter.py', 'search_service.py', 'version.py',
+  'network_config.py', 'pixiv_adapter.py', 'search_aliases.py', 'search_service.py', 'version.py',
   'web\index.html', 'web\app.js', 'web\style.css'
 ) | ForEach-Object { Join-Path $root $_ }
 $missingGenerationFile = $generationFiles | Where-Object { -not (Test-Path -LiteralPath $_) } | Select-Object -First 1
