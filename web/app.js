@@ -19,10 +19,12 @@ const MAX_SELECTED_PAGES = 1000;
 const DOWNLOAD_CHUNK_ARTWORKS = 20;
 const DOWNLOAD_CHUNK_PAGES = 200;
 const DETAIL_PAGE_WINDOW = 48;
+const SEARCH_KEEP_BEHIND = 6;
 const selectedArtworkIds = new Set();
 const selectedArtworks = new Map();
 const selectedPagesByArtwork = new Map();
 const selectedContextByArtwork = new Map();
+const selectedResultPageByArtwork = new Map();
 const archivedArtworkIds = new Set();
 
 const $ = (selector) => document.querySelector(selector);
@@ -151,27 +153,26 @@ function selectedPageCount() {
   );
 }
 
-function currentPageSelectionIds() {
-  return new Set(items.map((item) => item.id).filter((id) => selectedArtworkIds.has(id) && !archivedArtworkIds.has(id)));
+function unarchivedSelectionIds() {
+  return new Set([...selectedArtworkIds].filter((id) => !archivedArtworkIds.has(id)));
 }
 
-function detachCurrentSelection() {
-  const currentIds = currentPageSelectionIds();
-  currentIds.forEach((id) => archivedArtworkIds.add(id));
+function detachSelection(ids) {
+  ids.forEach((id) => archivedArtworkIds.add(id));
   updateSelectionBar();
-  return currentIds.size;
+  return ids.size;
 }
 
-function clearCurrentSelection() {
-  const currentIds = currentPageSelectionIds();
-  currentIds.forEach((id) => {
+function clearSelection(ids) {
+  ids.forEach((id) => {
     selectedArtworkIds.delete(id);
     selectedArtworks.delete(id);
     selectedPagesByArtwork.delete(id);
     selectedContextByArtwork.delete(id);
+    selectedResultPageByArtwork.delete(id);
   });
   updateSelectionBar();
-  return currentIds.size;
+  return ids.size;
 }
 
 function clearAllSelection() {
@@ -179,6 +180,7 @@ function clearAllSelection() {
   selectedArtworks.clear();
   selectedPagesByArtwork.clear();
   selectedContextByArtwork.clear();
+  selectedResultPageByArtwork.clear();
   archivedArtworkIds.clear();
   updateSelectionBar();
 }
@@ -198,6 +200,7 @@ function toggleArtworkSelection(item, checked) {
     selectedArtworkIds.add(item.id);
     selectedArtworks.set(item.id, item);
     selectedContextByArtwork.set(item.id, { ...activeSearchContext });
+    selectedResultPageByArtwork.set(item.id, currentPage);
     if (!selectedPagesByArtwork.has(item.id)) {
       selectedPagesByArtwork.set(item.id, new Set(Array.from({ length: item.pages }, (_, page) => page)));
     }
@@ -206,10 +209,43 @@ function toggleArtworkSelection(item, checked) {
     selectedArtworks.delete(item.id);
     selectedPagesByArtwork.delete(item.id);
     selectedContextByArtwork.delete(item.id);
+    selectedResultPageByArtwork.delete(item.id);
     archivedArtworkIds.delete(item.id);
   }
   updateSelectionBar();
   return true;
+}
+
+function selectAllCurrentPage() {
+  const additionalPages = items.reduce((total, item) => {
+    const allPages = new Set(Array.from({ length: item.pages }, (_, page) => page));
+    const existingPages = selectedPagesByArtwork.get(item.id) || new Set();
+    return total + [...allPages].filter((page) => !existingPages.has(page)).length;
+  }, 0);
+  const additionalArtworks = items.filter((item) => !selectedArtworkIds.has(item.id)).length;
+  const status = $("#pageSelectionStatus");
+  if (selectedArtworkIds.size + additionalArtworks > MAX_SELECTED_ARTWORKS) {
+    status.textContent = `无法全选：采集篮最多 ${MAX_SELECTED_ARTWORKS} 个作品`;
+    return;
+  }
+  if (selectedPageCount() + additionalPages > MAX_SELECTED_PAGES) {
+    status.textContent = `无法全选：采集篮最多 ${MAX_SELECTED_PAGES} 张图片`;
+    return;
+  }
+  for (const item of items) {
+    toggleArtworkSelection(item, true);
+    const allPages = new Set(Array.from({ length: item.pages }, (_, page) => page));
+    selectedPagesByArtwork.set(item.id, allPages);
+  }
+  updateSelectionBar();
+  status.textContent = `已全选当前页 ${items.length} 个作品及其全部图片`;
+  render();
+}
+
+function clearAllCurrentPage() {
+  for (const item of items) toggleArtworkSelection(item, false);
+  $("#pageSelectionStatus").textContent = "已取消当前页全部选择";
+  render();
 }
 
 async function search(tag, page = 1) {
@@ -315,7 +351,16 @@ function renderPagination() {
       navigateToPage(Number(button.dataset.page));
     };
   });
+  updatePaginationDock();
 }
+
+function updatePaginationDock() {
+  const dock = document.querySelector(".pagination-dock");
+  const gallery = $("#gallery");
+  dock.classList.toggle("is-visible", Boolean($("#pagination").children.length) && gallery.getBoundingClientRect().bottom > 0);
+}
+
+window.addEventListener("scroll", updatePaginationDock, { passive: true });
 
 async function select(index) {
   if (detailController) detailController.abort();
@@ -424,6 +469,9 @@ function renderCollectionPageWindow(item = currentDetailItem, chosenPages = sele
       if (set?.size) {
         selectedArtworks.set(item.id, item);
         selectedArtworkIds.add(item.id);
+        if (!selectedResultPageByArtwork.has(item.id)) {
+          selectedResultPageByArtwork.set(item.id, currentPage);
+        }
         if (!selectedContextByArtwork.has(item.id)) {
           selectedContextByArtwork.set(item.id, { ...activeSearchContext });
         }
@@ -432,6 +480,7 @@ function renderCollectionPageWindow(item = currentDetailItem, chosenPages = sele
         selectedArtworks.delete(item.id);
         selectedArtworkIds.delete(item.id);
         selectedContextByArtwork.delete(item.id);
+        selectedResultPageByArtwork.delete(item.id);
         archivedArtworkIds.delete(item.id);
       }
       updateSelectionBar();
@@ -617,8 +666,15 @@ function openCapacityDialog(targetPage) {
   if (dialog?.showModal) dialog.showModal();
 }
 
+function selectionWouldBeEvicted(targetPage) {
+  const oldestRetainedPage = Math.max(1, targetPage - SEARCH_KEEP_BEHIND);
+  return [...unarchivedSelectionIds()].some(
+    (id) => (selectedResultPageByArtwork.get(id) || currentPage) < oldestRetainedPage,
+  );
+}
+
 function navigateToPage(page) {
-  if (currentPageSelectionIds().size > 0) {
+  if (selectionWouldBeEvicted(page)) {
     openCapacityDialog(page);
     return;
   }
@@ -629,7 +685,7 @@ function navigateToPage(page) {
 function archiveAndContinue() {
   const page = pendingNavigationPage;
   pendingNavigationPage = null;
-  const detached = detachCurrentSelection();
+  const detached = detachSelection(unarchivedSelectionIds());
   $("#capacityDialog")?.close();
   if (page !== null) {
     $("#toast").textContent = `已将当前 ${detached} 个作品放入采集篮；继续翻页不会下载原图`;
@@ -641,7 +697,7 @@ function archiveAndContinue() {
 function clearAndContinue() {
   const page = pendingNavigationPage;
   pendingNavigationPage = null;
-  clearCurrentSelection();
+  clearSelection(unarchivedSelectionIds());
   $("#capacityDialog")?.close();
   if (page !== null) {
     search(activeTagQuery, page);
@@ -678,6 +734,8 @@ async function openBatchCollection(id) {
 $("#returnToBatch").onclick = () => renderBatchPicker();
 $("#openBatchPicker").onclick = () => renderBatchPicker();
 $("#closeBatchPicker").onclick = () => { renderBatchWorkspace(); $("#detail").scrollIntoView({ behavior: "auto" }); };
+$("#selectAllPage").onclick = selectAllCurrentPage;
+$("#clearPageSelection").onclick = clearAllCurrentPage;
 $("#clearSelection").onclick = () => { clearAllSelection(); document.body.classList.remove("collection-basket-open"); render(); };
 $("#openBatch").onclick = () => { renderBatchWorkspace(); $("#detail").scrollIntoView({ behavior: "auto" }); };
 

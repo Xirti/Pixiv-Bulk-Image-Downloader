@@ -110,10 +110,10 @@ class V105DownloadContractTests(unittest.TestCase):
 class V105VisualContractTests(unittest.TestCase):
     def test_deep_art_direction_uses_static_layers_not_runtime_particles(self):
         self.assertIn(".art-depth", STYLE)
-        self.assertIn(".art-orbit", STYLE)
+        self.assertIn(".moon-ring", STYLE)
         self.assertIn(".art-constellation", STYLE)
         self.assertIn('class="art-depth"', HTML)
-        self.assertIn('class="art-orbit orbit-one"', HTML)
+        self.assertIn('class="moon-ring"', HTML)
         self.assertIn('class="art-constellation constellation-one"', HTML)
         self.assertIn("aria-hidden=\"true\"", HTML)
         self.assertNotIn("requestAnimationFrame", APP)
@@ -123,8 +123,8 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn(".art-depth{", STYLE)
         self.assertIn("max-width:560px", STYLE)
         self.assertIn("max-height:560px", STYLE)
-        self.assertIn("box-shadow:0 0 24px", STYLE)
-        self.assertIn("html.conservative .art-orbit", STYLE)
+        self.assertIn("box-shadow:inset 22px 15px 28px", STYLE)
+        self.assertIn("html.conservative .moon-ring", STYLE)
         self.assertIn("html.conservative .art-constellation", STYLE)
         self.assertIn("prefers-reduced-motion:reduce", STYLE)
 
@@ -148,11 +148,11 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("lunar", STYLE)
         self.assertIn("模糊", HTML)
         self.assertIn("采集篮", HTML + APP)
-        self.assertIn("已达当前图片批次上限，是否打包", HTML + APP)
+        self.assertIn("旧页缓存即将清理", HTML + APP)
         self.assertIn("createFolder", APP)
         self.assertIn("batchDownload", HTML)
 
-    def test_collection_basket_capacity_and_navigation_decision_are_explicit(self):
+    def test_collection_basket_capacity_decision_only_runs_when_navigation_evicts_selected_pages(self):
         self.assertIn("MAX_SELECTED_ARTWORKS = 100", APP)
         self.assertIn("MAX_SELECTED_PAGES = 1000", APP)
         self.assertIn('id="capacityDialog"', HTML)
@@ -160,6 +160,22 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn('id="clearAndContinue"', HTML)
         self.assertIn("pendingNavigationPage", APP)
         self.assertIn("openCapacityDialog", APP)
+        self.assertIn("SEARCH_KEEP_BEHIND = 6", APP)
+        self.assertIn("const selectedResultPageByArtwork = new Map()", APP)
+        self.assertIn("function selectionWouldBeEvicted(targetPage)", APP)
+        navigate = APP[
+            APP.index("function navigateToPage"):APP.index("function archiveAndContinue")
+        ]
+        self.assertIn("selectionWouldBeEvicted(page)", navigate)
+        self.assertNotIn("currentPageSelectionIds().size > 0", navigate)
+        archive = APP[
+            APP.index("function archiveAndContinue"):APP.index("function clearAndContinue")
+        ]
+        clear = APP[
+            APP.index("function clearAndContinue"):APP.index("function cancelCapacityDecision")
+        ]
+        self.assertIn("unarchivedSelectionIds()", archive)
+        self.assertIn("unarchivedSelectionIds()", clear)
         self.assertIn("采集篮", APP + HTML)
 
     def test_opening_detail_does_not_create_ghost_collection_pages(self):
@@ -168,14 +184,14 @@ class V105VisualContractTests(unittest.TestCase):
         ]
         self.assertNotIn("selectedPagesByArtwork.set", detail)
         count = APP[
-            APP.index("function selectedPageCount"):APP.index("function currentPageSelectionIds")
+            APP.index("function selectedPageCount"):APP.index("function unarchivedSelectionIds")
         ]
         self.assertIn("selectedArtworkIds", count)
 
-    def test_collection_basket_detaches_current_selection_from_archived_items(self):
+    def test_collection_basket_detaches_unarchived_selection_before_cache_eviction(self):
         self.assertIn("const archivedArtworkIds = new Set()", APP)
-        self.assertIn("function detachCurrentSelection()", APP)
-        self.assertIn("function clearCurrentSelection()", APP)
+        self.assertIn("function detachSelection(ids)", APP)
+        self.assertIn("function clearSelection(ids)", APP)
         self.assertIn("archivedArtworkIds.add", APP)
 
     def test_collection_workspace_has_one_download_command_and_separate_picker_surface(self):
@@ -196,6 +212,29 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertNotIn("chosen.slice", batch)
         self.assertNotIn("basket-overflow", batch)
 
+    def test_result_page_has_one_click_select_all_controls(self):
+        self.assertIn('id="selectAllPage"', HTML)
+        self.assertIn('id="clearPageSelection"', HTML)
+        self.assertIn("function selectAllCurrentPage()", APP)
+        select_all = APP[
+            APP.index("function selectAllCurrentPage"):APP.index("function clearAllCurrentPage")
+        ]
+        self.assertIn("toggleArtworkSelection(item, true)", select_all)
+        self.assertIn("additionalPages", select_all)
+        self.assertIn("selectedPagesByArtwork.set(item.id, allPages)", select_all)
+        self.assertIn("无法全选", select_all)
+        self.assertIn("render()", select_all)
+
+    def test_result_pagination_stays_visible_at_viewport_bottom(self):
+        self.assertIn('class="pagination-dock"', HTML)
+        self.assertIn(".pagination-dock{position:fixed;left:0;right:0;bottom:0", STYLE)
+        self.assertIn(".pagination-dock.is-visible{display:flex}", STYLE)
+        self.assertIn("function updatePaginationDock()", APP)
+        self.assertIn('Boolean($("#pagination").children.length)', APP)
+        self.assertIn('window.addEventListener("scroll", updatePaginationDock, { passive: true })', APP)
+        self.assertIn("z-index:11", STYLE)
+        self.assertIn(".results{padding:55px 5vw 96px", STYLE)
+
     def test_collection_detail_uses_vertical_page_picker_and_hides_single_download(self):
         self.assertIn('class="detail scene collection-mode"', HTML)
         self.assertIn("body.collection-basket-open #download{display:none}", STYLE)
@@ -204,12 +243,21 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("aspect-ratio:2/3", STYLE)
         self.assertIn("object-position:center top", STYLE)
 
-    def test_capacity_dialog_buttons_have_explicit_readable_semantic_colors(self):
+    def test_capacity_dialog_buttons_use_restrained_monochrome_styles(self):
         for selector in ("#archiveAndContinue", "#clearAndContinue", "#cancelCapacity"):
             self.assertIn(f"{selector}{{", STYLE)
-        self.assertIn("color:#08131d", STYLE)
-        self.assertIn("color:#fff", STYLE)
-        self.assertIn("color:#eef5fb", STYLE)
+        capacity_styles = STYLE[STYLE.index("#archiveAndContinue{"):]
+        self.assertNotIn("#9dd6ff", capacity_styles)
+        self.assertNotIn("#9a3542", capacity_styles)
+        self.assertIn("color:#eef3f8", capacity_styles)
+
+    def test_home_uses_one_clean_monochrome_moon_ring_without_search_panel_arcs(self):
+        self.assertNotIn(".search-panel::before", STYLE)
+        self.assertIn('class="moon-ring"', HTML)
+        self.assertIn(".moon-ring::before", STYLE)
+        self.assertIn(".moon-ring::after", STYLE)
+        self.assertIn("conic-gradient", STYLE)
+        self.assertNotIn("rgba(255,141,78", STYLE)
 
     def test_collection_downloads_are_grouped_by_their_original_search_context(self):
         self.assertIn("const selectedContextByArtwork = new Map()", APP)

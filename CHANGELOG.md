@@ -9,13 +9,16 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Strict multi-tag AND search using `;` or `；` separators; spaces remain part of one tag.
 - Optional bounded anime-oriented tag aliases, disabled by default.
 - A collection basket for up to 100 artworks and 1,000 selected images, with windowed page selection for large works.
+- One-click select/clear controls for all artworks and images on the current result page.
 - Image-first adaptive download chunks and optional artwork grouping.
 
 ### Changed
 
 - Save one search batch into a shared tag, author, or artwork context folder instead of creating one folder per artwork.
 - Apply the same context-folder rule to single-artwork downloads.
-- Restyle the interface with a low-cost lunar monochrome theme while preserving the existing workflow and startup budget.
+- Restyle the interface with a restrained black-and-white lunar theme, a highlighted moon edge, and one clean orbital ring while preserving the existing workflow and startup budget.
+- Keep result pagination docked to the viewport bottom while the gallery scrolls.
+- Defer the collection retention decision until forward navigation would actually evict selected result pages.
 
 ### Fixed
 
