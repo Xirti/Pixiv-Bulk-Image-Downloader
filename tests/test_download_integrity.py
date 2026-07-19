@@ -13,6 +13,7 @@ import server
 
 
 PNG = b"\x89PNG\r\n\x1a\nMOKU-TEST"
+DOWNLOAD_NETWORK_REFRESH = server.ensure_network_opener_current
 
 
 class BatchDownloadIntegrityTests(unittest.TestCase):
@@ -20,8 +21,6 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
         self.httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
-        self.network_refresh = patch.object(server, "ensure_network_opener_current")
-        self.network_refresh.start()
         self.token = "batch-test-token"
         self.artwork_id = "990001"
         self.remote_urls = [
@@ -54,7 +53,6 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             )
 
     def tearDown(self):
-        self.network_refresh.stop()
         server.PIXIV_CACHE.clear()
         server.PIXIV_CACHE.update(self._old_cache)
         server.IMAGE_TOKENS.clear()
@@ -76,11 +74,16 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                return response.status, json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            return exc.code, json.loads(exc.read())
+        with patch.object(
+            server, "ensure_network_opener_current", DOWNLOAD_NETWORK_REFRESH,
+        ), patch.object(
+            server, "refresh_network_opener", return_value=server.PIXIV_PROXY,
+        ):
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
 
     def post_single(
         self, root: Path, create_folder: bool = False, context: dict | None = None,
@@ -102,11 +105,16 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                return response.status, json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            return exc.code, json.loads(exc.read())
+        with patch.object(
+            server, "ensure_network_opener_current", DOWNLOAD_NETWORK_REFRESH,
+        ), patch.object(
+            server, "refresh_network_opener", return_value=server.PIXIV_PROXY,
+        ):
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
 
     def test_batch_download_honors_create_folder_false(self):
         with tempfile.TemporaryDirectory(prefix="moku-batch-folder-test-") as raw_root, patch.object(
