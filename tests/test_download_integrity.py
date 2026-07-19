@@ -13,7 +13,6 @@ import server
 
 
 PNG = b"\x89PNG\r\n\x1a\nMOKU-TEST"
-DOWNLOAD_NETWORK_REFRESH = server.ensure_network_opener_current
 
 
 class BatchDownloadIntegrityTests(unittest.TestCase):
@@ -61,7 +60,20 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
         self.httpd.server_close()
         self.thread.join(timeout=3)
 
-    def post(self, payload: dict, root: Path) -> tuple[int, dict]:
+    def _request(self, request: urllib.request.Request, *, pixiv_side_effect=None) -> tuple[int, dict]:
+        """Install the network seam before the threaded handler begins."""
+        if pixiv_side_effect is None:
+            pixiv_side_effect = lambda *args, **kwargs: (PNG, "image/png")
+        with patch.object(server, "ensure_network_opener_current", return_value=server.PIXIV_PROXY), \
+             patch.object(server, "refresh_network_opener", return_value=server.PIXIV_PROXY), \
+             patch.object(server, "pixiv_request", side_effect=pixiv_side_effect):
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
+
+    def post(self, payload: dict, root: Path, *, pixiv_side_effect=None) -> tuple[int, dict]:
         body = json.dumps({**payload, "saveRoot": str(root)}).encode("utf-8")
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.httpd.server_port}/api/pixiv/batch-download",
@@ -74,19 +86,11 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             },
             method="POST",
         )
-        with patch.object(
-            server, "ensure_network_opener_current", DOWNLOAD_NETWORK_REFRESH,
-        ), patch.object(
-            server, "refresh_network_opener", return_value=server.PIXIV_PROXY,
-        ):
-            try:
-                with urllib.request.urlopen(request, timeout=10) as response:
-                    return response.status, json.loads(response.read())
-            except urllib.error.HTTPError as exc:
-                return exc.code, json.loads(exc.read())
+        return self._request(request, pixiv_side_effect=pixiv_side_effect)
 
     def post_single(
         self, root: Path, create_folder: bool = False, context: dict | None = None,
+        *, pixiv_side_effect=None,
     ) -> tuple[int, dict]:
         body = json.dumps({
             "id": self.artwork_id,
@@ -105,16 +109,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             },
             method="POST",
         )
-        with patch.object(
-            server, "ensure_network_opener_current", DOWNLOAD_NETWORK_REFRESH,
-        ), patch.object(
-            server, "refresh_network_opener", return_value=server.PIXIV_PROXY,
-        ):
-            try:
-                with urllib.request.urlopen(request, timeout=10) as response:
-                    return response.status, json.loads(response.read())
-            except urllib.error.HTTPError as exc:
-                return exc.code, json.loads(exc.read())
+        return self._request(request, pixiv_side_effect=pixiv_side_effect)
 
     def test_batch_download_honors_create_folder_false(self):
         with tempfile.TemporaryDirectory(prefix="moku-batch-folder-test-") as raw_root, patch.object(
@@ -217,9 +212,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                 raise urllib.error.URLError("injected failure")
             return PNG, "image/png"
 
-        with tempfile.TemporaryDirectory(prefix="moku-batch-partial-test-") as raw_root, patch.object(
-            server, "pixiv_request", side_effect=fail_second
-        ):
+        with tempfile.TemporaryDirectory(prefix="moku-batch-partial-test-") as raw_root:
             root = Path(raw_root)
             status, body = self.post(
                 {
@@ -229,6 +222,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                     "context": {"kind": "tags", "value": "测试"},
                 },
                 root,
+                pixiv_side_effect=fail_second,
             )
             self.assertEqual(status, 502)
             self.assertIn("失败", body["error"])
@@ -250,11 +244,12 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                 raise urllib.error.URLError("injected failure")
             return PNG, "image/png"
 
-        with tempfile.TemporaryDirectory(prefix="moku-single-partial-test-") as raw_root, patch.object(
-            server, "pixiv_request", side_effect=fail_second
-        ):
+        with tempfile.TemporaryDirectory(prefix="moku-single-partial-test-") as raw_root:
             root = Path(raw_root)
-            status, body = self.post_single(root)
+            status, body = self.post_single(
+                root,
+                pixiv_side_effect=fail_second,
+            )
             self.assertEqual(status, 502)
             self.assertIn("失败", body["error"])
             self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
