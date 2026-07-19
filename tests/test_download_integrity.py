@@ -66,10 +66,14 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             pixiv_side_effect = lambda *args, **kwargs: (PNG, "image/png")
         with patch.object(server, "ensure_network_opener_current", return_value=server.PIXIV_PROXY), \
              patch.object(server, "refresh_network_opener", return_value=server.PIXIV_PROXY), \
-             patch.object(server, "pixiv_request", side_effect=pixiv_side_effect):
+             patch.object(server, "pixiv_request", side_effect=pixiv_side_effect), \
+             patch.object(server, "_directory_identity", side_effect=lambda path: (
+                 int(Path(path).stat().st_dev), int(Path(path).stat().st_ino), 0,
+             )):
             try:
                 with urllib.request.urlopen(request, timeout=10) as response:
-                    return response.status, json.loads(response.read())
+                    payload = json.loads(response.read())
+                    return response.status, payload
             except urllib.error.HTTPError as exc:
                 return exc.code, json.loads(exc.read())
 
@@ -112,9 +116,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
         return self._request(request, pixiv_side_effect=pixiv_side_effect)
 
     def test_batch_download_honors_create_folder_false(self):
-        with tempfile.TemporaryDirectory(prefix="moku-batch-folder-test-") as raw_root, patch.object(
-            server, "pixiv_request", return_value=(PNG, "image/png")
-        ):
+        with tempfile.TemporaryDirectory(prefix="moku-batch-folder-test-") as raw_root:
             root = Path(raw_root)
             status, body = self.post(
                 {
@@ -124,15 +126,13 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                 },
                 root,
             )
-            self.assertEqual(status, 200)
+            self.assertEqual(status, 200, body)
             saved = root / Path(body["saved"][0])
             self.assertEqual(saved.parent, root)
             self.assertTrue(saved.exists())
 
     def test_batch_download_uses_one_context_folder_for_all_artworks(self):
-        with tempfile.TemporaryDirectory(prefix="moku-batch-context-test-") as raw_root, patch.object(
-            server, "pixiv_request", return_value=(PNG, "image/png")
-        ):
+        with tempfile.TemporaryDirectory(prefix="moku-batch-context-test-") as raw_root:
             root = Path(raw_root)
             status, body = self.post(
                 {
@@ -144,15 +144,13 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                 },
                 root,
             )
-            self.assertEqual(status, 200)
+            self.assertEqual(status, 200, body)
             saved = [root / Path(relative) for relative in body["saved"]]
             self.assertTrue(all(path.parent == root / "tag_猫；夜景" for path in saved))
             self.assertTrue(all(path.exists() for path in saved))
 
     def test_batch_download_can_group_each_artwork_inside_context_folder(self):
-        with tempfile.TemporaryDirectory(prefix="moku-batch-group-test-") as raw_root, patch.object(
-            server, "pixiv_request", return_value=(PNG, "image/png")
-        ):
+        with tempfile.TemporaryDirectory(prefix="moku-batch-group-test-") as raw_root:
             root = Path(raw_root)
             status, body = self.post(
                 {
@@ -164,7 +162,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                 },
                 root,
             )
-            self.assertEqual(status, 200)
+            self.assertEqual(status, 200, body)
             saved = root / Path(body["saved"][0])
             self.assertEqual(saved.parent.parent, root / "tag_猫；夜景")
             self.assertTrue(saved.parent.name.endswith(f"_{self.artwork_id}"))
@@ -190,14 +188,12 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             self.assertFalse(final.exists())
 
     def test_single_download_uses_current_search_context_folder(self):
-        with tempfile.TemporaryDirectory(prefix="moku-single-context-test-") as raw_root, patch.object(
-            server, "pixiv_request", return_value=(PNG, "image/png")
-        ):
+        with tempfile.TemporaryDirectory(prefix="moku-single-context-test-") as raw_root:
             root = Path(raw_root)
             status, body = self.post_single(
                 root, create_folder=True, context={"kind": "author", "value": "测试画师"},
             )
-            self.assertEqual(status, 200)
+            self.assertEqual(status, 200, body)
             saved = [root / Path(relative) for relative in body["saved"]]
             self.assertTrue(all(path.parent == root / "author_测试画师" for path in saved))
             self.assertTrue(all(path.exists() for path in saved))
