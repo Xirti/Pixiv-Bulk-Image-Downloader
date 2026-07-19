@@ -1292,9 +1292,9 @@ def _validated_publish_parent(save_root: Path, final: Path) -> Path:
         raise PixivPolicyError("保存根目录不存在")
     if _is_link_or_reparse(root):
         raise PixivPolicyError("保存根目录不能是链接或重解析点")
-    candidate = Path(final)
+    candidate = Path(final).resolve(strict=False)
     try:
-        relative = candidate.relative_to(save_root)
+        relative = candidate.relative_to(root)
     except ValueError as exc:
         raise PixivPolicyError("保存路径超出目标目录") from exc
     current = root
@@ -1714,7 +1714,7 @@ class Handler(SimpleHTTPRequestHandler):
         root = Path(raw).expanduser() if raw else DOWNLOADS
         if not root.is_absolute():
             raise RequestInputError(400, "保存位置必须是绝对路径")
-        return root
+        return root.resolve(strict=False)
 
     @staticmethod
     def _download_options(data: dict) -> tuple[str, bool]:

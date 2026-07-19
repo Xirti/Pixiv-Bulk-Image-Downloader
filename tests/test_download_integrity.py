@@ -187,6 +187,35 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                     )
             self.assertFalse(final.exists())
 
+    def test_save_root_canonicalizes_an_absolute_alias(self):
+        with tempfile.TemporaryDirectory(prefix="moku-save-root-alias-test-") as raw_root:
+            root = Path(raw_root).resolve()
+            alias_root = root / "alias-parent" / ".."
+            self.assertEqual(
+                server.Handler._save_root({"saveRoot": str(alias_root)}),
+                root,
+            )
+
+    def test_publish_accepts_an_unresolved_alias_of_the_same_save_root(self):
+        with tempfile.TemporaryDirectory(prefix="moku-publish-alias-test-") as raw_root:
+            root = Path(raw_root).resolve()
+            staging = root / ".staging"
+            staging.mkdir()
+            temporary = staging / "payload.png"
+            temporary.write_bytes(PNG)
+            alias_root = root / "alias-parent" / ".."
+            final = alias_root / "payload.png"
+
+            with patch.object(server, "_directory_identity", side_effect=lambda path: (
+                int(Path(path).stat().st_dev), int(Path(path).stat().st_ino), 0,
+            )):
+                saved = server.publish_staged_files(
+                    staging, [(temporary, final)], save_root=alias_root,
+                )
+
+            self.assertEqual(saved, [root / "payload.png"])
+            self.assertEqual((root / "payload.png").read_bytes(), PNG)
+
     def test_single_download_uses_current_search_context_folder(self):
         with tempfile.TemporaryDirectory(prefix="moku-single-context-test-") as raw_root:
             root = Path(raw_root)
