@@ -2,6 +2,13 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.6] - 2026-07-20
+
+### Fixed
+
+- Canonicalize user-selected download roots and final publication paths before containment checks, so equivalent Windows path aliases cannot produce false 502 responses or bypass the save-root boundary.
+- Isolate threaded download-integrity test network seams and stabilize the publish-identity test path on hosted Windows runners.
+
 ## [1.0.5] - 2026-07-18
 
 ### Added

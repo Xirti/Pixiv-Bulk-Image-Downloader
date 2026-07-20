@@ -234,16 +234,16 @@ class BuildManifestTests(unittest.TestCase):
             release.index("$ReleaseRoot ="),
         )
 
-    def test_release_metadata_describes_v105_search_and_collection_contract(self):
+    def test_release_metadata_describes_current_search_and_collection_contract(self):
         version = (ROOT / "version.py").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         portable = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertIn('__version__ = "1.0.5"', version)
+        self.assertIn('__version__ = "1.0.6"', version)
         self.assertIn("Strict multi-tag AND search", readme)
         self.assertIn("100 artworks and 1,000 selected images", readme)
-        self.assertIn("## [1.0.5]", changelog)
+        self.assertIn("## [1.0.6]", changelog)
         self.assertIn("Separate multiple tags with ; or ；", portable)
         self.assertNotIn("Space-separated tags use OR semantics", portable)
 
