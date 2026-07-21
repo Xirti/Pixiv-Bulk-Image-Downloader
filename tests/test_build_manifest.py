@@ -240,10 +240,10 @@ class BuildManifestTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         portable = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertIn('__version__ = "1.0.6"', version)
+        self.assertIn('__version__ = "1.0.7"', version)
         self.assertIn("Strict multi-tag AND search", readme)
         self.assertIn("100 artworks and 1,000 selected images", readme)
-        self.assertIn("## [1.0.6]", changelog)
+        self.assertIn("## [1.0.7]", changelog)
         self.assertIn("Separate multiple tags with ; or ；", portable)
         self.assertNotIn("Space-separated tags use OR semantics", portable)
 
@@ -255,7 +255,7 @@ class BuildManifestTests(unittest.TestCase):
             probe,
         )
 
-    def test_release_closure_includes_packaged_v105_probes(self):
+    def test_release_closure_includes_packaged_probes(self):
         release = (ROOT / "make-release.ps1").read_text(encoding="utf-8-sig")
         for probe in (
             "packaged_visual_style_probe.py",

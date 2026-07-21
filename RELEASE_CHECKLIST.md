@@ -21,9 +21,9 @@
 
 - [x] Run `powershell -ExecutionPolicy Bypass -File .\make-release.ps1`.
 - [x] Use `-SkipBuild` only when the source, build inputs, license, and every file in `dist\MOKU` still match `BUILD_MANIFEST.json`.
-- [ ] Commit the source and tag the exact verified release commit as `v1.0.6`.
+- [ ] Commit the source and tag the exact verified release commit as `v1.0.7`.
 - [ ] Create a GitHub Release from that tag.
-- [ ] Upload the ZIP and `SHA256SUMS.txt` from `release\v1.0.6`.
+- [ ] Upload the ZIP and `SHA256SUMS.txt` from `release\v1.0.7`.
 - [ ] Verify the downloaded ZIP hash from another directory.
 
-> `v1.0.5` is already published and immutable. The post-tag CI/path-canonicalization fixes are released as `v1.0.6` rather than being added to the old tag.
+> `v1.0.5` is already published and immutable. The pushed but unpublished `v1.0.6` candidate is also retained unchanged; its post-tag reparse-point fix is released as `v1.0.7`.

@@ -2,6 +2,12 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.7] - 2026-07-20
+
+### Fixed
+
+- Reject junctions and other reparse points before canonicalization or publication, including those nested below the selected root, and remove every directory created by a failed publish.
+
 ## [1.0.6] - 2026-07-20
 
 ### Fixed
