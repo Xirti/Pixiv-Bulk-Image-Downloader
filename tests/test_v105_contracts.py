@@ -194,23 +194,30 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("function clearSelection(ids)", APP)
         self.assertIn("archivedArtworkIds.add", APP)
 
-    def test_collection_workspace_has_one_download_command_and_separate_picker_surface(self):
+    def test_batch_download_opens_integrated_default_selected_artwork_picker(self):
         workspace = HTML[HTML.index('id="batchWorkspace"'):HTML.index('id="deck"')]
         self.assertEqual(workspace.count('id="batchDownload"'), 1)
-        self.assertIn('id="openBatchPicker"', workspace)
-        self.assertIn('id="batchPicker"', HTML)
-        self.assertIn('id="closeBatchPicker"', HTML)
-        self.assertIn('class="batch-picker-grid"', HTML)
-        self.assertIn("renderBatchPicker", APP)
-        self.assertIn("openBatchCollection", APP)
-
-    def test_collection_workspace_renders_one_cover_per_artwork_without_a_preview_cap(self):
-        batch = APP[
-            APP.index("function renderBatchPicker"):APP.index("function selectedGroups")
+        self.assertIn('id="batchCollections"', workspace)
+        self.assertNotIn('id="openBatchPicker"', HTML)
+        self.assertNotIn('id="batchPicker"', HTML)
+        self.assertNotIn('id="closeBatchPicker"', HTML)
+        self.assertIn("function openCurrentPageBatch", APP)
+        open_batch = APP[
+            APP.index("function openCurrentPageBatch"):APP.index("function selectedGroups")
         ]
-        self.assertIn("chosen.map", batch)
-        self.assertNotIn("chosen.slice", batch)
-        self.assertNotIn("basket-overflow", batch)
+        self.assertLess(open_batch.index("selectAllCurrentPage()"), open_batch.index("renderBatchWorkspace()"))
+        self.assertIn("viewGeneration += 1", open_batch)
+        self.assertIn("detailController.abort()", open_batch)
+        self.assertIn("detailController = null", open_batch)
+        workspace_block = APP[
+            APP.index("function renderBatchWorkspace"):APP.index("function selectedGroups")
+        ]
+        self.assertIn("chosen.map", workspace_block)
+        self.assertNotIn("chosen.slice", workspace_block)
+        self.assertIn("batch-card-select", workspace_block)
+        self.assertIn("batch-page-count", workspace_block)
+        self.assertIn("data-open-collection", workspace_block)
+        self.assertNotIn("await fetchJson", workspace_block)
 
     def test_result_page_has_one_click_select_all_controls(self):
         self.assertIn('id="selectAllPage"', HTML)

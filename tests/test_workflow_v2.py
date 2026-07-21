@@ -142,8 +142,8 @@ class WorkflowV2Tests(unittest.TestCase):
             self.assertIn(label, APP)
         self.assertIn("errorLabels[row?.errorKind]", APP)
         self.assertIn("pointer-events:none", STYLE)
-        self.assertIn(".batch-collection.image-unavailable::after", STYLE)
-        self.assertIn("width:62px", STYLE)
+        self.assertIn(".batch-collection.image-unavailable .batch-card-cover::after", STYLE)
+        self.assertIn('content:"预览已清理"', STYLE)
 
     def test_detail_selection_uses_artwork_identity_not_search_index(self):
         self.assertIn("let activeArtworkId", APP)
@@ -155,19 +155,24 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn('class="detail-content"', HTML)
         self.assertIn('id="collectionPages"', HTML)
         self.assertIn('id="batchCollections"', HTML)
-        self.assertLess(HTML.index('id="detail"'), HTML.index('id="batchPicker"'))
+        detail_start = HTML.index('id="detail"')
+        detail = HTML[detail_start:HTML.index('</section>', detail_start)]
+        self.assertIn('id="batchCollections"', detail)
+        self.assertNotIn('id="batchPicker"', HTML)
         self.assertIn("openBatchCollection", APP)
         self.assertIn("selectedPagesByArtwork", APP)
         self.assertIn("returnToBatch", APP)
         self.assertIn("page-select", STYLE)
 
     def test_batch_summary_is_immediate_and_detail_is_loaded_on_navigation(self):
-        batch_block = APP[APP.index("function renderBatchPicker"):APP.index("function selectedGroups")]
+        batch_block = APP[APP.index("function renderBatchWorkspace"):APP.index("function selectedGroups")]
         detail_start = APP.index("async function openBatchCollection")
         detail_end = APP.index('$("#returnToBatch").onclick', detail_start)
         detail_block = APP[detail_start:detail_end]
         self.assertNotIn("await fetchJson", batch_block)
         self.assertIn("await fetchJson", detail_block)
+        self.assertIn("{ signal: controller.signal }", detail_block)
+        self.assertIn("generation !== viewGeneration", detail_block)
 
     def test_page_selection_enrolls_collection_in_cross_collection_batch(self):
         self.assertIn("selectedArtworks.set(item.id, item)", APP)

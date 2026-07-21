@@ -264,6 +264,21 @@ class BuildManifestTests(unittest.TestCase):
         ):
             self.assertIn(probe, release)
 
+    def test_packaged_visual_probe_exercises_the_integrated_batch_picker(self):
+        probe = (ROOT / "tests" / "packaged_visual_style_probe.py").read_text(encoding="utf-8")
+        for contract in (
+            'result["batchFlow"]',
+            'document.querySelector("#openBatch").click()',
+            'data-batch-select="probe-multi"',
+            'data-collection-page="2"',
+            "selectedAfterRemoval",
+            "normalToBatchGuard",
+            "staleGuard",
+            "geometry.separate",
+            'geometry.badge === "4P"',
+        ):
+            self.assertIn(contract, probe)
+
     def test_packaged_search_probes_disable_persistent_credentials_and_assert_logged_out(self):
         for name in ("final_packaged_search_probe.py", "final_packaged_tag_cache_probe.py"):
             probe = (ROOT / "tests" / name).read_text(encoding="utf-8")

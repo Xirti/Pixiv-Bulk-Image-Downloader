@@ -33,6 +33,7 @@ def main() -> None:
         "galleryControls": {},
         "galleryControlsAfterScroll": {},
         "viewport": {},
+        "batchFlow": {},
         "error": "",
     }
     try:
@@ -107,6 +108,155 @@ def main() -> None:
             })()""")
             result["galleryControlsAfterScroll"] = after_scroll
             result["viewport"] = visual["viewport"]
+            batch_flow = evaluate(ws, counter, """(async () => {
+                const pixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+                const artwork = (id, title, pages) => ({
+                    id,
+                    title,
+                    artist: "Probe",
+                    tags: ["probe"],
+                    pages,
+                    thumb: pixel,
+                    bookmarks: 1,
+                    source: "pixiv",
+                    description: "",
+                    width: 100,
+                    height: 100,
+                    date: "2026-01-01",
+                    qualities: [{id: "regular", label: "regular", width: 100, height: 100}],
+                    formats: [{id: "source", label: "source"}],
+                    pageImages: Array.from({length: pages}, () => ({regular: pixel, original: pixel}))
+                });
+                const change = (input, checked) => {
+                    input.checked = checked;
+                    input.dispatchEvent(new Event("change", {bubbles: true}));
+                };
+                const snapshot = () => ({
+                    cards: document.querySelectorAll("#batchCollections .batch-collection").length,
+                    selectedWorks: document.querySelectorAll("[data-batch-select]:checked").length,
+                    selectedResults: document.querySelectorAll("#grid [data-select]:checked").length,
+                    multiLabel: document.querySelector('[data-batch-artwork="probe-multi"] small')?.textContent || "",
+                    summary: document.querySelector("#batchSummary")?.textContent || ""
+                });
+                clearAllSelection();
+                items = [artwork("probe-single", "Single", 1), artwork("probe-multi", "Multi", 4)];
+                activeSearchContext = {kind: "tags", value: "probe"};
+                currentPage = 1;
+                render();
+                document.querySelector("#openBatch").click();
+                await Promise.resolve();
+                const card = document.querySelector('[data-batch-artwork="probe-multi"]').getBoundingClientRect();
+                const check = document.querySelector('[data-batch-select="probe-multi"] + span').getBoundingClientRect();
+                const badgeElement = document.querySelector('[data-batch-artwork="probe-multi"] .batch-page-count');
+                const badge = badgeElement.getBoundingClientRect();
+                const badgeLabel = badgeElement.textContent;
+                const open = document.querySelector('[data-batch-artwork="probe-multi"] [data-open-collection]').getBoundingClientRect();
+                const initial = snapshot();
+                document.querySelector('[data-batch-artwork="probe-multi"] [data-open-collection]').click();
+                await Promise.resolve();
+                const detailDefault = {
+                    pages: document.querySelectorAll("[data-collection-page]").length,
+                    selectedPages: document.querySelectorAll("[data-collection-page]:checked").length,
+                    returnVisible: !document.querySelector("#returnToBatch").hidden
+                };
+                change(document.querySelector('[data-collection-page="1"]'), false);
+                document.querySelector("#returnToBatch").click();
+                const partial = snapshot();
+                change(document.querySelector('[data-batch-select="probe-multi"]'), false);
+                const removed = snapshot();
+                document.querySelector('[data-batch-artwork="probe-multi"] [data-open-collection]').click();
+                await Promise.resolve();
+                const selectedAfterRemoval = document.querySelectorAll("[data-collection-page]:checked").length;
+                change(document.querySelector('[data-collection-page="2"]'), true);
+                document.querySelector("#returnToBatch").click();
+                const restored = snapshot();
+                clearAllSelection();
+                const normalItem = artwork("probe-normal", "Normal", 2);
+                delete normalItem.pageImages;
+                items = [normalItem];
+                render();
+                const originalFetchJson = fetchJson;
+                let releaseNormal;
+                fetchJson = () => new Promise((resolve) => { releaseNormal = () => resolve(artwork("probe-normal", "Late normal detail", 2)); });
+                select(0);
+                await Promise.resolve();
+                openCurrentPageBatch();
+                releaseNormal();
+                await Promise.resolve();
+                await Promise.resolve();
+                const normalToBatchGuard = {
+                    title: document.querySelector("#dTitle").textContent,
+                    workspaceVisible: !document.querySelector("#batchWorkspace").hidden
+                };
+                const staleItem = artwork("probe-stale", "Stale", 2);
+                delete staleItem.pageImages;
+                batchCandidateItems = [staleItem];
+                selectedArtworks.set(staleItem.id, staleItem);
+                selectedArtworkIds.add(staleItem.id);
+                selectedPagesByArtwork.set(staleItem.id, new Set([0, 1]));
+                renderBatchWorkspace();
+                const staleButton = document.querySelector('[data-batch-artwork="probe-stale"] [data-open-collection]');
+                let releaseStale;
+                fetchJson = () => new Promise((resolve) => { releaseStale = () => resolve(artwork("probe-stale", "Stale detail", 2)); });
+                staleButton.click();
+                viewGeneration += 1;
+                render();
+                releaseStale();
+                await Promise.resolve();
+                const staleGuard = {
+                    title: document.querySelector("#dTitle").textContent,
+                    resultTitle: document.querySelector("#grid h3")?.textContent || ""
+                };
+                fetchJson = originalFetchJson;
+                const geometry = {
+                    separate: check.right + 8 <= badge.left,
+                    inside: check.left >= card.left && badge.right <= card.right,
+                    openArea: open.width >= card.width - 2 && open.height > 100,
+                    overflow: document.documentElement.scrollWidth > innerWidth,
+                    badge: badgeLabel
+                };
+                return {
+                    initial,
+                    detailDefault,
+                    partial,
+                    removed,
+                    selectedAfterRemoval,
+                    restored,
+                    normalToBatchGuard,
+                    staleGuard,
+                    geometry,
+                    ok: initial.cards === 2
+                        && initial.selectedWorks === 2
+                        && initial.selectedResults === 2
+                        && initial.multiLabel.includes("4/4")
+                        && detailDefault.pages === 4
+                        && detailDefault.selectedPages === 4
+                        && detailDefault.returnVisible
+                        && partial.cards === 2
+                        && partial.selectedWorks === 2
+                        && partial.selectedResults === 2
+                        && partial.multiLabel.includes("3/4")
+                        && removed.cards === 2
+                        && removed.selectedWorks === 1
+                        && removed.selectedResults === 1
+                        && removed.multiLabel.includes("0/4")
+                        && selectedAfterRemoval === 0
+                        && restored.cards === 2
+                        && restored.selectedWorks === 2
+                        && restored.selectedResults === 2
+                        && restored.multiLabel.includes("1/4")
+                        && normalToBatchGuard.title === "打包详情"
+                        && normalToBatchGuard.workspaceVisible
+                        && staleGuard.title !== "Stale detail"
+                        && staleGuard.resultTitle === "Normal"
+                        && geometry.separate
+                        && geometry.inside
+                        && geometry.openArea
+                        && !geometry.overflow
+                        && geometry.badge === "4P"
+                };
+            })()""", await_promise=True)
+            result["batchFlow"] = batch_flow
         finally:
             ws.close()
         result["ok"] = (
@@ -135,6 +285,7 @@ def main() -> None:
             and result["viewport"].get("scrollWidth", 0) <= result["viewport"].get("width", 0)
             and result["viewport"].get("scrollHeight", 0) > result["viewport"].get("height", 0)
             and result["viewport"].get("bodyBackgroundImage") != "none"
+            and result["batchFlow"].get("ok")
         )
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
