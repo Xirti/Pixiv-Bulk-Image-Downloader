@@ -7,6 +7,7 @@ Current source version: **1.0.7**.
 Download the latest published Windows x64 package from the [MOKU releases page](https://github.com/Xirti/MOKU/releases). Extract the complete ZIP and run `MOKU.exe`; do not copy the EXE by itself. A locally verified 1.0.7 package can be built from this source tree with `make-release.ps1`.
 
 This project is independent and is not affiliated with Pixiv.
+<img width="1855" height="990" alt="image" src="https://github.com/user-attachments/assets/e9d431d0-d55a-40b0-8963-94764838f306" />
 
 ## Features
 
@@ -30,12 +31,14 @@ This project is independent and is not affiliated with Pixiv.
 - Native Windows folder picker
 - An offline in-app Usage Guide with an explicit anonymous Pixiv/CDN network diagnosis
 - Direct, local Windows system-proxy, environment-proxy, and TUN-compatible network paths
+<img width="1770" height="677" alt="image" src="https://github.com/user-attachments/assets/14cede70-7876-4c5e-b9cb-87ae750c1af2" />
 
 R-18G is not supported. MOKU does not change Pixiv age settings or bypass account permissions.
 
 The network diagnosis runs only after the user clicks its button. It checks the Pixiv site and image CDN in parallel without sending the Pixiv session. MOKU does not modify Windows proxy settings, start VPN software, or scan local ports. On another PC, it reads that Windows user's currently enabled local HTTP system proxy; TUN is optional, not required.
 
 The embedded backend initializes network selection before serving requests and rechecks the current setting at Pixiv operation boundaries. Only loopback HTTP proxies (`127.0.0.1`, `localhost`, or `::1`) are accepted. Rejected remote `HTTP_PROXY` / `ALL_PROXY` values cannot be silently reintroduced by Python's default proxy handling. When no accepted proxy is selected, the request path is genuinely direct/TUN.
+<img width="1807" height="960" alt="image" src="https://github.com/user-attachments/assets/6684e171-2bb4-49c0-9216-b6ece2cbb55d" />
 
 ## Desktop login
 
