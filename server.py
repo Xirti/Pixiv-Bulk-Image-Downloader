@@ -22,6 +22,7 @@ import threading
 import weakref
 import winreg
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -1725,21 +1726,27 @@ def _delete_owned_published_file(ownership: PublishedFileOwnership) -> None:
     ownership.published = False
 
 
-def _discard_owned_staging(
+def _rollback_owned_files(
     ownerships: list[PublishedFileOwnership],
-) -> int:
-    failures = 0
+) -> list[Exception]:
+    failures: list[Exception] = []
     for ownership in reversed(ownerships):
         try:
             if ownership.published:
                 _delete_owned_published_file(ownership)
             elif ownership.staged_handle is not None:
                 _delete_empty_directory_on_close(ownership.staged_handle)
-        except Exception:
-            failures += 1
+        except Exception as exc:
+            failures.append(exc)
         finally:
             _close_published_ownership(ownership)
     return failures
+
+
+def _discard_owned_staging(
+    ownerships: list[PublishedFileOwnership],
+) -> int:
+    return len(_rollback_owned_files(ownerships))
 
 
 def _directory_lock_chain(root: Path, paths: list[Path]) -> list[int]:
@@ -2084,17 +2091,7 @@ def _publish_staged_files_locked(
             return public_saved_files(save_root, saved)
         return saved
     except Exception as original:
-        rollback_failures: list[Exception] = []
-        for ownership in reversed(transactions):
-            try:
-                if ownership.published:
-                    _delete_owned_published_file(ownership)
-                elif ownership.staged_handle is not None:
-                    _delete_empty_directory_on_close(ownership.staged_handle)
-            except Exception as exc:
-                rollback_failures.append(exc)
-            finally:
-                _close_published_ownership(ownership)
+        rollback_failures = _rollback_owned_files(transactions)
         if retained_parent_handles:
             _close_directory_lock_chain(retained_parent_handles)
             retained_parent_handles = []
@@ -2128,6 +2125,38 @@ def public_saved_files(save_root: Path, saved: list[Path]) -> list[str]:
             raise PixivPolicyError("保存结果不是有效文件路径")
         result.append(relative.as_posix())
     return result
+
+
+def _stage_and_publish_download(
+    save_root: Path,
+    *,
+    prefix: str,
+    stage: Callable[[Path, list[PublishedFileOwnership]], None],
+) -> tuple[list[str], bool]:
+    """Stage a complete request, then transfer the whole batch to publication."""
+    staging_context = secure_staging_directory(save_root, prefix=prefix)
+    with staging_context as staging_root:
+        staged: list[PublishedFileOwnership] = []
+        try:
+            stage(staging_root, staged)
+        except Exception as original:
+            failures = _discard_owned_staging(staged)
+            if failures:
+                raise PublishRollbackError(
+                    f"暂存失败且有 {failures} 个文件未能安全清理"
+                ) from original
+            raise
+
+        # Calling the publisher transfers ownership of the complete batch,
+        # including entries it has not visited yet.
+        public_saved = publish_staged_files(
+            staging_root,
+            staged,
+            save_root=save_root,
+            staging_locked=True,
+            public_paths=True,
+        )
+    return public_saved, staging_context.cleanup_pending
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -2488,39 +2517,31 @@ class Handler(SimpleHTTPRequestHandler):
             }, 400)
 
         try:
-            staging_context = secure_staging_directory(
-                save_root, prefix=".moku-batch-",
+            def stage_batch(
+                staging_root: Path,
+                staged: list[PublishedFileOwnership],
+            ) -> None:
+                for artwork_id, page_set in normalized.items():
+                    authorized = validated_session()
+                    item = pixiv_item_for_download(artwork_id, allow_r18=authorized)
+                    if item.get("restriction") == "r18" and not authorized:
+                        raise PixivPolicyError("R-18 下载需要有效账户授权")
+                    staged.extend(stage_artwork_pages(
+                        item, sorted(page_set), quality, save_root,
+                        create_folder, staging_root,
+                        download_context=download_context,
+                        group_artwork=group_artworks,
+                    ))
+
+            public_saved, cleanup_pending = _stage_and_publish_download(
+                save_root,
+                prefix=".moku-batch-",
+                stage=stage_batch,
             )
-            with staging_context as staging_root:
-                staged: list[PublishedFileOwnership] = []
-                publish_started = False
-                try:
-                    for artwork_id, page_set in normalized.items():
-                        authorized = validated_session()
-                        item = pixiv_item_for_download(artwork_id, allow_r18=authorized)
-                        if item.get("restriction") == "r18" and not authorized:
-                            raise PixivPolicyError("R-18 下载需要有效账户授权")
-                        selected_pages = sorted(page_set)
-                        staged.extend(stage_artwork_pages(
-                            item, selected_pages, quality, save_root, create_folder, staging_root,
-                            download_context=download_context, group_artwork=group_artworks,
-                        ))
-                    publish_started = True
-                    public_saved = publish_staged_files(
-                        staging_root,
-                        staged,
-                        save_root=save_root,
-                        staging_locked=True,
-                        public_paths=True,
-                    )
-                except Exception:
-                    if not publish_started:
-                        _discard_owned_staging(staged)
-                    raise
             response_payload = {
                 "ok": True, "saved": public_saved,
                 "artworks": len(normalized), "pages": total_pages,
-                "cleanupPending": staging_context.cleanup_pending,
+                "cleanupPending": cleanup_pending,
             }
             response_status = 200
         except PIXIV_OPERATION_ERRORS as exc:
@@ -2546,36 +2567,28 @@ class Handler(SimpleHTTPRequestHandler):
             item = pixiv_item_for_download(artwork_id, allow_r18=authorized)
             if item.get("restriction") == "r18" and not authorized:
                 raise PixivPolicyError("R-18 下载需要有效账户授权")
-            staging_context = secure_staging_directory(
-                save_root, prefix=".moku-single-",
+            def stage_single(
+                staging_root: Path,
+                staged: list[PublishedFileOwnership],
+            ) -> None:
+                page_images = item.get("pageImages")
+                if not isinstance(page_images, list):
+                    raise PixivPolicyError("作品详情不完整")
+                staged.extend(stage_artwork_pages(
+                    item, list(range(len(page_images))), quality, save_root,
+                    create_folder, staging_root,
+                    download_context=download_context,
+                ))
+
+            public_saved, cleanup_pending = _stage_and_publish_download(
+                save_root,
+                prefix=".moku-single-",
+                stage=stage_single,
             )
-            with staging_context as staging_root:
-                staged: list[PublishedFileOwnership] = []
-                publish_started = False
-                try:
-                    page_images = item.get("pageImages")
-                    if not isinstance(page_images, list):
-                        raise PixivPolicyError("作品详情不完整")
-                    staged = stage_artwork_pages(
-                        item, list(range(len(page_images))), quality, save_root,
-                        create_folder, staging_root, download_context=download_context,
-                    )
-                    publish_started = True
-                    public_saved = publish_staged_files(
-                        staging_root,
-                        staged,
-                        save_root=save_root,
-                        staging_locked=True,
-                        public_paths=True,
-                    )
-                except Exception:
-                    if not publish_started:
-                        _discard_owned_staging(staged)
-                    raise
             response_payload = {
                 "ok": True, "saved": public_saved,
                 "quality": quality, "source": "pixiv",
-                "cleanupPending": staging_context.cleanup_pending,
+                "cleanupPending": cleanup_pending,
             }
             response_status = 200
         except PIXIV_OPERATION_ERRORS as exc:

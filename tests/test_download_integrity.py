@@ -176,6 +176,53 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             self.assertIn("下载失败", body["error"])
             self.assertEqual(list(root.glob(".moku-single-*")), [])
 
+    def test_pre_publish_cleanup_failure_preserves_recovery_staging(self):
+        with tempfile.TemporaryDirectory(prefix="moku-pre-publish-cleanup-") as raw_root:
+            root = Path(raw_root).resolve()
+            ownerships: list[server.PublishedFileOwnership] = []
+
+            def stage_first_then_fail(
+                _item, _pages, _quality, _save_root, _create_folder, staging_root,
+                **_kwargs,
+            ):
+                if ownerships:
+                    raise urllib.error.URLError("injected second artwork failure")
+                ownership = server._create_owned_staged_file(
+                    staging_root, root / "first.png", PNG,
+                )
+                ownerships.append(ownership)
+                return [ownership]
+
+            with patch.object(
+                server,
+                "pixiv_item_for_download",
+                side_effect=lambda artwork_id, **_kwargs: {
+                    "id": artwork_id,
+                    "restriction": "safe",
+                },
+            ), patch.object(
+                server, "stage_artwork_pages", side_effect=stage_first_then_fail,
+            ), patch.object(
+                server,
+                "_delete_empty_directory_on_close",
+                side_effect=OSError("injected handle cleanup failure"),
+            ):
+                status, body = self.post({
+                    "groups": [
+                        {"id": self.artwork_id, "pages": [0]},
+                        {"id": "990002", "pages": [0]},
+                    ],
+                    "quality": "regular",
+                    "createFolder": False,
+                }, root)
+
+            self.assertEqual(status, 502, body)
+            staging_dirs = list(root.glob(".moku-batch-*"))
+            self.assertEqual(len(staging_dirs), 1)
+            self.assertEqual([path.read_bytes() for path in staging_dirs[0].iterdir()], [PNG])
+            shutil.rmtree(staging_dirs[0])
+
+
     def test_post_publish_failure_rolls_back_current_owned_entry(self):
         with tempfile.TemporaryDirectory(prefix="moku-owned-post-publish-test-") as raw_root:
             root = Path(raw_root).resolve()
