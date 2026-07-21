@@ -2,6 +2,13 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.8] - 2026-07-21
+
+### Fixed
+
+- Restore the one-step batch workflow: opening batch download now selects the current page and shows the integrated artwork picker immediately.
+- Preserve per-page selections and original search contexts while keeping result-card and batch-card state synchronized, including stale-detail response protection.
+
 ## [1.0.7] - 2026-07-20
 
 ### Fixed

@@ -240,10 +240,10 @@ class BuildManifestTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         portable = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertIn('__version__ = "1.0.7"', version)
+        self.assertIn('__version__ = "1.0.8"', version)
         self.assertIn("Strict multi-tag AND search", readme)
         self.assertIn("100 artworks and 1,000 selected images", readme)
-        self.assertIn("## [1.0.7]", changelog)
+        self.assertIn("## [1.0.8]", changelog)
         self.assertIn("Separate multiple tags with ; or ；", portable)
         self.assertNotIn("Space-separated tags use OR semantics", portable)
 

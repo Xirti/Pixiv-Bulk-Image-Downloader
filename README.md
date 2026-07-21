@@ -2,9 +2,9 @@
 
 MOKU is a local-first Windows desktop app for browsing and saving Pixiv artwork by tag. The desktop UI runs in pywebview with the Microsoft Edge WebView2 runtime, while a loopback-only Python service handles Pixiv requests, image proxying, native folder selection, and file writes.
 
-Current source version: **1.0.7**.
+Current source version: **1.0.8**.
 
-Download the latest published Windows x64 package from the [MOKU releases page](https://github.com/Xirti/MOKU/releases). Extract the complete ZIP and run `MOKU.exe`; do not copy the EXE by itself. A locally verified 1.0.7 package can be built from this source tree with `make-release.ps1`.
+Download the latest published Windows x64 package from the [MOKU releases page](https://github.com/Xirti/MOKU/releases). Extract the complete ZIP and run `MOKU.exe`; do not copy the EXE by itself. A locally verified 1.0.8 package can be built from this source tree with `make-release.ps1`.
 
 This project is independent and is not affiliated with Pixiv.
 <img width="1855" height="990" alt="image" src="https://github.com/user-attachments/assets/e9d431d0-d55a-40b0-8963-94764838f306" />
@@ -130,7 +130,7 @@ The build script fingerprints its inputs before and after PyInstaller, runs the 
 
 ### Current verified portable artifact
 
-The current source version is `1.0.7`. Its portable build is produced from a hash-locked Python 3.12 dependency set after the full test suite passes. Frozen-service, native folder selection, file-write, official login-window, and usage-guide/network probes are exercised before release. Live Pixiv probes require a currently usable Pixiv network route.
+The current source version is `1.0.8`. Its portable build is produced from a hash-locked Python 3.12 dependency set after the full test suite passes. Frozen-service, native folder selection, file-write, official login-window, and usage-guide/network probes are exercised before release. Live Pixiv probes require a currently usable Pixiv network route.
 
 The authoritative executable and archive hashes are published beside the release ZIP in `SHA256SUMS.txt`. Keeping generated hashes out of this source file avoids a self-referential build fingerprint. The checksum is a one-way file fingerprint; it contains no account, cookie, local path, or identity data.
 
@@ -140,7 +140,7 @@ The build script verifies that the frozen backend generation is `exe-sha256:<MOK
 
 ## Distribution status
 
-MOKU 1.0.7 is prepared as a portable Windows x64 ZIP. The repository includes the MIT License, pinned Windows CI, `SECURITY.md`, `PRIVACY.md`, third-party notices, a release checklist, and a fail-closed release-asset generator. Distribute and extract the whole `MOKU` folder, not `MOKU.exe` alone.
+MOKU 1.0.8 is prepared as a portable Windows x64 ZIP. The repository includes the MIT License, pinned Windows CI, `SECURITY.md`, `PRIVACY.md`, third-party notices, a release checklist, and a fail-closed release-asset generator. Distribute and extract the whole `MOKU` folder, not `MOKU.exe` alone.
 
 The binary is not Authenticode-signed, so Windows SmartScreen may display an unknown-publisher warning. Verify the downloaded ZIP against `SHA256SUMS.txt` before running it.
 
