@@ -4,6 +4,7 @@ let currentPage = 1;
 let pageNumbers = [1];
 let firstAvailablePage = 1;
 let preloadedThrough = 1;
+let searchHasMore = false;
 let activeTagQuery = "猫耳";
 let searchController = null;
 let detailController = null;
@@ -314,6 +315,7 @@ async function search(tag, page = 1) {
     pageNumbers = Array.isArray(data.availablePages) ? data.availablePages : (Array.isArray(data.pageNumbers) ? data.pageNumbers : [currentPage]);
     firstAvailablePage = pageNumbers.length ? Number(pageNumbers[0]) : currentPage;
     preloadedThrough = Number(data.preloadedThrough) || currentPage;
+    searchHasMore = Boolean(data.hasMore);
     $("#tagTitle").textContent = data.label || (Array.isArray(data.tags) && data.tags.length ? data.tags.join(" + ") : (data.tag || cleanTag));
     const preloadStatus = data.preloadedThrough > currentPage ? ` · 已预加载至第 ${data.preloadedThrough} 页` : "";
     const historyStatus = data.budgetExhausted ? " · 本次加载达到请求预算，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到历史末尾");
@@ -382,7 +384,8 @@ function render() {
 
 function renderPagination() {
   const pagination = $("#pagination");
-  pagination.innerHTML = `<button ${currentPage <= firstAvailablePage ? "disabled" : ""} data-page="${currentPage - 1}" aria-label="上一页">←</button>${pageNumbers.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" data-page="${number}">${number}</button>`).join("")}<button ${currentPage >= preloadedThrough ? "disabled" : ""} data-page="${currentPage + 1}" aria-label="下一页">→</button>`;
+  const canLoadNext = currentPage < preloadedThrough || searchHasMore;
+  pagination.innerHTML = `<button ${currentPage <= firstAvailablePage ? "disabled" : ""} data-page="${currentPage - 1}" aria-label="上一页">←</button>${pageNumbers.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" data-page="${number}">${number}</button>`).join("")}<button ${canLoadNext ? "" : "disabled"} data-page="${currentPage + 1}" aria-label="${currentPage < preloadedThrough ? "下一页" : "继续加载下一页"}">→</button>`;
   pagination.querySelectorAll("button:not([disabled])").forEach((button) => {
     button.onclick = () => {
       navigateToPage(Number(button.dataset.page));
