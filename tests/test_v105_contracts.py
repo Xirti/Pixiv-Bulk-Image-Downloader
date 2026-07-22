@@ -339,6 +339,18 @@ class V105VisualContractTests(unittest.TestCase):
         clear = APP[APP.index('$(\"#clearSelection\").onclick'):APP.index('$(\"#openBatch\").onclick')]
         self.assertIn("basketSelectionLocked", clear)
 
+    def test_batch_download_snapshots_all_task_options_before_first_request(self):
+        download = APP[APP.index('$(\"#batchDownload\").onclick'):APP.index('addEventListener("keydown"')]
+        snapshot = download[download.index("const taskOptions"):download.index("let savedCount")]
+        self.assertIn('quality: $("#quality").value || "regular"', snapshot)
+        self.assertIn('saveRoot: $("#saveRoot").value.trim()', snapshot)
+        self.assertIn('createFolder: $("#createFolder").checked', snapshot)
+        self.assertIn('groupArtworks: Boolean($("#groupArtworks")?.checked)', snapshot)
+        request_loop = download[download.index("for (let index"):download.index("savedCount +=")]
+        self.assertIn("...taskOptions", request_loop)
+        self.assertNotIn('$("#quality")', request_loop)
+        self.assertNotIn('$("#saveRoot")', request_loop)
+
     def test_search_and_basket_cache_status_is_reported_without_binary_image_cache_claims(self):
         self.assertIn('id="cacheStatus"', HTML)
         self.assertIn("renderCacheStatus", APP)

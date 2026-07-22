@@ -240,10 +240,14 @@ class BuildManifestTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         portable = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertIn('__version__ = "1.0.8"', version)
+        self.assertIn('__version__ = "1.0.9"', version)
+        self.assertIn("Current source version: **1.0.9**", readme)
+        self.assertIn("MOKU 1.0.9 is prepared", readme)
+        self.assertNotIn("Current source version: **1.0.8**", readme)
+        self.assertNotIn("MOKU 1.0.8 is prepared", readme)
         self.assertIn("Strict multi-tag AND search", readme)
         self.assertIn("any number of artworks within a 1,000-image selection limit", readme)
-        self.assertIn("## [1.0.8]", changelog)
+        self.assertIn("## [1.0.9]", changelog)
         self.assertIn("Separate multiple tags with ; or ；", portable)
         self.assertIn("any number of artworks within a 1,000 selected-image limit", portable)
         self.assertNotIn("Space-separated tags use OR semantics", portable)
@@ -283,6 +287,7 @@ class BuildManifestTests(unittest.TestCase):
             "clearRaceGuard",
             "imagePickerClosed",
             "staleGuard",
+            "optionSnapshot",
             "geometry.separate",
             "geometry.badgeTarget",
             'geometry.badge === "4P"',

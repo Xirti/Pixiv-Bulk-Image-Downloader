@@ -276,6 +276,39 @@ def main() -> None:
                     title: document.querySelector("#dTitle").textContent,
                     resultTitle: document.querySelector("#grid h3")?.textContent || ""
                 };
+                clearAllSelection();
+                const optionItem = artwork("probe-options", "Options", 401);
+                items = [optionItem];
+                activeSearchContext = {kind: "tags", value: "options"};
+                render();
+                toggleArtworkSelection(optionItem, true);
+                openSelectionBasket();
+                document.querySelector("#openBasketDetail").click();
+                document.querySelector("#quality").value = "regular";
+                document.querySelector("#saveRoot").value = "C:\\fixed";
+                document.querySelector("#createFolder").checked = true;
+                document.querySelector("#groupArtworks").checked = false;
+                const optionPayloads = [];
+                fetchJson = async (_url, options) => {
+                    optionPayloads.push(JSON.parse(options.body));
+                    if (optionPayloads.length === 1) {
+                        document.querySelector("#quality").value = "changed";
+                        document.querySelector("#saveRoot").value = "C:\\changed";
+                        document.querySelector("#createFolder").checked = false;
+                        document.querySelector("#groupArtworks").checked = true;
+                    }
+                    return {saved: []};
+                };
+                document.querySelector("#batchDownload").click();
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                const optionSnapshot = {
+                    requests: optionPayloads.length,
+                    allStable: optionPayloads.every((payload) => payload.quality === "regular"
+                        && payload.saveRoot === "C:\\fixed"
+                        && payload.createFolder === true
+                        && payload.groupArtworks === false),
+                    pages: optionPayloads.reduce((total, payload) => total + payload.groups.reduce((sum, group) => sum + group.pages.length, 0), 0)
+                };
                 fetchJson = originalFetchJson;
                 const geometry = {
                     separate: check.right + 8 <= badge.left,
@@ -299,6 +332,7 @@ def main() -> None:
                     singleTwoJumps,
                     capacityGuard,
                     staleGuard,
+                    optionSnapshot,
                     geometry,
                     ok: summaryOnly.cards === 0
                         && summaryOnly.summary.includes("2 个作品")
@@ -342,6 +376,9 @@ def main() -> None:
                         && capacityGuard.dialogOpen
                         && staleGuard.title !== "Stale detail"
                         && staleGuard.resultTitle === "Single jump"
+                        && optionSnapshot.requests === 3
+                        && optionSnapshot.allStable
+                        && optionSnapshot.pages === 401
                         && geometry.separate
                         && geometry.inside
                         && geometry.badgeTarget

@@ -21,9 +21,9 @@
 
 - [x] Run `powershell -ExecutionPolicy Bypass -File .\make-release.ps1`.
 - [x] Use `-SkipBuild` only when the source, build inputs, license, and every file in `dist\MOKU` still match `BUILD_MANIFEST.json`.
-- [ ] Commit the source and tag the exact verified release commit as `v1.0.8`.
+- [ ] Commit the source and tag the exact verified release commit as `v1.0.9`.
 - [ ] Create a GitHub Release from that tag.
-- [ ] Upload the ZIP and `SHA256SUMS.txt` from `release\v1.0.8`.
+- [ ] Upload the ZIP and `SHA256SUMS.txt` from `release\v1.0.9`.
 - [ ] Verify the downloaded ZIP hash from another directory.
 
-> Published releases through `v1.0.7` remain immutable. The integrated batch-selection workflow restoration is released as `v1.0.8`.
+> Published releases through `v1.0.8` remain immutable. The three-level collection basket, bounded sparse search, and stable multi-request download task are released as `v1.0.9`.

@@ -905,6 +905,12 @@ $("#batchDownload").onclick = async () => {
     return;
   }
   const button = $("#batchDownload");
+  const taskOptions = {
+    quality: $("#quality").value || "regular",
+    saveRoot: $("#saveRoot").value.trim(),
+    createFolder: $("#createFolder").checked,
+    groupArtworks: Boolean($("#groupArtworks")?.checked),
+  };
   setDownloadButtonState(button, "准备保存…", true);
   setBasketSelectionLocked(true);
   $("#toast").textContent = "本次任务已锁定当前勾选；完成前不能修改采集篮。";
@@ -918,10 +924,7 @@ $("#batchDownload").onclick = async () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           groups: chunk.groups,
-          quality: $("#quality").value || "regular",
-          saveRoot: $("#saveRoot").value.trim(),
-          createFolder: $("#createFolder").checked,
-          groupArtworks: Boolean($("#groupArtworks")?.checked),
+          ...taskOptions,
           context: chunk.context,
         }),
       }, 300000);

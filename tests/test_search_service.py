@@ -168,6 +168,63 @@ class SearchAggregationTests(unittest.TestCase):
         self.assertEqual(result["availablePages"], [1, 2, 3, 4])
         self.assertEqual(result["preloadedThrough"], 4)
 
+    def test_budget_limited_partial_page_is_returned_instead_of_hidden(self):
+        import server
+
+        rows = [
+            self._raw(9000 - index, "稀有", 0, 28 - index, all_tags=["稀有"])
+            for index in range(10)
+        ]
+        calls = 0
+
+        def sparse_source(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return {
+                "rows": rows if calls == 1 else [],
+                "hasMore": True,
+                "budgetExhausted": True,
+                "truncatedDates": [],
+            }
+
+        with patch.object(server, "load_search_source", side_effect=sparse_source):
+            result = server.search_pixiv_results(
+                "稀有", "safe", 1, "all", True, authorized=False,
+            )
+
+        self.assertEqual(len(result["items"]), 10)
+        self.assertEqual(result["total"], 10)
+        self.assertEqual(result["availablePages"], [1])
+        self.assertEqual(result["preloadedThrough"], 1)
+        self.assertTrue(result["hasMore"])
+        self.assertTrue(result["budgetExhausted"])
+
+    def test_requested_second_partial_page_is_returned_while_sources_have_more(self):
+        import server
+
+        rows = [
+            self._raw(8000 - index, "稀疏", 0, 28 - index % 20, all_tags=["稀疏"])
+            for index in range(46)
+        ]
+
+        def sparse_source(*_args, **_kwargs):
+            return {
+                "rows": rows,
+                "hasMore": True,
+                "budgetExhausted": True,
+                "truncatedDates": [],
+            }
+
+        with patch.object(server, "load_search_source", side_effect=sparse_source):
+            result = server.search_pixiv_results(
+                "稀疏", "safe", 2, "all", True, authorized=False,
+            )
+
+        self.assertEqual(len(result["items"]), 10)
+        self.assertEqual(result["page"], 2)
+        self.assertEqual(result["availablePages"], [1, 2])
+        self.assertTrue(result["hasMore"])
+
 
     def test_multi_tag_paging_keeps_and_query_and_evicts_only_stale_preview_tokens(self):
         import urllib.parse

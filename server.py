@@ -78,6 +78,8 @@ DOWNLOAD_CHUNK_ARTWORKS = 20
 DOWNLOAD_CHUNK_PAGES = 200
 MAX_HISTORY_REQUESTS = 24
 MAX_HISTORY_SECONDS = 45.0
+MAX_USER_SEARCH_REQUESTS = 8
+MAX_USER_SEARCH_SECONDS = 40.0
 SEARCH_PER_PAGE = 36
 SEARCH_PREFETCH_AHEAD = 3
 SEARCH_KEEP_BEHIND = 6
@@ -941,11 +943,19 @@ def search_user_results(
             session["targetUserId"] = user_id
             session["artist"] = resolved_name
         ids = session["profileIds"]
-        while len(session["items"]) < desired_items and int(session["profileOffset"]) < len(ids):
+        request_started = time.monotonic()
+        request_count = 0
+        while (
+            len(session["items"]) < desired_items
+            and int(session["profileOffset"]) < len(ids)
+            and request_count < MAX_USER_SEARCH_REQUESTS
+            and time.monotonic() - request_started < MAX_USER_SEARCH_SECONDS
+        ):
             start = int(session["profileOffset"])
             batch_ids = ids[start:start + 48]
             session["profileOffset"] = start + len(batch_ids)
             raw_rows = load_user_profile_works(user_id, batch_ids)
+            request_count += 1
             incoming: list[dict] = []
             for raw in raw_rows:
                 if str(raw.get("userId") or "") != user_id:
@@ -972,8 +982,15 @@ def search_user_results(
 
         loaded = len(session["items"])
         exhausted = int(session["profileOffset"]) >= len(ids)
+        budget_exhausted = not exhausted and (
+            request_count >= MAX_USER_SEARCH_REQUESTS
+            or time.monotonic() - request_started >= MAX_USER_SEARCH_SECONDS
+        )
         complete_through = loaded // SEARCH_PER_PAGE
-        if exhausted and loaded:
+        requested_page_start = (page - 1) * SEARCH_PER_PAGE
+        if loaded > requested_page_start:
+            complete_through = max(complete_through, page)
+        elif (exhausted or budget_exhausted) and loaded:
             complete_through = (loaded + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE
         cache_through = min(page + SEARCH_PREFETCH_AHEAD, complete_through)
         page_rows = {
@@ -1004,7 +1021,7 @@ def search_user_results(
             "pageNumbers": available_pages, "availablePages": available_pages,
             "preloadedThrough": SEARCH_PAGE_CACHE.preloaded_through(session_key),
             "items": authorized_items, "perPage": SEARCH_PER_PAGE, "hasMore": not exhausted,
-            "budgetExhausted": False, "truncatedDates": [],
+            "budgetExhausted": budget_exhausted, "truncatedDates": [],
             "workType": work_type, "includeAi": bool(include_ai),
             "mode": "pixiv-user-search",
         }
@@ -1098,11 +1115,18 @@ def search_pixiv_results(
                 break
 
         first_available_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
-        complete_through = (int(session["baseIndex"]) + len(session["items"])) // SEARCH_PER_PAGE
-        if not any(not done for done in session["sourceDone"].values()) and session["items"]:
+        absolute_result_count = int(session["baseIndex"]) + len(session["items"])
+        complete_through = absolute_result_count // SEARCH_PER_PAGE
+        requested_page_start = (page - 1) * SEARCH_PER_PAGE
+        if absolute_result_count > requested_page_start:
+            complete_through = max(complete_through, page)
+        elif (
+            (session["budgetExhausted"] or not any(not done for done in session["sourceDone"].values()))
+            and session["items"]
+        ):
             complete_through = max(
                 complete_through,
-                (int(session["baseIndex"]) + len(session["items"]) + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE,
+                (absolute_result_count + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE,
             )
         cache_through = min(page + SEARCH_PREFETCH_AHEAD, complete_through)
         page_rows: dict[int, list] = {}

@@ -2,6 +2,21 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.9] - 2026-07-22
+
+### Changed
+
+- Replace the integrated batch panel with a consistent three-level collection basket: summary, artwork selection, and per-image selection.
+- Allow any number of artworks within the existing 1,000-image basket limit and split large single artworks into bounded 200-image requests.
+- Use compact artwork and image pickers, report search/basket cache state, and replace the bright ribbon treatment with restrained Saturn rings around the dark moon.
+
+### Fixed
+
+- Build download payloads only from authoritative selected-page sets, so deselected preview images are never submitted.
+- Freeze both basket selections and all download options for the lifetime of a multi-request task, including dynamically rebuilt controls.
+- Return budget-limited partial search pages instead of hiding valid sparse results, and bound large-creator filtering to resumable request/time budgets.
+- Abort stale detail requests and clear every basket view class on back, clear, normal-detail, and replacement transitions.
+
 ## [1.0.8] - 2026-07-21
 
 ### Fixed

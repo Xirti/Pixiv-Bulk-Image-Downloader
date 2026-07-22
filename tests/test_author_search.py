@@ -115,6 +115,26 @@ class AuthorSearchRegressionTests(unittest.TestCase):
         self.assertEqual(len(third["items"]), 3)
         self.assertFalse(third["hasMore"])
 
+    def test_user_search_bounds_profile_work_requests_and_keeps_cursor(self):
+        ids = [str(9000 - index) for index in range(1000)]
+        calls = []
+        with patch.object(server, "load_user_profile_ids", return_value=ids), patch.object(
+            server, "load_user_profile_works",
+            side_effect=lambda _user_id, artwork_ids: calls.append(list(artwork_ids)) or [],
+        ):
+            result = server.search_pixiv_results(
+                "pid:42", "safe", 1, "ugoira", True, authorized=False,
+            )
+
+        self.assertEqual(len(calls), server.MAX_USER_SEARCH_REQUESTS)
+        session_key = ("user", "pid", "42", "42", "safe", "ugoira", True, False)
+        self.assertEqual(
+            server.SEARCH_SESSIONS[session_key]["profileOffset"],
+            server.MAX_USER_SEARCH_REQUESTS * 48,
+        )
+        self.assertTrue(result["hasMore"])
+        self.assertTrue(result["budgetExhausted"])
+
 
 if __name__ == "__main__":
     unittest.main()
