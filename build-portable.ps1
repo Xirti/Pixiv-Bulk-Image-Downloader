@@ -77,7 +77,7 @@ MOKU can use the target computer's enabled local Windows HTTP system proxy; TUN 
 If both the system proxy and TUN are off and direct Pixiv access is blocked, search cannot connect.
 MOKU never changes Windows proxy settings, starts a VPN, or scans local ports.
 Separate multiple tags with ; or ； for strict AND matching. Optional bounded tag aliases are disabled by default. Three later pages of result data are prefetched, but unopened-page thumbnails are not downloaded; old pages and temporary preview authorization are released outside the retained window.
-The collection basket accepts up to 100 artworks or 1,000 selected images and sends image-first bounded download chunks. A batch is stored in one shared tag, author, or artwork context folder unless folder creation is disabled.
+The collection basket accepts any number of artworks within a 1,000 selected-image limit and sends image-first bounded download chunks. A batch is stored in one shared tag, author, or artwork context folder unless folder creation is disabled.
 Pixiv authorization opens as a second MOKU desktop window on the official Pixiv website.
 The "keep me signed in" option stores only PHPSESSID in Windows Credential Manager for the current Windows user.
 Downloads and logs are written beside MOKU.exe. Do not expose the backend to LAN or the Internet.

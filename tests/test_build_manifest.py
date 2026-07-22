@@ -242,9 +242,10 @@ class BuildManifestTests(unittest.TestCase):
 
         self.assertIn('__version__ = "1.0.8"', version)
         self.assertIn("Strict multi-tag AND search", readme)
-        self.assertIn("100 artworks and 1,000 selected images", readme)
+        self.assertIn("any number of artworks within a 1,000-image selection limit", readme)
         self.assertIn("## [1.0.8]", changelog)
         self.assertIn("Separate multiple tags with ; or ；", portable)
+        self.assertIn("any number of artworks within a 1,000 selected-image limit", portable)
         self.assertNotIn("Space-separated tags use OR semantics", portable)
 
     def test_real_batch_probe_does_not_mutate_tracked_evidence_by_default(self):
@@ -269,12 +270,21 @@ class BuildManifestTests(unittest.TestCase):
         for contract in (
             'result["batchFlow"]',
             'document.querySelector("#openBatch").click()',
+            'document.querySelector("#openBasketDetail").click()',
+            "summaryOnly.cards === 0",
+            "firstJump",
+            "selectedPayloadAfterUncheck",
+            "singleTwoJumps",
+            "capacityGuard",
             'data-batch-select="probe-multi"',
             'data-collection-page="2"',
             "selectedAfterRemoval",
             "normalToBatchGuard",
+            "clearRaceGuard",
+            "imagePickerClosed",
             "staleGuard",
             "geometry.separate",
+            "geometry.badgeTarget",
             'geometry.badge === "4P"',
         ):
             self.assertIn(contract, probe)

@@ -28,7 +28,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Strict multi-tag AND search using `;` or `；` separators; spaces remain part of one tag.
 - Optional bounded anime-oriented tag aliases, disabled by default.
-- A collection basket for up to 100 artworks and 1,000 selected images, with windowed page selection for large works.
+- A collection basket for any number of artworks within a 1,000-image selection limit, with windowed page selection for large works.
 - One-click select/clear controls for all artworks and images on the current result page.
 - Image-first adaptive download chunks and optional artwork grouping.
 

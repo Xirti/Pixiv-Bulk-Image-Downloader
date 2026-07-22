@@ -28,7 +28,7 @@ def main() -> None:
     result = {
         "ok": False,
         "folderButton": {},
-        "lightRibbons": {},
+        "saturnRings": {},
         "artDepth": {},
         "galleryControls": {},
         "galleryControlsAfterScroll": {},
@@ -50,8 +50,7 @@ def main() -> None:
             )
             visual = evaluate(ws, counter, """(() => {
                 const button = getComputedStyle(document.querySelector('#browseFolder'));
-                const root = document.querySelector('.light-ribbons');
-                const ribbons = [...document.querySelectorAll('.light-ribbon')];
+                const rings = [...document.querySelectorAll('.saturn-ring')];
                 const depth = document.querySelector('.art-depth');
                 const depthStyle = getComputedStyle(depth);
                 const bodyStyle = getComputedStyle(document.body);
@@ -61,11 +60,11 @@ def main() -> None:
                 const clearPage = document.querySelector('#clearPageSelection');
                 return {
                     button: {color: button.color, backgroundImage: button.backgroundImage},
-                    ribbons: {
-                        count: ribbons.length,
-                        decorative: root?.getAttribute('aria-hidden') === 'true',
-                        pointerEvents: getComputedStyle(root).pointerEvents,
-                        animation: getComputedStyle(ribbons[0]).animationName,
+                    rings: {
+                        count: rings.length,
+                        decorative: depth?.getAttribute('aria-hidden') === 'true',
+                        pointerEvents: depthStyle.pointerEvents,
+                        animation: getComputedStyle(rings[0]).animationName,
                         conservative: document.documentElement.classList.contains('conservative')
                     },
                     artDepth: {
@@ -94,7 +93,7 @@ def main() -> None:
                 };
             })()""")
             result["folderButton"] = visual["button"]
-            result["lightRibbons"] = visual["ribbons"]
+            result["saturnRings"] = visual["rings"]
             result["artDepth"] = visual["artDepth"]
             result["galleryControls"] = visual["galleryControls"]
             after_scroll = evaluate(ws, counter, """(() => {
@@ -143,8 +142,21 @@ def main() -> None:
                 activeSearchContext = {kind: "tags", value: "probe"};
                 currentPage = 1;
                 render();
+                toggleArtworkSelection(items[0], true);
+                toggleArtworkSelection(items[1], true);
+                render();
                 document.querySelector("#openBatch").click();
                 await Promise.resolve();
+                const summaryOnly = {
+                    cards: document.querySelectorAll("#batchCollections .batch-collection").length,
+                    summary: document.querySelector("#batchSummary").textContent,
+                    downloadHidden: document.querySelector("#batchDownload").hidden
+                };
+                document.querySelector("#openBasketDetail").click();
+                const firstJump = {
+                    cards: document.querySelectorAll("#batchCollections .batch-collection").length,
+                    title: document.querySelector("#dTitle").textContent
+                };
                 const card = document.querySelector('[data-batch-artwork="probe-multi"]').getBoundingClientRect();
                 const check = document.querySelector('[data-batch-select="probe-multi"] + span').getBoundingClientRect();
                 const badgeElement = document.querySelector('[data-batch-artwork="probe-multi"] .batch-page-count');
@@ -160,6 +172,7 @@ def main() -> None:
                     returnVisible: !document.querySelector("#returnToBatch").hidden
                 };
                 change(document.querySelector('[data-collection-page="1"]'), false);
+                const selectedPayloadAfterUncheck = selectedGroups().find((group) => group.id === "probe-multi")?.pages || [];
                 document.querySelector("#returnToBatch").click();
                 const partial = snapshot();
                 change(document.querySelector('[data-batch-select="probe-multi"]'), false);
@@ -180,7 +193,8 @@ def main() -> None:
                 fetchJson = () => new Promise((resolve) => { releaseNormal = () => resolve(artwork("probe-normal", "Late normal detail", 2)); });
                 select(0);
                 await Promise.resolve();
-                openCurrentPageBatch();
+                toggleArtworkSelection(normalItem, true);
+                openSelectionBasket();
                 releaseNormal();
                 await Promise.resolve();
                 await Promise.resolve();
@@ -188,13 +202,68 @@ def main() -> None:
                     title: document.querySelector("#dTitle").textContent,
                     workspaceVisible: !document.querySelector("#batchWorkspace").hidden
                 };
+                clearAllSelection();
+                const clearRaceItem = artwork("probe-clear-race", "Clear race", 5);
+                delete clearRaceItem.pageImages;
+                items = [clearRaceItem];
+                render();
+                toggleArtworkSelection(clearRaceItem, true);
+                let releaseClearRace;
+                fetchJson = (_url, options) => new Promise((resolve, reject) => {
+                    releaseClearRace = () => options?.signal?.aborted
+                        ? reject(new DOMException("Aborted", "AbortError"))
+                        : resolve(artwork("probe-clear-race", "Resurrected", 5));
+                });
+                openSelectionBasket();
+                await Promise.resolve();
+                document.querySelector("#openBasketDetail").click();
+                document.querySelector('[data-open-collection="probe-clear-race"]').click();
+                await Promise.resolve();
+                document.querySelector("#clearSelection").click();
+                releaseClearRace();
+                await Promise.resolve();
+                await Promise.resolve();
+                const clearRaceGuard = {
+                    workspaceHidden: document.querySelector("#batchWorkspace").hidden,
+                    title: document.querySelector("#dTitle").textContent,
+                    selected: selectedArtworkIds.size,
+                    imagePickerClosed: !document.body.classList.contains("basket-image-picker")
+                };
+                clearAllSelection();
+                const singleJumpItem = artwork("probe-single-jump", "Single jump", 6);
+                items = [singleJumpItem];
+                render();
+                toggleArtworkSelection(singleJumpItem, true);
+                openSelectionBasket();
+                const singleSummaryCards = document.querySelectorAll("#batchCollections .batch-collection").length;
+                document.querySelector("#openBasketDetail").click();
+                const singleArtworkCards = document.querySelectorAll("#batchCollections .batch-collection").length;
+                document.querySelector('[data-open-collection="probe-single-jump"]').click();
+                await Promise.resolve();
+                const singlePageCards = document.querySelectorAll("[data-collection-page]").length;
+                const singleTwoJumps = {singleSummaryCards, singleArtworkCards, singlePageCards};
+                clearAllSelection();
+                const capacityItems = Array.from({length: 1001}, (_, index) => artwork(`probe-capacity-${index}`, `Capacity ${index}`, 1));
+                for (const item of capacityItems.slice(0, 300)) toggleArtworkSelection(item, true);
+                const selectedAt300 = selectedArtworkIds.size;
+                for (const item of capacityItems.slice(300, 1000)) toggleArtworkSelection(item, true);
+                const overflowAccepted = toggleArtworkSelection(capacityItems[1000], true);
+                const capacityGuard = {
+                    selectedAt300,
+                    selectedAtLimit: selectedPageCount(),
+                    overflowAccepted,
+                    dialogOpen: document.querySelector("#selectionLimitDialog").open
+                };
+                document.querySelector("#selectionLimitDialog").close();
+                clearAllSelection();
                 const staleItem = artwork("probe-stale", "Stale", 2);
                 delete staleItem.pageImages;
                 batchCandidateItems = [staleItem];
                 selectedArtworks.set(staleItem.id, staleItem);
                 selectedArtworkIds.add(staleItem.id);
                 selectedPagesByArtwork.set(staleItem.id, new Set([0, 1]));
-                renderBatchWorkspace();
+                renderBasketSummary([staleItem, artwork("probe-stale-peer", "Peer", 1)]);
+                openBasketArtworkPicker();
                 const staleButton = document.querySelector('[data-batch-artwork="probe-stale"] [data-open-collection]');
                 let releaseStale;
                 fetchJson = () => new Promise((resolve) => { releaseStale = () => resolve(artwork("probe-stale", "Stale detail", 2)); });
@@ -211,27 +280,40 @@ def main() -> None:
                 const geometry = {
                     separate: check.right + 8 <= badge.left,
                     inside: check.left >= card.left && badge.right <= card.right,
-                    openArea: open.width >= card.width - 2 && open.height > 100,
+                    badgeTarget: open.width >= 30 && open.height >= 30,
                     overflow: document.documentElement.scrollWidth > innerWidth,
                     badge: badgeLabel
                 };
                 return {
+                    summaryOnly,
+                    firstJump,
                     initial,
                     detailDefault,
+                    selectedPayloadAfterUncheck,
                     partial,
                     removed,
                     selectedAfterRemoval,
                     restored,
                     normalToBatchGuard,
+                    clearRaceGuard,
+                    singleTwoJumps,
+                    capacityGuard,
                     staleGuard,
                     geometry,
-                    ok: initial.cards === 2
+                    ok: summaryOnly.cards === 0
+                        && summaryOnly.summary.includes("2 个作品")
+                        && summaryOnly.downloadHidden
+                        && firstJump.cards === 2
+                        && firstJump.title.includes("选择要下载的作品")
+                        && initial.cards === 2
                         && initial.selectedWorks === 2
                         && initial.selectedResults === 2
                         && initial.multiLabel.includes("4/4")
                         && detailDefault.pages === 4
                         && detailDefault.selectedPages === 4
                         && detailDefault.returnVisible
+                        && !selectedPayloadAfterUncheck.includes(1)
+                        && selectedPayloadAfterUncheck.includes(0)
                         && partial.cards === 2
                         && partial.selectedWorks === 2
                         && partial.selectedResults === 2
@@ -245,13 +327,24 @@ def main() -> None:
                         && restored.selectedWorks === 2
                         && restored.selectedResults === 2
                         && restored.multiLabel.includes("1/4")
-                        && normalToBatchGuard.title === "打包详情"
+                        && normalToBatchGuard.title === "采集篮"
                         && normalToBatchGuard.workspaceVisible
+                        && clearRaceGuard.workspaceHidden
+                        && clearRaceGuard.title !== "Resurrected"
+                        && clearRaceGuard.selected === 0
+                        && clearRaceGuard.imagePickerClosed
+                        && singleTwoJumps.singleSummaryCards === 0
+                        && singleTwoJumps.singleArtworkCards === 1
+                        && singleTwoJumps.singlePageCards === 6
+                        && capacityGuard.selectedAt300 === 300
+                        && capacityGuard.selectedAtLimit === 1000
+                        && !capacityGuard.overflowAccepted
+                        && capacityGuard.dialogOpen
                         && staleGuard.title !== "Stale detail"
-                        && staleGuard.resultTitle === "Normal"
+                        && staleGuard.resultTitle === "Single jump"
                         && geometry.separate
                         && geometry.inside
-                        && geometry.openArea
+                        && geometry.badgeTarget
                         && !geometry.overflow
                         && geometry.badge === "4P"
                 };
@@ -262,11 +355,11 @@ def main() -> None:
         result["ok"] = (
             result["folderButton"].get("color") == "rgb(10, 17, 26)"
             and "linear-gradient" in result["folderButton"].get("backgroundImage", "")
-            and result["lightRibbons"].get("count") == 3
-            and result["lightRibbons"].get("decorative")
-            and result["lightRibbons"].get("pointerEvents") == "none"
-            and result["lightRibbons"].get("animation") == "none"
-            and result["lightRibbons"].get("conservative")
+            and result["saturnRings"].get("count") == 2
+            and result["saturnRings"].get("decorative")
+            and result["saturnRings"].get("pointerEvents") == "none"
+            and result["saturnRings"].get("animation") == "none"
+            and result["saturnRings"].get("conservative")
             and result["artDepth"].get("moonRings") == 1
             and result["artDepth"].get("moonRingSegments") == 2
             and result["artDepth"].get("constellations") == 2

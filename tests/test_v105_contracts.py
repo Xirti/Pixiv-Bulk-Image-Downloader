@@ -133,12 +133,11 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("#browseFolder{", STYLE)
         self.assertIn("color:#0a111a", STYLE)
 
-    def test_sparse_kimi_style_light_ribbons_are_decorative_and_low_cost(self):
-        self.assertIn('class="light-ribbons"', HTML)
+    def test_saturn_rings_are_decorative_and_low_cost(self):
+        self.assertIn('class="saturn-ring saturn-ring-outer"', HTML)
         self.assertIn('aria-hidden="true"', HTML)
-        self.assertIn(".light-ribbon", STYLE)
-        self.assertIn("light-ribbon-drift", STYLE)
-        self.assertIn("html.conservative .light-ribbon{animation:none", STYLE)
+        self.assertIn(".saturn-ring", STYLE)
+        self.assertIn("html.conservative .moon-ring,html.conservative .saturn-ring", STYLE)
         self.assertNotIn("requestAnimationFrame", APP)
         self.assertNotIn("backdrop-filter", STYLE)
         self.assertNotIn("filter:", STYLE)
@@ -153,7 +152,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("batchDownload", HTML)
 
     def test_collection_basket_capacity_decision_only_runs_when_navigation_evicts_selected_pages(self):
-        self.assertIn("MAX_SELECTED_ARTWORKS = 100", APP)
+        self.assertNotIn("MAX_SELECTED_ARTWORKS", APP)
         self.assertIn("MAX_SELECTED_PAGES = 1000", APP)
         self.assertIn('id="capacityDialog"', HTML)
         self.assertIn('id="archiveAndContinue"', HTML)
@@ -194,30 +193,55 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("function clearSelection(ids)", APP)
         self.assertIn("archivedArtworkIds.add", APP)
 
-    def test_batch_download_opens_integrated_default_selected_artwork_picker(self):
+    def test_collection_basket_summary_never_renders_images_and_single_artwork_requires_two_jumps(self):
         workspace = HTML[HTML.index('id="batchWorkspace"'):HTML.index('id="deck"')]
         self.assertEqual(workspace.count('id="batchDownload"'), 1)
         self.assertIn('id="batchCollections"', workspace)
-        self.assertNotIn('id="openBatchPicker"', HTML)
-        self.assertNotIn('id="batchPicker"', HTML)
-        self.assertNotIn('id="closeBatchPicker"', HTML)
-        self.assertIn("function openCurrentPageBatch", APP)
-        open_batch = APP[
-            APP.index("function openCurrentPageBatch"):APP.index("function selectedGroups")
+        self.assertIn('id="openBasketDetail"', workspace)
+        self.assertIn("function openSelectionBasket", APP)
+        open_basket = APP[
+            APP.index("function openSelectionBasket"):APP.index("function renderBasketSummary")
         ]
-        self.assertLess(open_batch.index("selectAllCurrentPage()"), open_batch.index("renderBatchWorkspace()"))
-        self.assertIn("viewGeneration += 1", open_batch)
-        self.assertIn("detailController.abort()", open_batch)
-        self.assertIn("detailController = null", open_batch)
-        workspace_block = APP[
-            APP.index("function renderBatchWorkspace"):APP.index("function selectedGroups")
-        ]
-        self.assertIn("chosen.map", workspace_block)
-        self.assertNotIn("chosen.slice", workspace_block)
-        self.assertIn("batch-card-select", workspace_block)
-        self.assertIn("batch-page-count", workspace_block)
-        self.assertIn("data-open-collection", workspace_block)
-        self.assertNotIn("await fetchJson", workspace_block)
+        self.assertNotIn("selectAllCurrentPage()", open_basket)
+        self.assertIn("renderBasketSummary(chosen)", open_basket)
+        summary = APP[APP.index("function renderBasketSummary"):APP.index("function openBasketArtworkPicker")]
+        self.assertIn('innerHTML = ""', summary)
+        self.assertIn('$("#batchDownload").hidden = true', summary)
+        self.assertNotIn("<img", summary)
+        self.assertNotIn("fetchJson", summary)
+        self.assertIn("openBasketArtworkPicker", summary)
+        picker = APP[APP.index("function openBasketArtworkPicker"):APP.index("function selectedGroups")]
+        self.assertIn("chosen.map", picker)
+        self.assertIn("data-open-collection", picker)
+        self.assertIn("openBatchCollection", picker)
+
+    def test_multi_artwork_picker_opens_only_after_summary_and_page_badge_opens_images(self):
+        picker = APP[APP.index("function openBasketArtworkPicker"):APP.index("function selectedGroups")]
+        self.assertIn("chosen.map", picker)
+        self.assertIn("data-batch-select", picker)
+        self.assertIn("data-open-collection", picker)
+        self.assertIn("batch-page-count", picker)
+        self.assertIn("openBatchCollection", picker)
+        self.assertIn('$("#batchDownload").hidden = false', picker)
+        summary = APP[APP.index("function renderBasketSummary"):APP.index("function openBasketArtworkPicker")]
+        self.assertNotIn("chosen.map", summary)
+
+    def test_basket_detail_request_is_cancelled_when_cleared_or_replaced_by_normal_detail(self):
+        detail = APP[APP.index("async function openBatchCollection"):APP.index('$(\"#returnToBatch\").onclick')]
+        self.assertIn("detailController = new AbortController()", detail)
+        self.assertIn("{ signal: controller.signal }", detail)
+        self.assertIn("controller !== detailController", detail)
+        clear = APP[APP.index('$(\"#clearSelection\").onclick'):APP.index('$(\"#openBatch\").onclick')]
+        self.assertIn("viewGeneration += 1", clear)
+        self.assertIn("detailController.abort()", clear)
+        self.assertIn("clearDetail()", clear)
+        select = APP[APP.index("async function select(index)"):APP.index("function renderDetail")]
+        self.assertIn("viewGeneration += 1", select)
+        self.assertIn('classList.remove("collection-basket-open", "basket-image-picker")', select)
+        self.assertIn('$("#batchWorkspace").hidden = true', select)
+        self.assertIn('$("#returnToBatch").hidden = true', select)
+        clear_detail = APP[APP.index("function clearDetail"):APP.index("function updateSelectionBar")]
+        self.assertIn('classList.remove("collection-basket-open", "basket-image-picker")', clear_detail)
 
     def test_result_page_has_one_click_select_all_controls(self):
         self.assertIn('id="selectAllPage"', HTML)
@@ -242,13 +266,18 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("z-index:11", STYLE)
         self.assertIn(".results{padding:55px 5vw 96px", STYLE)
 
-    def test_collection_detail_uses_vertical_page_picker_and_hides_single_download(self):
+    def test_basket_artwork_and_page_pickers_are_compact(self):
         self.assertIn('class="detail scene collection-mode"', HTML)
         self.assertIn("body.collection-basket-open #download{display:none}", STYLE)
         self.assertIn("body.collection-basket-open .collection-pages", STYLE)
-        self.assertIn("grid-template-columns:repeat(auto-fill,minmax(150px,1fr))", STYLE)
-        self.assertIn("aspect-ratio:2/3", STYLE)
+        self.assertIn("grid-template-columns:repeat(auto-fill,minmax(96px,120px))", STYLE)
         self.assertIn("object-position:center top", STYLE)
+        self.assertIn("body.basket-image-picker .detail-info dl", STYLE)
+        self.assertIn("body.basket-image-picker .detail-info .description", STYLE)
+        detail = APP[APP.index("async function openBatchCollection"):APP.index('$(\"#returnToBatch\").onclick')]
+        self.assertIn('classList.add("basket-image-picker")', detail)
+        prepare = APP[APP.index("function prepareBasketWorkspace"):APP.index("function openSelectionBasket")]
+        self.assertIn('classList.remove("basket-image-picker")', prepare)
 
     def test_capacity_dialog_buttons_use_restrained_monochrome_styles(self):
         for selector in ("#archiveAndContinue", "#clearAndContinue", "#cancelCapacity"):
@@ -260,11 +289,44 @@ class V105VisualContractTests(unittest.TestCase):
 
     def test_home_uses_one_clean_monochrome_moon_ring_without_search_panel_arcs(self):
         self.assertNotIn(".search-panel::before", STYLE)
+        self.assertNotIn("body::after", STYLE)
         self.assertIn('class="moon-ring"', HTML)
         self.assertIn(".moon-ring::before", STYLE)
         self.assertIn(".moon-ring::after", STYLE)
         self.assertIn("conic-gradient", STYLE)
+        self.assertIn("saturn-ring", HTML + STYLE)
+        self.assertNotIn('class="light-ribbons"', HTML)
         self.assertNotIn("rgba(255,141,78", STYLE)
+
+    def test_capacity_is_page_only_and_overflow_uses_a_modal_warning(self):
+        self.assertNotIn("MAX_SELECTED_ARTWORKS", APP)
+        self.assertIn("MAX_SELECTED_PAGES = 1000", APP)
+        self.assertIn('id="selectionLimitDialog"', HTML)
+        self.assertIn("showSelectionLimitDialog", APP)
+        self.assertIn("selectionWouldExceedPageLimit", APP)
+
+    def test_download_snapshot_comes_only_from_selected_page_sets(self):
+        groups = APP[APP.index("function selectedGroups"):APP.index("function contextKey")]
+        self.assertIn("selectedPagesByArtwork.entries()", groups)
+        self.assertNotIn("selectedArtworks.keys()", groups)
+        download = APP[APP.index('$(\"#batchDownload\").onclick'):APP.index('addEventListener("keydown"')]
+        self.assertIn("const groups = selectedGroups()", download)
+        self.assertIn("setBasketSelectionLocked(true)", download)
+        self.assertIn("setBasketSelectionLocked(false)", download)
+        self.assertIn("本次任务已锁定", download)
+        lock = APP[APP.index("function setBasketSelectionLocked"):APP.index("function downloadPayload")]
+        self.assertIn("#searchForm input", lock)
+        self.assertIn("#pagination button", lock)
+        self.assertIn("basketLockDisabled", lock)
+        self.assertIn("control.disabled = control.dataset.basketLockDisabled === \"true\"", lock)
+        clear = APP[APP.index('$(\"#clearSelection\").onclick'):APP.index('$(\"#openBatch\").onclick')]
+        self.assertIn("basketSelectionLocked", clear)
+
+    def test_search_and_basket_cache_status_is_reported_without_binary_image_cache_claims(self):
+        self.assertIn('id="cacheStatus"', HTML)
+        self.assertIn("renderCacheStatus", APP)
+        self.assertIn("只保留元数据和下载链接", APP)
+        self.assertIn("缩略图仅加载当前打开页", APP)
 
     def test_collection_downloads_are_grouped_by_their_original_search_context(self):
         self.assertIn("const selectedContextByArtwork = new Map()", APP)

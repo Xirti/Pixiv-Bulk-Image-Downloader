@@ -37,7 +37,8 @@ class FeatureUpgradeTests(unittest.TestCase):
         self.assertIn('id="selectionBar"', HTML)
         self.assertIn('id="batchWorkspace"', HTML)
         self.assertIn("selectedArtworkIds", APP)
-        self.assertIn("renderBatchWorkspace", APP)
+        self.assertIn("openSelectionBasket", APP)
+        self.assertIn("openBasketArtworkPicker", APP)
 
     def test_batch_download_endpoint_is_bounded_and_page_selective(self):
         self.assertIn('"/api/pixiv/batch-download"', SERVER)

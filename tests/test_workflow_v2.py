@@ -165,7 +165,7 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn("page-select", STYLE)
 
     def test_batch_summary_is_immediate_and_detail_is_loaded_on_navigation(self):
-        batch_block = APP[APP.index("function renderBatchWorkspace"):APP.index("function selectedGroups")]
+        batch_block = APP[APP.index("function renderBasketSummary"):APP.index("function openBasketArtworkPicker")]
         detail_start = APP.index("async function openBatchCollection")
         detail_end = APP.index('$("#returnToBatch").onclick', detail_start)
         detail_block = APP[detail_start:detail_end]

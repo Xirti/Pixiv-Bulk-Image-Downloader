@@ -25,7 +25,7 @@ This project is independent and is not affiliated with Pixiv.
 - Three pages prefetched ahead of the current page
 - Sliding result cache: six previous pages are retained; older pages and their temporary search-preview tokens are released
 - Result-data prefetch without downloading thumbnails from unopened pages; search previews use `no-store`
-- Collection basket for up to 100 artworks and 1,000 selected images
+- Collection basket for any number of artworks within a 1,000-image selection limit
 - Image-first adaptive download chunks, optional artwork grouping, and one shared search-context folder
 - Multi-page artwork preview with windowed page selection and selective batch download
 - Native Windows folder picker
