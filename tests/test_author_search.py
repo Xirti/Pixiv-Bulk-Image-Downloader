@@ -115,6 +115,28 @@ class AuthorSearchRegressionTests(unittest.TestCase):
         self.assertEqual(len(third["items"]), 3)
         self.assertFalse(third["hasMore"])
 
+    def test_author_first_page_exposes_exhausted_partial_second_page(self):
+        ids = [str(7000 - index) for index in range(53)]
+        with patch.object(server, "resolve_author_user", return_value=("42", "目标画师")), patch.object(
+            server, "load_user_profile_ids", return_value=ids,
+        ), patch.object(
+            server, "load_user_profile_works",
+            side_effect=lambda _user_id, artwork_ids: [self.raw(artwork_id) for artwork_id in artwork_ids],
+        ):
+            first = server.search_pixiv_results(
+                "author:目标画师", "safe", 1, "all", True, authorized=False,
+            )
+            second = server.search_pixiv_results(
+                "author:目标画师", "safe", 2, "all", True, authorized=False,
+            )
+
+        self.assertEqual(first["total"], 53)
+        self.assertEqual(len(first["items"]), 36)
+        self.assertEqual(first["availablePages"], [1, 2])
+        self.assertEqual(first["preloadedThrough"], 2)
+        self.assertEqual(len(second["items"]), 17)
+        self.assertFalse(second["hasMore"])
+
     def test_user_search_bounds_profile_work_requests_and_keeps_cursor(self):
         ids = [str(9000 - index) for index in range(1000)]
         calls = []

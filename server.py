@@ -990,8 +990,11 @@ def search_user_results(
         requested_page_start = (page - 1) * SEARCH_PER_PAGE
         if loaded > requested_page_start:
             complete_through = max(complete_through, page)
-        elif (exhausted or budget_exhausted) and loaded:
-            complete_through = (loaded + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE
+        if (exhausted or budget_exhausted) and loaded:
+            complete_through = max(
+                complete_through,
+                (loaded + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE,
+            )
         cache_through = min(page + SEARCH_PREFETCH_AHEAD, complete_through)
         page_rows = {
             number: session["items"][(number - 1) * SEARCH_PER_PAGE:number * SEARCH_PER_PAGE]
