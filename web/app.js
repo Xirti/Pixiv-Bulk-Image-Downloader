@@ -180,12 +180,14 @@ function unarchivedSelectionIds() {
 }
 
 function detachSelection(ids) {
+  if (basketSelectionLocked) return 0;
   ids.forEach((id) => archivedArtworkIds.add(id));
   updateSelectionBar();
   return ids.size;
 }
 
 function clearSelection(ids) {
+  if (basketSelectionLocked) return 0;
   ids.forEach((id) => {
     selectedArtworkIds.delete(id);
     selectedArtworks.delete(id);
@@ -198,6 +200,7 @@ function clearSelection(ids) {
 }
 
 function clearAllSelection() {
+  if (basketSelectionLocked) return false;
   selectedArtworkIds.clear();
   selectedArtworks.clear();
   selectedPagesByArtwork.clear();
@@ -208,6 +211,7 @@ function clearAllSelection() {
   batchCandidateContextByArtwork.clear();
   batchCandidateResultPageByArtwork.clear();
   updateSelectionBar();
+  return true;
 }
 
 function toggleArtworkSelection(item, checked) {
@@ -477,11 +481,15 @@ function renderCollectionPageWindow(item = currentDetailItem, chosenPages = sele
   const end = Math.min(pages.length, start + DETAIL_PAGE_WINDOW);
   $("#collectionPages").innerHTML = pages.slice(start, end).map((page, localIndex) => {
     const pageNo = start + localIndex;
-    return `<label class="page-select"><input type="checkbox" data-collection-page="${pageNo}" ${chosenPages?.has(pageNo) ? "checked" : ""}><img src="${page.regular}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${pageNo + 1}</span></label>`;
+    return `<label class="page-select"><input type="checkbox" data-collection-page="${pageNo}" ${chosenPages?.has(pageNo) ? "checked" : ""} ${basketSelectionLocked ? "disabled" : ""}><img src="${page.regular}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${pageNo + 1}</span></label>`;
   }).join("");
   installImageFallbacks($("#collectionPages"));
   $("#collectionPages").querySelectorAll("[data-collection-page]").forEach((box) => {
     box.onchange = () => {
+      if (basketSelectionLocked) {
+        box.checked = Boolean(selectedPagesByArtwork.get(item.id)?.has(Number(box.dataset.collectionPage)));
+        return;
+      }
       let set = selectedPagesByArtwork.get(item.id);
       const page = Number(box.dataset.collectionPage);
       if (box.checked) {
@@ -758,19 +766,19 @@ function planDownloadChunks(groups) {
   let current = [];
   let pageCount = 0;
   for (const group of groups) {
-    if (group.pages.length > DOWNLOAD_CHUNK_PAGES) {
-      throw new Error(`作品 ${group.id} 单独超过 ${DOWNLOAD_CHUNK_PAGES} 张，无法安全分块`);
+    for (let offset = 0; offset < group.pages.length; offset += DOWNLOAD_CHUNK_PAGES) {
+      const part = { ...group, pages: group.pages.slice(offset, offset + DOWNLOAD_CHUNK_PAGES) };
+      if (current.length && (
+        pageCount + part.pages.length > DOWNLOAD_CHUNK_PAGES
+        || current.length >= DOWNLOAD_CHUNK_ARTWORKS
+      )) {
+        chunks.push({ groups: current, pageCount });
+        current = [];
+        pageCount = 0;
+      }
+      current.push(part);
+      pageCount += part.pages.length;
     }
-    if (current.length && (
-      pageCount + group.pages.length > DOWNLOAD_CHUNK_PAGES
-      || current.length >= DOWNLOAD_CHUNK_ARTWORKS
-    )) {
-      chunks.push({ groups: current, pageCount });
-      current = [];
-      pageCount = 0;
-    }
-    current.push(group);
-    pageCount += group.pages.length;
   }
   if (current.length) chunks.push({ groups: current, pageCount });
   return chunks;

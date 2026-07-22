@@ -71,7 +71,7 @@ def build_search_tag_groups(
 def plan_download_chunks(
     groups: Iterable[dict], *, max_artworks: int = 20, max_pages: int = 200,
 ) -> list[dict]:
-    """Split selections without splitting one artwork; image count is the primary cap."""
+    """Split selections by image count, including large single artworks."""
     clean: list[dict] = []
     for group in groups:
         artwork_id = str(group.get("id") or "")
@@ -80,14 +80,15 @@ def plan_download_chunks(
         except (TypeError, ValueError):
             continue
         if artwork_id.isascii() and artwork_id.isdigit() and pages:
-            clean.append({"id": artwork_id, "pages": pages})
+            clean.extend(
+                {"id": artwork_id, "pages": pages[offset:offset + max_pages]}
+                for offset in range(0, len(pages), max_pages)
+            )
     chunks: list[dict] = []
     current: list[dict] = []
     page_count = 0
     for group in clean:
         group_pages = len(group["pages"])
-        if group_pages > max_pages:
-            raise SearchInputError("单个作品选中的图片数超过下载分块上限")
         if current and (
             page_count + group_pages > max_pages
             or len(current) >= max_artworks

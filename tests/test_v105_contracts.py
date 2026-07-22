@@ -106,6 +106,23 @@ class V105DownloadContractTests(unittest.TestCase):
         chunks = plan_download_chunks(many_single_page, max_artworks=20, max_pages=200)
         self.assertEqual([len(chunk["groups"]) for chunk in chunks], [20, 15])
 
+    def test_chunk_plan_splits_one_large_artwork_without_losing_pages(self):
+        pages = list(range(1000))
+        chunks = plan_download_chunks(
+            [{"id": "123", "pages": pages}],
+            max_artworks=20,
+            max_pages=200,
+        )
+        self.assertEqual([chunk["pageCount"] for chunk in chunks], [200] * 5)
+        flattened = [
+            page
+            for chunk in chunks
+            for group in chunk["groups"]
+            for page in group["pages"]
+        ]
+        self.assertEqual(flattened, pages)
+        self.assertTrue(all(group["id"] == "123" for chunk in chunks for group in chunk["groups"]))
+
 
 class V105VisualContractTests(unittest.TestCase):
     def test_deep_art_direction_uses_static_layers_not_runtime_particles(self):
@@ -352,6 +369,20 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("|| current.length >= DOWNLOAD_CHUNK_ARTWORKS", APP)
         self.assertIn("groupArtworks", APP)
         self.assertIn("context", APP)
+        planner = APP[APP.index("function planDownloadChunks"):APP.index("function openCapacityDialog")]
+        self.assertIn("group.pages.slice", planner)
+        self.assertNotIn("单独超过", planner)
+
+    def test_download_lock_guards_dynamic_page_controls_and_mutation_helpers(self):
+        page_window = APP[APP.index("function renderCollectionPageWindow"):APP.index("function previewDeckCard")]
+        self.assertIn("basketSelectionLocked", page_window)
+        self.assertIn('basketSelectionLocked ? "disabled" : ""', page_window)
+        detach = APP[APP.index("function detachSelection"):APP.index("function clearSelection")]
+        clear_one = APP[APP.index("function clearSelection"):APP.index("function clearAllSelection")]
+        clear_all = APP[APP.index("function clearAllSelection"):APP.index("function toggleArtworkSelection")]
+        self.assertIn("basketSelectionLocked", detach)
+        self.assertIn("basketSelectionLocked", clear_one)
+        self.assertIn("basketSelectionLocked", clear_all)
 
 
 if __name__ == "__main__":
