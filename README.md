@@ -1,125 +1,133 @@
-# MOKU — Pixiv Tag Gallery
+# MOKU - Pixiv Tag Gallery
 
-MOKU is a local-first Windows desktop app for browsing and saving Pixiv artwork by tag. The desktop UI runs in pywebview with the Microsoft Edge WebView2 runtime, while a loopback-only Python service handles Pixiv requests, image proxying, native folder selection, and file writes.
+<p align="center">
+  <img src="assets/moku-icon.png" width="148" alt="MOKU 猫娘图标">
+</p>
 
-Current source version: **1.0.10**.
+欢迎来 MOKU 的小窝，喵。
 
-Download the latest published Windows x64 package from the [MOKU releases page](https://github.com/Xirti/MOKU/releases). Extract the complete ZIP and run `MOKU.exe`; do not copy the EXE by itself. A locally verified 1.0.10 package can be built from this source tree with `make-release.ps1`.
+MOKU 是一只住在 Windows 里的 Pixiv 搜图小助手。输入 tag、作者名或作品 ID，就能把喜欢的作品找出来；看中了就放进采集篮，挑好图片后一起下载。界面跑在 pywebview 和 WebView2 上，后端只待在本机回环地址，负责 Pixiv 请求、预览图片、文件夹选择和下载写入。
 
-This project is independent and is not affiliated with Pixiv.
-<img width="1855" height="990" alt="image" src="https://github.com/user-attachments/assets/e9d431d0-d55a-40b0-8963-94764838f306" />
+当前源码版本：**1.0.10**，喵。
 
-## Features
+想直接使用的话，可以去 [MOKU Releases](https://github.com/Xirti/MOKU/releases) 抱走最新 Windows x64 压缩包，喵。请把完整的 ZIP 解压出来，再运行 `MOKU.exe`；只拎走一个 EXE，运行时会缺东西的。想自己打包，也可以在源码目录运行 `make-release.ps1`。
 
+MOKU 是独立项目，与 Pixiv 没有隶属关系。
 
-- Real Pixiv tag search with bounded historical date windows
-- Strict multi-tag AND search using `;` or `；` separators (`cat;night city`); spaces remain inside one tag
-- Optional bounded anime-oriented tag aliases, disabled by default
-- Exact creator-only search by Pixiv user ID (`pid:123456`) or exact creator name (`author:name`); ASCII and full-width colons are equivalent
-- Three content scopes:
-  - public all-ages
-  - R-18 after local account connection
-  - all types, merging all-ages and R-18 results with ID deduplication
-- Illustration, manga, and ugoira filters
-- Optional exclusion of AI-generated work
-- Thirty-six results per page
-- Three pages prefetched ahead of the current page
-- Sliding result cache: six previous pages are retained; older pages and their temporary search-preview tokens are released
-- Result-data prefetch without downloading thumbnails from unopened pages; search previews use `no-store`
-- Collection basket for any number of artworks within a 1,000-image selection limit
-- Image-first adaptive download chunks, optional artwork grouping, and one shared search-context folder
-- Multi-page artwork preview with windowed page selection and selective batch download
-- Native Windows folder picker
-- An offline in-app Usage Guide with an explicit anonymous Pixiv/CDN network diagnosis
-- Direct, local Windows system-proxy, environment-proxy, and TUN-compatible network paths
-<img width="1770" height="677" alt="image" src="https://github.com/user-attachments/assets/14cede70-7876-4c5e-b9cb-87ae750c1af2" />
+<img width="1855" height="990" alt="MOKU 首页" src="https://github.com/user-attachments/assets/e9d431d0-d55a-40b0-8963-94764838f306" />
 
-R-18G is not supported. MOKU does not change Pixiv age settings or bypass account permissions.
+## 搜图小本领
 
-The network diagnosis runs only after the user clicks its button. It checks the Pixiv site and image CDN in parallel without sending the Pixiv session. MOKU does not modify Windows proxy settings, start VPN software, or scan local ports. On another PC, it reads that Windows user's currently enabled local HTTP system proxy; TUN is optional, not required.
+- 支持 Pixiv tag 搜索，也支持有范围限制的历史日期窗口。
+- 支持多标签严格 AND 搜索。用 `;` 或 `；` 分开标签，例如 `cat;night city`；标签里的空格会留在原处。
+- 支持 `pid:123456` 精确查作者，也支持 `author:name` 精确查作者名；半角和全角冒号都可以，喵。
+- 可选排除 AI 生成作品，也能筛选插画、漫画和动图作品。
+- 有公开全年龄、R-18、全部类型三种内容范围。R-18 需要先在桌面模式连接 Pixiv 账号。
+- 每页 36 个结果，前方三页会提前准备好数据，翻页时更顺手。
+- 结果缓存会留下当前页附近的六页；离得太远的旧页面和临时预览授权会及时退场。
+- 只预取结果数据，不会偷偷下载还没打开页面的缩略图；搜索预览也会使用 `no-store`。
 
-The embedded backend initializes network selection before serving requests and rechecks the current setting at Pixiv operation boundaries. Only loopback HTTP proxies (`127.0.0.1`, `localhost`, or `::1`) are accepted. Rejected remote `HTTP_PROXY` / `ALL_PROXY` values cannot be silently reintroduced by Python's default proxy handling. When no accepted proxy is selected, the request path is genuinely direct/TUN.
-<img width="1807" height="960" alt="image" src="https://github.com/user-attachments/assets/6684e171-2bb4-49c0-9216-b6ece2cbb55d" />
+<img width="1770" height="677" alt="MOKU 搜索页" src="https://github.com/user-attachments/assets/14cede70-7876-4c5e-b9cb-87ae750c1af2" />
 
-## Desktop login
+## 采集篮和预览
 
-Account connection is available only in the desktop app:
+看到喜欢的作品，先扔进采集篮，慢慢挑就好，喵。采集篮支持任意数量的作品，最多选择 1,000 张图片；作品页和大图查看器采用窗口化加载，不会一下把几百张图片和控件全塞进页面。
 
-1. MOKU opens the official Pixiv login page in a second WebView2 window.
-2. Passwords, CAPTCHA, and 2FA stay on Pixiv's page.
-3. After the window reaches the HTTPS Pixiv home page, MOKU accepts one strictly validated Secure and HttpOnly `PHPSESSID`.
-4. The session is stored with Windows Credential Manager when persistence is selected.
+下载任务会按图片数量安排请求，可以选择把作品归到各自文件夹，也可以让同一 tag、作者或作品上下文共用一个文件夹。单个作品支持多页预览和按页选择，勾好的内容才会进入下载请求。
 
-MOKU does not log cookie values and does not send the Pixiv session to the image CDN or another domain. It no longer uses external Edge automation, CDP, remote-debugging ports, or `/ajax/user/self` as a blocking login probe.
+大图预览会缓存临时授权，但授权会跟着登录状态和缓存窗口一起管理。失效的预览会尝试自愈，重复请求会合并，失败时也会留一个清楚的占位提示，不让破图图标挡住点击，喵。
 
-A local session may appear connected until a real Pixiv request rejects an expired cookie. Reconnect at that point.
+R-18G 暂不支持。MOKU 不会替你修改 Pixiv 年龄设置，也不会绕过账号权限。
 
-## Runtime boundaries
+## 网络和代理
 
-- The HTTP service binds only to `127.0.0.1`.
-- Every API request requires a loopback client, loopback `Host`, a non-cross-site fetch context, and an absent or same-origin `Origin`.
-- `/api/health` is the only headerless API handshake, but headerless probes do not receive the process request token. Same-origin clients explicitly identify the handshake before receiving it. Every other API request requires that per-process token; image URLs use separate high-entropy capabilities.
-- Mutating requests additionally require bounded JSON-object bodies.
-- Pixiv API traffic is restricted to approved Pixiv HTTPS hosts.
-- Image traffic is restricted to `i.pximg.net` and carries no account cookie.
-- Download paths must be absolute when supplied by the user.
-- R-18 pages, image tokens, and artwork cache entries are cleared on disconnect.
+网络诊断要等你亲手点按钮才会开始，喵。它会并行检查 Pixiv 网站和图片 CDN，不会带上 Pixiv 会话。
 
-LAN and Internet exposure are intentionally unsupported. Do not change the bind address to `0.0.0.0` without adding authentication, TLS, explicit filesystem scoping, and a new threat model.
+MOKU 不改 Windows 代理设置，不启动 VPN，也不扫描本机端口。它可以使用当前 Windows 用户已经启用的本地 HTTP 代理，TUN 也能工作；没有可用代理时，就直接走网络。
 
-## Run from source
+内置后端启动时会先选择网络，真正访问 Pixiv 前还会再确认一次。接受的 HTTP 代理只限 `127.0.0.1`、`localhost` 和 `::1`；远程 `HTTP_PROXY` / `ALL_PROXY` 不会被 Python 的默认代理逻辑偷偷带回来。
 
-Requirements:
+<img width="1807" height="960" alt="MOKU 网络指南" src="https://github.com/user-attachments/assets/6684e171-2bb4-49c0-9216-b6ece2cbb55d" />
 
-- Windows 10 or 11
+## 桌面登录
+
+账号连接只在桌面模式开放，流程很短，喵：
+
+1. MOKU 会在第二个 WebView2 窗口打开 Pixiv 官方登录页。
+2. 密码、验证码和两步验证都留在 Pixiv 页面里处理。
+3. 页面到达 HTTPS Pixiv 首页后，MOKU 只接受经过严格检查的 Secure、HttpOnly `PHPSESSID`。
+4. 勾选保持登录时，会把会话交给当前 Windows 用户的凭据管理器保存。
+
+MOKU 不记录 Cookie，也不会把 Pixiv 会话发给图片 CDN 或其他域名。外部 Edge 自动化、CDP、远程调试端口和 `/ajax/user/self` 阻塞式探测都不在登录流程里。
+
+本机会话在 Cookie 过期前可能还显示为已连接；等真实 Pixiv 请求拒绝它时，再重新连接就好，喵。
+
+## 安全边界
+
+- HTTP 服务只绑定 `127.0.0.1`。
+- API 请求需要回环客户端、回环 `Host`、非跨站 fetch 上下文，以及空缺或同源的 `Origin`。
+- `/api/health` 是唯一允许无请求头的握手接口；真正的同源客户端会拿到进程级请求 token，其他 API GET 都需要它。图片 URL 使用另外的高熵能力令牌。
+- 写操作只接受有大小边界的 JSON 对象。
+- Pixiv API 流量只允许访问批准的 Pixiv HTTPS 主机。
+- 图片流量只允许访问 `i.pximg.net`，不会带账号 Cookie。
+- 用户提供的下载路径必须是绝对路径。
+- 断开连接后，R-18 页面、图片令牌和作品缓存都会清理。
+
+这条要认真记住喵：请不要把后端绑定到 `0.0.0.0`，也不要把它暴露给局域网或互联网。若要做这种部署，需要重新设计认证、TLS、文件范围和完整威胁模型。
+
+## 从源码运行
+
+需要：
+
+- Windows 10 或 Windows 11
 - Python 3.12
 - Microsoft Edge WebView2 Runtime
 
-Install runtime dependencies:
+安装运行依赖：
 
 ```powershell
 python -m pip install -r requirements.lock
 ```
 
-Run the desktop host:
+启动桌面主程序：
 
 ```powershell
 python moku_app.py
 ```
 
-Or use `MOKU启动.vbs` / `MOKU启动.bat`. The PowerShell launcher can also preload and reuse the loopback backend:
+也可以运行 `MOKU启动.vbs` / `MOKU启动.bat`。PowerShell 启动器支持先启动并复用本机后端：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\launch-moku.ps1 -Mode Desktop
 ```
 
-`Browser` mode is useful for public browsing and frontend diagnostics, but account login is intentionally disabled outside the desktop host.
+`Browser` 模式适合公开浏览和前端调试，登录入口会在这个模式里保持关闭。
 
-## Tests
+## 测试
 
-Install development-only dependencies when running native UI probes:
+运行原生 UI 探针前，安装开发依赖：
 
 ```powershell
 python -m pip install -r requirements-dev.lock
 ```
 
-Run the unit and integration suite:
+运行单元与集成测试：
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-The test suite covers multi-tag paging, result/image-token cache eviction, unopened-page thumbnail behavior, offline guide interaction, anonymous parallel network diagnosis, embedded-backend proxy initialization, WebView2 cookie handling, DNS-rebinding and same-origin defenses, bounded request parsing, download integrity, content-derived backend generations, frozen-resource lookup, and launcher contracts.
+测试会照顾多标签分页、结果和图片令牌缓存、未打开页面的缩略图、离线指南、匿名网络诊断、嵌入式后端代理初始化、WebView2 Cookie、DNS 重绑定、同源防护、请求体边界、下载完整性、冻结资源和启动器契约，一项也不落下喵。
 
-## Build
+## 构建便携版
 
-Build the portable onedir package:
+运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build-portable.ps1
 ```
 
-Output:
+产物会出现在：
 
 ```text
 dist\MOKU\MOKU.exe
@@ -127,30 +135,26 @@ dist\MOKU\SHA256.txt
 dist\MOKU\BUILD_MANIFEST.json
 ```
 
-The build script fingerprints its inputs before and after PyInstaller, runs the test suite, and performs frozen-service smoke checks. Schema 3 `BUILD_MANIFEST.json` binds the source/build inputs to every file and directory in the portable folder and rejects linked, undeclared, or non-Windows-x64 entries. It contains hashes and relative filenames only, never local absolute paths or account data.
+构建脚本会在 PyInstaller 前后计算输入指纹，跑完整测试，并执行冻结服务探针。schema 3 的 `BUILD_MANIFEST.json` 会把源码、构建输入和便携目录里的每个文件及目录绑在一起，还会拒绝链接、未声明文件和非 Windows x64 内容。清单里只有哈希和相对路径，不会写入本机绝对路径、账号信息或 Cookie。
 
-### Current verified portable artifact
+### 当前发布版
 
-The current source version is `1.0.10`. Its portable build is produced from a hash-locked Python 3.12 dependency set after the full test suite passes. Frozen-service, native folder selection, file-write, official login-window, and usage-guide/network probes are exercised before release. Live Pixiv probes require a currently usable Pixiv network route.
+当前源码版本是 `1.0.10`。便携版使用带哈希锁的 Python 3.12 依赖构建，测试通过后才会继续冻结；服务、文件夹选择、文件写入、官方登录窗口、使用指南和网络探针都会跑一遍，喵。真实 Pixiv 探针需要当前网络能访问 Pixiv 和图片 CDN。
 
-The authoritative executable and archive hashes are published beside the release ZIP in `SHA256SUMS.txt`. Keeping generated hashes out of this source file avoids a self-referential build fingerprint. The checksum is a one-way file fingerprint; it contains no account, cookie, local path, or identity data.
+权威的 EXE 和 ZIP 哈希会放在 Release 里的 `SHA256SUMS.txt`。生成的哈希不会写回源码，免得构建指纹和自己互相咬尾巴。`SHA256.txt` 只包含 `MOKU.exe` 的单向指纹和文件名，不会泄露账号、Cookie、路径或身份信息。
 
-The build script verifies that the frozen backend generation is `exe-sha256:<MOKU.exe hash>`, generates third-party license notices, removes smoke-test logs, and writes the authoritative `SHA256.txt`.
+构建脚本还会确认冻结后端代际是 `exe-sha256:<MOKU.exe hash>`，生成第三方许可说明，清理探针日志，再写出最终的 `SHA256.txt`。
 
-`SHA256.txt` contains only the one-way executable fingerprint and the filename `MOKU.exe`; it does not contain account, cookie, path, or identity data.
+## 分发提醒
 
-## Distribution status
+MOKU 1.0.10 已准备好作为 Windows x64 便携 ZIP 发布。请解压完整的 `MOKU` 文件夹，再运行 `MOKU.exe`；Windows 版程序没有 Authenticode 签名，SmartScreen 可能显示未知发布者提示，运行前请用 `SHA256SUMS.txt` 核对 ZIP。
 
-MOKU 1.0.10 is prepared as a portable Windows x64 ZIP. The repository includes the MIT License, pinned Windows CI, `SECURITY.md`, `PRIVACY.md`, third-party notices, a release checklist, and a fail-closed release-asset generator. Distribute and extract the whole `MOKU` folder, not `MOKU.exe` alone.
+请不要把日志、下载内容、Windows 凭据管理器数据、运行时描述文件、构建缓存或临时 WebView2 配置目录一起发布，记得检查喵。
 
-The binary is not Authenticode-signed, so Windows SmartScreen may display an unknown-publisher warning. Verify the downloaded ZIP against `SHA256SUMS.txt` before running it.
+## 许可证
 
-Do not publish logs, downloads, Windows Credential Manager data, runtime descriptors, build caches, or temporary WebView2 profiles.
+MOKU 使用 [MIT License](LICENSE) 发布。
 
-## License
+## 服务与版权提醒
 
-MOKU is released under the [MIT License](LICENSE).
-
-## Service and copyright notice
-
-Pixiv artwork belongs to its respective creators. Users are responsible for Pixiv's current terms, applicable law, and creator permissions. Do not redistribute downloaded work without authorization.
+Pixiv 作品归各自创作者所有。请自行遵守 Pixiv 当前条款、适用法律和创作者授权，不要在没有许可的情况下再分发下载的作品。
