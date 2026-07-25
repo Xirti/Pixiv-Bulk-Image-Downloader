@@ -29,7 +29,12 @@ from datetime import date, timedelta
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
-from auth_store import delete_session, session_cookie_header
+from auth_store import (
+    delete_session,
+    session_cookie_header,
+    store_session,
+    validate_session_value,
+)
 from folder_picker import select_folder
 from network_config import normalize_loopback_proxy
 from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
@@ -85,8 +90,11 @@ SEARCH_PREFETCH_AHEAD = 3
 SEARCH_KEEP_BEHIND = 6
 MAX_SEARCH_SESSIONS = 12
 MAX_HISTORY_SOURCES = 32
+MAX_AUTHOR_RESOLUTION_CACHE = 64
+AUTHOR_RESOLUTION_TTL_SECONDS = 5 * 60.0
 MAX_IMAGE_TOKENS = 4096
 MAX_PIXIV_CACHE_ITEMS = 256
+MAX_ACTIVE_DOWNLOAD_TASKS = 2
 PROTOCOL_VERSION = 5
 APPLICATION_ID = "MOKU.PixivTagGallery"
 TEST_FIXTURES_ENABLED = os.getenv("MOKU_ENABLE_TEST_FIXTURES") == "1"
@@ -111,7 +119,13 @@ def fixture_artwork_svg(index: int, page: int, size: str) -> bytes:
     return artwork_svg(index, page, size)
 INSTANCE_ID = os.getenv("MOKU_INSTANCE_ID") or secrets.token_hex(16)
 REQUEST_TOKEN = secrets.token_urlsafe(32)
+DESKTOP_AUTH_TOKEN = os.getenv("MOKU_DESKTOP_AUTH_TOKEN") or secrets.token_urlsafe(32)
+DESKTOP_AUTH_HEADER = "X-MOKU-Desktop-Capability"
 FOLDER_PICKER_LOCK = threading.Lock()
+# Single-artwork and batch requests share this process-wide limiter. The HTTP
+# server may create many request threads, but only a small bounded number may
+# consume Pixiv bandwidth and local staging/publish resources at once.
+DOWNLOAD_TASK_SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_DOWNLOAD_TASKS)
 # Network reads remain concurrent. This lock covers only the final local
 # publish/exact-object rollback transaction shared by request threads.
 PUBLISH_TRANSACTION_LOCK = threading.Lock()
@@ -171,6 +185,18 @@ def validate_mutating_request(handler) -> tuple[int, str] | None:
     return None
 
 
+def validate_desktop_auth_request(handler) -> tuple[int, str] | None:
+    """Authorize native-host auth IPC without exposing its capability to JS."""
+    if not trusted_local_request(handler):
+        return 403, "桌面认证只允许本机调用"
+    supplied = str(handler.headers.get(DESKTOP_AUTH_HEADER) or "")
+    if not supplied or not hmac.compare_digest(supplied, DESKTOP_AUTH_TOKEN):
+        return 403, "桌面认证能力无效"
+    if str(handler.headers.get_content_type() or "").lower() != "application/json":
+        return 415, "请求必须使用 application/json"
+    return None
+
+
 def valid_request_token(handler) -> bool:
     supplied = str(handler.headers.get("X-MOKU-Request-Token") or "")
     return bool(supplied) and hmac.compare_digest(supplied, REQUEST_TOKEN)
@@ -203,7 +229,10 @@ SEARCH_SESSIONS: OrderedDict[tuple, dict] = OrderedDict()
 SEARCH_SOURCE_OFFSETS: dict[tuple, int] = {}
 SEARCH_SESSION_LOCKS: weakref.WeakValueDictionary[tuple, threading.Lock] = weakref.WeakValueDictionary()
 SEARCH_SESSION_LOCKS_GUARD = threading.RLock()
+AUTHOR_RESOLUTION_CACHE: OrderedDict[str, tuple[float, str, str]] = OrderedDict()
+AUTHOR_RESOLUTION_CACHE_LOCK = threading.Lock()
 AUTHORIZATION_GENERATION = 0
+AUTHORIZATION_ACTIVE = False
 
 
 class AuthorizationRevokedError(PixivPolicyError):
@@ -219,7 +248,7 @@ def assert_authorization_generation(expected: int | None) -> None:
     if expected is None:
         return
     with SEARCH_SESSION_LOCKS_GUARD:
-        if AUTHORIZATION_GENERATION != expected:
+        if not AUTHORIZATION_ACTIVE or AUTHORIZATION_GENERATION != expected:
             raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新发起搜索")
 
 
@@ -262,11 +291,26 @@ def _item_image_tokens_current(item: dict, *, now: float | None = None) -> bool:
     return True
 
 
-def pixiv_item_for_download(artwork_id: str, *, allow_r18: bool) -> dict:
+def pixiv_item_for_download(
+    artwork_id: str,
+    *,
+    allow_r18: bool,
+    authorization_epoch: int | None = None,
+) -> dict:
     cached = get_cached_pixiv_item(artwork_id)
     if cached is not None and _item_image_tokens_current(cached):
+        if cached.get("restriction") == "r18":
+            if authorization_epoch is None:
+                raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新发起下载")
+            assert_authorization_generation(authorization_epoch)
         return cached
-    return pixiv_detail(artwork_id, allow_r18=allow_r18)
+    if authorization_epoch is None:
+        return pixiv_detail(artwork_id, allow_r18=allow_r18)
+    return pixiv_detail(
+        artwork_id,
+        allow_r18=allow_r18,
+        authorization_epoch=authorization_epoch,
+    )
 
 
 def search_session_scope(session_key: tuple) -> str:
@@ -277,9 +321,12 @@ def search_session_scope(session_key: tuple) -> str:
     return str(session_key[1]) if len(session_key) >= 2 else ""
 
 
-def clear_authorized_state() -> None:
-    global AUTHORIZATION_GENERATION
+def clear_authorized_state(*, force: bool = True) -> bool:
+    global AUTHORIZATION_GENERATION, AUTHORIZATION_ACTIVE
     with SEARCH_SESSION_LOCKS_GUARD:
+        if not force and not AUTHORIZATION_ACTIVE:
+            return False
+        AUTHORIZATION_ACTIVE = False
         AUTHORIZATION_GENERATION += 1
         restricted_sessions = [
             session_key for session_key in SEARCH_SESSIONS
@@ -294,23 +341,60 @@ def clear_authorized_state() -> None:
                 if len(key) >= 2 and key[1] == "r18": HISTORY_CACHE.pop(key, None)
         for session_key in restricted_sessions:
             _drop_search_session(session_key)
+    return True
 
 
 def disconnect_authorized_session() -> None:
-    delete_session(); clear_authorized_state()
+    # Login, logout, and authorization snapshots share one linearization lock.
+    # Otherwise a concurrent login can land between credential deletion and
+    # cache revocation, leaving a new credential that silently reactivates after
+    # logout has already reported success.
+    with SEARCH_SESSION_LOCKS_GUARD:
+        try:
+            delete_session()
+        finally:
+            # In-memory authorization and restricted capabilities are revoked
+            # even when Credential Manager cannot durably remove the credential.
+            clear_authorized_state(force=True)
+
+
+def connect_authorized_session(value: str, *, remember: bool) -> None:
+    # Validate before touching the current account, then make the account
+    # switch indivisible with respect to authorization snapshots. The previous
+    # credential is removed first so a failed replacement cannot resurrect it.
+    clean_value = validate_session_value(value)
+    with SEARCH_SESSION_LOCKS_GUARD:
+        clear_authorized_state(force=True)
+        delete_session()
+        store_session(clean_value, remember=remember)
+        mark_authorized_session()
 
 
 def mark_authorized_session() -> None:
     """Compatibility hook: local session presence is the authorization state."""
-    return None
+    global AUTHORIZATION_ACTIVE
+    with SEARCH_SESSION_LOCKS_GUARD:
+        AUTHORIZATION_ACTIVE = True
+
+
+def validated_authorization(force: bool = False) -> tuple[bool, int | None]:
+    """Atomically validate the local session and capture its revocation epoch."""
+    global AUTHORIZATION_ACTIVE
+    # Credential observation and epoch capture must be indivisible. Logout
+    # removes the credential before taking this guard, then revokes the epoch
+    # under it, so it cannot be inserted between these two values.
+    with SEARCH_SESSION_LOCKS_GUARD:
+        if not session_cookie_header():
+            clear_authorized_state(force=False)
+            return False, None
+        AUTHORIZATION_ACTIVE = True
+        return True, AUTHORIZATION_GENERATION
 
 
 def auth_status_snapshot() -> dict:
-    session_present = bool(session_cookie_header())
+    session_present, _epoch = validated_authorization()
     if not session_present:
-        clear_authorized_state()
         return {"loggedIn": False, "sessionPresent": False, "authState": "unauthenticated"}
-    mark_authorized_session()
     return {"loggedIn": True, "sessionPresent": True, "authState": "authorized"}
 
 
@@ -325,16 +409,27 @@ def history_lock_for(*parts) -> threading.Lock:
 
 
 def validated_session(force: bool = False) -> bool:
-    if not session_cookie_header():
-        clear_authorized_state()
-        return False
-    mark_authorized_session()
-    return True
+    return validated_authorization(force=force)[0]
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise PixivPolicyError("Pixiv 响应包含重定向，已按安全策略拒绝")
+
+
+class StrictLoopbackProxyHandler(urllib.request.ProxyHandler):
+    """Route through an explicitly selected local proxy without OS bypass rules."""
+
+    def proxy_open(self, request, proxy, target_type):
+        normalized = normalize_loopback_proxy(proxy)
+        if not normalized or normalized != proxy:
+            raise urllib.error.URLError("invalid loopback proxy")
+        original_type = request.type
+        parsed = urllib.parse.urlsplit(normalized)
+        request.set_proxy(parsed.netloc, parsed.scheme)
+        if original_type == parsed.scheme or original_type == "https":
+            return None
+        return self.parent.open(request, timeout=request.timeout)
 
 
 PIXIV_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirectHandler)
@@ -345,16 +440,22 @@ PIXIV_NETWORK_LOCK = threading.Lock()
 NETWORK_RECHECK_SECONDS = 1.0
 
 
+def _prune_image_tokens_locked(current: float) -> None:
+    for token, row in list(IMAGE_TOKENS.items()):
+        if not row or row[0] < current:
+            IMAGE_TOKENS.pop(token, None)
+    overflow = len(IMAGE_TOKENS) - MAX_IMAGE_TOKENS
+    if overflow > 0:
+        for token, _row in sorted(
+            IMAGE_TOKENS.items(), key=lambda pair: pair[1][0]
+        )[:overflow]:
+            IMAGE_TOKENS.pop(token, None)
+
+
 def prune_image_tokens(now: float | None = None) -> None:
     current = time.time() if now is None else float(now)
     with PIXIV_STATE_LOCK:
-        for token, row in list(IMAGE_TOKENS.items()):
-            if not row or row[0] < current:
-                IMAGE_TOKENS.pop(token, None)
-        overflow = len(IMAGE_TOKENS) - MAX_IMAGE_TOKENS
-        if overflow > 0:
-            for token, _row in sorted(IMAGE_TOKENS.items(), key=lambda pair: pair[1][0])[:overflow]:
-                IMAGE_TOKENS.pop(token, None)
+        _prune_image_tokens_locked(current)
 
 
 def prune_search_image_tokens(
@@ -371,40 +472,125 @@ def prune_search_image_tokens(
 
 
 def image_token_cache_control(row: tuple) -> str:
+    if len(row) >= 4 and row[3] == "r18":
+        return "no-store"
     return "no-store" if len(row) >= 6 else "private,max-age=3600"
+
+
+def assert_image_token_authorization(row: tuple) -> None:
+    if len(row) < 4 or row[3] != "r18":
+        return
+    epoch = row[6] if len(row) >= 7 else (row[4] if len(row) == 5 else None)
+    if not isinstance(epoch, int) or isinstance(epoch, bool):
+        raise AuthorizationRevokedError("R-18 图片授权已失效")
+    assert_authorization_generation(epoch)
 
 
 def authorize_image_proxy(
     proxy_url: str, artwork_id: str, restriction: str = "safe", *,
     search_session: tuple | None = None, search_page: int | None = None,
+    authorization_epoch: int | None = None,
 ) -> str:
-    remote_url = urllib.parse.parse_qs(urllib.parse.urlsplit(proxy_url).query).get("url", [""])[0]
-    if not is_allowed_pixiv_url(remote_url, image_only=True):
-        raise PixivPolicyError("invalid approved image")
-    if restriction not in {"safe", "r18"}: raise PixivPolicyError("invalid image restriction")
-    prune_image_tokens()
-    token = secrets.token_urlsafe(24)
-    row: tuple = (time.time() + 3600, artwork_id, remote_url, restriction)
-    if search_session is not None and search_page is not None:
-        row += (search_session, max(1, int(search_page)))
-    with PIXIV_STATE_LOCK:
-        IMAGE_TOKENS[token] = row
-    return "/api/pixiv/image?" + urllib.parse.urlencode({"token": token})
+    return _authorize_image_proxy_batch([(
+        proxy_url,
+        artwork_id,
+        restriction,
+        search_session,
+        search_page,
+        authorization_epoch,
+    )])[0]
+
+
+def _authorize_image_proxy_batch(entries: list[tuple]) -> list[str]:
+    if len(entries) > MAX_IMAGE_TOKENS:
+        raise PixivPolicyError("图片授权数量超出上限")
+    expires = time.time() + 3600
+    prepared: list[tuple[str, tuple]] = []
+    for (
+        proxy_url,
+        artwork_id,
+        restriction,
+        search_session,
+        search_page,
+        authorization_epoch,
+    ) in entries:
+        remote_url = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(proxy_url)).query
+        ).get("url", [""])[0]
+        if not is_allowed_pixiv_url(remote_url, image_only=True):
+            raise PixivPolicyError("invalid approved image")
+        if restriction not in {"safe", "r18"}:
+            raise PixivPolicyError("invalid image restriction")
+        token = secrets.token_urlsafe(24)
+        row: tuple = (expires, artwork_id, remote_url, restriction)
+        if search_session is not None and search_page is not None:
+            row += (search_session, max(1, int(search_page)))
+        if restriction == "r18":
+            if authorization_epoch is None:
+                raise AuthorizationRevokedError("R-18 图片授权已失效")
+            assert_authorization_generation(authorization_epoch)
+            # Search metadata retains its historical positions (4 and 5);
+            # restricted rows append their account-generation binding last.
+            row += (authorization_epoch,)
+        prepared.append((token, row))
+    with SEARCH_SESSION_LOCKS_GUARD:
+        for _token, row in prepared:
+            assert_image_token_authorization(row)
+        with PIXIV_STATE_LOCK:
+            _prune_image_tokens_locked(time.time())
+            for token, row in prepared:
+                IMAGE_TOKENS[token] = row
+            # Enforce the bound in the same critical section as insertion.
+            # Logout and parallel authorizations cannot leave an over-limit or
+            # post-revocation restricted token behind.
+            _prune_image_tokens_locked(time.time())
+    return [
+        "/api/pixiv/image?" + urllib.parse.urlencode({"token": token})
+        for token, _row in prepared
+    ]
 
 
 def authorize_item_images(
     item: dict, *, search_session: tuple | None = None, search_page: int | None = None,
+    authorization_epoch: int | None = None,
 ) -> dict:
     artwork_id = str(item["id"]); restriction = str(item.get("restriction") or "safe")
+    targets: list[tuple[dict, str]] = []
+    entries: list[tuple] = []
     if item.get("thumb"):
-        item["thumb"] = authorize_image_proxy(
-            item["thumb"], artwork_id, restriction,
-            search_session=search_session, search_page=search_page,
-        )
+        targets.append((item, "thumb"))
+        entries.append((
+            item["thumb"], artwork_id, restriction, search_session, search_page,
+            authorization_epoch,
+        ))
     for page in item.get("pageImages") or []:
-        page["regular"] = authorize_image_proxy(page["regular"], artwork_id, restriction)
-        page["original"] = authorize_image_proxy(page["original"], artwork_id, restriction)
+        targets.extend(((page, "regular"), (page, "original")))
+        entries.extend((
+            (page["regular"], artwork_id, restriction, None, None, authorization_epoch),
+            (page["original"], artwork_id, restriction, None, None, authorization_epoch),
+        ))
+    for (target, key), approved in zip(
+        targets, _authorize_image_proxy_batch(entries), strict=True,
+    ):
+        target[key] = approved
     return item
+
+
+def revoke_item_image_tokens(item: dict) -> None:
+    tokens: set[str] = set()
+    candidates = [item.get("thumb")]
+    for page in item.get("pageImages") or []:
+        if isinstance(page, dict):
+            candidates.extend((page.get("regular"), page.get("original")))
+    for proxy_url in candidates:
+        token = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(proxy_url or "")).query
+        ).get("token", [""])[0]
+        if token:
+            tokens.add(token)
+    with PIXIV_STATE_LOCK:
+        for token in tokens:
+            IMAGE_TOKENS.pop(token, None)
 
 
 def _update_network_opener(*, max_age: float) -> str:
@@ -427,7 +613,7 @@ def _update_network_opener(*, max_age: float) -> str:
             return PIXIV_PROXY
         proxy_map = {"http": proxy, "https": proxy} if proxy else {}
         opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler(proxy_map), NoRedirectHandler,
+            StrictLoopbackProxyHandler(proxy_map), NoRedirectHandler,
         )
         PIXIV_OPENER = opener
         PIXIV_PROXY = proxy
@@ -723,6 +909,8 @@ def reset_search_caches() -> None:
         SEARCH_PAGE_CACHE.clear()
         SEARCH_SESSIONS.clear()
         SEARCH_SOURCE_OFFSETS.clear()
+    with AUTHOR_RESOLUTION_CACHE_LOCK:
+        AUTHOR_RESOLUTION_CACHE.clear()
 
 
 def _drop_search_session(session_key: tuple) -> None:
@@ -882,6 +1070,13 @@ def _author_rows_from_payload(payload: object) -> list[dict]:
 
 
 def resolve_author_user(author: str) -> tuple[str, str]:
+    cache_key = str(author).strip().casefold()
+    now = time.monotonic()
+    with AUTHOR_RESOLUTION_CACHE_LOCK:
+        cached = AUTHOR_RESOLUTION_CACHE.pop(cache_key, None)
+        if cached is not None and cached[0] > now:
+            AUTHOR_RESOLUTION_CACHE[cache_key] = cached
+            return cached[1], cached[2]
     body = pixiv_json(build_user_search_url(author)).get("body") or {}
     rows = _author_rows_from_payload(body)
     target = str(author).strip().casefold()
@@ -894,7 +1089,19 @@ def resolve_author_user(author: str) -> tuple[str, str]:
     user_id = str(exact.get("userId") or exact.get("id") or "")
     if not user_id.isascii() or not user_id.isdigit():
         raise SearchInputError("Pixiv 未返回有效的画师用户 ID")
-    return user_id, str(exact.get("name") or exact.get("userName") or author)
+    resolved_name = str(exact.get("name") or exact.get("userName") or author)
+    with AUTHOR_RESOLUTION_CACHE_LOCK:
+        for key, row in list(AUTHOR_RESOLUTION_CACHE.items()):
+            if row[0] <= now:
+                AUTHOR_RESOLUTION_CACHE.pop(key, None)
+        AUTHOR_RESOLUTION_CACHE[cache_key] = (
+            now + AUTHOR_RESOLUTION_TTL_SECONDS,
+            user_id,
+            resolved_name,
+        )
+        while len(AUTHOR_RESOLUTION_CACHE) > MAX_AUTHOR_RESOLUTION_CACHE:
+            AUTHOR_RESOLUTION_CACHE.popitem(last=False)
+    return user_id, resolved_name
 
 
 def load_user_profile_ids(user_id: str) -> list[str]:
@@ -914,11 +1121,20 @@ def load_user_profile_ids(user_id: str) -> list[str]:
 
 def load_user_profile_works(user_id: str, artwork_ids: list[str]) -> list[dict]:
     body = pixiv_json(build_user_profile_works_url(user_id, artwork_ids)).get("body") or {}
-    works = body.get("works") if isinstance(body, dict) else None
-    if works is None and isinstance(body, dict):
+    if not isinstance(body, dict):
+        raise PixivPolicyError("Pixiv 画师作品结果格式异常")
+    works = body.get("works")
+    if works is None:
         works = body
-    rows = list(works.values()) if isinstance(works, dict) else (works if isinstance(works, list) else [])
-    return [row for row in rows if isinstance(row, dict)]
+    if isinstance(works, dict):
+        rows = list(works.values())
+    elif isinstance(works, list):
+        rows = works
+    else:
+        raise PixivPolicyError("Pixiv 画师作品结果格式异常")
+    if any(not isinstance(row, dict) for row in rows):
+        raise PixivPolicyError("Pixiv 画师作品结果格式异常")
+    return list(rows)
 
 
 def search_user_results(
@@ -953,8 +1169,9 @@ def search_user_results(
         ):
             start = int(session["profileOffset"])
             batch_ids = ids[start:start + 48]
-            session["profileOffset"] = start + len(batch_ids)
             raw_rows = load_user_profile_works(user_id, batch_ids)
+            # Commit the cursor only after the request and basic response-shape
+            # validation succeed. Transient failures must retry this same batch.
             request_count += 1
             incoming: list[dict] = []
             for raw in raw_rows:
@@ -979,6 +1196,9 @@ def search_user_results(
                 if candidate["id"] not in session["seen"]:
                     session["seen"].add(candidate["id"])
                     session["items"].append(candidate)
+            # Row conversion is part of consuming this batch. Do not skip the
+            # IDs if an unexpected malformed field aborts conversion midway.
+            session["profileOffset"] = start + len(batch_ids)
 
         loaded = len(session["items"])
         exhausted = int(session["profileOffset"]) >= len(ids)
@@ -1005,7 +1225,12 @@ def search_user_results(
         available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
         prune_search_image_tokens(session_key, retained_pages=set(available_pages), replace_page=page)
         authorized_items = [
-            authorize_item_images(copy.deepcopy(item), search_session=session_key, search_page=page)
+            authorize_item_images(
+                copy.deepcopy(item),
+                search_session=session_key,
+                search_page=page,
+                authorization_epoch=authorization_epoch,
+            )
             for item in selected
         ]
         if scope in {"r18", "all"}:
@@ -1156,7 +1381,12 @@ def search_pixiv_results(
             session_key, retained_pages=set(available_pages), replace_page=page,
         )
         authorized_items = [
-            authorize_item_images(copy.deepcopy(item), search_session=session_key, search_page=page)
+            authorize_item_images(
+                copy.deepcopy(item),
+                search_session=session_key,
+                search_page=page,
+                authorization_epoch=authorization_epoch,
+            )
             for item in selected
         ]
         if scope in {"r18", "all"}:
@@ -1182,13 +1412,42 @@ def search_pixiv_results(
         }
 
 
-def pixiv_detail(artwork_id: str, allow_r18: bool = False) -> dict:
+def pixiv_detail(
+    artwork_id: str,
+    allow_r18: bool = False,
+    *,
+    authorization_epoch: int | None = None,
+) -> dict:
     if not artwork_id.isdigit():
         raise PixivPolicyError("无效作品 ID")
     detail = pixiv_json(f"https://www.pixiv.net/ajax/illust/{artwork_id}?lang=zh").get("body") or {}
     pages = pixiv_json(f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages?lang=zh").get("body") or []
-    item = authorize_item_images(normalize_detail(detail, pages, allow_r18=allow_r18))
-    return cache_pixiv_item(item)
+    normalized = normalize_detail(detail, pages, allow_r18=allow_r18)
+    restricted = normalized.get("restriction") == "r18"
+    if restricted:
+        if authorization_epoch is None:
+            raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新打开作品")
+        assert_authorization_generation(authorization_epoch)
+    item = authorize_item_images(
+        normalized,
+        authorization_epoch=authorization_epoch,
+    )
+    if not restricted:
+        return cache_pixiv_item(item)
+    try:
+        # Commit the restricted cache while holding the same generation guard
+        # used by logout. If logout won the race, discard every token created by
+        # this request and return no restricted response.
+        with SEARCH_SESSION_LOCKS_GUARD:
+            if (
+                not AUTHORIZATION_ACTIVE
+                or AUTHORIZATION_GENERATION != authorization_epoch
+            ):
+                raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新打开作品")
+            return cache_pixiv_item(item)
+    except Exception:
+        revoke_item_image_tokens(item)
+        raise
 
 
 IMAGE_EXTENSIONS = {
@@ -1265,8 +1524,7 @@ def approved_image_url(proxy_url: str, artwork_id: str) -> str:
         if not approved or approved[0] < time.time() or str(approved[1]) != str(artwork_id):
             raise PixivPolicyError("图片授权无效")
         approved = tuple(approved)
-    if len(approved) >= 4 and approved[3] == "r18" and not validated_session():
-        raise PixivPolicyError("R-18 图片授权已失效")
+    assert_image_token_authorization(approved)
     return str(approved[2])
 
 
@@ -2159,6 +2417,7 @@ def _stage_and_publish_download(
     *,
     prefix: str,
     stage: Callable[[Path, list[PublishedFileOwnership]], None],
+    authorization_epochs: set[int] | None = None,
 ) -> tuple[list[str], bool]:
     """Stage a complete request, then transfer the whole batch to publication."""
     staging_context = secure_staging_directory(save_root, prefix=prefix)
@@ -2174,15 +2433,35 @@ def _stage_and_publish_download(
                 ) from original
             raise
 
-        # Calling the publisher transfers ownership of the complete batch,
-        # including entries it has not visited yet.
-        public_saved = publish_staged_files(
-            staging_root,
-            staged,
-            save_root=save_root,
-            staging_locked=True,
-            public_paths=True,
-        )
+        def publish() -> list[str]:
+            # Calling the publisher transfers ownership of the complete batch,
+            # including entries it has not visited yet.
+            return publish_staged_files(
+                staging_root,
+                staged,
+                save_root=save_root,
+                staging_locked=True,
+                public_paths=True,
+            )
+
+        if authorization_epochs:
+            # Keep the generation guard from the final validation through the
+            # local commit. Logout is linearized after a completed publish, or
+            # wins first and causes every staged restricted byte to be removed.
+            with SEARCH_SESSION_LOCKS_GUARD:
+                try:
+                    for epoch in authorization_epochs:
+                        assert_authorization_generation(epoch)
+                except Exception as original:
+                    failures = _discard_owned_staging(staged)
+                    if failures:
+                        raise PublishRollbackError(
+                            f"授权撤销后有 {failures} 个暂存文件未能安全清理"
+                        ) from original
+                    raise
+                public_saved = publish()
+        else:
+            public_saved = publish()
     return public_saved, staging_context.cleanup_pending
 
 
@@ -2319,6 +2598,8 @@ class Handler(SimpleHTTPRequestHandler):
         if request.path.startswith("/api/pixiv/"):
             ensure_network_opener_current()
         if request.path == "/api/pixiv/search":
+            if TEST_FIXTURES_ENABLED:
+                return self._get_fixture_search(request)
             return self._get_pixiv_search(request)
         artwork_match = re.fullmatch(r"/api/pixiv/artwork/(\d+)", request.path)
         if artwork_match:
@@ -2328,19 +2609,7 @@ class Handler(SimpleHTTPRequestHandler):
         if request.path == "/api/search":
             if not TEST_FIXTURES_ENABLED:
                 return self.send_json({"error": "not found"}, 404)
-            query = urllib.parse.parse_qs(request.query)
-            tag = query.get("tag", ["原创"])[0][:60]
-            try:
-                page = max(1, int(query.get("page", ["1"])[0]))
-            except ValueError:
-                page = 1
-            all_items = fixture_records(tag)
-            per_page = 12
-            start = (page - 1) * per_page
-            return self.send_json({
-                "tag": tag, "total": len(all_items), "page": page,
-                "pages": 2, "items": all_items[start:start + per_page],
-            })
+            return self._get_fixture_search(request)
         image_match = re.fullmatch(r"/api/image/(\d+)/(\d+)", request.path)
         if image_match:
             if not TEST_FIXTURES_ENABLED:
@@ -2354,11 +2623,30 @@ class Handler(SimpleHTTPRequestHandler):
             )
         super().do_GET()
 
+    def _get_fixture_search(self, request):
+        query = urllib.parse.parse_qs(request.query)
+        tag = query.get("tag", ["原创"])[0][:60]
+        try:
+            page = max(1, int(query.get("page", ["1"])[0]))
+        except ValueError:
+            page = 1
+        all_items = fixture_records(tag)
+        per_page = 12
+        start = (page - 1) * per_page
+        return self.send_json({
+            "tag": tag, "total": len(all_items), "page": page,
+            "pages": 2, "pageNumbers": [1, 2],
+            "preloadedThrough": 2, "hasMore": False,
+            "perPage": per_page,
+            "items": all_items[start:start + per_page],
+        })
+
     def _get_pixiv_search(self, request):
         query = urllib.parse.parse_qs(request.query)
         tag_query = query.get("tag", ["原创"])[0]
         search_scope = query.get("mode", ["safe"])[0]
-        if search_scope in {"r18", "all"} and not validated_session():
+        session_authorized, session_epoch = validated_authorization()
+        if search_scope in {"r18", "all"} and not session_authorized:
             return self.send_json({"error": "R-18搜索需要先完成Pixiv账户授权"}, 403)
         work_type = query.get("workType", ["all"])[0]
         include_ai = query.get("includeAi", ["false"])[0].lower() == "true"
@@ -2368,8 +2656,9 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError:
             page = 1
         try:
-            session_authorized = validated_session()
-            authorization_epoch = authorization_generation() if search_scope in {"r18", "all"} else None
+            authorization_epoch = (
+                session_epoch if search_scope in {"r18", "all"} else None
+            )
             result = search_pixiv_results(
                 tag_query, search_scope, page, work_type, include_ai,
                 authorized=session_authorized, fuzzy=fuzzy,
@@ -2379,14 +2668,23 @@ class Handler(SimpleHTTPRequestHandler):
         except SearchInputError as exc:
             status = 403 if "授权" in str(exc) else 400
             return self.send_json({"error": str(exc)}, status)
+        except AuthorizationRevokedError as exc:
+            return self.send_json({"error": str(exc)}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json({"error": public_pixiv_error("Pixiv 搜索", exc)}, 502)
 
     def _get_pixiv_detail(self, artwork_id: str):
         try:
+            authorized, authorization_epoch = validated_authorization()
             return self.send_json(
-                pixiv_detail(artwork_id, allow_r18=validated_session()),
+                pixiv_detail(
+                    artwork_id,
+                    allow_r18=authorized,
+                    authorization_epoch=authorization_epoch,
+                ),
             )
+        except AuthorizationRevokedError as exc:
+            return self.send_json({"error": str(exc)}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json({"error": public_pixiv_error("作品详情", exc)}, 502)
 
@@ -2397,10 +2695,19 @@ class Handler(SimpleHTTPRequestHandler):
             if not approved or approved[0] < time.time():
                 IMAGE_TOKENS.pop(token, None)
                 approved = None
-            elif len(approved) >= 4 and approved[3] == "r18" and not validated_session():
-                approved = None
             else:
                 approved = tuple(approved)
+        # Session validation can revoke caches and therefore takes the
+        # authorization-generation lock before PIXIV_STATE_LOCK. Never call it
+        # while holding PIXIV_STATE_LOCK or restricted detail commit can deadlock.
+        if approved is not None:
+            try:
+                assert_image_token_authorization(approved)
+            except AuthorizationRevokedError:
+                with PIXIV_STATE_LOCK:
+                    if IMAGE_TOKENS.get(token) == approved:
+                        IMAGE_TOKENS.pop(token, None)
+                approved = None
         if approved is None:
             return self.send_json({"error": "图片授权已失效"}, 403)
         try:
@@ -2409,7 +2716,9 @@ class Handler(SimpleHTTPRequestHandler):
                 still_approved = IMAGE_TOKENS.get(token)
                 if still_approved != approved or approved[0] < time.time():
                     return self.send_json({"error": "图片授权已失效"}, 403)
-            if len(approved) >= 4 and approved[3] == "r18" and not validated_session():
+            try:
+                assert_image_token_authorization(approved)
+            except AuthorizationRevokedError:
                 return self.send_json({"error": "R-18 图片授权已失效"}, 403)
             if not content_type.startswith("image/"):
                 raise PixivPolicyError("Pixiv 返回的不是图片")
@@ -2418,12 +2727,22 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": public_pixiv_error("图片代理", exc)}, 502)
 
     def do_POST(self):
-        authorization_error = validate_mutating_request(self)
+        path = urllib.parse.urlsplit(self.path).path
+        desktop_auth_path = path in {
+            "/api/desktop/auth/session",
+            "/api/desktop/auth/logout",
+        }
+        authorization_error = (
+            validate_desktop_auth_request(self)
+            if desktop_auth_path
+            else validate_mutating_request(self)
+        )
         if authorization_error:
             return self.send_json({"error": authorization_error[1]}, authorization_error[0])
-        path = urllib.parse.urlsplit(self.path).path
         routes = {
             "/api/auth/logout": (4096, self._post_logout),
+            "/api/desktop/auth/session": (4096, self._post_desktop_session),
+            "/api/desktop/auth/logout": (4096, self._post_desktop_logout),
             "/api/system/select-folder": (4096, self._post_select_folder),
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
             "/api/pixiv/download": (16384, self._post_pixiv_download),
@@ -2437,13 +2756,48 @@ class Handler(SimpleHTTPRequestHandler):
             data = self.read_json_object(route[0])
         except RequestInputError as exc:
             return self.send_json({"error": str(exc)}, exc.status)
-        if path.startswith("/api/pixiv/"):
-            ensure_network_opener_current()
-        return route[1](data)
+        is_download_task = path in {
+            "/api/pixiv/batch-download",
+            "/api/pixiv/download",
+        }
+        if is_download_task and not DOWNLOAD_TASK_SLOTS.acquire(blocking=False):
+            return self.send_json({
+                "error": "下载任务繁忙，请等待当前任务完成后重试",
+                "retryable": True,
+            }, 429)
+        try:
+            if path.startswith("/api/pixiv/"):
+                ensure_network_opener_current()
+            return route[1](data)
+        finally:
+            if is_download_task:
+                DOWNLOAD_TASK_SLOTS.release()
 
     def _post_logout(self, _data: dict):
-        disconnect_authorized_session()
-        return self.send_json({"ok": True})
+        try:
+            disconnect_authorized_session()
+            return self.send_json({"ok": True})
+        except OSError:
+            return self.send_json({
+                "ok": False,
+                "error": "当前会话已断开，但 Windows 凭据删除失败",
+            }, 500)
+
+    def _post_desktop_session(self, data: dict):
+        value = data.get("session")
+        remember = data.get("remember", False)
+        if not isinstance(value, str) or not isinstance(remember, bool):
+            return self.send_json({"error": "桌面认证请求格式无效"}, 400)
+        try:
+            connect_authorized_session(value, remember=remember)
+        except ValueError:
+            return self.send_json({"error": "Pixiv 会话格式无效"}, 400)
+        except OSError:
+            return self.send_json({"error": "Windows 凭据保存失败"}, 500)
+        return self.send_json({"ok": True, "remembered": remember})
+
+    def _post_desktop_logout(self, _data: dict):
+        return self._post_logout(_data)
 
     def _post_select_folder(self, data: dict):
         if not FOLDER_PICKER_LOCK.acquire(blocking=False):
@@ -2544,15 +2898,25 @@ class Handler(SimpleHTTPRequestHandler):
             }, 400)
 
         try:
+            restricted_epochs: set[int] = set()
+
             def stage_batch(
                 staging_root: Path,
                 staged: list[PublishedFileOwnership],
             ) -> None:
                 for artwork_id, page_set in normalized.items():
-                    authorized = validated_session()
-                    item = pixiv_item_for_download(artwork_id, allow_r18=authorized)
+                    authorized, authorization_epoch = validated_authorization()
+                    item = pixiv_item_for_download(
+                        artwork_id,
+                        allow_r18=authorized,
+                        authorization_epoch=authorization_epoch,
+                    )
                     if item.get("restriction") == "r18" and not authorized:
                         raise PixivPolicyError("R-18 下载需要有效账户授权")
+                    if item.get("restriction") == "r18":
+                        if authorization_epoch is None:
+                            raise AuthorizationRevokedError("R-18 下载授权已失效")
+                        restricted_epochs.add(authorization_epoch)
                     staged.extend(stage_artwork_pages(
                         item, sorted(page_set), quality, save_root,
                         create_folder, staging_root,
@@ -2564,6 +2928,7 @@ class Handler(SimpleHTTPRequestHandler):
                 save_root,
                 prefix=".moku-batch-",
                 stage=stage_batch,
+                authorization_epochs=restricted_epochs,
             )
             response_payload = {
                 "ok": True, "saved": public_saved,
@@ -2571,6 +2936,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "cleanupPending": cleanup_pending,
             }
             response_status = 200
+        except AuthorizationRevokedError as exc:
+            response_payload = {"error": str(exc)}
+            response_status = 403
         except PIXIV_OPERATION_ERRORS as exc:
             response_payload = {
                 "error": public_pixiv_error("批量下载", exc, saving=True),
@@ -2590,17 +2958,31 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(exc)}, exc.status)
 
         try:
-            authorized = validated_session()
-            item = pixiv_item_for_download(artwork_id, allow_r18=authorized)
+            authorized, authorization_epoch = validated_authorization()
+            item = pixiv_item_for_download(
+                artwork_id,
+                allow_r18=authorized,
+                authorization_epoch=authorization_epoch,
+            )
+            page_images = item.get("pageImages")
+            if not isinstance(page_images, list) or not page_images:
+                raise PixivPolicyError("作品详情不完整")
+            if len(page_images) > DOWNLOAD_CHUNK_PAGES:
+                raise PixivPolicyError(
+                    f"单作品下载最多处理 {DOWNLOAD_CHUNK_PAGES} 张图片"
+                )
             if item.get("restriction") == "r18" and not authorized:
                 raise PixivPolicyError("R-18 下载需要有效账户授权")
+            restricted_epochs = (
+                {authorization_epoch}
+                if item.get("restriction") == "r18"
+                and authorization_epoch is not None
+                else set()
+            )
             def stage_single(
                 staging_root: Path,
                 staged: list[PublishedFileOwnership],
             ) -> None:
-                page_images = item.get("pageImages")
-                if not isinstance(page_images, list):
-                    raise PixivPolicyError("作品详情不完整")
                 staged.extend(stage_artwork_pages(
                     item, list(range(len(page_images))), quality, save_root,
                     create_folder, staging_root,
@@ -2611,6 +2993,7 @@ class Handler(SimpleHTTPRequestHandler):
                 save_root,
                 prefix=".moku-single-",
                 stage=stage_single,
+                authorization_epochs=restricted_epochs,
             )
             response_payload = {
                 "ok": True, "saved": public_saved,
@@ -2618,6 +3001,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "cleanupPending": cleanup_pending,
             }
             response_status = 200
+        except AuthorizationRevokedError as exc:
+            response_payload = {"error": str(exc)}
+            response_status = 403
         except PIXIV_OPERATION_ERRORS as exc:
             response_payload = {
                 "error": public_pixiv_error("Pixiv 下载", exc, saving=True),

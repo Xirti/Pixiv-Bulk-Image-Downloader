@@ -36,6 +36,12 @@ class HistoryAndR18Tests(unittest.TestCase):
         with self.assertRaises(PixivPolicyError):
             normalize_search_item(self._item(2), allow_r18=True)
 
+    def test_r18_search_policy_does_not_assume_missing_unlisted_flag_is_public(self):
+        missing_policy = self._item(1)
+        del missing_policy["isUnlisted"]
+        with self.assertRaises(PixivPolicyError):
+            normalize_search_item(missing_policy, allow_r18=True)
+
     def test_r18_search_must_return_actual_r18_rows(self):
         import server
         with patch.object(server, "pixiv_json", return_value={"body":{"illustManga":{"total":1,"lastPage":1,"data":[self._item(0)]}}}):

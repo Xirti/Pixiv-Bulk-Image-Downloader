@@ -89,6 +89,43 @@ class NetworkSelectionRegressionTests(unittest.TestCase):
             "http": "http://127.0.0.1:7890",
             "https": "http://127.0.0.1:7890",
         })
+        self.assertIsInstance(proxy_handlers[0], server.StrictLoopbackProxyHandler)
+
+
+    def test_selected_loopback_proxy_ignores_environment_bypass_rules(self):
+        state = {
+            "mode": "system-proxy",
+            "proxyEnabled": True,
+            "proxyServer": "127.0.0.1:7890",
+            "proxyStored": "127.0.0.1:7890",
+            "pac": "",
+            "environmentProxy": False,
+        }
+        addresses = []
+
+        def capture_connection(address, *args, **kwargs):
+            addresses.append(address)
+            raise ConnectionRefusedError("probe stopped after route selection")
+
+        with patch.object(server, "windows_proxy_state", return_value=state), \
+             patch.dict(os.environ, {
+                 "HTTPS_PROXY": "", "https_proxy": "",
+                 "NO_PROXY": "*", "no_proxy": "*",
+             }, clear=False):
+            self.assertEqual(
+                server.refresh_network_opener(),
+                "http://127.0.0.1:7890",
+            )
+            with patch.object(socket, "create_connection", side_effect=capture_connection):
+                with self.assertRaises(OSError):
+                    server.pixiv_request(
+                        "https://www.pixiv.net/ajax/search/artworks/test",
+                        anonymous=True,
+                        attempts=1,
+                    )
+
+        self.assertTrue(addresses)
+        self.assertEqual(addresses[0], ("127.0.0.1", 7890))
 
 
     def test_unchanged_network_selection_does_not_rebuild_opener(self):

@@ -55,6 +55,65 @@ class PackagedAppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_root, patch.object(sys, "_MEIPASS", raw_root, create=True):
             self.assertEqual(moku_app.runtime_resource_root(), Path(raw_root))
 
+    def test_runtime_descriptor_round_trips_native_desktop_capability(self):
+        import moku_app
+
+        capability = "A" * 32
+        with tempfile.TemporaryDirectory() as raw_root:
+            runtime_file = Path(raw_root) / "runtime" / "backend.json"
+            moku_app.write_runtime(runtime_file, 45678, "instance-1", capability)
+            runtime = moku_app.load_runtime(runtime_file)
+
+        self.assertEqual(moku_app.runtime_desktop_auth_token(runtime), capability)
+        self.assertEqual(runtime["desktopAuthToken"], capability)
+
+    def test_healthy_runtime_requires_browser_request_token_protocol(self):
+        import moku_app
+
+        runtime = {
+            "port": 45678,
+            "instanceId": "instance-1",
+            "protocolVersion": server.PROTOCOL_VERSION,
+            "applicationId": server.APPLICATION_ID,
+            "codeGeneration": server.CODE_GENERATION,
+        }
+        health = {
+            "instanceId": "instance-1",
+            "protocolVersion": server.PROTOCOL_VERSION,
+            "applicationId": server.APPLICATION_ID,
+            "codeGeneration": server.CODE_GENERATION,
+        }
+        with patch.object(moku_app, "read_json", return_value=health):
+            self.assertIsNone(moku_app.healthy_runtime(runtime))
+            health["requestToken"] = "browser-request-token"
+            self.assertEqual(
+                moku_app.healthy_runtime(runtime),
+                "http://127.0.0.1:45678/",
+            )
+
+    def test_reused_runtime_passes_descriptor_capability_to_desktop(self):
+        import moku_app
+
+        capability = "B" * 32
+        runtime = {"desktopAuthToken": capability}
+        url = "http://127.0.0.1:45678/"
+        with tempfile.TemporaryDirectory() as raw_root, patch.object(
+            moku_app, "runtime_resource_root", return_value=Path(raw_root)
+        ), patch.object(
+            moku_app, "writable_data_root", return_value=Path(raw_root)
+        ), patch.object(moku_app, "configure_logging"), patch.object(
+            moku_app, "configure_server_paths"
+        ), patch.object(moku_app.server, "refresh_network_opener"), patch.object(
+            moku_app, "runtime_directory", return_value=Path(raw_root) / "runtime"
+        ), patch.object(
+            moku_app, "named_mutex", return_value=nullcontext()
+        ), patch.object(moku_app, "load_runtime", return_value=runtime), patch.object(
+            moku_app, "healthy_runtime", return_value=url
+        ), patch.object(moku_app, "launch_desktop") as launch:
+            self.assertEqual(moku_app.run([]), 0)
+
+        launch.assert_called_once_with(url, server.PIXIV_PROXY, capability)
+
     def test_configure_server_paths_separates_resources_and_writable_data(self):
         import moku_app
 
@@ -113,12 +172,17 @@ class PackagedAppTests(unittest.TestCase):
         import desktop_client
 
         observed = []
-        def start(*_args):
+        def start(*_args, **_kwargs):
             observed.append(moku_app.os.environ.get("WEBVIEW2_USER_DATA_FOLDER"))
 
-        with patch.dict(moku_app.os.environ, {"WEBVIEW2_USER_DATA_FOLDER": "foreign-profile"}, clear=False), patch.object(
-            desktop_client, "start_desktop", side_effect=start
-        ):
+        with tempfile.TemporaryDirectory() as raw_local, patch.dict(
+            moku_app.os.environ,
+            {
+                "LOCALAPPDATA": raw_local,
+                "WEBVIEW2_USER_DATA_FOLDER": "foreign-profile",
+            },
+            clear=False,
+        ), patch.object(desktop_client, "start_desktop", side_effect=start):
             moku_app.launch_desktop("http://127.0.0.1:45678/")
             self.assertEqual(moku_app.os.environ.get("WEBVIEW2_USER_DATA_FOLDER"), "foreign-profile")
         self.assertEqual(observed, [None])
@@ -131,7 +195,7 @@ class PackagedAppTests(unittest.TestCase):
         observed = []
         with patch.dict(moku_app.os.environ, {"PYTHONNET_RUNTIME": "coreclr"}, clear=False), patch.object(
             desktop_client, "start_desktop",
-            side_effect=lambda *_args: observed.append(moku_app.os.environ.get("PYTHONNET_RUNTIME")),
+            side_effect=lambda *_args, **_kwargs: observed.append(moku_app.os.environ.get("PYTHONNET_RUNTIME")),
         ):
             moku_app._start_webview(
                 "http://127.0.0.1:45678/", Path("C:/tmp/moku-profile"), ""
@@ -186,12 +250,24 @@ class PackagedAppTests(unittest.TestCase):
         lock = (ROOT / "requirements.lock").read_text(encoding="utf-8-sig")
         self.assertIn("moku_app.py", spec)
         self.assertIn("webview", spec.lower())
+        self.assertIn("icon='assets/moku-icon.ico'", spec)
         self.assertIn("pywebview==6.2.1", lock.lower())
         self.assertIn("from search_service import", (ROOT / "server.py").read_text(encoding="utf-8"))
         build = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("$env:MOKU_CODE_GENERATION = $null", build)
         self.assertIn("$env:MOKU_ENABLE_TEST_FIXTURES = $null", build)
         self.assertIn("^exe-sha256:[0-9a-f]{64}$", build)
+
+    def test_powershell_launcher_keeps_desktop_capability_out_of_child_environment(self):
+        launcher = (ROOT / "launch-moku.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("RandomNumberGenerator", launcher)
+        self.assertIn("desktopAuthToken=$desktopAuthToken", launcher)
+        self.assertIn("$env:MOKU_DESKTOP_AUTH_TOKEN = $desktopAuthToken", launcher)
+        self.assertIn("Remove-Item Env:MOKU_DESKTOP_AUTH_TOKEN", launcher)
+        self.assertLess(
+            launcher.index("Remove-Item Env:MOKU_DESKTOP_AUTH_TOKEN"),
+            launcher.index("if($desktopChosen)"),
+        )
 
     def test_spec_excludes_non_windows_x64_backends_and_debug_artifacts(self):
         spec = (ROOT / "MOKU.spec").read_text(encoding="utf-8-sig")

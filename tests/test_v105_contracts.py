@@ -133,7 +133,9 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn('class="moon-ring"', HTML)
         self.assertIn('class="art-constellation constellation-one"', HTML)
         self.assertIn("aria-hidden=\"true\"", HTML)
-        self.assertNotIn("requestAnimationFrame", APP)
+        scheduler = APP[APP.index("function schedulePaginationDockUpdate"):APP.index("async function select")]
+        self.assertEqual(APP.count("requestAnimationFrame("), 1)
+        self.assertIn("requestAnimationFrame(run)", scheduler)
         self.assertNotIn("setInterval", APP)
 
     def test_art_layers_are_bounded_and_disabled_in_conservative_mode(self):
@@ -155,7 +157,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn('aria-hidden="true"', HTML)
         self.assertIn(".saturn-ring", STYLE)
         self.assertIn("html.conservative .moon-ring,html.conservative .saturn-ring", STYLE)
-        self.assertNotIn("requestAnimationFrame", APP)
+        self.assertEqual(APP.count("requestAnimationFrame("), 1)
         self.assertNotIn("backdrop-filter", STYLE)
         self.assertNotIn("filter:", STYLE)
 
@@ -228,13 +230,13 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertNotIn("fetchJson", summary)
         self.assertIn("openBasketArtworkPicker", summary)
         picker = APP[APP.index("function openBasketArtworkPicker"):APP.index("function selectedGroups")]
-        self.assertIn("chosen.map", picker)
+        self.assertIn("chosen.slice(start, end).map", picker)
         self.assertIn("data-open-collection", picker)
         self.assertIn("openBatchCollection", picker)
 
     def test_multi_artwork_picker_opens_only_after_summary_and_page_badge_opens_images(self):
         picker = APP[APP.index("function openBasketArtworkPicker"):APP.index("function selectedGroups")]
-        self.assertIn("chosen.map", picker)
+        self.assertIn("chosen.slice(start, end).map", picker)
         self.assertIn("data-batch-select", picker)
         self.assertIn("data-open-collection", picker)
         self.assertIn("batch-page-count", picker)
@@ -269,7 +271,8 @@ class V105VisualContractTests(unittest.TestCase):
         ]
         self.assertIn("toggleArtworkSelection(item, true)", select_all)
         self.assertIn("additionalPages", select_all)
-        self.assertIn("selectedPagesByArtwork.set(item.id, allPages)", select_all)
+        self.assertIn("validatedArtworkPageCount(item)", select_all)
+        self.assertNotIn("Array.from", select_all)
         self.assertIn("无法全选", select_all)
         self.assertIn("render()", select_all)
 
@@ -279,7 +282,9 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn(".pagination-dock.is-visible{display:flex}", STYLE)
         self.assertIn("function updatePaginationDock()", APP)
         self.assertIn('Boolean($("#pagination").children.length)', APP)
-        self.assertIn('window.addEventListener("scroll", updatePaginationDock, { passive: true })', APP)
+        self.assertIn("function schedulePaginationDockUpdate()", APP)
+        self.assertIn('window.addEventListener("scroll", schedulePaginationDockUpdate, { passive: true })', APP)
+        self.assertIn('window.addEventListener("resize", schedulePaginationDockUpdate, { passive: true })', APP)
         self.assertIn("z-index:11", STYLE)
         self.assertIn(".results{padding:55px 5vw 96px", STYLE)
 

@@ -76,18 +76,21 @@ class DesktopClientTests(unittest.TestCase):
         login.get_current_url.return_value = "https://www.pixiv.net/"
         login.get_cookies.return_value = [cookie]
         window_factory = Mock(return_value=login)
-        api = desktop_client.DesktopApi(window_factory=window_factory, poll_interval=0)
+        auth_request = Mock(return_value={"ok": True})
+        api = desktop_client.DesktopApi(
+            window_factory=window_factory,
+            poll_interval=0,
+            auth_request=auth_request,
+        )
 
-        with patch.object(desktop_client, "store_session") as store, patch.object(
-            desktop_client, "mark_authorized_session"
-        ) as mark:
-            result = api.pixiv_login(remember=True)
+        result = api.pixiv_login(remember=True)
 
         self.assertTrue(result["ok"])
         window_factory.assert_called_once()
         self.assertTrue(window_factory.call_args.kwargs["url"].startswith("https://www.pixiv.net/login.php"))
-        store.assert_called_once_with("abcdefgh", remember=True)
-        mark.assert_called_once_with()
+        auth_request.assert_called_once_with(
+            "session", {"session": "abcdefgh", "remember": True}
+        )
         login.destroy.assert_called_once_with()
 
     def test_desktop_accepts_pixiv_home_and_eligible_cookie_without_self_endpoint(self):
@@ -101,16 +104,19 @@ class DesktopClientTests(unittest.TestCase):
         login.events.loaded.is_set.return_value = True
         login.get_current_url.return_value = "https://www.pixiv.net/"
         login.get_cookies.return_value = [cookie]
-        api = desktop_client.DesktopApi(window_factory=Mock(return_value=login), poll_interval=0)
+        auth_request = Mock(return_value={"ok": True})
+        api = desktop_client.DesktopApi(
+            window_factory=Mock(return_value=login),
+            poll_interval=0,
+            auth_request=auth_request,
+        )
 
-        with patch.object(desktop_client, "store_session") as store, patch.object(
-            desktop_client, "mark_authorized_session"
-        ) as mark:
-            result = api.pixiv_login(remember=True)
+        result = api.pixiv_login(remember=True)
 
         self.assertTrue(result["ok"])
-        store.assert_called_once_with("abcdefgh", remember=True)
-        mark.assert_called_once_with()
+        auth_request.assert_called_once_with(
+            "session", {"session": "abcdefgh", "remember": True}
+        )
 
     def test_desktop_does_not_accept_cookie_while_still_on_pixiv_login_page(self):
         cookie = create_cookie({
@@ -123,13 +129,17 @@ class DesktopClientTests(unittest.TestCase):
         login.events.loaded.is_set.return_value = True
         login.get_current_url.return_value = "https://accounts.pixiv.net/login"
         login.get_cookies.return_value = [cookie]
-        api = desktop_client.DesktopApi(window_factory=Mock(return_value=login), poll_interval=0)
+        auth_request = Mock(return_value={"ok": True})
+        api = desktop_client.DesktopApi(
+            window_factory=Mock(return_value=login),
+            poll_interval=0,
+            auth_request=auth_request,
+        )
 
-        with patch.object(desktop_client, "store_session") as store:
-            result = api.pixiv_login(remember=False)
+        result = api.pixiv_login(remember=False)
 
         self.assertFalse(result["ok"])
-        store.assert_not_called()
+        auth_request.assert_not_called()
 
     def test_start_desktop_can_run_internal_probe_callback_without_enabling_it_by_default(self):
         main = Mock()
@@ -205,13 +215,17 @@ class DesktopClientTests(unittest.TestCase):
         login.events.loaded.is_set.return_value = True
         login.get_current_url.return_value = "https://example.com/"
         login.get_cookies.return_value = [cookie]
-        api = desktop_client.DesktopApi(window_factory=Mock(return_value=login), poll_interval=0)
+        auth_request = Mock(return_value={"ok": True})
+        api = desktop_client.DesktopApi(
+            window_factory=Mock(return_value=login),
+            poll_interval=0,
+            auth_request=auth_request,
+        )
 
-        with patch.object(desktop_client, "store_session") as store:
-            result = api.pixiv_login(remember=False)
+        result = api.pixiv_login(remember=False)
 
         self.assertFalse(result["ok"])
-        store.assert_not_called()
+        auth_request.assert_not_called()
 
     def test_desktop_login_rejects_malformed_cookie_even_on_pixiv_home(self):
         cookie = create_cookie({
@@ -224,12 +238,25 @@ class DesktopClientTests(unittest.TestCase):
         login.events.loaded.is_set.return_value = True
         login.get_current_url.return_value = "https://www.pixiv.net/"
         login.get_cookies.return_value = [cookie]
-        api = desktop_client.DesktopApi(window_factory=Mock(return_value=login), poll_interval=0)
-        with patch.object(desktop_client, "store_session") as store:
-            result = api.pixiv_login(remember=False)
+        auth_request = Mock(return_value={"ok": True})
+        api = desktop_client.DesktopApi(
+            window_factory=Mock(return_value=login),
+            poll_interval=0,
+            auth_request=auth_request,
+        )
+        result = api.pixiv_login(remember=False)
         self.assertFalse(result["ok"])
-        store.assert_not_called()
+        auth_request.assert_not_called()
         login.destroy.assert_not_called()
+
+    def test_desktop_logout_is_submitted_to_the_backend_process(self):
+        auth_request = Mock(return_value={"ok": True, "authenticated": False})
+        api = desktop_client.DesktopApi(auth_request=auth_request)
+
+        result = api.pixiv_logout()
+
+        self.assertTrue(result["ok"])
+        auth_request.assert_called_once_with("logout", {})
 
 
 if __name__ == "__main__":

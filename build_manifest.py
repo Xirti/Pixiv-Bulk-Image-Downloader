@@ -41,6 +41,8 @@ ALLOWED_TOP_LEVEL_DISTRIBUTION_METADATA = (
 BUILD_INPUT_FILES = (
     *server.CODE_GENERATION_FILES,
     "MOKU.spec",
+    "assets/moku-icon.ico",
+    "assets/moku-icon.png",
     "requirements.lock",
     "requirements-dev.lock",
     "build-portable.ps1",

@@ -67,7 +67,9 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn("login.get_cookies()", DESKTOP)
         self.assertIn("is_completed_pixiv_login_url", DESKTOP)
         self.assertIn("select_session_cookie", DESKTOP)
-        self.assertIn("store_session", DESKTOP)
+        self.assertIn("desktop_auth_request", DESKTOP)
+        self.assertIn("X-MOKU-Desktop-Capability", DESKTOP)
+        self.assertNotIn("from auth_store import", DESKTOP)
         self.assertNotIn("verify_session_status", DESKTOP)
 
     def test_desktop_launcher_starts_webview_host_not_edge_app(self):

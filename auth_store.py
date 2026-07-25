@@ -9,7 +9,10 @@ from ctypes import wintypes
 TARGET = "MOKU.Pixiv.PHPSESSID"
 CRED_TYPE_GENERIC = 1
 CRED_PERSIST_LOCAL_MACHINE = 2
+ERROR_NOT_FOUND = 1168
 _MEMORY_SESSION = ""
+_SESSION_CACHE_UNSET = object()
+_PERSISTENT_SESSION_CACHE: str | object = _SESSION_CACHE_UNSET
 _SESSION_LOCK = threading.RLock()
 
 
@@ -23,13 +26,14 @@ class CREDENTIALW(ctypes.Structure):
     ]
 
 
-advapi32 = ctypes.WinDLL("Advapi32.dll")
+advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
 advapi32.CredWriteW.argtypes = [ctypes.POINTER(CREDENTIALW), wintypes.DWORD]
 advapi32.CredWriteW.restype = wintypes.BOOL
 advapi32.CredReadW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.POINTER(CREDENTIALW))]
 advapi32.CredReadW.restype = wintypes.BOOL
 advapi32.CredFree.argtypes = [wintypes.LPVOID]
 advapi32.CredDeleteW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD]
+advapi32.CredDeleteW.restype = wintypes.BOOL
 
 
 def validate_session_value(value: str) -> str:
@@ -74,12 +78,22 @@ def read_persistent_session() -> str:
 def delete_persistent_session() -> None:
     if persistent_session_disabled():
         return
-    advapi32.CredDeleteW(TARGET, CRED_TYPE_GENERIC, 0)
+    ctypes.set_last_error(0)
+    if advapi32.CredDeleteW(TARGET, CRED_TYPE_GENERIC, 0):
+        return
+    error = ctypes.get_last_error()
+    if error != ERROR_NOT_FOUND:
+        raise ctypes.WinError(error)
 
 
 def delete_session() -> None:
+    global _MEMORY_SESSION, _PERSISTENT_SESSION_CACHE
     with _SESSION_LOCK:
-        clear_memory_session()
+        # Commit the in-process logout before touching Credential Manager. If
+        # durable deletion fails, this backend must not immediately reload the
+        # old credential and silently undo the user's logout.
+        _MEMORY_SESSION = ""
+        _PERSISTENT_SESSION_CACHE = ""
         delete_persistent_session()
 
 
@@ -90,19 +104,29 @@ def clear_memory_session() -> None:
 
 
 def store_session(value: str, remember: bool = False) -> None:
-    global _MEMORY_SESSION
+    global _MEMORY_SESSION, _PERSISTENT_SESSION_CACHE
     value = validate_session_value(value)
     with _SESSION_LOCK:
-        _MEMORY_SESSION = value
         if remember:
+            # Persist first. A failed CredWrite must leave the old in-memory
+            # authorization untouched instead of committing a half-login.
             write_persistent_session(value)
+            persistent_value = "" if persistent_session_disabled() else value
         else:
             delete_persistent_session()
+            persistent_value = ""
+        _MEMORY_SESSION = value
+        _PERSISTENT_SESSION_CACHE = persistent_value
 
 
 def read_session() -> str:
+    global _PERSISTENT_SESSION_CACHE
     with _SESSION_LOCK:
-        return _MEMORY_SESSION or read_persistent_session()
+        if _MEMORY_SESSION:
+            return _MEMORY_SESSION
+        if _PERSISTENT_SESSION_CACHE is _SESSION_CACHE_UNSET:
+            _PERSISTENT_SESSION_CACHE = read_persistent_session()
+        return str(_PERSISTENT_SESSION_CACHE or "")
 
 
 # Backward-compatible name for existing callers/tests.

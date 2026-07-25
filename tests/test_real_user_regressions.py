@@ -35,7 +35,16 @@ def wait_health(port: int) -> None:
 
 class WorkflowRegressionTests(unittest.TestCase):
     def test_card_selection_initializes_all_pages_for_batch_payload(self):
-        self.assertIn("selectedPagesByArtwork.set(item.id, new Set(Array.from({ length: item.pages }, (_, page) => page)))", APP)
+        toggle_block = APP[
+            APP.index("function toggleArtworkSelection"):
+            APP.index("function selectAllCurrentPage")
+        ]
+        self.assertIn("const pageCount = validatedArtworkPageCount(item)", toggle_block)
+        self.assertIn("if (pageCount === null)", toggle_block)
+        self.assertIn(
+            "selectedPagesByArtwork.set(item.id, new Set(Array.from({ length: pageCount }, (_, page) => page)))",
+            toggle_block,
+        )
 
     def test_clear_detail_removes_stale_page_controls(self):
         clear_block = APP[APP.index("function clearDetail"):APP.index("function updateSelectionBar")]

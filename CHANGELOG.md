@@ -2,6 +2,27 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.10] - 2026-07-25
+
+### Security
+
+- Linearize account connect, disconnect, and replacement so stale login work cannot restore a cleared session; bind R-18 image capabilities to the active authorization generation and return protected responses with `no-store`.
+- Keep direct and TUN requests fail-closed by disabling implicit environment and Windows proxy bypasses, while accepting only explicitly selected loopback proxies.
+- Stage downloads transactionally, recheck authorization before publication, and roll back every file and directory created by a failed or revoked task.
+
+### Changed
+
+- Use the project-provided artwork as a multi-resolution Windows executable icon and bind both its source PNG and generated ICO into the release fingerprint.
+- Limit active download tasks to two, reject saturation with HTTP 429, cap one-artwork downloads at 200 pages, and cache bounded author resolution results in a 64-entry five-minute LRU.
+- Window large detail, continuous-viewer, and collection-basket renders to reduce DOM, image, and layout pressure while preserving current selections.
+- Make the synthetic fixture gallery drive the complete interface for repeatable desktop and responsive-layout verification.
+
+### Fixed
+
+- Recover expired preview capabilities once per failed URL with deduplicated refreshes and cooldown, without reusing stale tokens after logout or cache eviction.
+- Prevent stale search, detail, logout, selection, and multi-request download state from overwriting the latest page or task context.
+- Keep long remote labels, navigation, pagination, detail views, and basket controls usable down to 320-pixel-wide layouts.
+
 ## [1.0.9] - 2026-07-22
 
 ### Changed

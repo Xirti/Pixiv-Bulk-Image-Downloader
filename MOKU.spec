@@ -103,6 +103,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='MOKU',
+    icon='assets/moku-icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

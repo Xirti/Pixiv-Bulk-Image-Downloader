@@ -19,7 +19,9 @@ class MinimalClientTests(unittest.TestCase):
     def test_expensive_decorative_systems_are_removed(self):
         self.assertNotIn("backdrop-filter", STYLE)
         self.assertNotIn("filter:", STYLE)
-        self.assertNotIn("requestAnimationFrame", APP)
+        scheduler = APP[APP.index("function schedulePaginationDockUpdate"):APP.index("async function select")]
+        self.assertEqual(APP.count("requestAnimationFrame("), 1)
+        self.assertIn("requestAnimationFrame(run)", scheduler)
         self.assertNotIn("IntersectionObserver", APP)
         self.assertNotIn("bindRipple", APP)
         self.assertNotIn("previewMode", HTML)

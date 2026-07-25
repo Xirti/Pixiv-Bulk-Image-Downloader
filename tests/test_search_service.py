@@ -124,11 +124,13 @@ class SearchServiceTests(unittest.TestCase):
 class SearchAggregationTests(unittest.TestCase):
     def setUp(self):
         import server
+        server.clear_authorized_state()
         server.reset_search_caches()
 
     def tearDown(self):
         import server
         server.reset_search_caches()
+        server.clear_authorized_state()
 
     @staticmethod
     def _raw(artwork_id: int, tag: str, restriction: int, day: int, *, all_tags=None) -> dict:
@@ -155,8 +157,14 @@ class SearchAggregationTests(unittest.TestCase):
             rows.append(self._raw(9999, tag, restriction, 30, all_tags=["猫", "夜景"]))
             return {"rows": rows, "hasMore": False, "budgetExhausted": False, "truncatedDates": []}
 
+        server.mark_authorized_session()
+        epoch = server.authorization_generation()
         with patch.object(server, "load_search_source", side_effect=fake_source):
-            result = server.search_pixiv_results("猫；夜景", "all", 1, "all", True, authorized=True)
+            result = server.search_pixiv_results(
+                "猫；夜景", "all", 1, "all", True,
+                authorized=True,
+                authorization_epoch=epoch,
+            )
 
         self.assertEqual(set(calls), {("猫", "safe"), ("猫", "r18"), ("夜景", "safe"), ("夜景", "r18")})
         self.assertEqual(result["tags"], ["猫", "夜景"])

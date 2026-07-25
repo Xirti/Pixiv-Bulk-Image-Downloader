@@ -39,7 +39,7 @@ class FrontendStartupBudgetTests(unittest.TestCase):
         self.assertIn('"MOKU" / "WebView2Sessions"', source)
         self.assertIn('mkdtemp(prefix="session-"', source)
         self.assertIn("remove_webview_profile(storage_path)", source)
-        self.assertIn("launch_desktop(url", source)
+        self.assertRegex(source, r"launch_desktop\(\s*url,\s*server\.PIXIV_PROXY")
 
     def test_conservative_mode_disables_continuous_decorative_work(self):
         source = APP.read_text(encoding="utf-8")

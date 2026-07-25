@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,33 @@ class BuildManifestTests(unittest.TestCase):
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
+
+    def test_multiresolution_application_icon_is_fingerprinted(self):
+        png_relative = "assets/moku-icon.png"
+        ico_relative = "assets/moku-icon.ico"
+        self.assertIn(png_relative, build_manifest.BUILD_INPUT_FILES)
+        self.assertIn(ico_relative, build_manifest.BUILD_INPUT_FILES)
+
+        png = (ROOT / png_relative).read_bytes()
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+
+        ico = (ROOT / ico_relative).read_bytes()
+        reserved, image_type, count = struct.unpack_from("<HHH", ico)
+        self.assertEqual((reserved, image_type), (0, 1))
+        sizes = set()
+        for index in range(count):
+            width, height, _colors, entry_reserved, *_rest = struct.unpack_from(
+                "<BBBBHHII", ico, 6 + index * 16
+            )
+            self.assertEqual(entry_reserved, 0)
+            sizes.add((width or 256, height or 256))
+        self.assertEqual(
+            sizes,
+            {(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)},
+        )
+
+        spec = (ROOT / "MOKU.spec").read_text(encoding="utf-8-sig")
+        self.assertIn("icon='assets/moku-icon.ico'", spec)
 
     def test_round_trip_rejects_changed_executable_source_or_distribution(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -240,14 +268,16 @@ class BuildManifestTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         portable = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertIn('__version__ = "1.0.9"', version)
-        self.assertIn("Current source version: **1.0.9**", readme)
-        self.assertIn("MOKU 1.0.9 is prepared", readme)
+        self.assertIn('__version__ = "1.0.10"', version)
+        self.assertIn("Current source version: **1.0.10**", readme)
+        self.assertIn("MOKU 1.0.10 is prepared", readme)
+        self.assertNotIn("Current source version: **1.0.9**", readme)
+        self.assertNotIn("MOKU 1.0.9 is prepared", readme)
         self.assertNotIn("Current source version: **1.0.8**", readme)
         self.assertNotIn("MOKU 1.0.8 is prepared", readme)
         self.assertIn("Strict multi-tag AND search", readme)
         self.assertIn("any number of artworks within a 1,000-image selection limit", readme)
-        self.assertIn("## [1.0.9]", changelog)
+        self.assertIn("## [1.0.10]", changelog)
         self.assertIn("Separate multiple tags with ; or ；", portable)
         self.assertIn("any number of artworks within a 1,000 selected-image limit", portable)
         self.assertNotIn("Space-separated tags use OR semantics", portable)

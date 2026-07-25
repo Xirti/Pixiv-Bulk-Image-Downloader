@@ -66,7 +66,12 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
     if restriction == 0:
         validate_public_policy(raw, detail=False)
     elif restriction == 1 and allow_r18:
-        if bool(raw.get("isUnlisted")):
+        # R-18 search rows use the same explicit publication-policy contract as
+        # safe rows. Treat an omitted flag as unknown instead of assuming that
+        # the work is public.
+        if "isUnlisted" not in raw:
+            raise PixivPolicyError("missing public policy field")
+        if bool(raw["isUnlisted"]):
             raise PixivPolicyError("restricted artwork")
     else:
         raise PixivPolicyError("restricted artwork")

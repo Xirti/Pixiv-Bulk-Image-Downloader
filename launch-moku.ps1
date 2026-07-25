@@ -33,7 +33,7 @@ try {
   $mutexHeld = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
   if (-not $mutexHeld) { throw 'MOKU backend launch lock timeout' }
 
-$url = $null; $instanceId = $null
+$url = $null; $instanceId = $null; $desktopAuthToken = $null
 if (Test-Path -LiteralPath $runtimeFile) {
   try {
     $runtime = Get-Content -LiteralPath $runtimeFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -41,8 +41,9 @@ if (Test-Path -LiteralPath $runtimeFile) {
       $candidateUrl = "http://127.0.0.1:$([int]$runtime.port)/"
       $candidate = Invoke-WebRequest -UseBasicParsing -Uri ($candidateUrl+'api/health') -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 3
       $candidateHealth = $candidate.Content | ConvertFrom-Json
-      if ($candidate.StatusCode -eq 200 -and [int]$candidateHealth.protocolVersion -eq $protocolVersion -and [string]$candidateHealth.applicationId -eq $applicationId -and [string]$candidateHealth.codeGeneration -eq $codeGeneration -and [string]$candidateHealth.instanceId -eq [string]$runtime.instanceId -and [string]$candidateHealth.requestToken) {
-        $url = $candidateUrl; $instanceId = [string]$runtime.instanceId; Log "reuse pid=$([int]$runtime.pid) url=$url instance=$instanceId"
+      $candidateDesktopToken = [string]$runtime.desktopAuthToken
+      if ($candidate.StatusCode -eq 200 -and [int]$candidateHealth.protocolVersion -eq $protocolVersion -and [string]$candidateHealth.applicationId -eq $applicationId -and [string]$candidateHealth.codeGeneration -eq $codeGeneration -and [string]$candidateHealth.instanceId -eq [string]$runtime.instanceId -and [string]$candidateHealth.requestToken -and $candidateDesktopToken -match '^[A-Za-z0-9_-]{24,256}$') {
+        $url = $candidateUrl; $instanceId = [string]$runtime.instanceId; $desktopAuthToken = $candidateDesktopToken; Log "reuse pid=$([int]$runtime.pid) url=$url instance=$instanceId"
       }
     }
   } catch { Log "runtime descriptor stale: $($_.Exception.Message)" }
@@ -55,9 +56,20 @@ if (-not $url) {
   } finally {
     $listener.Stop()
   }
-  $instanceId=[Guid]::NewGuid().ToString('N'); $env:PORT=[string]$port; $env:MOKU_INSTANCE_ID=$instanceId; $env:MOKU_CODE_GENERATION=$codeGeneration
+  $instanceId=[Guid]::NewGuid().ToString('N')
+  $desktopAuthBytes = New-Object byte[] 32
+  $desktopAuthRng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $desktopAuthRng.GetBytes($desktopAuthBytes) } finally { $desktopAuthRng.Dispose() }
+  $desktopAuthToken = [Convert]::ToBase64String($desktopAuthBytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+  $env:PORT=[string]$port; $env:MOKU_INSTANCE_ID=$instanceId; $env:MOKU_CODE_GENERATION=$codeGeneration
+  $oldDesktopAuthToken = $env:MOKU_DESKTOP_AUTH_TOKEN
+  $env:MOKU_DESKTOP_AUTH_TOKEN = $desktopAuthToken
   $stdout=Join-Path $logDir ("server-$instanceId.stdout.log"); $stderr=Join-Path $logDir ("server-$instanceId.stderr.log")
-  $process=Start-Process -FilePath $python -ArgumentList 'server.py' -WorkingDirectory $root -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  try {
+    $process=Start-Process -FilePath $python -ArgumentList 'server.py' -WorkingDirectory $root -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  } finally {
+    if ($null -eq $oldDesktopAuthToken) { Remove-Item Env:MOKU_DESKTOP_AUTH_TOKEN -ErrorAction SilentlyContinue } else { $env:MOKU_DESKTOP_AUTH_TOKEN = $oldDesktopAuthToken }
+  }
   $url="http://127.0.0.1:$port/"; Log "start pid=$($process.Id) url=$url instance=$instanceId"
 }
 
@@ -82,7 +94,7 @@ if(-not $ready){
   throw "MOKU preload timeout or instance mismatch. See $log"
 }
   if ($process) {
-    $descriptor = [ordered]@{ protocolVersion=$protocolVersion; applicationId=$applicationId; codeGeneration=$codeGeneration; instanceId=$instanceId; pid=$process.Id; port=$port; startedAt=(Get-Date).ToUniversalTime().ToString('o') }
+    $descriptor = [ordered]@{ protocolVersion=$protocolVersion; applicationId=$applicationId; codeGeneration=$codeGeneration; instanceId=$instanceId; pid=$process.Id; port=$port; desktopAuthToken=$desktopAuthToken; startedAt=(Get-Date).ToUniversalTime().ToString('o') }
     $tempRuntime = $runtimeFile + '.tmp'
     $descriptor | ConvertTo-Json -Compress | Set-Content -LiteralPath $tempRuntime -Encoding UTF8
     Move-Item -LiteralPath $tempRuntime -Destination $runtimeFile -Force

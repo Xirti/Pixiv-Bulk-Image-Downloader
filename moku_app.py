@@ -112,9 +112,26 @@ def healthy_runtime(runtime: dict | None) -> str | None:
         health = read_json(url + "api/health", same_origin=True)
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
         return None
-    if health.get("protocolVersion") != protocol or health.get("applicationId") != application_id or health.get("codeGeneration") != code_generation or health.get("instanceId") != instance_id:
+    if (
+        health.get("protocolVersion") != protocol
+        or health.get("applicationId") != application_id
+        or health.get("codeGeneration") != code_generation
+        or health.get("instanceId") != instance_id
+        or not str(health.get("requestToken") or "")
+    ):
         return None
     return url
+
+
+def runtime_desktop_auth_token(runtime: dict | None) -> str:
+    if not isinstance(runtime, dict):
+        return ""
+    value = str(runtime.get("desktopAuthToken") or "")
+    if not 24 <= len(value) <= 256 or not value.isascii():
+        return ""
+    if any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for character in value):
+        return ""
+    return value
 
 
 def wait_ready(url: str, instance_id: str, timeout: float = 30.0) -> None:
@@ -136,7 +153,14 @@ def wait_ready(url: str, instance_id: str, timeout: float = 30.0) -> None:
     raise TimeoutError(f"MOKU backend did not become ready: {last_error}")
 
 
-def write_runtime(path: Path, port: int, instance_id: str) -> None:
+def write_runtime(
+    path: Path,
+    port: int,
+    instance_id: str,
+    desktop_auth_token: str,
+) -> None:
+    if not runtime_desktop_auth_token({"desktopAuthToken": desktop_auth_token}):
+        raise ValueError("invalid desktop auth capability")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "protocolVersion": server.PROTOCOL_VERSION,
@@ -145,6 +169,9 @@ def write_runtime(path: Path, port: int, instance_id: str) -> None:
         "instanceId": instance_id,
         "pid": os.getpid(),
         "port": port,
+        # Native-host-only capability. It is deliberately absent from health
+        # responses and is never made available to the page's JavaScript.
+        "desktopAuthToken": desktop_auth_token,
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -196,7 +223,12 @@ def runtime_directory() -> Path:
     return Path(local_app_data) / "MOKU" / "runtime"
 
 
-def _start_webview(url: str, storage_path: Path, proxy: str) -> None:
+def _start_webview(
+    url: str,
+    storage_path: Path,
+    proxy: str,
+    desktop_auth_token: str = "",
+) -> None:
     from desktop_client import start_desktop
 
     inherited = os.environ.get("WEBVIEW2_USER_DATA_FOLDER")
@@ -204,7 +236,12 @@ def _start_webview(url: str, storage_path: Path, proxy: str) -> None:
     try:
         os.environ.pop("WEBVIEW2_USER_DATA_FOLDER", None)
         os.environ["PYTHONNET_RUNTIME"] = "netfx"
-        start_desktop(url, storage_path, proxy)
+        start_desktop(
+            url,
+            storage_path,
+            proxy,
+            desktop_auth_token=desktop_auth_token,
+        )
     finally:
         if inherited is not None:
             os.environ["WEBVIEW2_USER_DATA_FOLDER"] = inherited
@@ -245,7 +282,11 @@ def cleanup_stale_webview_profiles(root: Path, *, now: float | None = None) -> i
     return removed
 
 
-def launch_desktop(url: str, proxy: str = "") -> None:
+def launch_desktop(
+    url: str,
+    proxy: str = "",
+    desktop_auth_token: str = "",
+) -> None:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
         raise RuntimeError("LOCALAPPDATA is unavailable")
@@ -254,7 +295,7 @@ def launch_desktop(url: str, proxy: str = "") -> None:
     cleanup_stale_webview_profiles(session_root)
     storage_path = Path(tempfile.mkdtemp(prefix="session-", dir=str(session_root)))
     try:
-        _start_webview(url, storage_path, proxy)
+        _start_webview(url, storage_path, proxy, desktop_auth_token)
     finally:
         remove_webview_profile(storage_path)
 
@@ -286,11 +327,17 @@ def run(argv: list[str] | None = None) -> int:
     owns_backend = False
 
     with named_mutex(mutex_name):
-        url = healthy_runtime(load_runtime(runtime_file))
+        runtime = load_runtime(runtime_file)
+        url = healthy_runtime(runtime)
+        desktop_auth_token = runtime_desktop_auth_token(runtime) if url else ""
+        if url and not desktop_auth_token:
+            url = None
         if url:
             LOG.info("reuse url=%s", url)
         else:
             server.INSTANCE_ID = secrets.token_hex(16)
+            server.DESKTOP_AUTH_TOKEN = secrets.token_urlsafe(32)
+            desktop_auth_token = server.DESKTOP_AUTH_TOKEN
             httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
             port = int(httpd.server_port)
             thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -298,7 +345,12 @@ def run(argv: list[str] | None = None) -> int:
             url = f"http://127.0.0.1:{port}/"
             try:
                 wait_ready(url, server.INSTANCE_ID)
-                write_runtime(runtime_file, port, server.INSTANCE_ID)
+                write_runtime(
+                    runtime_file,
+                    port,
+                    server.INSTANCE_ID,
+                    desktop_auth_token,
+                )
             except Exception:
                 httpd.shutdown()
                 httpd.server_close()
@@ -319,7 +371,11 @@ def run(argv: list[str] | None = None) -> int:
                 while thread and thread.is_alive():
                     thread.join(timeout=3600)
         else:
-            launch_desktop(url, server.PIXIV_PROXY)
+            launch_desktop(
+                url,
+                server.PIXIV_PROXY,
+                desktop_auth_token,
+            )
     except KeyboardInterrupt:
         pass
     finally:

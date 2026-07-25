@@ -4,6 +4,8 @@ import json
 import logging
 import threading
 import time
+import urllib.error
+import urllib.request
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -12,9 +14,7 @@ from urllib.parse import urlsplit
 
 import webview
 
-from auth_store import store_session
 from pixiv_login import LOGIN, select_session_cookie, session_cookie_metadata
-from server import mark_authorized_session
 
 
 LOG = logging.getLogger("moku.desktop")
@@ -22,6 +22,69 @@ LOG = logging.getLogger("moku.desktop")
 
 class DesktopLoginCancelled(RuntimeError):
     pass
+
+
+def desktop_auth_request(
+    backend_url: str,
+    capability: str,
+    action: str,
+    payload: dict,
+    *,
+    timeout: float = 8.0,
+) -> dict:
+    """Send account material directly from the native host to its backend."""
+    try:
+        parsed = urlsplit(str(backend_url or ""))
+        port = parsed.port
+    except ValueError:
+        return {"ok": False, "error": "桌面后端地址无效"}
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or not port
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        return {"ok": False, "error": "桌面后端地址无效"}
+    secret = str(capability or "")
+    if not 24 <= len(secret) <= 256 or not secret.isascii():
+        return {"ok": False, "error": "桌面认证能力不可用"}
+    route = {
+        "session": "api/desktop/auth/session",
+        "logout": "api/desktop/auth/logout",
+    }.get(str(action))
+    if route is None:
+        return {"ok": False, "error": "桌面认证操作无效"}
+    raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    request = urllib.request.Request(
+        str(backend_url).rstrip("/") + "/" + route,
+        data=raw,
+        headers={
+            "Content-Type": "application/json",
+            "X-MOKU-Desktop-Capability": secret,
+        },
+        method="POST",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=max(1.0, min(float(timeout), 15.0))) as response:
+            response_raw = response.read(65537)
+    except urllib.error.HTTPError as exc:
+        response_raw = exc.read(65537)
+    except (OSError, ValueError):
+        return {"ok": False, "error": "无法连接 MOKU 本机后端"}
+    if len(response_raw) > 65536:
+        return {"ok": False, "error": "MOKU 本机后端响应过大"}
+    try:
+        result = json.loads(response_raw)
+    except (UnicodeError, json.JSONDecodeError):
+        return {"ok": False, "error": "MOKU 本机后端响应无效"}
+    if not isinstance(result, dict):
+        return {"ok": False, "error": "MOKU 本机后端响应无效"}
+    return result
 
 
 def is_completed_pixiv_login_url(url: str) -> bool:
@@ -72,6 +135,9 @@ class DesktopApi:
         window_factory: Callable = webview.create_window,
         poll_interval: float = 0.6,
         timeout: float = 600.0,
+        backend_url: str = "",
+        desktop_auth_token: str = "",
+        auth_request: Callable | None = None,
     ) -> None:
         self._window = None
         self.proxy = proxy
@@ -79,6 +145,16 @@ class DesktopApi:
         self.poll_interval = max(0.0, float(poll_interval))
         self.timeout = max(0.01, float(timeout))
         self._login_lock = threading.Lock()
+        self._backend_url = str(backend_url or "")
+        self._desktop_auth_token = str(desktop_auth_token or "")
+        self._auth_request = auth_request or (
+            lambda action, payload: desktop_auth_request(
+                self._backend_url,
+                self._desktop_auth_token,
+                action,
+                payload,
+            )
+        )
 
     def _notify(self, text: str) -> None:
         if self._window is None:
@@ -149,8 +225,18 @@ class DesktopApi:
                         time.sleep(self.poll_interval)
                     continue
                 LOG.info("desktop auth accepted host=www.pixiv.net cookie_shape=eligible")
-                store_session(value, remember=bool(remember))
-                mark_authorized_session()
+                result = self._auth_request(
+                    "session", {"session": value, "remember": bool(remember)},
+                )
+                if not isinstance(result, dict) or not result.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(
+                            (result or {}).get("error")
+                            if isinstance(result, dict)
+                            else ""
+                        ) or "Pixiv 会话未能提交到 MOKU 后端",
+                    }
                 self._notify("Pixiv 账户已连接。")
                 return {"ok": True, "remembered": bool(remember)}
             return {"ok": False, "error": "Pixiv 桌面登录等待超时，请重试"}
@@ -168,9 +254,10 @@ class DesktopApi:
             self._login_lock.release()
 
     def pixiv_logout(self) -> dict:
-        from server import disconnect_authorized_session
-        disconnect_authorized_session()
-        return {"ok": True}
+        result = self._auth_request("logout", {})
+        if not isinstance(result, dict):
+            return {"ok": False, "error": "MOKU 本机后端响应无效"}
+        return result
 
     def select_folder(self) -> dict:
         if self._window is None:
@@ -180,8 +267,19 @@ class DesktopApi:
         return {"selected": selected, "cancelled": not bool(selected)}
 
 
-def start_desktop(url: str, storage_path: Path, proxy: str = "", startup: Callable | None = None) -> None:
-    api = DesktopApi(proxy)
+def start_desktop(
+    url: str,
+    storage_path: Path,
+    proxy: str = "",
+    startup: Callable | None = None,
+    *,
+    desktop_auth_token: str = "",
+) -> None:
+    api = DesktopApi(
+        proxy,
+        backend_url=url,
+        desktop_auth_token=desktop_auth_token,
+    )
     window = webview.create_window(
         "MOKU — Pixiv 标签采集册",
         url,

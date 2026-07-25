@@ -240,7 +240,7 @@ class FinalArchitectureRegressionTests(unittest.TestCase):
             server.get_cached_pixiv_item,
             server.prune_image_tokens,
             server.prune_search_image_tokens,
-            server.authorize_image_proxy,
+            server._authorize_image_proxy_batch,
             server.approved_image_url,
             server.clear_authorized_state,
         ):

@@ -25,16 +25,27 @@ def records(tag: str):
     result = []
     for i in range(24):
         width, height = 2400 + i * 30, 1800 + i * 20
+        # One deliberately large collection exercises the detail/viewer windows
+        # in integrated visual probes without contacting Pixiv.
+        page_count = 96 if i == 1 else (4 if i % 6 in (1, 4) else (2 if i % 6 == 3 else 1))
         result.append({
             "id": str(81024000 + i),
             "title": TITLES[i % 6] + (f" · {i // 6 + 1}" if i >= 6 else ""),
             "artist": ARTISTS[i % 6], "userId": str(12000 + i),
             "tags": [tag or "原创", "插画", ["猫", "风景", "少女"][i % 3]],
-            "pages": 12 if i % 12 == 1 else (4 if i % 6 in (1, 4) else (2 if i % 6 == 3 else 1)),
+            "source": "fixture", "pages": page_count,
             "width": width, "height": height, "bookmarks": 1260 + i * 847,
             "date": f"2026-06-{30-i:02d}",
             "description": "一幅关于柔软日常与季节光线的习作。颜色像糖纸一样透亮，也保留了安静的呼吸感。",
             "thumb": f"/api/image/{i}/0?size=preview",
+            "pageImages": [
+                {
+                    "width": width, "height": height,
+                    "regular": f"/api/image/{i}/{page}?size=preview",
+                    "original": f"/api/image/{i}/{page}?size=original",
+                }
+                for page in range(page_count)
+            ],
             "qualities": [
                 {"id": "original", "label": "原始尺寸", "width": width, "height": height},
                 {"id": "large", "label": "高清 75%", "width": round(width * .75), "height": round(height * .75)},
