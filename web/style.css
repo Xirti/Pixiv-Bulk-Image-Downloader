@@ -42,7 +42,7 @@ body.collection-basket-open .batch-workspace{margin:0;padding:0;border:0;backgro
 .batch-collection .batch-card-open{display:block;width:100%;min-width:0;padding:0;border:0;background:transparent;color:inherit;text-align:left;grid-column:auto}
 .batch-collection .batch-card-cover{position:relative;display:block;aspect-ratio:4/5;overflow:hidden;background:#161e29}
 .batch-collection .batch-card-cover img{display:block;width:100%;height:100%;object-fit:cover;object-position:center top;border-radius:0}
-.batch-collection .batch-card-copy{display:grid;grid-template-columns:minmax(0,1fr);gap:5px;padding:11px 12px 13px}.batch-collection .batch-card-copy b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.batch-collection .batch-card-copy small{color:var(--muted)}
+.batch-collection .batch-card-copy{display:grid;grid-template-columns:minmax(0,1fr);min-width:0;max-width:100%;overflow:hidden;gap:5px;padding:11px 12px 13px}.batch-collection .batch-card-copy b{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.batch-collection .batch-card-copy small{color:var(--muted)}
 .batch-collection .batch-card-select{position:absolute;z-index:4;left:10px;top:10px;width:36px;height:36px;cursor:pointer}
 .batch-collection .batch-card-select input{position:absolute;inset:0;opacity:0;cursor:pointer}
 .batch-collection .batch-card-select span{width:36px;height:36px;display:grid;place-items:center;border:1px solid rgba(229,240,250,.7);border-radius:8px;background:rgba(8,12,17,.82);color:transparent;font-size:20px;font-weight:900;padding:0}
@@ -59,7 +59,6 @@ body.collection-basket-open .batch-workspace{margin:0;padding:0;border:0;backgro
 /* Remote Pixiv labels must not impose a min-content width on cards or scenes. */
 .section-head>div,.gallery-tools,.meta>div,.detail-info,.detail-content,.viewer-bar>div,.viewer-meta,.batch-card-copy{min-width:0}
 #tagTitle,#dTitle,#dArtist,#viewerTitle,#viewerArtist,.meta h3,.meta p,.tags span,.batch-card-copy b,.batch-card-copy small{overflow-wrap:anywhere}
-.batch-card-copy b{white-space:normal}
 .detail dl div{grid-template-columns:70px minmax(0,1fr)}
 dd{min-width:0;overflow-wrap:anywhere}
 .pagination{max-width:calc(100vw - 16px);overflow-x:auto}
@@ -92,3 +91,5 @@ dd{min-width:0;overflow-wrap:anywhere}
   .selection-bar b{flex-basis:100%}
   footer{align-items:flex-start;flex-direction:column;gap:8px}
 }
+
+#cancelSearch{flex:0 0 44px;width:44px;padding:0;font-size:22px;background:#111820;color:#e6eef6;border-color:var(--line)}

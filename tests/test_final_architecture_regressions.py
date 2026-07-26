@@ -309,6 +309,29 @@ class FinalArchitectureRegressionTests(unittest.TestCase):
             server.IMAGE_TOKENS.clear()
             server.IMAGE_TOKENS.update(old_tokens)
 
+    def test_detail_endpoint_reuses_a_current_cached_artwork(self):
+        cached = {
+            "id": "9",
+            "restriction": "safe",
+            "pageImages": [{"regular": "/cached", "original": "/cached"}],
+        }
+
+        class Sink:
+            @staticmethod
+            def send_json(payload, status=200):
+                return status, payload
+
+        with patch.object(server, "validated_authorization", return_value=(False, None)), patch.object(
+            server, "pixiv_item_for_download", return_value=cached,
+        ) as cached_lookup, patch.object(server, "pixiv_detail") as remote_detail:
+            status, payload = server.Handler._get_pixiv_detail(Sink(), "9")
+
+        self.assertEqual((status, payload), (200, cached))
+        cached_lookup.assert_called_once_with(
+            "9", allow_r18=False, authorization_epoch=None, require_thumb=True,
+        )
+        remote_detail.assert_not_called()
+
     def test_code_generation_changes_with_source_and_frozen_executable_bytes(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+STYLE = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 
 
 def block(start: str, end: str) -> str:
@@ -16,7 +17,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
     def test_authorization_loss_aborts_requests_and_removes_restricted_views(self):
         cleanup = block("function handleAuthorizationLoss", "function updateSelectionBar")
         self.assertIn("viewGeneration += 1", cleanup)
-        self.assertIn("searchController.abort()", cleanup)
+        self.assertIn("cancelActiveSearch()", cleanup)
         self.assertIn("detailController.abort()", cleanup)
         self.assertIn('$("#safety").value = "safe"', cleanup)
         self.assertIn("closeAllViewer()", cleanup)
@@ -30,6 +31,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
 
     def test_search_commits_context_only_after_the_matching_response(self):
         search = block("async function search", "function syncResultSelectionControls")
+        self.assertIn("(pid|uid|author)", search)
         request = search.index("await fetchJson")
         identity_check = search.index("controller !== searchController")
         context_commit = search.index("activeSearchContext = requestedContext")
@@ -37,29 +39,60 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertLess(request, identity_check)
         self.assertLess(identity_check, context_commit)
         self.assertLess(identity_check, filter_commit)
+        self.assertLess(search.index("items = Array.isArray(data.items)"), search.index("reconcileSelectedArtworkPreviews(items)"))
         self.assertIn("resultSelectionEnabled = false", search[:request])
         self.assertIn('$("#download").disabled = true', search[:request])
 
         controls = block("function syncSearchScopedControls", "function clearDetail")
         self.assertIn('$("#openBatch").disabled', controls)
         self.assertIn('$("#clearSelection").disabled', controls)
+        self.assertIn('$("#batchDownload").disabled', controls)
+        self.assertIn("searchButton.disabled = basketSelectionLocked || searchPending || singleDownloadPending", controls)
         self.assertIn("basketSelectionLocked || searchPending", controls)
         open_basket = block("function openSelectionBasket", "function renderBasketSummary")
         self.assertIn("if (basketSelectionLocked || searchPending) return", open_basket)
+
+        reconciliation = block("function reconcileSelectedArtworkPreviews", "function render()")
+        self.assertIn("selectedArtworks.set(artworkId, merged)", reconciliation)
+        self.assertIn("batchCandidateItems = batchCandidateItems.map(mergePreview)", reconciliation)
+        self.assertIn("merged.pageImages = existing.pageImages", reconciliation)
+        self.assertIn("merged.thumb = fresh.thumb || existing.thumb", reconciliation)
 
         select_all = block("function selectAllCurrentPage", "function clearAllCurrentPage")
         clear_page = block("function clearAllCurrentPage", "async function search")
         self.assertIn("searchPending || !resultSelectionEnabled", select_all)
         self.assertIn("searchPending || !resultSelectionEnabled", clear_page)
 
-    def test_pagination_uses_committed_filters_and_filter_changes_restart_page_one(self):
+        token_wait = block("function waitForPromiseOrAbort", "function nextSearchRequestId")
+        self.assertIn('signal.addEventListener("abort"', token_wait)
+        self.assertIn("waitForPromiseOrAbort(getRequestToken(), controller.signal)", token_wait)
+        cancellation = block("function cancelActiveSearch", "function abortDetailRefreshes")
+        self.assertIn("searchController.abort()", cancellation)
+        self.assertNotIn("requestTokenController", cancellation)
+        self.assertNotIn("requestTokenPromise", cancellation)
+
+        basket_download = block('$("#batchDownload").onclick', 'addEventListener("keydown"')
+        self.assertIn("if (basketSelectionLocked || searchPending || singleDownloadPending) return", basket_download)
+        basket_lock = block("function setBasketSelectionLocked", "function downloadPayload")
+        self.assertIn("#searchSubmit", basket_lock)
+        self.assertNotIn("#searchForm button", basket_lock)
+        single_download = block('$("#download").onclick', "async function syncAuthStatus")
+        self.assertIn("basketSelectionLocked || searchPending || singleDownloadPending", single_download)
+        self.assertLess(
+            single_download.index("singleDownloadPending = true"),
+            single_download.index("syncSearchScopedControls()"),
+        )
+
+    def test_pagination_uses_committed_filters_and_filter_changes_wait_for_submit(self):
         navigation = block("function navigateToPage", "function archiveAndContinue")
         self.assertIn("{ ...activeSearchFilters }", navigation)
 
         listeners = block('$("#searchForm").onsubmit', '$("#browseFolder").onclick')
-        for selector in ("#workType", "#includeAi", "#fuzzySearch", "#safety"):
-            self.assertIn(selector, listeners)
         self.assertIn("search($(\"#tag\").value, 1, readSearchFilters())", listeners)
+        self.assertNotIn("restartSearchFromFilters", listeners)
+        self.assertNotIn('addEventListener("change"', listeners)
+        self.assertIn("cancelSearchButton.onclick", listeners)
+        self.assertIn("cancelActiveSearch()", listeners)
 
     def test_checkbox_keyboard_events_do_not_open_the_parent_card(self):
         render = block("function render()", "function renderPagination")
@@ -82,6 +115,22 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn("failedUrl", fallback)
         self.assertIn('data-detail-artwork="${esc(item.id)}"', APP)
         self.assertIn("delete img.dataset.detailRefreshAttemptedUrl", refresh)
+        self.assertIn('data-basket-artwork="${esc(item.id)}"', APP)
+        basket_detail = block("async function openBatchCollection", '$("#returnToBatch").onclick')
+        self.assertIn("staleBasketPreviewIds.has", basket_detail)
+
+    def test_empty_basket_and_invalid_detail_targets_leave_controls_clean(self):
+        controls = block("function syncSearchScopedControls", "function clearDetail")
+        self.assertIn("selectedPageCount() === 0", controls)
+        detail = block("async function select", "function renderDetail")
+        self.assertLess(detail.index("if (!item) return"), detail.index("detailController = new AbortController()"))
+        self.assertIn("selectedArtworks.set(item.id, item)", detail)
+        self.assertIn("batchCandidateItems[candidateIndex] = item", detail)
+        basket = block("async function openBatchCollection", '$("#returnToBatch").onclick')
+        self.assertLess(basket.index("if (!item) return"), basket.index("detailController = new AbortController()"))
+
+        viewer = block("function openAllViewer", "function closeAllViewer")
+        self.assertLess(viewer.index("currentDetailItem"), viewer.index("selectedArtworks.get(activeArtworkId)"))
 
     def test_large_basket_and_viewer_views_are_windowed_before_rendering(self):
         self.assertIn("const BASKET_ARTWORK_WINDOW = 120", APP)
@@ -89,14 +138,37 @@ class FrontendStateSafetyTests(unittest.TestCase):
         picker = block("function openBasketArtworkPicker", "function selectedGroups")
         self.assertIn("chosen.slice(start, end)", picker)
         self.assertIn("data-basket-window", picker)
+        checkbox_handler = picker[
+            picker.index("box.onchange = () => {"):
+            picker.index('$("#batchCollections").querySelectorAll("[data-open-collection]")')
+        ]
+        self.assertIn("applyBasketArtworkSelection(item, box)", checkbox_handler)
+        self.assertNotIn("openBasketArtworkPicker()", checkbox_handler)
+        local_update = block("function applyBasketArtworkSelection", "function openBasketArtworkPicker")
+        self.assertIn('classList.toggle("is-selected", selected)', local_update)
+        self.assertIn('setAttribute("aria-label"', local_update)
+        self.assertIn('$("#batchSummary").textContent', local_update)
+        self.assertIn("syncResultSelectionControls()", local_update)
+        self.assertNotIn("innerHTML", local_update)
         viewer = block("function renderViewerWindow", "function openAllViewer")
         self.assertIn("item.pageImages.slice(start, end)", viewer)
         self.assertIn("data-viewer-window", viewer)
         self.assertIn("currentDetailItem", viewer)
         self.assertIn("renderViewerWindow(latestItem)", viewer)
 
+    def test_mobile_basket_titles_have_explicit_ellipsis_bounds(self):
+        self.assertIn(
+            ".batch-collection .batch-card-copy b{display:block;min-width:0;max-width:100%;"
+            "overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+            STYLE,
+        )
+
     def test_pagination_scroll_updates_are_coalesced_to_one_animation_frame(self):
         scheduler = block("function schedulePaginationDockUpdate", "async function select")
+        dock_visibility = block("function updatePaginationDock", "function schedulePaginationDockUpdate")
+        self.assertIn("galleryRect.top < dockTop", dock_visibility)
+        self.assertIn("galleryRect.bottom > dockTop", dock_visibility)
+        self.assertIn('Boolean($("#pagination").children.length)', dock_visibility)
         self.assertIn("requestAnimationFrame(run)", scheduler)
         self.assertIn('window.addEventListener("scroll", schedulePaginationDockUpdate, { passive: true })', scheduler)
         self.assertNotIn('window.addEventListener("scroll", updatePaginationDock', scheduler)
@@ -122,6 +194,11 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn("validatedArtworkPageCount(item)", select_all)
         self.assertIn("selectionWouldExceedPageLimit(additionalPages)", select_all)
         self.assertNotIn("Array.from", select_all)
+        capacity_rejection = select_all.index("if (selectionWouldExceedPageLimit(additionalPages)) {")
+        page_set_allocation = select_all.index("const pages = new Set()")
+        self.assertLess(capacity_rejection, page_set_allocation)
+        self.assertNotIn("new Set", select_all[:capacity_rejection])
+        self.assertIn("selectedPagesByArtwork.set(item.id, pages)", select_all)
         toggle = block("function toggleArtworkSelection", "function selectAllCurrentPage")
         self.assertLess(toggle.index("selectionWouldExceedPageLimit"), toggle.index("Array.from"))
 
@@ -172,7 +249,7 @@ class FakeElement {
     return nodes;
   }
   scrollIntoView() {}
-  getBoundingClientRect() { return {bottom: 1}; }
+  getBoundingClientRect() { return {top: 0, bottom: 1}; }
   setAttribute(name, value) { this[name] = String(value); }
   getAttribute(name) { return this[name]; }
   removeAttribute(name) { delete this[name]; }
@@ -219,22 +296,113 @@ fakeElement("#tag").value = "old";
   currentDetailItem = oldItem;
   activeArtworkId = oldItem.id;
   resultSelectionEnabled = true;
+  const selectedSearchItem = {...oldItem, pageImages: undefined};
   selectedArtworkIds.add(oldItem.id);
-  selectedArtworks.set(oldItem.id, oldItem);
+  selectedArtworks.set(oldItem.id, selectedSearchItem);
   selectedPagesByArtwork.set(oldItem.id, new Set([0]));
+  batchCandidateItems = [selectedSearchItem];
+  const reorderedItem = {...oldItem, thumb: "/api/pixiv/image?token=reordered", bookmarks: 77, pageImages: undefined};
+  reconcileSelectedArtworkPreviews([reorderedItem]);
+  check(selectedArtworks.get(oldItem.id).thumb === reorderedItem.thumb, "selected artwork kept the revoked search thumbnail");
+  selectedArtworks.set(oldItem.id, oldItem);
+  batchCandidateItems = [oldItem];
+  reconcileSelectedArtworkPreviews([reorderedItem]);
+  check(selectedArtworks.get(oldItem.id).pageImages === oldItem.pageImages, "search reconciliation discarded loaded detail pages");
+  check(selectedArtworks.get(oldItem.id).thumb === reorderedItem.thumb, "search reconciliation retained an expired detail thumbnail");
+  check(batchCandidateItems[0].pageImages === oldItem.pageImages, "open basket candidate discarded loaded detail pages");
+
+  const realFetchJson = fetchJson;
+  let releaseSingleDownload;
+  let singleDownloadRequests = 0;
+  fetchJson = () => {
+    singleDownloadRequests += 1;
+    return new Promise((resolve) => { releaseSingleDownload = resolve; });
+  };
+  const pendingSingleDownload = document.querySelector("#download").onclick();
+  await Promise.resolve();
+  check(singleDownloadPending, "single download did not enter its pending state");
+  check(document.querySelector("#searchSubmit").disabled, "single download left search enabled");
+  check(document.querySelector("#batchDownload").disabled, "single download left batch download enabled");
+  await search("blocked-by-single", 1, {mode: "safe", workType: "all", includeAi: false, fuzzy: false});
+  await document.querySelector("#batchDownload").onclick();
+  check(searchController === null, "single download allowed a search to start programmatically");
+  check(singleDownloadRequests === 1, "single download allowed another download request");
+  releaseSingleDownload({saved: ["saved.jpg"]});
+  await pendingSingleDownload;
+  check(!singleDownloadPending, "single download did not clear its pending state");
+  check(!document.querySelector("#searchSubmit").disabled, "search stayed disabled after single download");
+  fetchJson = realFetchJson;
+
+  requestToken = null;
+  requestTokenPromise = null;
+  requestTokenController = null;
+  let searchFetchStartedBeforeToken = false;
+  let blockedHandshakeAborted = false;
+  let releaseHandshake;
+  const retriedUrls = [];
+  globalThis.fetch = (url, options = {}) => {
+    retriedUrls.push(url);
+    if (url === "/api/health") {
+      return new Promise((resolve, reject) => {
+        releaseHandshake = () => resolve({ok: true, json: async () => ({
+          protocolVersion: 5,
+          applicationId: "MOKU.PixivTagGallery",
+          requestToken: "test-request-token",
+        })});
+        options.signal.addEventListener("abort", () => {
+          blockedHandshakeAborted = true;
+          reject(new Error("aborted"));
+        }, {once: true});
+      });
+    }
+    searchFetchStartedBeforeToken = true;
+    return Promise.resolve({ok: true, text: async () => JSON.stringify({
+      items: [], page: 1, availablePages: [1], preloadedThrough: 1,
+      hasMore: false, label: "retry", tags: [], tag: "token-retry",
+      total: 0, perPage: 36,
+    })});
+  };
+  const tokenBlockedSearch = search("token-blocked", 1, {mode: "safe", workType: "all", includeAi: false, fuzzy: false});
+  await Promise.resolve();
+  const sharedHandshake = requestTokenPromise;
+  check(!document.querySelector("#cancelSearch").hidden, "token-blocked search did not expose cancellation");
+  document.querySelector("#cancelSearch").onclick();
+  await tokenBlockedSearch;
+  await Promise.resolve();
+  check(!searchFetchStartedBeforeToken, "search network request started without a request token");
+  check(!blockedHandshakeAborted, "search cancellation aborted the shared token handshake");
+  check(requestTokenPromise === sharedHandshake, "search cancellation discarded the shared token handshake");
+  check(!searchPending && searchController === null, "token-blocked search did not cancel immediately");
+  check(resultSelectionEnabled, "token-blocked cancellation did not restore committed results");
+
+  const tokenRetrySearch = search("token-retry", 1, {mode: "safe", workType: "all", includeAi: false, fuzzy: false});
+  await Promise.resolve();
+  check(retriedUrls.filter((url) => url === "/api/health").length === 1, "second search started a duplicate token handshake");
+  check(!searchFetchStartedBeforeToken, "second search bypassed the pending token handshake");
+  releaseHandshake();
+  await tokenRetrySearch;
+  check(retriedUrls.some((url) => String(url).startsWith("/api/pixiv/search?")), "second search did not reach the search endpoint");
+  check(requestToken === "test-request-token", "successful retry did not retain the request token");
+
+  batchCandidateItems = [];
+  const contextBeforePendingSearch = {...activeSearchContext};
   let releaseSearch;
   fetchJson = () => new Promise((resolve) => { releaseSearch = resolve; });
   const pending = search("author:new", 1, {mode: "safe", workType: "manga", includeAi: true, fuzzy: false});
   await Promise.resolve();
-  check(activeSearchContext.value === "old", "pending search committed its context early");
+  check(activeSearchContext.value === contextBeforePendingSearch.value, "pending search committed its context early");
   check(selectAllCurrentPage() === false, "pending search allowed stale result selection");
   check(document.querySelector("#download").disabled, "pending search left stale detail download enabled");
   check(document.querySelector("#openBatch").disabled, "pending search left the stale basket action enabled");
   check(document.querySelector("#clearSelection").disabled, "pending search left the stale clear action enabled");
+  check(document.querySelector("#batchDownload").disabled, "pending search left batch download enabled");
   openSelectionBasket();
   check(batchCandidateItems.length === 0, "pending search opened the stale basket programmatically");
   document.querySelector("#clearSelection").onclick();
   check(selectedArtworkIds.has(oldItem.id), "pending search cleared stale selection programmatically");
+  await document.querySelector("#batchDownload").onclick();
+  check(!basketSelectionLocked, "pending search started a batch download programmatically");
+  check(!document.querySelector("#cancelSearch").disabled, "pending search lost its cancellation control");
   releaseSearch({
     items: [], page: 1, availablePages: [1], preloadedThrough: 1, hasMore: false,
     label: "new", tags: [], tag: "author:new", total: 0, perPage: 36,
@@ -242,6 +410,63 @@ fakeElement("#tag").value = "old";
   await pending;
   check(activeSearchContext.kind === "author" && activeSearchContext.value === "new", "successful search did not commit context");
   check(activeSearchFilters.workType === "manga" && activeSearchFilters.includeAi, "successful search did not commit filters");
+
+  const stableCount = document.querySelector("#count").textContent;
+  requestTokenPromise = Promise.resolve("test-request-token");
+  globalThis.fetch = async () => ({ok: true});
+  fetchJson = (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener("abort", () => reject(new Error("aborted")), {once: true});
+  });
+  const supersededSearch = search("superseded-first", 1, {mode: "safe", workType: "all", includeAi: false, fuzzy: false});
+  await Promise.resolve();
+  const replacementSearch = search("superseded-second", 1, {mode: "safe", workType: "all", includeAi: false, fuzzy: false});
+  await supersededSearch;
+  await Promise.resolve();
+  document.querySelector("#cancelSearch").onclick();
+  await replacementSearch;
+  await Promise.resolve();
+  await Promise.resolve();
+  check(resultSelectionEnabled, "replacement cancellation lost the earlier committed result state");
+  check(document.querySelector("#count").textContent === stableCount, "replacement cancellation restored an intermediate loading state");
+
+  for (const selector of ["#workType", "#includeAi", "#fuzzySearch", "#safety"]) {
+    check(!document.querySelector(selector).listeners.has("change"), `${selector} still triggers an automatic search`);
+  }
+
+  const committedContext = {...activeSearchContext};
+  const committedFilters = {...activeSearchFilters};
+  const committedCount = document.querySelector("#count").textContent;
+  let cancelledSearchUrl = "";
+  let cancelledSignal;
+  fetchJson = (url, options) => new Promise((_resolve, reject) => {
+    cancelledSearchUrl = url;
+    cancelledSignal = options.signal;
+    options.signal.addEventListener("abort", () => reject(new Error("aborted")), {once: true});
+  });
+  requestTokenPromise = Promise.resolve("test-request-token");
+  let cancellationPost = null;
+  globalThis.fetch = async (url, options) => {
+    cancellationPost = {url, options};
+    return {ok: true};
+  };
+  const cancelledSearch = search("should-not-commit", 1, {mode: "safe", workType: "ugoira", includeAi: false, fuzzy: true});
+  await Promise.resolve();
+  check(!document.querySelector("#cancelSearch").hidden, "pending search did not expose cancellation");
+  document.querySelector("#cancelSearch").onclick();
+  await cancelledSearch;
+  await Promise.resolve();
+  await Promise.resolve();
+  check(cancelledSignal.aborted, "cancel button did not abort the browser request");
+  check(!searchPending && searchController === null, "cancelled search stayed pending");
+  check(!document.querySelector("#searchSubmit").disabled, "cancelled search left submit disabled");
+  check(document.querySelector("#cancelSearch").hidden, "cancelled search left cancellation visible");
+  check(activeSearchContext.value === committedContext.value, "cancelled search changed the committed context");
+  check(activeSearchFilters.workType === committedFilters.workType, "cancelled search changed committed filters");
+  check(document.querySelector("#count").textContent === committedCount, "cancelled search did not restore the prior result status");
+  const cancelledRequestId = new URLSearchParams(cancelledSearchUrl.split("?")[1]).get("requestId");
+  check(Boolean(cancelledRequestId), "search request did not include a cancellation id");
+  check(cancellationPost?.url === "/api/pixiv/search/cancel", "cancel button did not notify the backend");
+  check(JSON.parse(cancellationPost.options.body).requestId === cancelledRequestId, "cancel endpoint used the wrong request id");
 
   const restricted = {...oldItem, id: "18", restriction: "r18", thumb: "/api/pixiv/image?token=r18"};
   items = [restricted];
@@ -299,10 +524,71 @@ fakeElement("#tag").value = "old";
   check(document.querySelector("#authStateText").textContent === "credential deletion failed", "failed logout error was not preserved after reconciliation");
 
   clearAllSelection();
+  const resumableItem = {...oldItem, id: "88", pages: 201};
+  selectedArtworkIds.add(resumableItem.id);
+  selectedArtworks.set(resumableItem.id, resumableItem);
+  selectedPagesByArtwork.set(resumableItem.id, new Set(Array.from({length: 201}, (_, page) => page)));
+  selectedContextByArtwork.set(resumableItem.id, {kind: "tags", value: "resume"});
+  syncSearchScopedControls();
+  let batchRequests = 0;
+  fetchJson = async (url) => {
+    if (url !== "/api/pixiv/batch-download") throw new Error("unexpected batch URL");
+    batchRequests += 1;
+    if (batchRequests === 2) throw new Error("second chunk failed");
+    return {saved: []};
+  };
+  await document.querySelector("#batchDownload").onclick();
+  check(batchRequests === 2, "initial batch task did not stop at the failed chunk");
+  check(resumableBatchTask?.remainingChunks.length === 1, "failed task did not retain exactly one remaining chunk");
+  await document.querySelector("#batchDownload").onclick();
+  check(batchRequests === 3, "retry repeated a completed batch instead of resuming");
+  check(resumableBatchTask === null, "successful resume retained stale task state");
+
+  clearAllSelection();
+  const partialItem = {...oldItem, id: "partial", pages: 3};
+  const partialPages = new Set([1]);
+  items = [partialItem];
+  selectedArtworkIds.add(partialItem.id);
+  selectedArtworks.set(partialItem.id, partialItem);
+  selectedPagesByArtwork.set(partialItem.id, partialPages);
+  resultSelectionEnabled = true;
+  check(selectAllCurrentPage() === true, "current-page selection rejected a valid partial artwork");
+  const completedPages = selectedPagesByArtwork.get(partialItem.id);
+  check(completedPages.size === 3 && [0, 1, 2].every((page) => completedPages.has(page)), "current-page selection did not fill missing artwork pages");
+
+  clearAllSelection();
   items = [{...oldItem, id: "huge", pages: Number.MAX_SAFE_INTEGER}];
   resultSelectionEnabled = true;
   check(selectAllCurrentPage() === false, "oversized page count bypassed the selection limit");
   check(!selectedArtworkIds.has("huge"), "oversized artwork was partially selected");
+
+  clearAllSelection();
+  const detailSummary = {...oldItem, id: "66", pages: 2, pageImages: undefined, thumb: "/summary"};
+  const loadedDetail = {
+    ...detailSummary,
+    thumb: "/fresh-detail-0",
+    pageImages: [
+      {regular: "/fresh-detail-0", original: "/fresh-detail-original-0"},
+      {regular: "/fresh-detail-1", original: "/fresh-detail-original-1"},
+    ],
+  };
+  items = [detailSummary];
+  selectedArtworkIds.add(detailSummary.id);
+  selectedArtworks.set(detailSummary.id, detailSummary);
+  selectedPagesByArtwork.set(detailSummary.id, new Set([0, 1]));
+  batchCandidateItems = [detailSummary];
+  fetchJson = async () => loadedDetail;
+  await select(0);
+  check(items[0] === loadedDetail, "normal detail load did not replace the search summary");
+  check(selectedArtworks.get(detailSummary.id) === loadedDetail, "normal detail load left a stale selected artwork");
+  check(batchCandidateItems[0] === loadedDetail, "normal detail load left a stale basket candidate");
+
+  selectedArtworks.set(detailSummary.id, {...loadedDetail, pageImages: [{regular: "/stale-selected", original: "/stale-selected"}]});
+  openAllViewer();
+  check(document.querySelector("#viewerGrid").innerHTML.includes("/fresh-detail-0"), "viewer did not prefer the current loaded detail");
+  check(!document.querySelector("#viewerGrid").innerHTML.includes("/stale-selected"), "viewer reopened a stale selected artwork");
+  closeAllViewer();
+  clearAllSelection();
 
   const stalePages = Array.from({length: 401}, (_, page) => ({
     regular: `/api/pixiv/image?token=stale-${page}`,
@@ -385,6 +671,30 @@ fakeElement("#tag").value = "old";
   const basketMarkup = document.querySelector("#batchCollections").innerHTML;
   check((basketMarkup.match(/<article\b/g) || []).length <= BASKET_ARTWORK_WINDOW, "basket rendered more than one artwork window");
   check(basketMarkup.includes("data-basket-window"), "basket window navigation was not rendered");
+
+  const basketItem = batchCandidateItems[0];
+  const basketCard = new FakeElement();
+  const basketLabel = new FakeElement();
+  const basketSelectionLabel = new FakeElement();
+  basketCard.querySelector = (selector) => selector === ".batch-card-select" ? basketLabel : basketSelectionLabel;
+  const basketBox = new FakeElement();
+  basketBox.checked = true;
+  basketBox.closest = () => basketCard;
+  const basketDomBeforeToggle = document.querySelector("#batchCollections").innerHTML;
+  check(applyBasketArtworkSelection(basketItem, basketBox), "basket checkbox selection was rejected");
+  check(document.querySelector("#batchCollections").innerHTML === basketDomBeforeToggle, "basket checkbox rebuilt the picker DOM");
+  check(basketCard.classList.contains("is-selected"), "basket checkbox did not update its card state");
+  check(basketLabel.getAttribute("aria-label") === `取消选择 ${basketItem.title}`, "basket checkbox did not update its accessible label");
+  check(basketSelectionLabel.textContent.includes("已选 1/1 张"), "basket checkbox did not update its page label");
+  check(document.querySelector("#batchSummary").textContent.startsWith("1/1000 个作品已勾选"), "basket checkbox did not update the picker summary");
+  check(!document.querySelector("#batchDownload").disabled, "basket checkbox did not enable download controls");
+  basketBox.checked = false;
+  check(applyBasketArtworkSelection(basketItem, basketBox), "basket checkbox deselection was rejected");
+  check(document.querySelector("#batchCollections").innerHTML === basketDomBeforeToggle, "basket checkbox deselection rebuilt the picker DOM");
+  check(!basketCard.classList.contains("is-selected"), "basket checkbox did not clear its card state");
+  check(basketLabel.getAttribute("aria-label") === `选择 ${basketItem.title}`, "basket checkbox did not restore its accessible label");
+  check(document.querySelector("#batchSummary").textContent.startsWith("0/1000 个作品已勾选"), "basket checkbox deselection did not update the picker summary");
+  check(document.querySelector("#batchDownload").disabled, "basket checkbox deselection did not disable empty download controls");
   abortDetailRefreshes();
   check(detailRefreshes.size === 0 && detailRefreshAttempts.size === 0, "detail refresh state was not cleared");
 })().catch((error) => { console.error(error.stack || error); process.exitCode = 1; });

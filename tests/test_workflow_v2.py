@@ -32,7 +32,7 @@ class WorkflowV2Tests(unittest.TestCase):
             self.assertIn("X-MOKU-Request-Token", source, name)
 
     def test_frontend_sends_request_token_on_protected_gets(self):
-        self.assertIn('headers.set("X-MOKU-Request-Token", await getRequestToken())', APP)
+        self.assertIn("waitForPromiseOrAbort(getRequestToken(), controller.signal)", APP)
         self.assertNotIn('if (method !== "GET" && method !== "HEAD")', APP)
 
     def test_normalized_items_expose_type_and_ai_generation(self):
@@ -46,6 +46,27 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn("workType", APP)
         self.assertIn("includeAi", APP)
         self.assertIn("aiGenerated", SERVER)
+
+    def test_search_ui_requires_submit_and_exposes_explicit_cancellation(self):
+        self.assertIn('id="searchSubmit"', HTML)
+        self.assertIn('id="cancelSearch"', HTML)
+        self.assertNotIn('id="sortOrder"', HTML)
+        listeners = APP[APP.index('$("#searchForm").onsubmit'):APP.index('$("#browseFolder").onclick')]
+        self.assertNotIn("restartSearchFromFilters", listeners)
+        self.assertNotIn('addEventListener("change"', listeners)
+        self.assertIn("cancelSearchButton.onclick", listeners)
+        self.assertIn('requestId,', APP)
+        self.assertIn('"/api/pixiv/search/cancel"', APP)
+        self.assertIn(
+            "const dockTop = window.innerHeight - dock.getBoundingClientRect().height",
+            APP,
+        )
+        self.assertIn(
+            "galleryRect.top < dockTop && galleryRect.bottom > dockTop",
+            APP,
+        )
+        self.assertIn('Boolean($("#pagination").children.length)', APP)
+        self.assertIn('#cancelSearch{flex:0 0 44px', STYLE)
 
     def test_desktop_webview_is_the_only_login_entrypoint(self):
         self.assertNotIn(chr(34)+"/api/auth/login"+chr(34), SERVER)

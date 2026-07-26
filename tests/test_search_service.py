@@ -207,6 +207,39 @@ class SearchAggregationTests(unittest.TestCase):
         self.assertTrue(result["hasMore"])
         self.assertTrue(result["budgetExhausted"])
 
+    def test_fuzzy_all_scope_stays_within_the_history_source_budget(self):
+        import server
+
+        calls = []
+
+        def empty_source(_session_key, tag, mode, *_args, **_kwargs):
+            calls.append((tag, mode))
+            return {
+                "rows": [],
+                "nextOffset": 0,
+                "hasMore": False,
+                "budgetExhausted": False,
+                "truncatedDates": [],
+            }
+
+        server.mark_authorized_session()
+        epoch = server.authorization_generation()
+        with patch.object(server, "load_search_source", side_effect=empty_source):
+            result = server.search_pixiv_results(
+                "miku;saber;rem;asuna;honkai star rail;blue archive",
+                "all",
+                1,
+                "all",
+                True,
+                authorized=True,
+                fuzzy=True,
+                authorization_epoch=epoch,
+            )
+
+        self.assertLessEqual(len(calls), server.MAX_HISTORY_SOURCES)
+        self.assertEqual(len(calls), len(set(calls)))
+        self.assertTrue(all(len(group) <= 2 for group in result["tagGroups"]))
+
     def test_requested_second_partial_page_is_returned_while_sources_have_more(self):
         import server
 

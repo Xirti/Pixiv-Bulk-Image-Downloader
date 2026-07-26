@@ -7,8 +7,12 @@ let preloadedThrough = 1;
 let searchHasMore = false;
 let activeTagQuery = "猫耳";
 let searchController = null;
+let activeSearchRequestId = null;
+let searchRequestSequence = 0;
 let detailController = null;
+let requestToken = null;
 let requestTokenPromise = null;
+let requestTokenController = null;
 let viewGeneration = 0;
 let lockedDeckPage = null;
 let pendingNavigationPage = null;
@@ -26,6 +30,7 @@ let paginationDockFrame = null;
 let searchPending = false;
 let resultSelectionEnabled = false;
 let singleDownloadPending = false;
+let resumableBatchTask = null;
 let lastKnownLoggedIn = null;
 let authStatusGeneration = 0;
 const batchCandidateContextByArtwork = new Map();
@@ -40,6 +45,7 @@ const VIEWER_PAGE_WINDOW = 80;
 const SEARCH_KEEP_BEHIND = 6;
 const detailRefreshes = new Map();
 const detailRefreshAttempts = new Map();
+const staleBasketPreviewIds = new Set();
 const selectedArtworkIds = new Set();
 const selectedArtworks = new Map();
 const selectedPagesByArtwork = new Map();
@@ -50,7 +56,8 @@ const archivedArtworkIds = new Set();
 const $ = (selector) => document.querySelector(selector);
 const grid = $("#grid");
 const gallery = $("#gallery");
-const searchButton = $("#searchForm button");
+const searchButton = $("#searchSubmit");
+const cancelSearchButton = $("#cancelSearch");
 document.documentElement.classList.add("conservative");
 
 function readSearchFilters() {
@@ -68,10 +75,16 @@ const esc = (value) => String(value).replace(
 );
 
 async function getRequestToken() {
+  if (requestToken) return requestToken;
   if (!requestTokenPromise) {
-    requestTokenPromise = fetch("/api/health", {
+    const controller = new AbortController();
+    requestTokenController = controller;
+    const timer = setTimeout(() => controller.abort(), 5000);
+    let pending;
+    pending = fetch("/api/health", {
       cache: "no-store",
       headers: { "Sec-Fetch-Site": "same-origin" },
+      signal: controller.signal,
     })
       .then((response) => {
         if (!response.ok) throw new Error("本机服务未准备好");
@@ -80,14 +93,35 @@ async function getRequestToken() {
       .then((data) => {
         if (data.protocolVersion !== 5 || data.applicationId !== "MOKU.PixivTagGallery") throw new Error("MOKU 后端版本过旧，请关闭当前窗口并重新启动 MOKU");
         if (!data.requestToken) throw new Error("本机请求授权未初始化");
-        return data.requestToken;
+        requestToken = data.requestToken;
+        return requestToken;
       })
       .catch((error) => {
-        requestTokenPromise = null;
+        if (controller.signal.aborted) throw new Error("本机服务连接超时或已取消");
         throw error;
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        if (requestTokenController === controller) requestTokenController = null;
+        if (!requestToken && requestTokenPromise === pending) requestTokenPromise = null;
       });
+    requestTokenPromise = pending;
   }
   return requestTokenPromise;
+}
+
+function waitForPromiseOrAbort(promise, signal) {
+  if (!signal) return Promise.resolve(promise);
+  if (signal.aborted) return Promise.reject(signal.reason || new Error("请求已取消"));
+  return new Promise((resolve, reject) => {
+    const finish = (callback) => (value) => {
+      signal.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () => reject(signal.reason || new Error("请求已取消"));
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(promise).then(finish(resolve), finish(reject));
+  });
 }
 
 async function fetchJson(url, options = {}, timeoutMs = 12000) {
@@ -108,7 +142,10 @@ async function fetchJson(url, options = {}, timeoutMs = 12000) {
 
   try {
     const headers = new Headers(options.headers || {});
-    headers.set("X-MOKU-Request-Token", await getRequestToken());
+    headers.set(
+      "X-MOKU-Request-Token",
+      await waitForPromiseOrAbort(getRequestToken(), controller.signal),
+    );
     const response = await fetch(url, { ...options, headers, signal: controller.signal });
     const text = await response.text();
     let data = {};
@@ -126,6 +163,37 @@ async function fetchJson(url, options = {}, timeoutMs = 12000) {
     clearTimeout(timer);
     if (upstream) upstream.removeEventListener("abort", relayAbort);
   }
+}
+
+function nextSearchRequestId() {
+  searchRequestSequence += 1;
+  return `${Date.now().toString(36)}-${searchRequestSequence.toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+async function notifySearchCancellation(requestId) {
+  if (!requestId || !requestToken) return;
+  try {
+    await fetch("/api/pixiv/search/cancel", {
+      method: "POST",
+      cache: "no-store",
+      keepalive: true,
+      headers: {
+        "Content-Type": "application/json",
+        "X-MOKU-Request-Token": requestToken,
+      },
+      body: JSON.stringify({ requestId }),
+    });
+  } catch {
+    // The local service may already be closing; the browser request is still aborted below.
+  }
+}
+
+function cancelActiveSearch() {
+  if (!searchController) return false;
+  const requestId = activeSearchRequestId;
+  searchController.abort();
+  void notifySearchCancellation(requestId);
+  return true;
 }
 
 function abortDetailRefreshes() {
@@ -163,6 +231,7 @@ async function refreshArtworkPreview(rawArtworkId) {
       if (candidateIndex >= 0) batchCandidateItems[candidateIndex] = fresh;
       if (selectedArtworkIds.has(artworkId)) selectedArtworks.set(artworkId, fresh);
       currentDetailItem = fresh;
+      staleBasketPreviewIds.delete(artworkId);
 
       document.querySelectorAll("[data-detail-artwork]").forEach((img) => {
         if (String(img.dataset.detailArtwork || "") !== artworkId) return;
@@ -195,6 +264,7 @@ function installImageFallbacks(root = document) {
     img.dataset.fallbackReady = "1";
     img.addEventListener("error", async () => {
       const artworkId = img.dataset.detailArtwork;
+      const basketArtworkId = img.dataset.basketArtwork;
       const failedUrl = img.currentSrc || img.getAttribute?.("src") || img.src || "";
       if (artworkId && failedUrl && img.dataset.detailRefreshAttemptedUrl !== failedUrl) {
         img.dataset.detailRefreshAttemptedUrl = failedUrl;
@@ -202,6 +272,7 @@ function installImageFallbacks(root = document) {
       }
       img.removeAttribute("src");
       img.classList.add("image-unavailable");
+      if (basketArtworkId) staleBasketPreviewIds.add(String(basketArtworkId));
       img.closest(".poster,.batch-collection,.page-select,.deck-card,figure")?.classList.add("image-unavailable");
     });
   });
@@ -214,6 +285,8 @@ function syncSearchScopedControls() {
   const selectionActionsDisabled = basketSelectionLocked || searchPending;
   $("#clearSelection").disabled = selectionActionsDisabled || selectedArtworkIds.size === 0;
   $("#openBatch").disabled = selectionActionsDisabled || selectedArtworkIds.size === 0;
+  $("#batchDownload").disabled = basketSelectionLocked || searchPending || singleDownloadPending || selectedPageCount() === 0;
+  searchButton.disabled = basketSelectionLocked || searchPending || singleDownloadPending;
   const detailReady = Boolean(
     currentDetailItem
     && activeArtworkId !== null
@@ -268,19 +341,22 @@ function discardRestrictedSelections() {
     selectedPagesByArtwork.delete(id);
     selectedContextByArtwork.delete(id);
     selectedResultPageByArtwork.delete(id);
+    staleBasketPreviewIds.delete(id);
     archivedArtworkIds.delete(id);
   });
   batchCandidateItems = [];
   batchCandidateContextByArtwork.clear();
   batchCandidateResultPageByArtwork.clear();
+  staleBasketPreviewIds.clear();
 }
 
 function handleAuthorizationLoss() {
   viewGeneration += 1;
   abortDetailRefreshes();
-  if (searchController) searchController.abort();
+  cancelActiveSearch();
   if (detailController) detailController.abort();
   searchController = null;
+  activeSearchRequestId = null;
   detailController = null;
   searchPending = false;
   resultSelectionEnabled = false;
@@ -302,6 +378,8 @@ function handleAuthorizationLoss() {
   updateSelectionBar();
   searchButton.disabled = basketSelectionLocked;
   searchButton.innerHTML = "开始寻找 <span>↗</span>";
+  cancelSearchButton.disabled = false;
+  cancelSearchButton.hidden = true;
   syncSearchScopedControls();
 }
 
@@ -424,18 +502,20 @@ function toggleArtworkSelection(item, checked) {
 function selectAllCurrentPage() {
   if (basketSelectionLocked || searchPending || !resultSelectionEnabled) return false;
   let additionalPages = 0;
+  const selectionPlan = [];
   for (const item of items) {
     const pageCount = validatedArtworkPageCount(item);
     if (pageCount === null) {
       $("#pageSelectionStatus").textContent = "无法全选：搜索结果包含异常页数";
       return false;
     }
-    const existingPages = selectedPagesByArtwork.get(item.id) || new Set();
+    const existingPages = selectedPagesByArtwork.get(item.id);
     let existingPageCount = 0;
-    existingPages.forEach((page) => {
+    existingPages?.forEach((page) => {
       if (Number.isInteger(page) && page >= 0 && page < pageCount) existingPageCount += 1;
     });
     additionalPages += Math.max(0, pageCount - existingPageCount);
+    selectionPlan.push({ item, pageCount });
     if (selectionWouldExceedPageLimit(additionalPages)) break;
   }
   const status = $("#pageSelectionStatus");
@@ -444,8 +524,18 @@ function selectAllCurrentPage() {
     showSelectionLimitDialog(additionalPages);
     return false;
   }
-  for (const item of items) {
-    toggleArtworkSelection(item, true);
+  for (const { item, pageCount } of selectionPlan) {
+    const pages = new Set();
+    for (let page = 0; page < pageCount; page += 1) pages.add(page);
+    selectedArtworkIds.add(item.id);
+    selectedArtworks.set(item.id, item);
+    selectedPagesByArtwork.set(item.id, pages);
+    if (!selectedContextByArtwork.has(item.id)) {
+      selectedContextByArtwork.set(item.id, { ...activeSearchContext });
+    }
+    if (!selectedResultPageByArtwork.has(item.id)) {
+      selectedResultPageByArtwork.set(item.id, currentPage);
+    }
   }
   updateSelectionBar();
   status.textContent = `已全选当前页 ${items.length} 个作品及其全部图片`;
@@ -461,13 +551,20 @@ function clearAllCurrentPage() {
 }
 
 async function search(tag, page = 1, filters = readSearchFilters()) {
-  if (basketSelectionLocked) return;
-  if (searchController) searchController.abort();
+  if (basketSelectionLocked || singleDownloadPending) return;
+  const previousView = searchController?._mokuRestoreView || {
+    count: $("#count").textContent,
+    hadCommittedResults: resultSelectionEnabled,
+  };
+  cancelActiveSearch();
   viewGeneration += 1;
   abortDetailRefreshes();
   if (detailController) detailController.abort();
   searchController = new AbortController();
   const controller = searchController;
+  controller._mokuRestoreView = previousView;
+  const requestId = nextSearchRequestId();
+  activeSearchRequestId = requestId;
   const cleanTag = String(tag || "").trim() || "原创";
   const requestedFilters = {
     mode: filters?.mode || "safe",
@@ -475,7 +572,7 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     includeAi: Boolean(filters?.includeAi),
     fuzzy: Boolean(filters?.fuzzy),
   };
-  const contextMatch = cleanTag.match(/^\s*(pid|author)\s*[:：]\s*(.+)$/i);
+  const contextMatch = cleanTag.match(/^\s*(pid|uid|author)\s*[:：]\s*(.+)$/i);
   const requestedContext = contextMatch
     ? { kind: contextMatch[1].toLowerCase(), value: contextMatch[2].trim() }
     : { kind: "tags", value: cleanTag };
@@ -484,6 +581,8 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
   resultSelectionEnabled = false;
   searchButton.disabled = true;
   searchButton.textContent = "正在寻找…";
+  cancelSearchButton.hidden = false;
+  cancelSearchButton.disabled = false;
   $("#download").disabled = true;
   syncSearchScopedControls();
   grid.innerHTML = '<p class="loading-state">正在连接 Pixiv，可随时继续操作页面…</p>';
@@ -498,6 +597,7 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
       workType: requestedFilters.workType,
       includeAi: String(requestedFilters.includeAi),
       fuzzy: String(requestedFilters.fuzzy),
+      requestId,
     });
     const data = await fetchJson(`/api/pixiv/search?${query}`, { signal: controller.signal }, 90000);
     if (controller !== searchController) return;
@@ -506,6 +606,7 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     activeSearchContext = requestedContext;
     activeSearchFilters = requestedFilters;
     items = Array.isArray(data.items) ? data.items : [];
+    reconcileSelectedArtworkPreviews(items);
     currentPage = Number(data.page) || 1;
     pageNumbers = Array.isArray(data.availablePages) ? data.availablePages : (Array.isArray(data.pageNumbers) ? data.pageNumbers : [currentPage]);
     firstAvailablePage = pageNumbers.length ? Number(pageNumbers[0]) : currentPage;
@@ -521,16 +622,33 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     renderPagination();
     clearDetail();
   } catch (error) {
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted) {
+      if (controller === searchController) {
+        resultSelectionEnabled = previousView.hadCommittedResults;
+        if (previousView.hadCommittedResults) {
+          render();
+          renderPagination();
+          $("#count").textContent = previousView.count;
+        } else {
+          grid.innerHTML = '<div class="empty-state"><b>搜索已取消</b><p>调整条件后可以重新开始寻找。</p></div>';
+          $("#pagination").innerHTML = "";
+          $("#count").textContent = "搜索已取消";
+        }
+      }
+      return;
+    }
     grid.innerHTML = `<div class="error-state"><b>加载失败</b><p>${esc(error.message || "Pixiv 搜索失败")}</p><button id="retrySearch" type="button">重试当前搜索</button></div>`;
     $("#count").textContent = "连接未完成";
     $("#retrySearch")?.addEventListener("click", () => search(cleanTag, page, requestedFilters));
   } finally {
     if (controller === searchController) {
       searchController = null;
+      activeSearchRequestId = null;
       searchPending = false;
       searchButton.disabled = false;
       searchButton.innerHTML = "开始寻找 <span>↗</span>";
+      cancelSearchButton.disabled = false;
+      cancelSearchButton.hidden = true;
       syncSearchScopedControls();
     }
   }
@@ -541,6 +659,25 @@ function syncResultSelectionControls() {
     const item = items[Number(box.dataset.select)];
     box.checked = Boolean(item && selectedArtworkIds.has(item.id));
   });
+}
+
+function reconcileSelectedArtworkPreviews(freshItems) {
+  const freshById = new Map(freshItems.map((item) => [String(item.id), item]));
+  const mergePreview = (existing) => {
+    const fresh = freshById.get(String(existing.id));
+    if (!fresh) return existing;
+    const merged = { ...existing, ...fresh };
+    if (Array.isArray(existing.pageImages) && existing.pageImages.length) {
+      merged.pageImages = existing.pageImages;
+      merged.thumb = fresh.thumb || existing.thumb;
+    }
+    return merged;
+  };
+  selectedArtworks.forEach((item, artworkId) => {
+    const merged = mergePreview(item);
+    if (merged !== item) selectedArtworks.set(artworkId, merged);
+  });
+  batchCandidateItems = batchCandidateItems.map(mergePreview);
 }
 
 function render() {
@@ -597,7 +734,16 @@ function renderPagination() {
 function updatePaginationDock() {
   const dock = document.querySelector(".pagination-dock");
   const gallery = $("#gallery");
-  dock.classList.toggle("is-visible", Boolean($("#pagination").children.length) && gallery.getBoundingClientRect().bottom > 0);
+  const hasPagination = Boolean($("#pagination").children.length);
+  if (!hasPagination) {
+    dock.classList.remove("is-visible");
+    return;
+  }
+  dock.classList.add("is-visible");
+  const galleryRect = gallery.getBoundingClientRect();
+  const dockTop = window.innerHeight - dock.getBoundingClientRect().height;
+  const dockOverGallery = galleryRect.top < dockTop && galleryRect.bottom > dockTop;
+  dock.classList.toggle("is-visible", dockOverGallery);
 }
 
 function schedulePaginationDockUpdate() {
@@ -615,14 +761,14 @@ window.addEventListener("scroll", schedulePaginationDockUpdate, { passive: true 
 window.addEventListener("resize", schedulePaginationDockUpdate, { passive: true });
 
 async function select(index) {
+  let item = items[index];
+  if (!item) return;
   if (detailController) detailController.abort();
   viewGeneration += 1;
   abortDetailRefreshes();
   detailController = new AbortController();
   const controller = detailController;
   const generation = viewGeneration;
-  let item = items[index];
-  if (!item) return;
   const detailContext = { ...activeSearchContext };
   document.body.classList.remove("collection-basket-open", "basket-image-picker");
   $("#batchWorkspace").hidden = true;
@@ -639,6 +785,11 @@ async function select(index) {
       item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, 18000);
       if (controller !== detailController || generation !== viewGeneration) return;
       items[index] = item;
+      if (selectedArtworkIds.has(item.id)) {
+        selectedArtworks.set(item.id, item);
+        const candidateIndex = batchCandidateItems.findIndex((candidate) => String(candidate.id) === String(item.id));
+        if (candidateIndex >= 0) batchCandidateItems[candidateIndex] = item;
+      }
     }
     if (controller !== detailController || generation !== viewGeneration) return;
     renderDetail(item, index, detailContext);
@@ -814,7 +965,12 @@ function renderViewerWindow(item) {
 }
 
 function openAllViewer() {
-  const item = selectedArtworks.get(activeArtworkId) || items.find((row) => row.id === activeArtworkId);
+  const activeDetail = currentDetailItem
+    && activeArtworkId !== null
+    && String(currentDetailItem.id) === String(activeArtworkId)
+    ? currentDetailItem
+    : null;
+  const item = activeDetail || selectedArtworks.get(activeArtworkId) || items.find((row) => row.id === activeArtworkId);
   if (!item?.pageImages) return;
   viewerPageOffset = 0;
   $("#viewerTitle").textContent = item.title;
@@ -913,6 +1069,33 @@ function renderBasketSummary(chosen = batchCandidateItems) {
   renderCacheStatus();
 }
 
+function applyBasketArtworkSelection(item, box) {
+  const accepted = toggleArtworkSelection(item, box.checked);
+  if (!accepted) {
+    box.checked = Boolean(selectedPagesByArtwork.get(item.id)?.size);
+    return false;
+  }
+  if (box.checked) {
+    selectedContextByArtwork.set(item.id, batchCandidateContextByArtwork.get(item.id) || { ...activeSearchContext });
+    selectedResultPageByArtwork.set(item.id, batchCandidateResultPageByArtwork.get(item.id) || currentPage);
+  }
+
+  const selectedPages = selectedPagesByArtwork.get(item.id);
+  const selected = Boolean(selectedPages?.size);
+  box.checked = selected;
+  const card = box.closest(".batch-collection");
+  card?.classList.toggle("is-selected", selected);
+  const label = card?.querySelector(".batch-card-select");
+  label?.setAttribute("aria-label", `${selected ? "取消选择" : "选择"} ${item.title}`);
+  const selectionLabel = card?.querySelector(".batch-card-copy small");
+  if (selectionLabel) selectionLabel.textContent = `${item.artist} · 已选 ${selectedPages?.size || 0}/${item.pages} 张`;
+
+  const selectedCount = batchCandidateItems.filter((candidate) => selectedPagesByArtwork.get(candidate.id)?.size).length;
+  $("#batchSummary").textContent = `${selectedCount}/${batchCandidateItems.length} 个作品已勾选 · ${selectedPageCount()}/${MAX_SELECTED_PAGES} 张`;
+  syncResultSelectionControls();
+  return true;
+}
+
 function openBasketArtworkPicker() {
   const chosen = batchCandidateItems;
   if (!chosen.length) return;
@@ -935,7 +1118,7 @@ function openBasketArtworkPicker() {
     const selectedPages = selectedPagesByArtwork.get(item.id);
     const selected = Boolean(selectedPages?.size);
     const selectedPagesLabel = `${selectedPages?.size || 0}/${item.pages} 张`;
-    return `<article class="batch-collection ${selected ? "is-selected" : ""}" data-batch-artwork="${esc(item.id)}"><label class="batch-card-select" aria-label="${selected ? "取消选择" : "选择"} ${esc(item.title)}"><input type="checkbox" data-batch-select="${esc(item.id)}" ${selected ? "checked" : ""}><span aria-hidden="true">✓</span></label><span class="batch-card-cover"><img src="${esc(item.thumb)}" alt="${esc(item.title)}" loading="lazy" decoding="async"><button class="batch-page-count" type="button" data-open-collection="${esc(item.id)}" aria-label="进入 ${esc(item.title)} 的 ${item.pages} 张图片选择">${item.pages}P</button></span><span class="batch-card-copy"><b>${esc(item.title)}</b><small>${esc(item.artist)} · 已选 ${selectedPagesLabel}</small></span></article>`;
+    return `<article class="batch-collection ${selected ? "is-selected" : ""}" data-batch-artwork="${esc(item.id)}"><label class="batch-card-select" aria-label="${selected ? "取消选择" : "选择"} ${esc(item.title)}"><input type="checkbox" data-batch-select="${esc(item.id)}" ${selected ? "checked" : ""}><span aria-hidden="true">✓</span></label><span class="batch-card-cover"><img src="${esc(item.thumb)}" data-basket-artwork="${esc(item.id)}" alt="${esc(item.title)}" loading="lazy" decoding="async"><button class="batch-page-count" type="button" data-open-collection="${esc(item.id)}" aria-label="进入 ${esc(item.title)} 的 ${item.pages} 张图片选择">${item.pages}P</button></span><span class="batch-card-copy"><b>${esc(item.title)}</b><small>${esc(item.artist)} · 已选 ${selectedPagesLabel}</small></span></article>`;
   }).join("")}`;
   installImageFallbacks($("#batchCollections"));
   $("#batchCollections").querySelectorAll("[data-basket-window]:not([disabled])").forEach((button) => {
@@ -949,17 +1132,7 @@ function openBasketArtworkPicker() {
     box.onchange = () => {
       const item = batchCandidateItems.find((candidate) => candidate.id === box.dataset.batchSelect);
       if (!item) return;
-      const accepted = toggleArtworkSelection(item, box.checked);
-      if (!accepted) {
-        box.checked = false;
-        return;
-      }
-      if (box.checked) {
-        selectedContextByArtwork.set(item.id, batchCandidateContextByArtwork.get(item.id) || { ...activeSearchContext });
-        selectedResultPageByArtwork.set(item.id, batchCandidateResultPageByArtwork.get(item.id) || currentPage);
-      }
-      syncResultSelectionControls();
-      openBasketArtworkPicker();
+      applyBasketArtworkSelection(item, box);
     };
   });
   $("#batchCollections").querySelectorAll("[data-open-collection]").forEach((button) => {
@@ -993,6 +1166,23 @@ function planContextDownloadChunks(groups) {
   );
 }
 
+function prepareBatchTask(chunks, taskOptions) {
+  const signature = JSON.stringify({ chunks, taskOptions });
+  if (
+    resumableBatchTask?.signature === signature
+    && resumableBatchTask.remainingChunks.length
+  ) {
+    return resumableBatchTask;
+  }
+  return {
+    signature,
+    remainingChunks: chunks,
+    savedCount: 0,
+    completedBatches: 0,
+    totalBatches: chunks.length,
+  };
+}
+
 function setDownloadButtonState(button, text, disabled) {
   button.disabled = disabled;
   button.textContent = text;
@@ -1000,7 +1190,7 @@ function setDownloadButtonState(button, text, disabled) {
 
 function setBasketSelectionLocked(locked) {
   basketSelectionLocked = locked;
-  const controls = document.querySelectorAll("[data-select],[data-batch-select],[data-collection-page],[data-open-collection],#selectAllPage,#clearPageSelection,#clearSelection,#openBasketDetail,#returnToBatch,#searchForm input,#searchForm button,#searchForm select,#pagination button");
+  const controls = document.querySelectorAll("[data-select],[data-batch-select],[data-collection-page],[data-open-collection],#selectAllPage,#clearPageSelection,#clearSelection,#openBasketDetail,#returnToBatch,#searchForm input,#searchSubmit,#searchForm select,#pagination button");
   controls.forEach((control) => {
     if (locked) {
       control.dataset.basketLockDisabled = String(control.disabled);
@@ -1113,25 +1303,26 @@ $("#clearAndContinue").onclick = clearAndContinue;
 $("#cancelCapacity").onclick = cancelCapacityDecision;
 
 async function openBatchCollection(id) {
+  let item = selectedArtworks.get(id) || batchCandidateItems.find((candidate) => candidate.id === id);
+  if (!item) return;
   if (detailController) detailController.abort();
   viewGeneration += 1;
   abortDetailRefreshes();
   detailController = new AbortController();
   const controller = detailController;
   const generation = viewGeneration;
-  let item = selectedArtworks.get(id) || batchCandidateItems.find((candidate) => candidate.id === id);
-  if (!item) return;
   const detailContext = batchCandidateContextByArtwork.get(item.id)
     || selectedContextByArtwork.get(item.id)
     || activeSearchContext;
   try {
-    if (item.source === "pixiv" && !item.pageImages) {
+    if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)))) {
       $("#dTitle").textContent = "正在加载合集详情…";
       item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, 18000);
       if (controller !== detailController || generation !== viewGeneration) return;
       const candidateIndex = batchCandidateItems.findIndex((candidate) => candidate.id === item.id);
       if (candidateIndex >= 0) batchCandidateItems[candidateIndex] = item;
       if (selectedArtworkIds.has(item.id)) selectedArtworks.set(item.id, item);
+      staleBasketPreviewIds.delete(String(item.id));
     }
     if (controller !== detailController || generation !== viewGeneration) return;
     $("#detail").hidden = false;
@@ -1172,14 +1363,15 @@ $("#clearSelection").onclick = () => {
 $("#openBatch").onclick = openSelectionBasket;
 
 $("#batchDownload").onclick = async () => {
+  if (basketSelectionLocked || searchPending || singleDownloadPending) return;
   const groups = selectedGroups();
   if (!groups.length) {
     $("#toast").textContent = "请至少选择一张图片";
     return;
   }
-  let chunks;
+  let plannedChunks;
   try {
-    chunks = planContextDownloadChunks(groups);
+    plannedChunks = planContextDownloadChunks(groups);
   } catch (error) {
     $("#toast").textContent = error.message;
     return;
@@ -1191,14 +1383,17 @@ $("#batchDownload").onclick = async () => {
     createFolder: $("#createFolder").checked,
     groupArtworks: Boolean($("#groupArtworks")?.checked),
   };
+  const task = prepareBatchTask(plannedChunks, taskOptions);
+  const chunks = task.remainingChunks;
   setDownloadButtonState(button, "准备保存…", true);
   setBasketSelectionLocked(true);
   $("#toast").textContent = "本次任务已锁定当前勾选；完成前不能修改采集篮。";
-  let savedCount = 0;
+  let activeChunkIndex = 0;
   try {
     for (let index = 0; index < chunks.length; index += 1) {
+      activeChunkIndex = index;
       const chunk = chunks[index];
-      setDownloadButtonState(button, `正在保存第 ${index + 1}/${chunks.length} 批…`, true);
+      setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
       const data = await fetchJson("/api/pixiv/batch-download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1208,12 +1403,17 @@ $("#batchDownload").onclick = async () => {
           context: chunk.context,
         }),
       }, 300000);
-      savedCount += Array.isArray(data.saved) ? data.saved.length : chunk.pageCount;
+      task.savedCount += Array.isArray(data.saved) ? data.saved.length : chunk.pageCount;
+      task.completedBatches += 1;
+      task.remainingChunks = chunks.slice(index + 1);
     }
-    $("#toast").textContent = `已保存 ${savedCount} 张图片，共 ${chunks.length} 批`;
+    resumableBatchTask = null;
+    $("#toast").textContent = `已保存 ${task.savedCount} 张图片，共 ${task.totalBatches} 批`;
   } catch (error) {
-    const prefix = savedCount ? `已保存 ${savedCount} 张；后续` : "批量下载";
-    $("#toast").textContent = `${prefix}失败：${error.message}`;
+    task.remainingChunks = chunks.slice(activeChunkIndex);
+    resumableBatchTask = task;
+    const prefix = task.savedCount ? `已保存 ${task.savedCount} 张；后续` : "批量下载";
+    $("#toast").textContent = `${prefix}失败：${error.message}。再次点击只继续剩余 ${task.remainingChunks.length} 批。`;
   } finally {
     setBasketSelectionLocked(false);
     setDownloadButtonState(button, "下载已勾选图片", false);
@@ -1240,15 +1440,12 @@ $("#searchForm").onsubmit = (event) => {
   scrollToResults();
 };
 
-function restartSearchFromFilters() {
-  if (basketSelectionLocked || !$("#tag").value.trim()) return;
-  search($("#tag").value, 1, readSearchFilters());
-  scrollToResults();
-}
-
-["#workType", "#includeAi", "#fuzzySearch", "#safety"].forEach((selector) => {
-  $(selector)?.addEventListener("change", restartSearchFromFilters);
-});
+cancelSearchButton.onclick = () => {
+  if (!searchController) return;
+  cancelSearchButton.disabled = true;
+  $("#count").textContent = "正在停止搜索…";
+  cancelActiveSearch();
+};
 
 $("#browseFolder").onclick = async () => {
   const button = $("#browseFolder");
@@ -1281,11 +1478,12 @@ $("#browseFolder").onclick = async () => {
 
 $("#download").onclick = async () => {
   const item = selectedArtworks.get(activeArtworkId) || items.find((row) => row.id === activeArtworkId);
-  if (!item || searchPending || singleDownloadPending) return;
+  if (!item || basketSelectionLocked || searchPending || singleDownloadPending) return;
   const sourceIndex = Math.max(0, items.findIndex((row) => row.id === item.id));
   const button = $("#download");
   singleDownloadPending = true;
   setDownloadButtonState(button, "正在保存…", true);
+  syncSearchScopedControls();
   try {
     const request = downloadPayload(item, sourceIndex);
     const data = await fetchJson(request.endpoint, {

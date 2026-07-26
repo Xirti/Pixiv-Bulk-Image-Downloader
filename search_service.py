@@ -22,15 +22,19 @@ class SearchQuery:
 
 def parse_search_query(value: str, *, max_length: int = 60) -> SearchQuery:
     text = str(value or "").strip()
-    match = re.fullmatch(r"(?is)(pid|author)\s*[:：]\s*(.*)", text)
+    match = re.fullmatch(r"(?is)(pid|uid|author)\s*[:：]\s*(.*)", text)
     if not match:
         return SearchQuery("tags", text or "原创")
     kind = match.group(1).casefold()
-    target = match.group(2).strip()[:max_length]
+    raw_target = match.group(2).strip()
+    target = raw_target[:max_length]
     if not target:
         raise SearchInputError(f"{kind} 搜索缺少目标")
-    if kind == "pid" and (not target.isascii() or not target.isdigit()):
-        raise SearchInputError("pid 必须是 Pixiv 画师主页中的纯数字用户 ID")
+    if kind in {"pid", "uid"} and (
+        len(raw_target) > max_length or not target.isascii() or not target.isdigit()
+    ):
+        label = "作品 ID" if kind == "pid" else "用户 ID"
+        raise SearchInputError(f"{kind} 必须是 Pixiv 的纯数字{label}")
     return SearchQuery(kind, target)
 
 
@@ -120,6 +124,46 @@ def resolve_source_modes(scope: str, *, authorized: bool) -> tuple[str, ...]:
 
 def prefetch_item_count(page: int, *, per_page: int = 36, ahead: int = 3) -> int:
     return (max(1, int(page)) + max(0, int(ahead))) * max(1, int(per_page))
+
+
+def build_result_page_rows(
+    items: list[Any],
+    *,
+    base_index: int,
+    current_page: int,
+    complete_through: int,
+    per_page: int = 36,
+    ahead: int = 3,
+) -> dict[int, list[Any]]:
+    """Build only the retained page window from an absolute result sequence."""
+    size = max(1, int(per_page))
+    base = max(0, int(base_index))
+    first_page = base // size + 1
+    cache_through = min(
+        max(1, int(current_page)) + max(0, int(ahead)),
+        max(0, int(complete_through)),
+    )
+    rows: dict[int, list[Any]] = {}
+    for page_number in range(first_page, cache_through + 1):
+        start = (page_number - 1) * size - base
+        if start >= 0:
+            rows[page_number] = list(items[start:start + size])
+    return rows
+
+
+def result_window_trim_count(
+    item_count: int,
+    *,
+    base_index: int,
+    current_page: int,
+    per_page: int = 36,
+    keep_behind: int = 6,
+) -> int:
+    """Return how many leading items fall outside the backward page window."""
+    size = max(1, int(per_page))
+    oldest_page = max(1, int(current_page) - max(0, int(keep_behind)))
+    trim_to = (oldest_page - 1) * size
+    return min(max(0, int(item_count)), max(0, trim_to - max(0, int(base_index))))
 
 
 @dataclass

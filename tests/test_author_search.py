@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -39,10 +41,119 @@ class AuthorSearchRegressionTests(unittest.TestCase):
     def test_query_prefixes_accept_ascii_and_fullwidth_colons(self):
         self.assertEqual(parse_search_query("pid:42"), SearchQuery("pid", "42"))
         self.assertEqual(parse_search_query("PID： 42"), SearchQuery("pid", "42"))
+        self.assertEqual(parse_search_query("uid:42"), SearchQuery("uid", "42"))
+        self.assertEqual(parse_search_query("UID： 42"), SearchQuery("uid", "42"))
         self.assertEqual(parse_search_query("author:目标画师"), SearchQuery("author", "目标画师"))
         self.assertEqual(parse_search_query("AUTHOR： 目标画师"), SearchQuery("author", "目标画师"))
         with self.assertRaises(SearchInputError):
             parse_search_query("pid:not-a-number")
+        with self.assertRaises(SearchInputError):
+            parse_search_query("uid:not-a-number")
+        with self.assertRaises(SearchInputError):
+            parse_search_query("pid:" + "1" * 60 + "suffix")
+        with self.assertRaises(SearchInputError):
+            parse_search_query("uid:" + "1" * 60 + "suffix")
+
+    def test_pid_search_returns_one_pixiv_detail(self):
+        item = {
+            "id": "42", "title": "目标作品", "artist": "目标画师",
+            "restriction": "safe", "workType": "manga", "aiGenerated": False,
+        }
+        with patch.object(server, "pixiv_item_for_download", return_value=item) as detail:
+            result = server.search_pixiv_results(
+                "pid:42", "safe", 1, "manga", False, authorized=False,
+            )
+
+        detail.assert_called_once()
+        call_args, call_kwargs = detail.call_args
+        self.assertEqual(call_args, ("42",))
+        self.assertFalse(call_kwargs["allow_r18"])
+        self.assertIsNone(call_kwargs["authorization_epoch"])
+        self.assertFalse(call_kwargs["cancel_event"].is_set())
+        self.assertTrue(call_kwargs["require_thumb"])
+        self.assertEqual(result["searchType"], "pid")
+        self.assertEqual(result["targetArtworkId"], "42")
+        self.assertEqual(result["items"], [item])
+        self.assertEqual(result["total"], 1)
+        self.assertFalse(result["hasMore"])
+
+    def test_pid_search_applies_type_ai_and_safety_filters(self):
+        item = {
+            "id": "42", "title": "目标作品", "artist": "目标画师",
+            "restriction": "safe", "workType": "ugoira", "aiGenerated": True,
+        }
+        with patch.object(server, "pixiv_item_for_download", return_value=item):
+            type_filtered = server.search_pixiv_results(
+                "pid:42", "safe", 1, "manga", True, authorized=False,
+            )
+            ai_filtered = server.search_pixiv_results(
+                "pid:42", "safe", 1, "all", False, authorized=False,
+            )
+            safety_filtered = server.search_pixiv_results(
+                "pid:42", "r18", 1, "all", True,
+                authorized=True, authorization_epoch=7,
+            )
+
+        self.assertEqual(type_filtered["items"], [])
+        self.assertEqual(ai_filtered["items"], [])
+        self.assertEqual(safety_filtered["items"], [])
+        self.assertEqual(type_filtered["total"], 0)
+        self.assertEqual(ai_filtered["total"], 0)
+        self.assertEqual(safety_filtered["total"], 0)
+
+    def test_pid_detail_cache_requires_a_current_thumbnail_token(self):
+        item = {
+            "id": "42",
+            "thumb": "/api/pixiv/image?token=missing-thumb",
+            "pageImages": [{
+                "regular": "/api/pixiv/image?token=page-regular",
+                "original": "/api/pixiv/image?token=page-original",
+            }],
+        }
+        expires = time.time() + 60
+        tokens = {
+            "page-regular": (expires, "42", "https://i.pximg.net/regular.jpg", "safe"),
+            "page-original": (expires, "42", "https://i.pximg.net/original.jpg", "safe"),
+        }
+
+        with patch.dict(server.IMAGE_TOKENS, tokens, clear=True):
+            self.assertFalse(server._item_image_tokens_current(item))
+
+    def test_download_cache_does_not_refresh_for_an_unused_thumbnail(self):
+        item = {
+            "id": "42", "restriction": "safe",
+            "thumb": "/api/pixiv/image?token=expired-thumb",
+            "pageImages": [{
+                "regular": "/api/pixiv/image?token=page-regular",
+                "original": "/api/pixiv/image?token=page-original",
+            }],
+        }
+        expires = time.time() + 60
+        tokens = {
+            "page-regular": (expires, "42", "https://i.pximg.net/regular.jpg", "safe"),
+            "page-original": (expires, "42", "https://i.pximg.net/original.jpg", "safe"),
+        }
+
+        with patch.object(server, "get_cached_pixiv_item", return_value=item), patch.dict(
+            server.IMAGE_TOKENS, tokens, clear=True,
+        ), patch.object(server, "pixiv_detail") as remote_detail:
+            result = server.pixiv_item_for_download("42", allow_r18=False)
+
+        self.assertIs(result, item)
+        remote_detail.assert_not_called()
+
+    def test_pid_detail_rejects_a_mismatched_upstream_artwork_id(self):
+        detail = {
+            "illustId": "43", "title": "wrong work", "userId": "2",
+            "userName": "artist", "tags": {"tags": []},
+            "xRestrict": 0, "isUnlisted": False, "isLoginOnly": False,
+            "isMasked": False, "visibilityScope": 0,
+        }
+        with patch.object(server, "search_pixiv_json", side_effect=[
+            {"body": detail}, {"body": []},
+        ]):
+            with self.assertRaisesRegex(server.PixivPolicyError, "作品 ID 不匹配"):
+                server.pixiv_detail("42", cancel_event=threading.Event())
 
     def test_legacy_nested_user_preview_parser_remains_bounded(self):
         payload = {
@@ -106,9 +217,9 @@ class AuthorSearchRegressionTests(unittest.TestCase):
             server, "load_user_profile_works",
             side_effect=lambda _user_id, artwork_ids: [self.raw(artwork_id) for artwork_id in artwork_ids],
         ):
-            second = server.search_pixiv_results("pid:42", "safe", 2, "all", True, authorized=False)
-            first = server.search_pixiv_results("pid:42", "safe", 1, "all", True, authorized=False)
-            third = server.search_pixiv_results("pid:42", "safe", 3, "all", True, authorized=False)
+            second = server.search_pixiv_results("uid:42", "safe", 2, "all", True, authorized=False)
+            first = server.search_pixiv_results("uid:42", "safe", 1, "all", True, authorized=False)
+            third = server.search_pixiv_results("uid:42", "safe", 3, "all", True, authorized=False)
         self.assertEqual(len(second["items"]), 36)
         self.assertEqual(len(first["items"]), 36)
         self.assertEqual(first["items"][0]["id"], ids[0])
@@ -145,11 +256,11 @@ class AuthorSearchRegressionTests(unittest.TestCase):
             side_effect=lambda _user_id, artwork_ids: calls.append(list(artwork_ids)) or [],
         ):
             result = server.search_pixiv_results(
-                "pid:42", "safe", 1, "ugoira", True, authorized=False,
+                "uid:42", "safe", 1, "ugoira", True, authorized=False,
             )
 
         self.assertEqual(len(calls), server.MAX_USER_SEARCH_REQUESTS)
-        session_key = ("user", "pid", "42", "42", "safe", "ugoira", True, False)
+        session_key = ("user", "uid", "42", "42", "safe", "ugoira", True, False)
         self.assertEqual(
             server.SEARCH_SESSIONS[session_key]["profileOffset"],
             server.MAX_USER_SEARCH_REQUESTS * 48,

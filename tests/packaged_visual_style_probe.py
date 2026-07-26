@@ -99,11 +99,53 @@ def main() -> None:
             after_scroll = evaluate(ws, counter, """(() => {
                 const gallery = document.querySelector('#gallery');
                 const dock = document.querySelector('.pagination-dock');
-                document.querySelector('#pagination').innerHTML = '<button type="button">1</button>';
+                const grid = document.querySelector('#grid');
+                const pagination = document.querySelector('#pagination');
+                const originalGrid = grid.innerHTML;
+                const originalPagination = pagination.innerHTML;
+                const spacer = document.createElement('div');
+                spacer.style.height = `${innerHeight + 64}px`;
+                grid.innerHTML = '<div style="height:240px;grid-column:1/-1"></div>';
+                pagination.innerHTML = '<button type="button">1</button>';
+                gallery.insertAdjacentElement('afterend', spacer);
+
                 gallery.scrollIntoView({block:'start'});
                 updatePaginationDock();
-                const style = getComputedStyle(dock);
-                return {visible: style.display === 'flex', position: style.position, bottom: style.bottom};
+                const visibleStyle = getComputedStyle(dock);
+                const visibleWithResults = visibleStyle.display === 'flex';
+                const position = visibleStyle.position;
+                const bottom = visibleStyle.bottom;
+                const dockHeightWithResults = dock.getBoundingClientRect().height;
+                const dockTopWithResults = innerHeight - dockHeightWithResults;
+                const bottomWithResults = gallery.getBoundingClientRect().bottom;
+
+                scrollTo(0, scrollY + bottomWithResults + 1);
+                updatePaginationDock();
+                const hiddenPastResults = getComputedStyle(dock).display === 'none';
+                const bottomPastResults = gallery.getBoundingClientRect().bottom;
+
+                gallery.scrollIntoView({block:'start'});
+                updatePaginationDock();
+                const visibleAfterReturn = getComputedStyle(dock).display === 'flex';
+                const bottomAfterReturn = gallery.getBoundingClientRect().bottom;
+
+                spacer.remove();
+                grid.innerHTML = originalGrid;
+                pagination.innerHTML = originalPagination;
+                scrollTo(0, 0);
+                updatePaginationDock();
+                return {
+                    visibleWithResults,
+                    hiddenPastResults,
+                    visibleAfterReturn,
+                    position,
+                    bottom,
+                    dockHeightWithResults,
+                    dockTopWithResults,
+                    bottomWithResults,
+                    bottomPastResults,
+                    bottomAfterReturn
+                };
             })()""")
             result["galleryControlsAfterScroll"] = after_scroll
             result["viewport"] = visual["viewport"]
@@ -409,7 +451,12 @@ def main() -> None:
             and result["galleryControls"].get("pagerBottom") == "0px"
             and result["galleryControls"].get("pagerPointerEvents") == "none"
             and result["galleryControls"].get("pagerDisplay") == "none"
-            and result["galleryControlsAfterScroll"].get("visible")
+            and result["galleryControlsAfterScroll"].get("visibleWithResults")
+            and result["galleryControlsAfterScroll"].get("hiddenPastResults")
+            and result["galleryControlsAfterScroll"].get("visibleAfterReturn")
+            and result["galleryControlsAfterScroll"].get("dockHeightWithResults", 0) > 0
+            and result["galleryControlsAfterScroll"].get("bottomWithResults", 0) > result["galleryControlsAfterScroll"].get("dockTopWithResults", 0)
+            and result["galleryControlsAfterScroll"].get("bottomPastResults", 0) < 0
             and result["galleryControlsAfterScroll"].get("position") == "fixed"
             and result["galleryControlsAfterScroll"].get("bottom") == "0px"
             and result["viewport"].get("scrollWidth", 0) <= result["viewport"].get("width", 0)

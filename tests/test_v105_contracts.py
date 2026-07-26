@@ -10,9 +10,11 @@ from pixiv_adapter import (
     safe_context_folder_name,
 )
 from search_service import (
+    build_result_page_rows,
     build_search_tag_groups,
     parse_search_tags,
     plan_download_chunks,
+    result_window_trim_count,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,24 @@ SERVER = (ROOT / "server.py").read_text(encoding="utf-8")
 
 
 class V105SearchContractTests(unittest.TestCase):
+    def test_shared_result_window_builds_and_trims_absolute_pages(self):
+        items = list(range(108, 468))
+        rows = build_result_page_rows(
+            items,
+            base_index=108,
+            current_page=10,
+            complete_through=13,
+            per_page=36,
+            ahead=3,
+        )
+        self.assertEqual(list(rows), list(range(4, 14)))
+        self.assertEqual(rows[4][0], 108)
+        self.assertEqual(rows[13][-1], 467)
+        self.assertEqual(result_window_trim_count(
+            len(items), base_index=108, current_page=14,
+            per_page=36, keep_behind=6,
+        ), 144)
+
     def test_semicolon_separators_create_strict_tag_groups_and_spaces_stay_inside_tag(self):
         self.assertEqual(parse_search_tags("猫；夜景; 星 夜"), ("猫", "夜景", "星 夜"))
         self.assertEqual(build_search_tag_groups("猫；夜景"), (("猫",), ("夜景",)))
@@ -69,11 +89,13 @@ class V105DownloadContractTests(unittest.TestCase):
         self.assertIn("len(groups) <= DOWNLOAD_CHUNK_ARTWORKS", SERVER)
         self.assertIn("if total_pages > DOWNLOAD_CHUNK_PAGES", SERVER)
 
-    def test_download_context_names_one_shared_folder_for_tag_author_and_pid(self):
+    def test_download_context_names_one_shared_folder_for_tag_author_pid_and_uid(self):
         self.assertEqual(safe_context_folder_name("tag", "猫；夜景"), "tag_猫；夜景")
         self.assertEqual(safe_context_folder_name("author", "画师/甲"), "author_画师_甲")
         self.assertEqual(safe_context_folder_name("pid", "123456"), "pid_123456")
+        self.assertEqual(safe_context_folder_name("uid", "654321"), "uid_654321")
         self.assertEqual(build_download_context("tags", "猫；夜景")["kind"], "tags")
+        self.assertEqual(build_download_context("uid", "654321")["kind"], "uid")
 
     def test_create_folder_resolves_shared_context_not_artwork_folder(self):
         root = Path("C:/Pictures")
@@ -269,7 +291,8 @@ class V105VisualContractTests(unittest.TestCase):
         select_all = APP[
             APP.index("function selectAllCurrentPage"):APP.index("function clearAllCurrentPage")
         ]
-        self.assertIn("toggleArtworkSelection(item, true)", select_all)
+        self.assertNotIn("toggleArtworkSelection(item, true)", select_all)
+        self.assertIn("selectedPagesByArtwork.set(item.id, pages)", select_all)
         self.assertIn("additionalPages", select_all)
         self.assertIn("validatedArtworkPageCount(item)", select_all)
         self.assertNotIn("Array.from", select_all)
@@ -281,6 +304,8 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn(".pagination-dock{position:fixed;left:0;right:0;bottom:0", STYLE)
         self.assertIn(".pagination-dock.is-visible{display:flex}", STYLE)
         self.assertIn("function updatePaginationDock()", APP)
+        self.assertIn("const dockTop = window.innerHeight - dock.getBoundingClientRect().height", APP)
+        self.assertIn("galleryRect.bottom > dockTop", APP)
         self.assertIn('Boolean($("#pagination").children.length)', APP)
         self.assertIn("function schedulePaginationDockUpdate()", APP)
         self.assertIn('window.addEventListener("scroll", schedulePaginationDockUpdate, { passive: true })', APP)
@@ -346,15 +371,24 @@ class V105VisualContractTests(unittest.TestCase):
 
     def test_batch_download_snapshots_all_task_options_before_first_request(self):
         download = APP[APP.index('$(\"#batchDownload\").onclick'):APP.index('addEventListener("keydown"')]
-        snapshot = download[download.index("const taskOptions"):download.index("let savedCount")]
+        snapshot = download[download.index("const taskOptions"):download.index("const task =")]
         self.assertIn('quality: $("#quality").value || "regular"', snapshot)
         self.assertIn('saveRoot: $("#saveRoot").value.trim()', snapshot)
         self.assertIn('createFolder: $("#createFolder").checked', snapshot)
         self.assertIn('groupArtworks: Boolean($("#groupArtworks")?.checked)', snapshot)
-        request_loop = download[download.index("for (let index"):download.index("savedCount +=")]
+        request_loop = download[download.index("for (let index"):download.index("task.savedCount +=")]
         self.assertIn("...taskOptions", request_loop)
         self.assertNotIn('$("#quality")', request_loop)
         self.assertNotIn('$("#saveRoot")', request_loop)
+
+    def test_failed_batch_task_keeps_only_unfinished_chunks_in_memory(self):
+        task = APP[APP.index("function prepareBatchTask"):APP.index("function setDownloadButtonState")]
+        self.assertIn("resumableBatchTask?.signature === signature", task)
+        self.assertIn("remainingChunks", task)
+        download = APP[APP.index('$(\"#batchDownload\").onclick'):APP.index('addEventListener("keydown"')]
+        self.assertIn("task.remainingChunks = chunks.slice(index + 1)", download)
+        self.assertIn("task.remainingChunks = chunks.slice(activeChunkIndex)", download)
+        self.assertIn("再次点击只继续剩余", download)
 
     def test_search_and_basket_cache_status_is_reported_without_binary_image_cache_claims(self):
         self.assertIn('id="cacheStatus"', HTML)

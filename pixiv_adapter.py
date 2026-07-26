@@ -188,7 +188,7 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
     for page in pages:
         urls = page.get("urls") or {}
         page_images.append({"width": int(page.get("width") or 0), "height": int(page.get("height") or 0), "regular": _proxy_image(str(urls.get("regular") or "")), "original": _proxy_image(str(urls.get("original") or ""))})
-    return {"id": artwork_id, "restriction": restriction, "source": "pixiv", "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"), "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""), "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30], "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0), "bookmarks": int(raw.get("bookmarkCount") or 0), "date": str(raw.get("createDate") or "")[:10], "description": _plain_text(raw.get("description") or raw.get("illustComment")), "thumb": page_images[0]["regular"] if page_images else "", "pageImages": page_images, "qualities": [{"id":"original","label":"Pixiv 原图","width":int(raw.get("width") or 0),"height":int(raw.get("height") or 0)},{"id":"regular","label":"Pixiv 常规预览","width":0,"height":0}], "formats":[{"id":"source","label":"保留源格式（推荐）"}]}
+    return {"id": artwork_id, "restriction": restriction, "source": "pixiv", "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"), "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""), "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30], "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0), "bookmarks": int(raw.get("bookmarkCount") or 0), "date": str(raw.get("createDate") or "")[:10], "description": _plain_text(raw.get("description") or raw.get("illustComment")), "workType": {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType") or 0), "illustration"), "aiGenerated": int(raw.get("aiType") or 1) == 2, "thumb": page_images[0]["regular"] if page_images else "", "pageImages": page_images, "qualities": [{"id":"original","label":"Pixiv 原图","width":int(raw.get("width") or 0),"height":int(raw.get("height") or 0)},{"id":"regular","label":"Pixiv 常规预览","width":0,"height":0}], "formats":[{"id":"source","label":"保留源格式（推荐）"}]}
 
 
 def should_retry_status(status: int) -> bool:
@@ -215,7 +215,10 @@ def matches_tag_groups(tags: list[str], groups: tuple[tuple[str, ...], ...]) -> 
 
 
 def safe_context_folder_name(kind: str, value: str) -> str:
-    prefix = {"tags": "tag", "tag": "tag", "author": "author", "pid": "pid"}.get(str(kind), "search")
+    prefix = {
+        "tags": "tag", "tag": "tag", "author": "author",
+        "pid": "pid", "uid": "uid",
+    }.get(str(kind), "search")
     clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', str(value or ''))
     clean = re.sub(r"\s+", " ", clean).strip(" ._")[:100] or "未命名"
     if clean.upper() in {"CON", "PRN", "AUX", "NUL", "COM1", "LPT1"}:
@@ -225,7 +228,7 @@ def safe_context_folder_name(kind: str, value: str) -> str:
 
 def build_download_context(kind: str, value: str) -> dict[str, str]:
     clean_kind = str(kind or "tags").strip().casefold()
-    if clean_kind not in {"tags", "author", "pid"}:
+    if clean_kind not in {"tags", "author", "pid", "uid"}:
         raise PixivPolicyError("invalid download context")
     clean_value = str(value or "").strip()[:120]
     if not clean_value:

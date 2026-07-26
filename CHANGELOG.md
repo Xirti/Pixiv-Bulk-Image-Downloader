@@ -2,6 +2,25 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.11] - 2026-07-26
+
+### Added
+
+- Add exact `pid:` artwork lookup and `uid:` creator lookup while retaining exact-name `author:` search, with ASCII and full-width colon support.
+- Add an explicit search cancel action backed by bounded request tracking and cancellation propagation through session waits, network reads, and result commits.
+
+### Changed
+
+- Apply work type, AI, fuzzy, and safety filters only after the user submits the search form; filter changes no longer start large searches automatically.
+- Bound Pixiv search traffic to four process-wide workers, cap fuzzy source expansion to the retained cache budget, and keep cancelled connection attempts from accumulating unbounded work.
+- Reuse valid page-image capabilities for downloads even when an unused thumbnail capability was evicted, avoiding unnecessary artwork-detail refreshes.
+
+### Fixed
+
+- Reject mismatched upstream artwork IDs, preserve cursor state across cancelled creator searches, and rebuild evicted deep-page sessions instead of returning empty pages.
+- Preserve loaded detail pages and current previews across result, viewer, and basket transitions; update basket selections in place and resume failed download chunks without repeating completed batches.
+- Keep mobile basket titles ellipsized inside their cards, and show the fixed pagination dock only while it overlaps the gallery without losing it on short result pages or return scrolling.
+
 ## [1.0.10] - 2026-07-25
 
 ### Security

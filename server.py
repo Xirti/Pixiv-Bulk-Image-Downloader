@@ -17,13 +17,15 @@ import urllib.request
 import urllib.error
 import time
 import secrets
+import socket
 import sys
 import threading
 import weakref
 import winreg
 from collections import OrderedDict
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import date, timedelta
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -38,7 +40,7 @@ from auth_store import (
 from folder_picker import select_folder
 from network_config import normalize_loopback_proxy
 from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
-from search_service import SearchInputError, SearchPageCache, build_search_tag_groups, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes
+from search_service import SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
 
 CODE_GENERATION_FILES = (
@@ -85,6 +87,9 @@ MAX_HISTORY_REQUESTS = 24
 MAX_HISTORY_SECONDS = 45.0
 MAX_USER_SEARCH_REQUESTS = 8
 MAX_USER_SEARCH_SECONDS = 40.0
+SEARCH_REMOTE_TIMEOUT_SECONDS = 12.0
+MAX_SEARCH_NETWORK_WORKERS = 4
+SEARCH_NETWORK_POLL_SECONDS = 0.05
 SEARCH_PER_PAGE = 36
 SEARCH_PREFETCH_AHEAD = 3
 SEARCH_KEEP_BEHIND = 6
@@ -94,6 +99,9 @@ MAX_AUTHOR_RESOLUTION_CACHE = 64
 AUTHOR_RESOLUTION_TTL_SECONDS = 5 * 60.0
 MAX_IMAGE_TOKENS = 4096
 MAX_PIXIV_CACHE_ITEMS = 256
+MAX_TRACKED_SEARCH_REQUESTS = 64
+MAX_SEARCH_CANCEL_TOMBSTONES = 64
+SEARCH_CANCEL_TOMBSTONE_SECONDS = 120.0
 MAX_ACTIVE_DOWNLOAD_TASKS = 2
 PROTOCOL_VERSION = 5
 APPLICATION_ID = "MOKU.PixivTagGallery"
@@ -126,6 +134,14 @@ FOLDER_PICKER_LOCK = threading.Lock()
 # server may create many request threads, but only a small bounded number may
 # consume Pixiv bandwidth and local staging/publish resources at once.
 DOWNLOAD_TASK_SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_DOWNLOAD_TASKS)
+# Search requests run through a small process-wide pool. A cancelled HTTP
+# handler can stop waiting immediately even if urllib is still establishing a
+# connection, while the worker cap prevents abandoned connects from piling up.
+SEARCH_NETWORK_SLOTS = threading.BoundedSemaphore(MAX_SEARCH_NETWORK_WORKERS)
+SEARCH_NETWORK_POOL = ThreadPoolExecutor(
+    max_workers=MAX_SEARCH_NETWORK_WORKERS,
+    thread_name_prefix="moku-pixiv-search",
+)
 # Network reads remain concurrent. This lock covers only the final local
 # publish/exact-object rollback transaction shared by request threads.
 PUBLISH_TRANSACTION_LOCK = threading.Lock()
@@ -231,12 +247,112 @@ SEARCH_SESSION_LOCKS: weakref.WeakValueDictionary[tuple, threading.Lock] = weakr
 SEARCH_SESSION_LOCKS_GUARD = threading.RLock()
 AUTHOR_RESOLUTION_CACHE: OrderedDict[str, tuple[float, str, str]] = OrderedDict()
 AUTHOR_RESOLUTION_CACHE_LOCK = threading.Lock()
+SEARCH_REQUESTS: OrderedDict[str, dict] = OrderedDict()
+SEARCH_REQUESTS_LOCK = threading.Lock()
 AUTHORIZATION_GENERATION = 0
 AUTHORIZATION_ACTIVE = False
 
 
 class AuthorizationRevokedError(PixivPolicyError):
     pass
+
+
+class SearchCancelledError(RuntimeError):
+    pass
+
+
+class SearchRequestConflictError(RuntimeError):
+    pass
+
+
+class SearchRequestLimitError(RuntimeError):
+    pass
+
+
+def parse_search_request_id(value: object, *, required: bool = False) -> str:
+    request_id = str(value or "").strip()
+    if not request_id and not required:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", request_id):
+        raise SearchInputError("搜索请求标识无效")
+    return request_id
+
+
+def _prune_search_requests_locked(now: float) -> None:
+    for request_id, entry in list(SEARCH_REQUESTS.items()):
+        if not entry["active"] and entry["expiresAt"] <= now:
+            SEARCH_REQUESTS.pop(request_id, None)
+    while sum(not entry["active"] for entry in SEARCH_REQUESTS.values()) > MAX_SEARCH_CANCEL_TOMBSTONES:
+        stale_id = next((
+            request_id for request_id, entry in SEARCH_REQUESTS.items()
+            if not entry["active"]
+        ), None)
+        if stale_id is None:
+            break
+        SEARCH_REQUESTS.pop(stale_id, None)
+
+
+def _search_request_capacity_available_locked() -> bool:
+    return sum(bool(entry["active"]) for entry in SEARCH_REQUESTS.values()) < MAX_TRACKED_SEARCH_REQUESTS
+
+
+def register_search_request(request_id: str) -> threading.Event:
+    clean = parse_search_request_id(request_id, required=True)
+    now = time.monotonic()
+    with SEARCH_REQUESTS_LOCK:
+        _prune_search_requests_locked(now)
+        entry = SEARCH_REQUESTS.pop(clean, None)
+        if entry is not None and entry["active"]:
+            SEARCH_REQUESTS[clean] = entry
+            raise SearchRequestConflictError("搜索请求标识正在使用")
+        if not _search_request_capacity_available_locked():
+            if entry is not None:
+                SEARCH_REQUESTS[clean] = entry
+            raise SearchRequestLimitError("同时进行的搜索过多，请先停止正在运行的搜索")
+        event = entry["event"] if entry is not None else threading.Event()
+        SEARCH_REQUESTS[clean] = {
+            "event": event,
+            "active": True,
+            "expiresAt": now + SEARCH_CANCEL_TOMBSTONE_SECONDS,
+        }
+        return event
+
+
+def cancel_search_request(request_id: str) -> bool:
+    clean = parse_search_request_id(request_id, required=True)
+    now = time.monotonic()
+    with SEARCH_REQUESTS_LOCK:
+        _prune_search_requests_locked(now)
+        entry = SEARCH_REQUESTS.pop(clean, None)
+        found = entry is not None and bool(entry["active"])
+        event = entry["event"] if entry is not None else threading.Event()
+        event.set()
+        SEARCH_REQUESTS[clean] = {
+            "event": event,
+            "active": bool(entry and entry["active"]),
+            "expiresAt": now + SEARCH_CANCEL_TOMBSTONE_SECONDS,
+        }
+        _prune_search_requests_locked(now)
+        return found
+
+
+def release_search_request(request_id: str, event: threading.Event) -> None:
+    with SEARCH_REQUESTS_LOCK:
+        entry = SEARCH_REQUESTS.get(request_id)
+        if entry is not None and entry["event"] is event:
+            SEARCH_REQUESTS.pop(request_id, None)
+
+
+def cancel_all_search_requests() -> None:
+    with SEARCH_REQUESTS_LOCK:
+        for entry in SEARCH_REQUESTS.values():
+            entry["event"].set()
+        SEARCH_REQUESTS.clear()
+
+
+def raise_if_search_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise SearchCancelledError("搜索已取消")
 
 
 def authorization_generation() -> int:
@@ -272,22 +388,33 @@ def get_cached_pixiv_item(artwork_id: str) -> dict | None:
         return item
 
 
-def _item_image_tokens_current(item: dict, *, now: float | None = None) -> bool:
+def _item_image_tokens_current(
+    item: dict,
+    *,
+    now: float | None = None,
+    require_thumb: bool = True,
+) -> bool:
     artwork_id = str(item.get("id") or "")
     pages = item.get("pageImages")
+    thumb = str(item.get("thumb") or "")
     if not artwork_id.isdigit() or not isinstance(pages, list) or not pages:
         return False
+    if require_thumb and not thumb:
+        return False
+    proxy_urls = [thumb] if require_thumb else []
+    for page in pages:
+        if not isinstance(page, dict):
+            return False
+        proxy_urls.extend(str(page.get(quality) or "") for quality in ("regular", "original"))
     current = time.time() if now is None else float(now)
     with PIXIV_STATE_LOCK:
-        for page in pages:
-            if not isinstance(page, dict):
+        for proxy_url in proxy_urls:
+            token = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(proxy_url).query
+            ).get("token", [""])[0]
+            approved = IMAGE_TOKENS.get(token)
+            if not approved or approved[0] < current or str(approved[1]) != artwork_id:
                 return False
-            for quality in ("regular", "original"):
-                proxy_url = str(page.get(quality) or "")
-                token = urllib.parse.parse_qs(urllib.parse.urlsplit(proxy_url).query).get("token", [""])[0]
-                approved = IMAGE_TOKENS.get(token)
-                if not approved or approved[0] < current or str(approved[1]) != artwork_id:
-                    return False
     return True
 
 
@@ -296,21 +423,28 @@ def pixiv_item_for_download(
     *,
     allow_r18: bool,
     authorization_epoch: int | None = None,
+    cancel_event: threading.Event | None = None,
+    require_thumb: bool = False,
 ) -> dict:
+    raise_if_search_cancelled(cancel_event)
     cached = get_cached_pixiv_item(artwork_id)
-    if cached is not None and _item_image_tokens_current(cached):
+    if cached is not None and _item_image_tokens_current(
+        cached, require_thumb=require_thumb,
+    ):
         if cached.get("restriction") == "r18":
+            if not allow_r18:
+                raise PixivPolicyError("restricted artwork")
             if authorization_epoch is None:
                 raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新发起下载")
             assert_authorization_generation(authorization_epoch)
+        raise_if_search_cancelled(cancel_event)
         return cached
-    if authorization_epoch is None:
+    if authorization_epoch is None and cancel_event is None:
         return pixiv_detail(artwork_id, allow_r18=allow_r18)
-    return pixiv_detail(
-        artwork_id,
-        allow_r18=allow_r18,
-        authorization_epoch=authorization_epoch,
-    )
+    kwargs = {"authorization_epoch": authorization_epoch}
+    if cancel_event is not None:
+        kwargs["cancel_event"] = cancel_event
+    return pixiv_detail(artwork_id, allow_r18=allow_r18, **kwargs)
 
 
 def search_session_scope(session_key: tuple) -> str:
@@ -629,9 +763,76 @@ def ensure_network_opener_current() -> str:
     return _update_network_opener(max_age=NETWORK_RECHECK_SECONDS)
 
 
+def _read_cancellable_response(
+    response,
+    *,
+    max_bytes: int,
+    cancel_event: threading.Event,
+    deadline: float,
+) -> bytes:
+    """Read a response while a small watcher can close a blocked socket."""
+    watcher_done = threading.Event()
+    deadline_reached = threading.Event()
+
+    def interrupt_response() -> None:
+        # Buffered HTTP readers can hold their own lock while blocked in recv().
+        # Shutting down the underlying CPython socket wakes that read first.
+        raw = getattr(getattr(response, "fp", None), "raw", None)
+        stream_socket = getattr(raw, "_sock", None)
+        if stream_socket is not None:
+            try:
+                stream_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        try:
+            response.close()
+        except OSError:
+            pass
+
+    def interrupt_blocked_read() -> None:
+        while not watcher_done.wait(0.05):
+            if cancel_event.is_set():
+                interrupt_response()
+                return
+            if time.monotonic() >= deadline:
+                deadline_reached.set()
+                interrupt_response()
+                return
+
+    watcher = threading.Thread(target=interrupt_blocked_read, daemon=True)
+    watcher.start()
+    chunks: list[bytes] = []
+    received = 0
+    try:
+        while received <= max_bytes:
+            raise_if_search_cancelled(cancel_event)
+            if deadline_reached.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError("Pixiv response deadline exceeded")
+            try:
+                chunk = response.read(min(64 * 1024, max_bytes + 1 - received))
+            except Exception:
+                if cancel_event.is_set():
+                    raise SearchCancelledError("搜索已取消") from None
+                if deadline_reached.is_set() or time.monotonic() >= deadline:
+                    raise TimeoutError("Pixiv response deadline exceeded") from None
+                raise
+            if not chunk:
+                break
+            chunks.append(chunk)
+            received += len(chunk)
+        raise_if_search_cancelled(cancel_event)
+        if deadline_reached.is_set() or time.monotonic() >= deadline:
+            raise TimeoutError("Pixiv response deadline exceeded")
+        return b"".join(chunks)
+    finally:
+        watcher_done.set()
+        watcher.join(timeout=0.2)
+
+
 def pixiv_request(
     url: str, image_only: bool = False, max_bytes: int = MAX_REMOTE_BYTES,
-    session_value: str = "", *, anonymous: bool = False, timeout: float = 25, attempts: int = 2,
+    session_value: str = "", *, anonymous: bool = False, timeout: float = 25,
+    attempts: int = 2, cancel_event: threading.Event | None = None,
 ) -> tuple[bytes, str]:
     if not is_allowed_pixiv_url(url, image_only=image_only):
         raise PixivPolicyError("不允许的 Pixiv 地址")
@@ -646,6 +847,8 @@ def pixiv_request(
     attempt_count = max(1, min(int(attempts), 2))
     request_timeout = max(1.0, min(float(timeout), 25.0))
     for attempt in range(attempt_count):
+        raise_if_search_cancelled(cancel_event)
+        deadline = time.monotonic() + request_timeout
         try:
             with PIXIV_OPENER.open(request, timeout=request_timeout) as response:
                 final_url = response.geturl()
@@ -661,7 +864,16 @@ def pixiv_request(
                         raise PixivPolicyError("Pixiv 返回了无效的 Content-Length") from exc
                     if declared_length < 0 or declared_length > max_bytes:
                         raise PixivPolicyError("远程响应过大")
-                raw = response.read(max_bytes + 1)
+                raw = (
+                    response.read(max_bytes + 1)
+                    if cancel_event is None
+                    else _read_cancellable_response(
+                        response,
+                        max_bytes=max_bytes,
+                        cancel_event=cancel_event,
+                        deadline=deadline,
+                    )
+                )
                 if len(raw) > max_bytes:
                     raise PixivPolicyError("远程响应过大")
                 if declared_length is not None and len(raw) != declared_length:
@@ -675,12 +887,25 @@ def pixiv_request(
             if attempt == attempt_count - 1:
                 raise
             last_error = exc
-        time.sleep(.6)
+        if cancel_event is None:
+            time.sleep(.6)
+        elif cancel_event.wait(.6):
+            raise SearchCancelledError("搜索已取消")
     raise last_error or PixivPolicyError("Pixiv 连接失败")
 
 
-def pixiv_json(url: str) -> dict:
-    raw, content_type = pixiv_request(url, max_bytes=8 * 1024 * 1024)
+def pixiv_json(
+    url: str, *, timeout: float = 25, attempts: int = 2,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    request_options = {
+        "max_bytes": 8 * 1024 * 1024,
+        "timeout": timeout,
+        "attempts": attempts,
+    }
+    if cancel_event is not None:
+        request_options["cancel_event"] = cancel_event
+    raw, content_type = pixiv_request(url, **request_options)
     if content_type != "application/json":
         raise PixivPolicyError("Pixiv 返回了非 JSON 数据")
     try:
@@ -691,6 +916,52 @@ def pixiv_json(url: str) -> dict:
         raise PixivPolicyError("Pixiv 返回的数据格式异常")
     if data.get("error"):
         raise PixivPolicyError("Pixiv API 拒绝了当前请求")
+    return data
+
+
+def search_pixiv_json(url: str, cancel_event: threading.Event | None) -> dict:
+    raise_if_search_cancelled(cancel_event)
+    while not SEARCH_NETWORK_SLOTS.acquire(timeout=SEARCH_NETWORK_POLL_SECONDS):
+        raise_if_search_cancelled(cancel_event)
+    options = {}
+    if cancel_event is not None:
+        options = {
+            "timeout": SEARCH_REMOTE_TIMEOUT_SECONDS,
+            "attempts": 1,
+            "cancel_event": cancel_event,
+        }
+    try:
+        raise_if_search_cancelled(cancel_event)
+        future = SEARCH_NETWORK_POOL.submit(pixiv_json, url, **options)
+    except BaseException:
+        SEARCH_NETWORK_SLOTS.release()
+        raise
+    future.add_done_callback(lambda _future: SEARCH_NETWORK_SLOTS.release())
+    if cancel_event is None:
+        return future.result()
+    while True:
+        if cancel_event.is_set():
+            future.cancel()
+            raise SearchCancelledError("搜索已取消")
+        try:
+            data = future.result(timeout=SEARCH_NETWORK_POLL_SECONDS)
+            break
+        except FutureTimeoutError:
+            # concurrent.futures.TimeoutError aliases built-in TimeoutError on
+            # current Python versions. A completed future therefore means the
+            # poll raced with completion. Re-read the completed future so a
+            # successful result is preserved and a worker exception propagates.
+            if future.done():
+                try:
+                    data = future.result()
+                except Exception:
+                    raise_if_search_cancelled(cancel_event)
+                    raise
+                break
+        except Exception:
+            raise_if_search_cancelled(cancel_event)
+            raise
+    raise_if_search_cancelled(cancel_event)
     return data
 
 
@@ -712,6 +983,8 @@ def windows_proxy_state() -> dict:
 
 def network_error_kind(exc: Exception) -> str:
     text = str(exc or "").casefold()
+    if isinstance(exc, PermissionError) or "permission denied" in text or "access is denied" in text or "拒绝访问" in text:
+        return "unavailable"
     if isinstance(exc, TimeoutError) or "timed out" in text or "timeout" in text or "超时" in text:
         return "timeout"
     if "refused" in text or "actively refused" in text or "拒绝" in text:
@@ -810,9 +1083,12 @@ def _history_state(tag: str, mode: str, namespace: tuple | None = None) -> dict:
             with _HISTORY_LOCKS_GUARD:
                 active_keys = set(_HISTORY_LOCKS)
             candidates = sorted(
-                (row.get("touched", 0.0), cache_key)
-                for cache_key, row in HISTORY_CACHE.items()
-                if cache_key != key and cache_key not in active_keys
+                (
+                    (row.get("touched", 0.0), cache_key)
+                    for cache_key, row in HISTORY_CACHE.items()
+                    if cache_key != key and cache_key not in active_keys
+                ),
+                key=lambda candidate: (candidate[0], repr(candidate[1])),
             )
             for _touched, stale_key in candidates[: len(HISTORY_CACHE) - MAX_HISTORY_SOURCES]:
                 HISTORY_CACHE.pop(stale_key, None)
@@ -839,6 +1115,7 @@ def extend_history(
     max_seconds: float = MAX_HISTORY_SECONDS,
     budget: dict | None = None,
     namespace: tuple | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
     cache_key = history_cache_key(tag, mode, namespace)
     with history_lock_for(*cache_key):
@@ -848,12 +1125,14 @@ def extend_history(
             budget = {"started": time.monotonic(), "requests": 0}
 
         def budget_available() -> bool:
+            raise_if_search_cancelled(cancel_event)
             return budget["requests"] < max_requests and time.monotonic() - budget["started"] < max_seconds
 
         def consume_request() -> None:
             budget["requests"] += 1
 
         while state.get("baseOffset", 0) + len(state["items"]) < need_count and not state["exhausted"]:
+            raise_if_search_cancelled(cancel_event)
             if not budget_available():
                 state["budgetExhausted"] = True
                 break
@@ -862,7 +1141,10 @@ def extend_history(
             window = state["queue"][0]
             if not window["initialized"]:
                 consume_request()
-                block = (pixiv_json(build_search_url(tag, 1, mode=mode, start_date=window["start"], end_date=window["end"])).get("body") or {}).get("illustManga") or {}
+                block = (search_pixiv_json(
+                    build_search_url(tag, 1, mode=mode, start_date=window["start"], end_date=window["end"]),
+                    cancel_event,
+                ).get("body") or {}).get("illustManga") or {}
                 total = int(block.get("total") or 0)
                 first_data = block.get("data") or []
                 if mode == "r18" and total > 0 and not any(int(row.get("xRestrict", -1)) == 1 for row in first_data):
@@ -886,7 +1168,10 @@ def extend_history(
                     state["budgetExhausted"] = True
                     break
                 consume_request()
-                block = (pixiv_json(build_search_url(tag, window["page"], mode=mode, start_date=window["start"], end_date=window["end"])).get("body") or {}).get("illustManga") or {}
+                block = (search_pixiv_json(
+                    build_search_url(tag, window["page"], mode=mode, start_date=window["start"], end_date=window["end"]),
+                    cancel_event,
+                ).get("body") or {}).get("illustManga") or {}
                 rows = block.get("data") or []
             for raw in rows:
                 artwork_id = str(raw.get("id") or "")
@@ -901,6 +1186,7 @@ def extend_history(
 
 
 def reset_search_caches() -> None:
+    cancel_all_search_requests()
     with SEARCH_SESSION_LOCKS_GUARD, PIXIV_STATE_LOCK:
         for token, row in list(IMAGE_TOKENS.items()):
             if len(row) >= 6:
@@ -936,6 +1222,21 @@ def search_session_lock(session_key: tuple) -> threading.Lock:
         return lock
 
 
+@contextmanager
+def locked_search_session(
+    session_key: tuple,
+    cancel_event: threading.Event | None = None,
+):
+    lock = search_session_lock(session_key)
+    while not lock.acquire(timeout=0.1):
+        raise_if_search_cancelled(cancel_event)
+    try:
+        raise_if_search_cancelled(cancel_event)
+        yield
+    finally:
+        lock.release()
+
+
 def _touch_search_session(session_key: tuple) -> dict:
     with SEARCH_SESSION_LOCKS_GUARD:
         session = SEARCH_SESSIONS.pop(session_key, None)
@@ -955,6 +1256,20 @@ def _touch_search_session(session_key: tuple) -> dict:
                 break
             _drop_search_session(stale_key)
         return session
+
+
+def assert_search_commit_allowed(
+    session_key: tuple,
+    session: dict,
+    scope: str,
+    authorization_epoch: int | None,
+    cancel_event: threading.Event | None,
+) -> None:
+    if scope in {"r18", "all"}:
+        assert_authorization_generation(authorization_epoch)
+    raise_if_search_cancelled(cancel_event)
+    if SEARCH_SESSIONS.get(session_key) is not session:
+        raise SearchCancelledError("搜索缓存已重置")
 
 
 def _trim_history_source(session_key: tuple, tag: str, mode: str) -> None:
@@ -990,10 +1305,12 @@ def load_search_source(
     need_count: int,
     allow_r18: bool,
     budget: dict,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
     state = extend_history(
         tag, mode, need_count, allow_r18=allow_r18, budget=budget,
-        namespace=session_key,
+        namespace=session_key, cancel_event=cancel_event,
     )
     source_key = (session_key, tag, mode)
     base = int(state.get("baseOffset", 0))
@@ -1001,16 +1318,14 @@ def load_search_source(
         offset = max(base, int(SEARCH_SOURCE_OFFSETS.get(source_key, base)))
     start = min(len(state["items"]), max(0, offset - base))
     rows = list(state["items"][start:])
-    with SEARCH_SESSION_LOCKS_GUARD:
-        SEARCH_SOURCE_OFFSETS[source_key] = base + len(state["items"])
     has_more = not state["exhausted"] or bool(state["queue"])
     result = {
         "rows": rows,
+        "nextOffset": base + len(state["items"]),
         "hasMore": has_more,
         "budgetExhausted": bool(state.get("budgetExhausted")),
         "truncatedDates": list(state.get("truncatedDates") or []),
     }
-    _trim_history_source(session_key, tag, mode)
     return result
 
 
@@ -1069,7 +1384,12 @@ def _author_rows_from_payload(payload: object) -> list[dict]:
     return normalized_rows
 
 
-def resolve_author_user(author: str) -> tuple[str, str]:
+def resolve_author_user(
+    author: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> tuple[str, str]:
+    raise_if_search_cancelled(cancel_event)
     cache_key = str(author).strip().casefold()
     now = time.monotonic()
     with AUTHOR_RESOLUTION_CACHE_LOCK:
@@ -1077,7 +1397,7 @@ def resolve_author_user(author: str) -> tuple[str, str]:
         if cached is not None and cached[0] > now:
             AUTHOR_RESOLUTION_CACHE[cache_key] = cached
             return cached[1], cached[2]
-    body = pixiv_json(build_user_search_url(author)).get("body") or {}
+    body = search_pixiv_json(build_user_search_url(author), cancel_event).get("body") or {}
     rows = _author_rows_from_payload(body)
     target = str(author).strip().casefold()
     exact = next((
@@ -1085,7 +1405,7 @@ def resolve_author_user(author: str) -> tuple[str, str]:
         if str(row.get("name") or row.get("userName") or "").strip().casefold() == target
     ), None)
     if exact is None:
-        raise SearchInputError(f"未找到名称完全匹配“{author}”的 Pixiv 画师；可改用 pid:数字 精确搜索")
+        raise SearchInputError(f"未找到名称完全匹配“{author}”的 Pixiv 画师；可改用 uid:数字 精确搜索")
     user_id = str(exact.get("userId") or exact.get("id") or "")
     if not user_id.isascii() or not user_id.isdigit():
         raise SearchInputError("Pixiv 未返回有效的画师用户 ID")
@@ -1104,8 +1424,12 @@ def resolve_author_user(author: str) -> tuple[str, str]:
     return user_id, resolved_name
 
 
-def load_user_profile_ids(user_id: str) -> list[str]:
-    body = pixiv_json(build_user_profile_all_url(user_id)).get("body") or {}
+def load_user_profile_ids(
+    user_id: str,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> list[str]:
+    body = search_pixiv_json(build_user_profile_all_url(user_id), cancel_event).get("body") or {}
     if not isinstance(body, dict):
         raise PixivPolicyError("Pixiv 画师作品索引格式异常")
     ids: set[str] = set()
@@ -1119,8 +1443,13 @@ def load_user_profile_ids(user_id: str) -> list[str]:
     return sorted(ids, key=int, reverse=True)
 
 
-def load_user_profile_works(user_id: str, artwork_ids: list[str]) -> list[dict]:
-    body = pixiv_json(build_user_profile_works_url(user_id, artwork_ids)).get("body") or {}
+def load_user_profile_works(
+    user_id: str,
+    artwork_ids: list[str],
+    *,
+    cancel_event: threading.Event | None = None,
+) -> list[dict]:
+    body = search_pixiv_json(build_user_profile_works_url(user_id, artwork_ids), cancel_event).get("body") or {}
     if not isinstance(body, dict):
         raise PixivPolicyError("Pixiv 画师作品结果格式异常")
     works = body.get("works")
@@ -1141,9 +1470,18 @@ def search_user_results(
     query_kind: str, target: str, scope: str, page: int,
     work_type: str, include_ai: bool, *, authorized: bool, fuzzy: bool = False,
     authorization_epoch: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
+    raise_if_search_cancelled(cancel_event)
     resolve_source_modes(scope, authorized=authorized)
-    user_id, resolved_name = resolve_author_user(target) if query_kind == "author" else (target, "")
+    if query_kind == "author":
+        user_id, resolved_name = (
+            resolve_author_user(target)
+            if cancel_event is None
+            else resolve_author_user(target, cancel_event=cancel_event)
+        )
+    else:
+        user_id, resolved_name = target, ""
     page = max(1, int(page))
     session_key = (
         "user", query_kind, target.casefold(), user_id,
@@ -1151,25 +1489,47 @@ def search_user_results(
     )
     desired_items = prefetch_item_count(page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD)
 
-    with search_session_lock(session_key):
+    with locked_search_session(session_key, cancel_event):
+        raise_if_search_cancelled(cancel_event)
         session = _touch_search_session(session_key)
+        first_retained_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
+        if page < first_retained_page:
+            _drop_search_session(session_key)
+            session = _touch_search_session(session_key)
         if "profileIds" not in session or session.get("targetUserId") != user_id:
-            session["profileIds"] = load_user_profile_ids(user_id)
-            session["profileOffset"] = 0
-            session["targetUserId"] = user_id
-            session["artist"] = resolved_name
+            profile_ids = (
+                load_user_profile_ids(user_id)
+                if cancel_event is None
+                else load_user_profile_ids(user_id, cancel_event=cancel_event)
+            )
+            with SEARCH_SESSION_LOCKS_GUARD:
+                assert_search_commit_allowed(
+                    session_key, session, scope, authorization_epoch, cancel_event,
+                )
+                session["profileIds"] = profile_ids
+                session["profileOffset"] = 0
+                session["targetUserId"] = user_id
+                session["artist"] = resolved_name
         ids = session["profileIds"]
         request_started = time.monotonic()
         request_count = 0
         while (
-            len(session["items"]) < desired_items
+            int(session["baseIndex"]) + len(session["items"]) < desired_items
             and int(session["profileOffset"]) < len(ids)
             and request_count < MAX_USER_SEARCH_REQUESTS
             and time.monotonic() - request_started < MAX_USER_SEARCH_SECONDS
         ):
+            raise_if_search_cancelled(cancel_event)
             start = int(session["profileOffset"])
             batch_ids = ids[start:start + 48]
-            raw_rows = load_user_profile_works(user_id, batch_ids)
+            raw_rows = (
+                load_user_profile_works(user_id, batch_ids)
+                if cancel_event is None
+                else load_user_profile_works(
+                    user_id, batch_ids, cancel_event=cancel_event,
+                )
+            )
+            raise_if_search_cancelled(cancel_event)
             # Commit the cursor only after the request and basic response-shape
             # validation succeed. Transient failures must retry this same batch.
             request_count += 1
@@ -1192,15 +1552,19 @@ def search_user_results(
                     continue
                 incoming.append(candidate)
             incoming.sort(key=_search_sort_key, reverse=True)
-            for candidate in incoming:
-                if candidate["id"] not in session["seen"]:
-                    session["seen"].add(candidate["id"])
-                    session["items"].append(candidate)
-            # Row conversion is part of consuming this batch. Do not skip the
-            # IDs if an unexpected malformed field aborts conversion midway.
-            session["profileOffset"] = start + len(batch_ids)
+            with SEARCH_SESSION_LOCKS_GUARD:
+                assert_search_commit_allowed(
+                    session_key, session, scope, authorization_epoch, cancel_event,
+                )
+                for candidate in incoming:
+                    if candidate["id"] not in session["seen"]:
+                        session["seen"].add(candidate["id"])
+                        session["items"].append(candidate)
+                # Row conversion is part of consuming this batch. Do not skip the
+                # IDs if an unexpected malformed field aborts conversion midway.
+                session["profileOffset"] = start + len(batch_ids)
 
-        loaded = len(session["items"])
+        loaded = int(session["baseIndex"]) + len(session["items"])
         exhausted = int(session["profileOffset"]) >= len(ids)
         budget_exhausted = not exhausted and (
             request_count >= MAX_USER_SEARCH_REQUESTS
@@ -1215,24 +1579,45 @@ def search_user_results(
                 complete_through,
                 (loaded + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE,
             )
-        cache_through = min(page + SEARCH_PREFETCH_AHEAD, complete_through)
-        page_rows = {
-            number: session["items"][(number - 1) * SEARCH_PER_PAGE:number * SEARCH_PER_PAGE]
-            for number in range(1, cache_through + 1)
-        }
-        SEARCH_PAGE_CACHE.store_pages(session_key, page, page_rows)
-        selected = SEARCH_PAGE_CACHE.get_page(session_key, page) or []
-        available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
-        prune_search_image_tokens(session_key, retained_pages=set(available_pages), replace_page=page)
-        authorized_items = [
-            authorize_item_images(
-                copy.deepcopy(item),
-                search_session=session_key,
-                search_page=page,
-                authorization_epoch=authorization_epoch,
+        page_rows = build_result_page_rows(
+            session["items"],
+            base_index=int(session["baseIndex"]),
+            current_page=page,
+            complete_through=complete_through,
+            per_page=SEARCH_PER_PAGE,
+            ahead=SEARCH_PREFETCH_AHEAD,
+        )
+        with SEARCH_SESSION_LOCKS_GUARD:
+            assert_search_commit_allowed(
+                session_key, session, scope, authorization_epoch, cancel_event,
             )
-            for item in selected
-        ]
+            SEARCH_PAGE_CACHE.store_pages(session_key, page, page_rows)
+            selected = SEARCH_PAGE_CACHE.get_page(session_key, page) or []
+            available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
+            remove_count = result_window_trim_count(
+                len(session["items"]),
+                base_index=int(session["baseIndex"]),
+                current_page=page,
+                per_page=SEARCH_PER_PAGE,
+                keep_behind=SEARCH_KEEP_BEHIND,
+            )
+            if remove_count:
+                del session["items"][:remove_count]
+                session["baseIndex"] += remove_count
+                session["seen"] = {str(item["id"]) for item in session["items"]}
+            prune_search_image_tokens(
+                session_key, retained_pages=set(available_pages), replace_page=page,
+            )
+            authorized_items = [
+                authorize_item_images(
+                    copy.deepcopy(item),
+                    search_session=session_key,
+                    search_page=page,
+                    authorization_epoch=authorization_epoch,
+                )
+                for item in selected
+            ]
+            preloaded_through = SEARCH_PAGE_CACHE.preloaded_through(session_key)
         if scope in {"r18", "all"}:
             try:
                 assert_authorization_generation(authorization_epoch)
@@ -1247,12 +1632,58 @@ def search_user_results(
             "total": loaded, "reportedTotal": len(ids), "page": page,
             "pages": available_pages[-1] if available_pages else 1,
             "pageNumbers": available_pages, "availablePages": available_pages,
-            "preloadedThrough": SEARCH_PAGE_CACHE.preloaded_through(session_key),
+            "preloadedThrough": preloaded_through,
             "items": authorized_items, "perPage": SEARCH_PER_PAGE, "hasMore": not exhausted,
             "budgetExhausted": budget_exhausted, "truncatedDates": [],
             "workType": work_type, "includeAi": bool(include_ai),
             "mode": "pixiv-user-search",
         }
+
+
+def search_artwork_result(
+    artwork_id: str, scope: str, page: int, work_type: str, include_ai: bool,
+    *, authorized: bool, authorization_epoch: int | None = None,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    raise_if_search_cancelled(cancel_event)
+    resolve_source_modes(scope, authorized=authorized)
+    network_cancel_event = cancel_event or threading.Event()
+    try:
+        item = pixiv_item_for_download(
+            artwork_id,
+            allow_r18=scope in {"r18", "all"},
+            authorization_epoch=authorization_epoch,
+            cancel_event=network_cancel_event,
+            require_thumb=True,
+        )
+    except PixivPolicyError as exc:
+        if scope != "safe" or str(exc) != "restricted artwork":
+            raise
+        item = None
+    raise_if_search_cancelled(cancel_event)
+
+    matches = item is not None
+    if matches and scope != "all" and item.get("restriction") != scope:
+        matches = False
+    if matches and work_type != "all" and item.get("workType") != work_type:
+        matches = False
+    if matches and not include_ai and bool(item.get("aiGenerated")):
+        matches = False
+
+    requested_page = max(1, int(page))
+    selected = [item] if matches and requested_page == 1 else []
+    label = str((item or {}).get("title") or f"Pixiv 作品 {artwork_id}")
+    return {
+        "tag": artwork_id, "tags": [], "label": label,
+        "artist": str((item or {}).get("artist") or ""),
+        "searchType": "pid", "targetArtworkId": artwork_id, "scope": scope,
+        "total": int(matches), "reportedTotal": int(matches), "page": requested_page,
+        "pages": 1, "pageNumbers": [1], "availablePages": [1],
+        "preloadedThrough": 1, "items": selected, "perPage": SEARCH_PER_PAGE,
+        "hasMore": False, "budgetExhausted": False, "truncatedDates": [],
+        "workType": work_type, "includeAi": bool(include_ai),
+        "mode": "pixiv-artwork-search",
+    }
 
 
 def search_pixiv_results(
@@ -1265,25 +1696,50 @@ def search_pixiv_results(
     authorized: bool,
     fuzzy: bool = False,
     authorization_epoch: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
+    raise_if_search_cancelled(cancel_event)
     if work_type not in {"all", "illustration", "manga", "ugoira"}:
         raise SearchInputError("不支持的作品类型")
     query = parse_search_query(tag_query)
-    if query.kind in {"pid", "author"}:
-        return search_user_results(
-            query.kind, query.value, scope, page, work_type, include_ai,
-            authorized=authorized, fuzzy=fuzzy, authorization_epoch=authorization_epoch,
+    if query.kind == "pid":
+        return search_artwork_result(
+            query.value, scope, page, work_type, include_ai,
+            authorized=authorized,
+            authorization_epoch=authorization_epoch,
+            cancel_event=cancel_event,
         )
-    tags = parse_search_tags(query.value)
-    tag_groups = build_search_tag_groups(query.value, fuzzy=fuzzy)
+    if query.kind in {"uid", "author"}:
+        kwargs = {
+            "authorized": authorized,
+            "fuzzy": fuzzy,
+            "authorization_epoch": authorization_epoch,
+        }
+        if cancel_event is not None:
+            kwargs["cancel_event"] = cancel_event
+        return search_user_results(
+            query.kind, query.value, scope, page, work_type, include_ai, **kwargs,
+        )
     modes = resolve_source_modes(scope, authorized=authorized)
+    tags = parse_search_tags(query.value)
+    max_aliases = max(
+        1,
+        min(8, MAX_HISTORY_SOURCES // max(1, len(tags) * len(modes))),
+    )
+    tag_groups = build_search_tag_groups(
+        query.value,
+        fuzzy=fuzzy,
+        max_tags=len(tags),
+        max_aliases=max_aliases,
+    )
     page = max(1, int(page))
     session_key = ("tags", tag_groups, scope, work_type, bool(include_ai), bool(fuzzy))
     desired_items = prefetch_item_count(
         page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD,
     )
 
-    with search_session_lock(session_key):
+    with locked_search_session(session_key, cancel_event):
+        raise_if_search_cancelled(cancel_event)
         session = _touch_search_session(session_key)
         first_retained_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
         if page < first_retained_page:
@@ -1295,24 +1751,40 @@ def search_pixiv_results(
         sources = [(tag, mode) for tag in source_tags for mode in modes]
         rounds = 0
         while absolute_loaded < desired_items and rounds < 8:
+            raise_if_search_cancelled(cancel_event)
             missing = desired_items - absolute_loaded
             per_source = max(SEARCH_PER_PAGE, (missing * 2 + len(sources) - 1) // len(sources))
             incoming: list[dict] = []
+            source_commits: list[tuple[str, str, int]] = []
+            source_done: dict[tuple[str, str], bool] = {}
+            round_budget_exhausted = False
+            round_truncated_dates: set[str] = set()
             any_more = False
             any_rows = False
             for tag, mode in sources:
+                raise_if_search_cancelled(cancel_event)
                 source_key = (tag, mode)
                 if session["sourceDone"].get(source_key):
                     continue
                 with SEARCH_SESSION_LOCKS_GUARD:
                     absolute_offset = int(SEARCH_SOURCE_OFFSETS.get((session_key, tag, mode), 0))
-                source = load_search_source(
-                    session_key, tag, mode, absolute_offset + per_source,
-                    mode == "r18", budget,
-                )
-                session["budgetExhausted"] = session["budgetExhausted"] or source["budgetExhausted"]
-                session["truncatedDates"].update(source["truncatedDates"])
-                session["sourceDone"][source_key] = not source["hasMore"]
+                if cancel_event is None:
+                    source = load_search_source(
+                        session_key, tag, mode, absolute_offset + per_source,
+                        mode == "r18", budget,
+                    )
+                else:
+                    source = load_search_source(
+                        session_key, tag, mode, absolute_offset + per_source,
+                        mode == "r18", budget, cancel_event=cancel_event,
+                    )
+                round_budget_exhausted = round_budget_exhausted or source["budgetExhausted"]
+                round_truncated_dates.update(source["truncatedDates"])
+                source_done[source_key] = not source["hasMore"]
+                next_offset = source.get("nextOffset")
+                if next_offset is None:
+                    next_offset = absolute_offset + len(source["rows"])
+                source_commits.append((tag, mode, max(absolute_offset, int(next_offset))))
                 any_more = any_more or source["hasMore"]
                 any_rows = any_rows or bool(source["rows"])
                 for raw in source["rows"]:
@@ -1326,14 +1798,27 @@ def search_pixiv_results(
                         continue
                     incoming.append(candidate)
             incoming.sort(key=_search_sort_key, reverse=True)
-            for candidate in incoming:
-                if not matches_tag_groups(candidate.get("tags") or [], tag_groups):
-                    continue
-                artwork_id = candidate["id"]
-                if artwork_id in session["seen"]:
-                    continue
-                session["seen"].add(artwork_id)
-                session["items"].append(candidate)
+            with SEARCH_SESSION_LOCKS_GUARD:
+                assert_search_commit_allowed(
+                    session_key, session, scope, authorization_epoch, cancel_event,
+                )
+                session["budgetExhausted"] = (
+                    session["budgetExhausted"] or round_budget_exhausted
+                )
+                session["truncatedDates"].update(round_truncated_dates)
+                session["sourceDone"].update(source_done)
+                for candidate in incoming:
+                    if not matches_tag_groups(candidate.get("tags") or [], tag_groups):
+                        continue
+                    artwork_id = candidate["id"]
+                    if artwork_id in session["seen"]:
+                        continue
+                    session["seen"].add(artwork_id)
+                    session["items"].append(candidate)
+                for source_tag, source_mode, next_offset in source_commits:
+                    SEARCH_SOURCE_OFFSETS[(session_key, source_tag, source_mode)] = next_offset
+            for source_tag, source_mode, _next_offset in source_commits:
+                _trim_history_source(session_key, source_tag, source_mode)
             absolute_loaded = int(session["baseIndex"]) + len(session["items"])
             rounds += 1
             if not any_rows or (not any_more and not incoming):
@@ -1342,7 +1827,6 @@ def search_pixiv_results(
                 session["budgetExhausted"] = True
                 break
 
-        first_available_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
         absolute_result_count = int(session["baseIndex"]) + len(session["items"])
         complete_through = absolute_result_count // SEARCH_PER_PAGE
         requested_page_start = (page - 1) * SEARCH_PER_PAGE
@@ -1356,39 +1840,47 @@ def search_pixiv_results(
                 complete_through,
                 (absolute_result_count + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE,
             )
-        cache_through = min(page + SEARCH_PREFETCH_AHEAD, complete_through)
-        page_rows: dict[int, list] = {}
-        for page_number in range(first_available_page, cache_through + 1):
-            start_absolute = (page_number - 1) * SEARCH_PER_PAGE
-            start = start_absolute - int(session["baseIndex"])
-            if start < 0:
-                continue
-            page_rows[page_number] = session["items"][start:start + SEARCH_PER_PAGE]
-        SEARCH_PAGE_CACHE.store_pages(session_key, page, page_rows)
-        selected = SEARCH_PAGE_CACHE.get_page(session_key, page) or []
-        available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
-
-        oldest_page = max(1, page - SEARCH_KEEP_BEHIND)
-        trim_to = (oldest_page - 1) * SEARCH_PER_PAGE
-        if trim_to > int(session["baseIndex"]):
-            remove_count = min(len(session["items"]), trim_to - int(session["baseIndex"]))
-            del session["items"][:remove_count]
-            session["baseIndex"] += remove_count
-            session["seen"] = {str(item["id"]) for item in session["items"]}
-
-        has_more = any(not done for done in session["sourceDone"].values())
-        prune_search_image_tokens(
-            session_key, retained_pages=set(available_pages), replace_page=page,
+        page_rows = build_result_page_rows(
+            session["items"],
+            base_index=int(session["baseIndex"]),
+            current_page=page,
+            complete_through=complete_through,
+            per_page=SEARCH_PER_PAGE,
+            ahead=SEARCH_PREFETCH_AHEAD,
         )
-        authorized_items = [
-            authorize_item_images(
-                copy.deepcopy(item),
-                search_session=session_key,
-                search_page=page,
-                authorization_epoch=authorization_epoch,
+        with SEARCH_SESSION_LOCKS_GUARD:
+            assert_search_commit_allowed(
+                session_key, session, scope, authorization_epoch, cancel_event,
             )
-            for item in selected
-        ]
+            SEARCH_PAGE_CACHE.store_pages(session_key, page, page_rows)
+            selected = SEARCH_PAGE_CACHE.get_page(session_key, page) or []
+            available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
+
+            remove_count = result_window_trim_count(
+                len(session["items"]),
+                base_index=int(session["baseIndex"]),
+                current_page=page,
+                per_page=SEARCH_PER_PAGE,
+                keep_behind=SEARCH_KEEP_BEHIND,
+            )
+            if remove_count:
+                del session["items"][:remove_count]
+                session["baseIndex"] += remove_count
+                session["seen"] = {str(item["id"]) for item in session["items"]}
+            has_more = any(not done for done in session["sourceDone"].values())
+            prune_search_image_tokens(
+                session_key, retained_pages=set(available_pages), replace_page=page,
+            )
+            authorized_items = [
+                authorize_item_images(
+                    copy.deepcopy(item),
+                    search_session=session_key,
+                    search_page=page,
+                    authorization_epoch=authorization_epoch,
+                )
+                for item in selected
+            ]
+            preloaded_through = SEARCH_PAGE_CACHE.preloaded_through(session_key)
         if scope in {"r18", "all"}:
             try:
                 assert_authorization_generation(authorization_epoch)
@@ -1401,7 +1893,7 @@ def search_pixiv_results(
             "total": int(session["baseIndex"]) + len(session["items"]), "reportedTotal": None,
             "page": page, "pages": available_pages[-1] if available_pages else 1,
             "pageNumbers": available_pages, "availablePages": available_pages,
-            "preloadedThrough": SEARCH_PAGE_CACHE.preloaded_through(session_key),
+            "preloadedThrough": preloaded_through,
             "items": authorized_items, "perPage": SEARCH_PER_PAGE, "hasMore": has_more,
             "budgetExhausted": bool(session["budgetExhausted"]),
             "truncatedDates": sorted(session["truncatedDates"], reverse=True),
@@ -1417,12 +1909,22 @@ def pixiv_detail(
     allow_r18: bool = False,
     *,
     authorization_epoch: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
     if not artwork_id.isdigit():
         raise PixivPolicyError("无效作品 ID")
-    detail = pixiv_json(f"https://www.pixiv.net/ajax/illust/{artwork_id}?lang=zh").get("body") or {}
-    pages = pixiv_json(f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages?lang=zh").get("body") or []
+    detail_url = f"https://www.pixiv.net/ajax/illust/{artwork_id}?lang=zh"
+    pages_url = f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages?lang=zh"
+    if cancel_event is None:
+        detail = pixiv_json(detail_url).get("body") or {}
+        pages = pixiv_json(pages_url).get("body") or []
+    else:
+        detail = search_pixiv_json(detail_url, cancel_event).get("body") or {}
+        pages = search_pixiv_json(pages_url, cancel_event).get("body") or []
+    raise_if_search_cancelled(cancel_event)
     normalized = normalize_detail(detail, pages, allow_r18=allow_r18)
+    if normalized.get("id") != artwork_id:
+        raise PixivPolicyError("Pixiv 返回的作品 ID 不匹配")
     restricted = normalized.get("restriction") == "r18"
     if restricted:
         if authorization_epoch is None:
@@ -1432,9 +1934,10 @@ def pixiv_detail(
         normalized,
         authorization_epoch=authorization_epoch,
     )
-    if not restricted:
-        return cache_pixiv_item(item)
     try:
+        raise_if_search_cancelled(cancel_event)
+        if not restricted:
+            return cache_pixiv_item(item)
         # Commit the restricted cache while holding the same generation guard
         # used by logout. If logout won the race, discard every token created by
         # this request and return no restricted response.
@@ -1485,6 +1988,10 @@ PIXIV_OPERATION_ERRORS = (
 
 
 def public_pixiv_error(action: str, exc: Exception, *, saving: bool = False) -> str:
+    if isinstance(exc, (TypeError, ValueError, KeyError)) and not isinstance(
+        exc, (PixivPolicyError, json.JSONDecodeError)
+    ):
+        HTTP_LOG.exception("Unexpected %s data-processing failure", action)
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code in {401, 403}:
             detail = "Pixiv 拒绝了访问，请检查登录状态或作品权限"
@@ -2644,6 +3151,12 @@ class Handler(SimpleHTTPRequestHandler):
     def _get_pixiv_search(self, request):
         query = urllib.parse.parse_qs(request.query)
         tag_query = query.get("tag", ["原创"])[0]
+        try:
+            request_id = parse_search_request_id(query.get("requestId", [""])[0])
+        except SearchInputError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        if not request_id:
+            request_id = secrets.token_urlsafe(24)
         search_scope = query.get("mode", ["safe"])[0]
         session_authorized, session_epoch = validated_authorization()
         if search_scope in {"r18", "all"} and not session_authorized:
@@ -2656,31 +3169,47 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError:
             page = 1
         try:
-            authorization_epoch = (
-                session_epoch if search_scope in {"r18", "all"} else None
-            )
-            result = search_pixiv_results(
-                tag_query, search_scope, page, work_type, include_ai,
-                authorized=session_authorized, fuzzy=fuzzy,
-                authorization_epoch=authorization_epoch,
-            )
-            return self.send_json(result)
-        except SearchInputError as exc:
-            status = 403 if "授权" in str(exc) else 400
-            return self.send_json({"error": str(exc)}, status)
-        except AuthorizationRevokedError as exc:
-            return self.send_json({"error": str(exc)}, 403)
-        except PIXIV_OPERATION_ERRORS as exc:
-            return self.send_json({"error": public_pixiv_error("Pixiv 搜索", exc)}, 502)
+            cancel_event = register_search_request(request_id)
+        except SearchRequestConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
+        except SearchRequestLimitError as exc:
+            return self.send_json({"error": str(exc)}, 429)
+        try:
+            try:
+                authorization_epoch = (
+                    session_epoch if search_scope in {"r18", "all"} else None
+                )
+                kwargs = {
+                    "authorized": session_authorized,
+                    "fuzzy": fuzzy,
+                    "authorization_epoch": authorization_epoch,
+                }
+                kwargs["cancel_event"] = cancel_event
+                result = search_pixiv_results(
+                    tag_query, search_scope, page, work_type, include_ai, **kwargs,
+                )
+                return self.send_json(result)
+            except SearchCancelledError:
+                return self.send_json({"error": "搜索已取消", "cancelled": True}, 409)
+            except SearchInputError as exc:
+                status = 403 if "授权" in str(exc) else 400
+                return self.send_json({"error": str(exc)}, status)
+            except AuthorizationRevokedError as exc:
+                return self.send_json({"error": str(exc)}, 403)
+            except PIXIV_OPERATION_ERRORS as exc:
+                return self.send_json({"error": public_pixiv_error("Pixiv 搜索", exc)}, 502)
+        finally:
+            release_search_request(request_id, cancel_event)
 
     def _get_pixiv_detail(self, artwork_id: str):
         try:
             authorized, authorization_epoch = validated_authorization()
             return self.send_json(
-                pixiv_detail(
+                pixiv_item_for_download(
                     artwork_id,
                     allow_r18=authorized,
                     authorization_epoch=authorization_epoch,
+                    require_thumb=True,
                 ),
             )
         except AuthorizationRevokedError as exc:
@@ -2744,6 +3273,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/desktop/auth/session": (4096, self._post_desktop_session),
             "/api/desktop/auth/logout": (4096, self._post_desktop_logout),
             "/api/system/select-folder": (4096, self._post_select_folder),
+            "/api/pixiv/search/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
             "/api/pixiv/download": (16384, self._post_pixiv_download),
         }
@@ -2798,6 +3328,14 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_desktop_logout(self, _data: dict):
         return self._post_logout(_data)
+
+    def _post_cancel_search(self, data: dict):
+        try:
+            request_id = parse_search_request_id(data.get("requestId"), required=True)
+            found = cancel_search_request(request_id)
+        except SearchInputError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        return self.send_json({"ok": True, "cancelled": found})
 
     def _post_select_folder(self, data: dict):
         if not FOLDER_PICKER_LOCK.acquire(blocking=False):
