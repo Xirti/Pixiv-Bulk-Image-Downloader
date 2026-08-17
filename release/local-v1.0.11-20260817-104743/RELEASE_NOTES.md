@@ -1,195 +1,22 @@
-# Changelog
+# MOKU v1.0.12
 
-All notable changes are documented here. The project follows Semantic Versioning.
+本版本聚焦动图支持与采集篮体验优化。
 
-## [Unreleased]
+## 新增
 
-### Added
+- 动图作品下载为 Pixiv 帧 ZIP，并附带 `_ugoira.frames.json` 帧延迟清单。
+- 搜索结果、作品详情和采集篮支持鼠标悬停播放动图预览。
+- 多选进入第三页打包模式；采集篮内点击作品直接进入独立作品详情页，可逐张选图。
+- 返回顶部悬浮按钮支持主页面、采集篮详情和连续查看页。
 
-- Download ugoira works as the official Pixiv frame ZIP plus a `_ugoira.frames.json` delay manifest, labelled as 动图清晰度 options in the detail panel; ugoira cards and details carry a 动图 badge.
-- Animate ugoira works on hover in the result grid and both basket pickers: a bounded `/api/pixiv/ugoira/{id}` endpoint serves the frame manifest and ZIP, and the page decodes frames via ImageBitmap (CSP-safe), attaches the canvas only once frames are ready, and cover-fits playback to the card.
-- Give the collection basket a dedicated flow: multi-selection turns the artwork detail page into a batch-download page with only the shared download options and a jump panel, the fullscreen basket page handles artwork and per-image selection, and returning lands back on the batch options. Single-artwork downloads remain available when nothing is selected.
-- Add floating chrome: an animated show/hide for the pagination dock, a download-progress task dock, a back-to-top chip, and a basket quick-entry chip.
+## 调整
 
-### Changed
+- 下载设置统一保留在第三页，采集篮专注作品与图片选择。
+- 采集篮作品详情沿用单作品详情页的排版和选图交互。
+- 采集篮顶部栏固定显示，长篇多 P 作品浏览更容易返回和定位。
 
-- Keep the download settings (save root, context folder, grouping) on the artwork detail page as the single source for single and batch downloads; the basket page no longer carries its own settings panel.
-- Pin the basket header with a sticky bar so the scrollbar tracks the page correctly.
-- Restyle the floating chips and task dock as translucent glass surfaces without `backdrop-filter`, and move back-to-top to the bottom-left corner away from the basket entry.
+## 修复
 
-### Fixed
-
-- Ugoira artworks no longer fail detail loading: Pixiv returns no original still image for them, so empty page URLs are tolerated instead of rejecting the whole artwork, and no image capability is issued for empty slots.
-- The ugoira badge no longer covers the card select checkbox.
-- Restricted (R-18) previews no longer linger in the hidden basket page DOM after authorization loss or view switches.
-
-## [1.0.11] - 2026-07-26
-
-### Added
-
-- Add exact `pid:` artwork lookup and `uid:` creator lookup while retaining exact-name `author:` search, with ASCII and full-width colon support.
-- Add an explicit search cancel action backed by bounded request tracking and cancellation propagation through session waits, network reads, and result commits.
-
-### Changed
-
-- Apply work type, AI, fuzzy, and safety filters only after the user submits the search form; filter changes no longer start large searches automatically.
-- Bound Pixiv search traffic to four process-wide workers, cap fuzzy source expansion to the retained cache budget, and keep cancelled connection attempts from accumulating unbounded work.
-- Reuse valid page-image capabilities for downloads even when an unused thumbnail capability was evicted, avoiding unnecessary artwork-detail refreshes.
-
-### Fixed
-
-- Reject mismatched upstream artwork IDs, preserve cursor state across cancelled creator searches, and rebuild evicted deep-page sessions instead of returning empty pages.
-- Preserve loaded detail pages and current previews across result, viewer, and basket transitions; update basket selections in place and resume failed download chunks without repeating completed batches.
-- Keep mobile basket titles ellipsized inside their cards, and show the fixed pagination dock only while it overlaps the gallery without losing it on short result pages or return scrolling.
-
-## [1.0.10] - 2026-07-25
-
-### Security
-
-- Linearize account connect, disconnect, and replacement so stale login work cannot restore a cleared session; bind R-18 image capabilities to the active authorization generation and return protected responses with `no-store`.
-- Keep direct and TUN requests fail-closed by disabling implicit environment and Windows proxy bypasses, while accepting only explicitly selected loopback proxies.
-- Stage downloads transactionally, recheck authorization before publication, and roll back every file and directory created by a failed or revoked task.
-
-### Changed
-
-- Use the project-provided artwork as a multi-resolution Windows executable icon and bind both its source PNG and generated ICO into the release fingerprint.
-- Limit active download tasks to two, reject saturation with HTTP 429, cap one-artwork downloads at 200 pages, and cache bounded author resolution results in a 64-entry five-minute LRU.
-- Window large detail, continuous-viewer, and collection-basket renders to reduce DOM, image, and layout pressure while preserving current selections.
-- Make the synthetic fixture gallery drive the complete interface for repeatable desktop and responsive-layout verification.
-
-### Fixed
-
-- Recover expired preview capabilities once per failed URL with deduplicated refreshes and cooldown, without reusing stale tokens after logout or cache eviction.
-- Prevent stale search, detail, logout, selection, and multi-request download state from overwriting the latest page or task context.
-- Keep long remote labels, navigation, pagination, detail views, and basket controls usable down to 320-pixel-wide layouts.
-
-## [1.0.9] - 2026-07-22
-
-### Changed
-
-- Replace the integrated batch panel with a consistent three-level collection basket: summary, artwork selection, and per-image selection.
-- Allow any number of artworks within the existing 1,000-image basket limit and split large single artworks into bounded 200-image requests.
-- Use compact artwork and image pickers, report search/basket cache state, and replace the bright ribbon treatment with restrained Saturn rings around the dark moon.
-
-### Fixed
-
-- Build download payloads only from authoritative selected-page sets, so deselected preview images are never submitted.
-- Freeze both basket selections and all download options for the lifetime of a multi-request task, including dynamically rebuilt controls.
-- Return budget-limited partial search pages instead of hiding valid sparse results, and bound large-creator filtering to resumable request/time budgets.
-- Abort stale detail requests and clear every basket view class on back, clear, normal-detail, and replacement transitions.
-
-## [1.0.8] - 2026-07-21
-
-### Fixed
-
-- Restore the one-step batch workflow: opening batch download now selects the current page and shows the integrated artwork picker immediately.
-- Preserve per-page selections and original search contexts while keeping result-card and batch-card state synchronized, including stale-detail response protection.
-
-## [1.0.7] - 2026-07-20
-
-### Fixed
-
-- Reject junctions and other reparse points before canonicalization or publication, including those nested below the selected root, and remove every directory created by a failed publish.
-
-## [1.0.6] - 2026-07-20
-
-### Fixed
-
-- Canonicalize user-selected download roots and final publication paths before containment checks, so equivalent Windows path aliases cannot produce false 502 responses or bypass the save-root boundary.
-- Isolate threaded download-integrity test network seams and stabilize the publish-identity test path on hosted Windows runners.
-
-## [1.0.5] - 2026-07-18
-
-### Added
-
-- Strict multi-tag AND search using `;` or `；` separators; spaces remain part of one tag.
-- Optional bounded anime-oriented tag aliases, disabled by default.
-- A collection basket for any number of artworks within a 1,000-image selection limit, with windowed page selection for large works.
-- One-click select/clear controls for all artworks and images on the current result page.
-- Image-first adaptive download chunks and optional artwork grouping.
-
-### Changed
-
-- Save one search batch into a shared tag, author, or artwork context folder instead of creating one folder per artwork.
-- Apply the same context-folder rule to single-artwork downloads.
-- Restyle the interface with a restrained black-and-white lunar theme, a highlighted moon edge, and one clean orbital ring while preserving the existing workflow and startup budget.
-- Keep result pagination docked to the viewport bottom while the gallery scrolls.
-- Defer the collection retention decision until forward navigation would actually evict selected result pages.
-
-### Fixed
-
-- Keep exact and alias-expanded search sessions in separate cache namespaces.
-- Validate every multi-tag result against all requested tag groups after Pixiv response normalization.
-
-## [1.0.4] - 2026-07-17
-
-### Fixed
-
-- Use Pixiv's current JSON `/ajax/search/users?nick=...` response for exact `author:` resolution, including both list and keyed user payloads.
-- Do not expose the loopback request capability to headerless health probes; same-origin desktop/browser readiness checks now identify themselves explicitly.
-- Return download paths relative to the selected save directory instead of leaking local absolute paths through the HTTP API.
-- Reject malformed or negative remote `Content-Length` values before reading a Pixiv response.
-
-## [1.0.3] - 2026-07-17
-
-### Fixed
-
-- Resolve exact `author:` queries through Pixiv's current `/search/users` page instead of the removed AJAX user-search route.
-- Parse the bounded `__NEXT_DATA__` user result set and keep exact creator-name and user-ID filtering.
-
-## [1.0.2] - 2026-07-17
-
-### Added
-
-- Exact Pixiv creator search with `pid:` / `pid：` and `author:` / `author：` queries.
-
-### Fixed
-
-- Parse Pixiv's nested `userPreviews[].user` response before exact author-name matching.
-- Reject works whose `userId` does not match the resolved creator.
-- Replace overlapping absolute-positioned deck cards with a non-overlapping flex row.
-- Reduce pointer preview travel and keep every other card stationary while one card is locked.
-
-## [1.0.1] - 2026-07-16
-
-### Fixed
-
-- Restored Windows PowerShell module discovery in `-NoProfile` CI subprocesses while preserving fail-closed Python Authenticode verification.
-- Preserved the vendored `proxy-tools` license byte hash across Windows and CI checkouts with explicit LF normalization.
-- Updated pinned GitHub Actions to Node.js 24-compatible major versions.
-
-## [1.0.0] - 2026-07-16
-
-### Added
-
-- Windows pywebview/WebView2 desktop host with a second official Pixiv login window.
-- Public, R-18, and combined search scopes with multi-tag OR aggregation.
-- Bounded historical search, paging prefetch, sliding cache eviction, and selective batch download.
-- Native folder selection, offline usage guide, and anonymous parallel network diagnosis.
-- Portable PyInstaller build, release ZIP generation, SHA-256 manifests, and Windows CI.
-- A fail-closed build manifest binding source/build inputs to every portable-package file.
-
-### Security
-
-- Loopback host, `Sec-Fetch-Site`, and same-origin checks for every API GET.
-- Per-process request tokens for every non-health API request; image URLs use separate high-entropy capabilities.
-- Strict Content Security Policy and same-origin resource headers on local HTTP responses.
-- Bounded JSON-object parsing for mutating requests.
-- Explicit Pixiv/API/image host allowlists and loopback-only proxy selection.
-- Query parameters, cookies, request bodies, and image tokens excluded from HTTP logs.
-- Content-derived backend generation IDs prevent a new client from reusing stale code.
-- Test-only synthetic gallery routes disabled by default.
-- Release generation rejects stale source, changed licenses, modified support files, linked or undeclared files/directories, non-Windows-x64 product artifacts, missing pywebview loader runtimes, unlocked top-level package metadata, and archives that fail round-trip verification.
-- Runtime and build dependencies are locked to verified artifact SHA-256 values; the legacy `proxy-tools` source is reproduced as an audited deterministic local wheel.
-- Build and release validation use a signed CPython 3.12 executable, a shared exclusive mutex, source rechecks, and schema 3 full file/directory manifests.
-
-### Changed
-
-- Replaced the legacy external Edge `--app` host with pywebview/WebView2.
-- Replaced sequential port probing with Windows-assigned ephemeral loopback ports.
-- Extracted synthetic test fixtures from the production HTTP module.
-- Added bounded LRU artwork caching and safe refresh of expired image authorization.
-- Synchronized artwork/image-capability state and revalidate in-flight R-18 image/download authorization after network reads.
-- Complete staging cleanup before returning download success or failure responses, so the HTTP result matches the final filesystem state.
-- Replaced unbounded logs with 5 MiB rotation and removed temporary WebView2 paths from cleanup warnings.
-- Removed Android, non-Windows UI backends, unnecessary x86/ARM64 product components, and debug symbols from the Windows x64 frozen closure while retaining the small pywebview loader runtimes required during import.
+- 动图没有静态原图时不再导致作品详情加载失败。
+- 动图卡片标识不再遮挡选择控件。
+- 切换采集篮视图或授权状态时，不再残留受限作品预览。
