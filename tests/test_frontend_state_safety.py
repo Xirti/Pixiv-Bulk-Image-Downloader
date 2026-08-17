@@ -49,7 +49,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn('$("#batchDownload").disabled', controls)
         self.assertIn("searchButton.disabled = basketSelectionLocked || searchPending || singleDownloadPending", controls)
         self.assertIn("basketSelectionLocked || searchPending", controls)
-        open_basket = block("function openSelectionBasket", "function renderBasketSummary")
+        open_basket = block("function openSelectionBasket", "function applyBasketArtworkSelection")
         self.assertIn("if (basketSelectionLocked || searchPending) return", open_basket)
 
         reconciliation = block("function reconcileSelectedArtworkPreviews", "function render()")
@@ -116,7 +116,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn('data-detail-artwork="${esc(item.id)}"', APP)
         self.assertIn("delete img.dataset.detailRefreshAttemptedUrl", refresh)
         self.assertIn('data-basket-artwork="${esc(item.id)}"', APP)
-        basket_detail = block("async function openBatchCollection", '$("#returnToBatch").onclick')
+        basket_detail = block("async function openBatchCollection", '$("#basketBack").onclick')
         self.assertIn("staleBasketPreviewIds.has", basket_detail)
 
     def test_empty_basket_and_invalid_detail_targets_leave_controls_clean(self):
@@ -126,7 +126,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertLess(detail.index("if (!item) return"), detail.index("detailController = new AbortController()"))
         self.assertIn("selectedArtworks.set(item.id, item)", detail)
         self.assertIn("batchCandidateItems[candidateIndex] = item", detail)
-        basket = block("async function openBatchCollection", '$("#returnToBatch").onclick')
+        basket = block("async function openBatchCollection", '$("#basketBack").onclick')
         self.assertLess(basket.index("if (!item) return"), basket.index("detailController = new AbortController()"))
 
         viewer = block("function openAllViewer", "function closeAllViewer")
@@ -179,9 +179,11 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn("context: downloadContext", payload)
         detail = block("function renderDetail", "function renderCollectionPageWindow")
         self.assertIn("currentDetailContext = { ...detailContext }", detail)
-        basket_detail = block("async function openBatchCollection", '$("#returnToBatch").onclick')
-        self.assertIn("batchCandidateContextByArtwork.get(item.id)", basket_detail)
-        self.assertIn("renderDetail(item, items.findIndex", basket_detail)
+        basket_detail = block("async function openBatchCollection", '$("#basketBack").onclick')
+        self.assertIn("renderBasketArtworkDetail(item)", basket_detail)
+        context_apply = block("function applyBasketArtworkSelection", "function openBasketArtworkPicker")
+        self.assertIn("batchCandidateContextByArtwork.get(item.id)", context_apply)
+        self.assertIn("batchCandidateResultPageByArtwork.get(item.id)", context_apply)
 
     def test_failed_logout_still_reconciles_authorization_state(self):
         action = block('$("#authAction").onclick', 'document.querySelectorAll(".dialog-close")')
@@ -233,16 +235,41 @@ class FakeElement {
   set innerHTML(value) { this._innerHTML = String(value); this.queryCache.clear(); }
   addEventListener(type, handler) { this.listeners.set(type, handler); }
   removeEventListener() {}
+  appendChild(child) { return child; }
   querySelectorAll(selector) {
-    if (selector !== "[data-viewer-window]:not([disabled])") return [];
     if (this.queryCache.has(selector)) return this.queryCache.get(selector);
     const nodes = [];
-    const pattern = /<button\b([^>]*\bdata-viewer-window="([^"]+)"[^>]*)>/g;
+    if (selector === "[data-collection-page]") {
+      const inputs = /<input\b([^>]*\bdata-collection-page="([^"]+)"[^>]*)>/g;
+      let inputMatch;
+      while ((inputMatch = inputs.exec(this._innerHTML))) {
+        const node = new FakeElement();
+        node.dataset.collectionPage = inputMatch[2];
+        node.checked = /\bchecked\b/.test(inputMatch[1]);
+        node.disabled = /\bdisabled\b/.test(inputMatch[1]);
+        nodes.push(node);
+      }
+      this.queryCache.set(selector, nodes);
+      return nodes;
+    }
+    const patterns = {
+      "[data-viewer-window]:not([disabled])": {
+        regex: /<button\b([^>]*\bdata-viewer-window="([^"]+)"[^>]*)>/g,
+        key: "viewerWindow",
+      },
+      "[data-open-collection]": {
+        regex: /<button\b([^>]*\bdata-open-collection="([^"]+)"[^>]*)>/g,
+        key: "openCollection",
+      },
+    };
+    const definition = patterns[selector];
+    if (!definition) return nodes;
+    const pattern = definition.regex;
     let match;
     while ((match = pattern.exec(this._innerHTML))) {
       if (/\bdisabled\b/.test(match[1])) continue;
       const node = new FakeElement();
-      node.dataset.viewerWindow = match[2];
+      node.dataset[definition.key] = match[2];
       nodes.push(node);
     }
     this.queryCache.set(selector, nodes);
@@ -695,6 +722,49 @@ fakeElement("#tag").value = "old";
   check(basketLabel.getAttribute("aria-label") === `选择 ${basketItem.title}`, "basket checkbox did not restore its accessible label");
   check(document.querySelector("#batchSummary").textContent.startsWith("0/1000 个作品已勾选"), "basket checkbox deselection did not update the picker summary");
   check(document.querySelector("#batchDownload").disabled, "basket checkbox deselection did not disable empty download controls");
+
+  const basketFlowItem = {
+    ...oldItem,
+    id: "basket-flow",
+    title: "basket-flow",
+    pages: 3,
+    pageImages: Array.from({length: 3}, (_, page) => ({
+      regular: `/basket-flow-${page}`,
+      original: `/basket-flow-original-${page}`,
+    })),
+  };
+  batchCandidateItems = [basketFlowItem];
+  selectedArtworkIds.add(basketFlowItem.id);
+  selectedArtworks.set(basketFlowItem.id, basketFlowItem);
+  selectedPagesByArtwork.set(basketFlowItem.id, new Set([0, 1, 2]));
+  selectedContextByArtwork.set(basketFlowItem.id, {kind: "tags", value: "basket-flow"});
+  document.body.classList.add("batch-mode");
+  openBasketArtworkPicker();
+  openBasketPage();
+  const openArtwork = document.querySelector("#batchCollections").querySelectorAll("[data-open-collection]")[0];
+  check(typeof openArtwork?.onclick === "function", "basket artwork card did not expose a detail action");
+  await openArtwork.onclick();
+  check(!document.querySelector("#basketPage").hidden, "basket artwork detail closed the basket overlay");
+  check(document.querySelector("#batchCollections").hidden, "basket artwork list remained above the detail view");
+  check(!document.querySelector("#basketArtworkDetail").hidden, "basket artwork detail view did not open");
+  check(document.querySelector("#basketDetailDeck").innerHTML.includes("deck-card"), "basket artwork detail omitted the single-work deck layout");
+  check(document.querySelector("#basketPages").innerHTML.includes("data-collection-page"), "basket artwork detail omitted per-image selection");
+  check(document.body.classList.contains("batch-mode"), "basket artwork detail replaced the third-page batch mode");
+  const basketPageInputs = document.querySelector("#basketPages").querySelectorAll("[data-collection-page]");
+  check(basketPageInputs.length === 3, "basket artwork detail did not bind every rendered page checkbox");
+  basketPageInputs[1].checked = false;
+  basketPageInputs[1].onchange();
+  check(!selectedPagesByArtwork.get(basketFlowItem.id).has(1), "basket page checkbox did not update the selected page set");
+  check(document.querySelector("#batchSummary").textContent === "已选 2/3 张", "basket page checkbox did not update the detail summary");
+  document.querySelector("#basketBack").onclick();
+  check(!document.querySelector("#batchCollections").hidden, "detail back did not return to the basket artwork list");
+  check(document.querySelector("#basketArtworkDetail").hidden, "detail back left the detail view visible");
+  check(!document.querySelector("#basketPage").hidden, "detail back skipped the basket artwork list");
+  check(document.querySelector("#batchCollections").innerHTML.includes("已选 2/3 张"), "detail page selection was not preserved in the basket list");
+  document.querySelector("#basketBack").onclick();
+  check(document.querySelector("#basketPage").hidden, "basket back did not return to the third-page download options");
+  check(document.body.classList.contains("batch-mode"), "basket back did not restore third-page batch mode");
+  check(document.querySelector("#batchDetailSummary").textContent.includes("2/1000 张已选"), "basket selection did not persist into third-page batch mode");
   abortDetailRefreshes();
   check(detailRefreshes.size === 0 && detailRefreshAttempts.size === 0, "detail refresh state was not cleared");
 })().catch((error) => { console.error(error.stack || error); process.exitCode = 1; });

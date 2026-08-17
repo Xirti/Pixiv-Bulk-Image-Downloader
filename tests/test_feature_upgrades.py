@@ -35,7 +35,9 @@ class FeatureUpgradeTests(unittest.TestCase):
 
     def test_gallery_has_multi_select_and_batch_workspace(self):
         self.assertIn('id="selectionBar"', HTML)
-        self.assertIn('id="batchWorkspace"', HTML)
+        self.assertIn('id="basketPage"', HTML)
+        self.assertIn('id="batchCollections"', HTML)
+        self.assertIn('id="basketBack"', HTML)
         self.assertIn("selectedArtworkIds", APP)
         self.assertIn("openSelectionBasket", APP)
         self.assertIn("openBasketArtworkPicker", APP)

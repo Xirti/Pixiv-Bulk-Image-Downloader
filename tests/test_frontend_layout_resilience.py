@@ -81,7 +81,12 @@ class FrontendLayoutResilienceTests(unittest.TestCase):
         self.assert_declarations(".scene", "scroll-margin-top:52px")
         self.assertIn('@media(max-width:360px)', STYLE)
         self.assert_declarations(".search-row", "flex-direction:column")
-        self.assertIn('id="returnToBatch"', HTML)
+        self.assertIn('id="basketPage"', HTML)
+        self.assertIn('id="basketBack"', HTML)
+
+    def test_hidden_basket_panes_are_removed_from_the_layout(self):
+        self.assert_declarations("#batchCollections[hidden]", "display:none")
+        self.assert_declarations(".basket-artwork-detail[hidden]", "display:none")
 
 
 if __name__ == "__main__":

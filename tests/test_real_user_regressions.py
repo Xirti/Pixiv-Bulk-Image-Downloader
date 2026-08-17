@@ -49,7 +49,7 @@ class WorkflowRegressionTests(unittest.TestCase):
     def test_clear_detail_removes_stale_page_controls(self):
         clear_block = APP[APP.index("function clearDetail"):APP.index("function updateSelectionBar")]
         self.assertIn('$("#collectionPages").innerHTML = ""', clear_block)
-        self.assertIn('$("#returnToBatch").hidden = true', clear_block)
+        self.assertIn("closeBasketPage()", clear_block)
 
     def test_launcher_uses_runtime_descriptor_instead_of_commandline_path_match(self):
         self.assertIn("backend.json", LAUNCHER)

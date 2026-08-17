@@ -58,7 +58,7 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn('requestId,', APP)
         self.assertIn('"/api/pixiv/search/cancel"', APP)
         self.assertIn(
-            "const dockTop = window.innerHeight - dock.getBoundingClientRect().height",
+            "const dockTop = window.innerHeight - (dock.offsetHeight || 0)",
             APP,
         )
         self.assertIn(
@@ -180,17 +180,25 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn('id="batchCollections"', HTML)
         detail_start = HTML.index('id="detail"')
         detail = HTML[detail_start:HTML.index('</section>', detail_start)]
-        self.assertIn('id="batchCollections"', detail)
+        self.assertIn('id="saveRoot"', detail)
+        self.assertIn('id="browseFolder"', detail)
+        self.assertIn('id="groupArtworks"', detail)
+        basket_start = HTML.index('id="basketPage"')
+        basket = HTML[basket_start:HTML.index('</section>', basket_start)]
+        self.assertIn('id="batchCollections"', basket)
+        self.assertIn('id="basketPages"', basket)
+        self.assertNotIn('id="saveRoot"', basket)
         self.assertNotIn('id="batchPicker"', HTML)
         self.assertIn("openBatchCollection", APP)
         self.assertIn("selectedPagesByArtwork", APP)
-        self.assertIn("returnToBatch", APP)
+        self.assertIn("basketBack", APP)
+        self.assertIn("closeBasketPage", APP)
         self.assertIn("page-select", STYLE)
 
     def test_batch_summary_is_immediate_and_detail_is_loaded_on_navigation(self):
-        batch_block = APP[APP.index("function renderBasketSummary"):APP.index("function openBasketArtworkPicker")]
+        batch_block = APP[APP.index("function openSelectionBasket"):APP.index("function applyBasketArtworkSelection")]
         detail_start = APP.index("async function openBatchCollection")
-        detail_end = APP.index('$("#returnToBatch").onclick', detail_start)
+        detail_end = APP.index('$("#basketBack").onclick', detail_start)
         detail_block = APP[detail_start:detail_end]
         self.assertNotIn("await fetchJson", batch_block)
         self.assertIn("await fetchJson", detail_block)

@@ -39,7 +39,7 @@ from auth_store import (
 )
 from folder_picker import select_folder
 from network_config import normalize_loopback_proxy
-from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
+from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
 from search_service import SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
 
@@ -405,7 +405,13 @@ def _item_image_tokens_current(
     for page in pages:
         if not isinstance(page, dict):
             return False
-        proxy_urls.extend(str(page.get(quality) or "") for quality in ("regular", "original"))
+        # Ugoira pages carry no original still image; empty slots hold no token.
+        proxy_urls.extend(
+            url for url in (
+                str(page.get(quality) or "")
+                for quality in ("regular", "original")
+            ) if url
+        )
     current = time.time() if now is None else float(now)
     with PIXIV_STATE_LOCK:
         for proxy_url in proxy_urls:
@@ -698,11 +704,14 @@ def authorize_item_images(
             authorization_epoch,
         ))
     for page in item.get("pageImages") or []:
-        targets.extend(((page, "regular"), (page, "original")))
-        entries.extend((
-            (page["regular"], artwork_id, restriction, None, None, authorization_epoch),
-            (page["original"], artwork_id, restriction, None, None, authorization_epoch),
-        ))
+        # Skip empty ugoira "original" slots instead of refusing to authorize.
+        for key in ("regular", "original"):
+            if not page.get(key):
+                continue
+            targets.append((page, key))
+            entries.append((
+                page[key], artwork_id, restriction, None, None, authorization_epoch,
+            ))
     for (target, key), approved in zip(
         targets, _authorize_image_proxy_batch(entries), strict=True,
     ):
@@ -1953,6 +1962,43 @@ def pixiv_detail(
         raise
 
 
+UGOIRA_ZIP_MAGIC = b"PK\x03\x04"
+
+
+def pixiv_ugoira_meta(
+    artwork_id: str,
+    *,
+    authorization_epoch: int | None = None,
+) -> dict:
+    """Fetch the ugoira animation manifest (frame zip URLs and delays)."""
+    body = pixiv_json(build_ugoira_meta_url(artwork_id)).get("body") or {}
+    if not isinstance(body, dict):
+        raise PixivPolicyError("Pixiv 动图数据格式异常")
+    original_src = str(body.get("originalSrc") or "")
+    src = str(body.get("src") or "")
+    if not is_allowed_pixiv_url(original_src, image_only=True) or not is_allowed_pixiv_url(src, image_only=True):
+        raise PixivPolicyError("invalid image host")
+    frames = body.get("frames")
+    if not isinstance(frames, list) or not frames or any(
+        not isinstance(frame, dict)
+        or not str(frame.get("file") or "").strip()
+        or not isinstance(frame.get("delay"), int)
+        for frame in frames
+    ):
+        raise PixivPolicyError("Pixiv 动图帧数据格式异常")
+    if authorization_epoch is not None:
+        assert_authorization_generation(authorization_epoch)
+    return {
+        "src": src,
+        "originalSrc": original_src,
+        "mime": str(body.get("mime_type") or "image/jpeg"),
+        "frames": [
+            {"file": str(frame["file"]), "delay": int(frame["delay"])}
+            for frame in frames
+        ],
+    }
+
+
 IMAGE_EXTENSIONS = {
     "image/jpeg": "jpg",
     "image/png": "png",
@@ -2035,10 +2081,35 @@ def approved_image_url(proxy_url: str, artwork_id: str) -> str:
     return str(approved[2])
 
 
+def stage_ugoira_zip(
+    item: dict, quality: str, folder: Path, staging_root: Path,
+    *, authorization_epoch: int | None = None,
+) -> list[PublishedFileOwnership]:
+    artwork_id = str(item.get("id") or "")
+    meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch)
+    zip_url = str(meta["originalSrc"] if quality == "original" else meta["src"])
+    raw, _content_type = pixiv_request(zip_url, image_only=True)
+    # Re-check the capability after the network request, mirroring the per-page
+    # token re-check: logout during flight must not publish restricted bytes.
+    if item.get("restriction") == "r18" and authorization_epoch is not None:
+        assert_authorization_generation(authorization_epoch)
+    if not raw.startswith(UGOIRA_ZIP_MAGIC):
+        raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
+    stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
+    manifest = json.dumps(
+        {"mime": meta["mime"], "frames": meta["frames"], "source": zip_url},
+        ensure_ascii=False, indent=2,
+    ).encode("utf-8")
+    return [
+        _create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.zip", raw),
+        _create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.frames.json", manifest),
+    ]
+
+
 def stage_artwork_pages(
     item: dict, selected_pages: list[int], quality: str, save_root: Path,
     create_folder: bool, staging_root: Path, *, download_context: dict | None = None,
-    group_artwork: bool = False,
+    group_artwork: bool = False, authorization_epoch: int | None = None,
 ) -> list[PublishedFileOwnership]:
     artwork_id = str(item.get("id") or "")
     page_images = item.get("pageImages")
@@ -2048,6 +2119,12 @@ def stage_artwork_pages(
         save_root, str(item.get("title") or ""), artwork_id, create_folder,
         context=download_context, group_artwork=group_artwork,
     )
+    if str(item.get("workType") or "") == "ugoira":
+        # Ugoira animation data lives in a frame zip, not in page stills.
+        return stage_ugoira_zip(
+            item, quality, folder, staging_root,
+            authorization_epoch=authorization_epoch,
+        )
     stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
     staged: list[PublishedFileOwnership] = []
     try:
@@ -3111,6 +3188,9 @@ class Handler(SimpleHTTPRequestHandler):
         artwork_match = re.fullmatch(r"/api/pixiv/artwork/(\d+)", request.path)
         if artwork_match:
             return self._get_pixiv_detail(artwork_match.group(1))
+        ugoira_match = re.fullmatch(r"/api/pixiv/ugoira/(\d+)", request.path)
+        if ugoira_match:
+            return self._get_pixiv_ugoira(request, ugoira_match.group(1))
         if request.path == "/api/pixiv/image":
             return self._get_pixiv_image(request)
         if request.path == "/api/search":
@@ -3216,6 +3296,42 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(exc)}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json({"error": public_pixiv_error("作品详情", exc)}, 502)
+
+    def _get_pixiv_ugoira(self, request, artwork_id: str):
+        """Serve ugoira hover previews: frame manifest JSON or the frame zip."""
+        mode = urllib.parse.parse_qs(request.query).get("mode", ["meta"])[0]
+        if mode not in {"meta", "zip"}:
+            return self.send_json({"error": "mode 无效"}, 400)
+        try:
+            authorized, authorization_epoch = validated_authorization()
+            item = pixiv_item_for_download(
+                artwork_id,
+                allow_r18=authorized,
+                authorization_epoch=authorization_epoch,
+            )
+            if item.get("workType") != "ugoira":
+                raise PixivPolicyError("该作品不是动图")
+            restricted = item.get("restriction") == "r18"
+            if restricted and not authorized:
+                raise PixivPolicyError("R-18 动图预览需要有效账户授权")
+            meta = pixiv_ugoira_meta(
+                artwork_id,
+                authorization_epoch=authorization_epoch if restricted else None,
+            )
+            if mode == "meta":
+                return self.send_json({"frames": meta["frames"], "mime": meta["mime"]})
+            raw, _content_type = pixiv_request(str(meta["src"]), image_only=True)
+            # Mirror the download path: revoked authorization mid-flight must
+            # not publish restricted bytes.
+            if restricted and authorization_epoch is not None:
+                assert_authorization_generation(authorization_epoch)
+            if not raw.startswith(UGOIRA_ZIP_MAGIC):
+                raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
+            return self.send_bytes(raw, "application/zip", "private, no-store")
+        except AuthorizationRevokedError as exc:
+            return self.send_json({"error": str(exc)}, 403)
+        except PIXIV_OPERATION_ERRORS as exc:
+            return self.send_json({"error": public_pixiv_error("动图预览", exc)}, 502)
 
     def _get_pixiv_image(self, request):
         token = urllib.parse.parse_qs(request.query).get("token", [""])[0]
@@ -3460,6 +3576,7 @@ class Handler(SimpleHTTPRequestHandler):
                         create_folder, staging_root,
                         download_context=download_context,
                         group_artwork=group_artworks,
+                        authorization_epoch=authorization_epoch,
                     ))
 
             public_saved, cleanup_pending = _stage_and_publish_download(
@@ -3525,6 +3642,7 @@ class Handler(SimpleHTTPRequestHandler):
                     item, list(range(len(page_images))), quality, save_root,
                     create_folder, staging_root,
                     download_context=download_context,
+                    authorization_epoch=authorization_epoch,
                 ))
 
             public_saved, cleanup_pending = _stage_and_publish_download(

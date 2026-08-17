@@ -1307,5 +1307,165 @@ class CrossPlatformPublicationContractTests(unittest.TestCase):
             self.assertFalse(destination.exists())
 
 
+class UgoiraDownloadTests(unittest.TestCase):
+    """Ugoira works download as the official frame zip plus a delay manifest."""
+
+    UGOIRA_ID = "990101"
+
+    def setUp(self):
+        self.httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.token = "ugoira-test-token"
+        self.zip_url = f"https://i.pximg.net/img-zip/test/{self.UGOIRA_ID}_ugoira.zip"
+        self.zip_bytes = b"PK\x03\x04moku-ugoira-frames"
+        self._old_cache = dict(server.PIXIV_CACHE)
+        self._old_tokens = dict(server.IMAGE_TOKENS)
+        server.PIXIV_CACHE.clear()
+        server.IMAGE_TOKENS.clear()
+        server.PIXIV_CACHE[self.UGOIRA_ID] = {
+            "id": self.UGOIRA_ID,
+            "restriction": "safe",
+            "source": "pixiv",
+            "title": "动图下载测试",
+            "workType": "ugoira",
+            "pageImages": [
+                {
+                    "regular": f"/api/pixiv/image?token={self.token}",
+                    "original": "",
+                }
+            ],
+        }
+        server.IMAGE_TOKENS[self.token] = (
+            9_999_999_999.0,
+            self.UGOIRA_ID,
+            f"https://i.pximg.net/test/{self.UGOIRA_ID}_p0.jpg",
+            "safe",
+        )
+
+    def tearDown(self):
+        server.PIXIV_CACHE.clear()
+        server.PIXIV_CACHE.update(self._old_cache)
+        server.IMAGE_TOKENS.clear()
+        server.IMAGE_TOKENS.update(self._old_tokens)
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=3)
+
+    def _ugoira_meta(self, url):
+        self.assertTrue(
+            url.startswith(f"https://www.pixiv.net/ajax/illust/{self.UGOIRA_ID}/ugoira_meta"),
+            f"unexpected ugoira meta url: {url}",
+        )
+        return {
+            "body": {
+                "src": self.zip_url,
+                "originalSrc": self.zip_url,
+                "mime_type": "image/jpeg",
+                "frames": [
+                    {"file": "000000.jpg", "delay": 80},
+                    {"file": "000001.jpg", "delay": 120},
+                ],
+            }
+        }
+
+    def _post_single(self, root: Path, quality: str) -> tuple[int, dict]:
+        body = json.dumps({
+            "id": self.UGOIRA_ID,
+            "quality": quality,
+            "saveRoot": str(root),
+            "createFolder": False,
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.httpd.server_port}/api/pixiv/download",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Origin": f"http://127.0.0.1:{self.httpd.server_port}",
+                "X-MOKU-Request-Token": server.REQUEST_TOKEN,
+            },
+            method="POST",
+        )
+        requested = []
+
+        def pixiv_side_effect(url, *args, **kwargs):
+            requested.append(url)
+            return self.zip_bytes, "application/zip"
+
+        with patch.object(server, "pixiv_json", side_effect=self._ugoira_meta), \
+             patch.object(server, "pixiv_request", side_effect=pixiv_side_effect):
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
+
+    def test_single_ugoira_publishes_zip_and_frame_manifest(self):
+        with tempfile.TemporaryDirectory(prefix="moku-ugoira-single-") as raw_root:
+            root = Path(raw_root)
+            status, body = self._post_single(root, "regular")
+            self.assertEqual(status, 200, body)
+            saved = sorted(Path(path).name for path in root.rglob("*") if path.is_file())
+            self.assertEqual(saved, ["动图下载测试_990101_ugoira.frames.json", "动图下载测试_990101_ugoira.zip"])
+            self.assertEqual((root / "动图下载测试_990101_ugoira.zip").read_bytes(), self.zip_bytes)
+            manifest = json.loads((root / "动图下载测试_990101_ugoira.frames.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["frames"][0], {"file": "000000.jpg", "delay": 80})
+            self.assertEqual(manifest["source"], self.zip_url)
+
+    def test_ugoira_rejects_payload_without_zip_signature(self):
+        with tempfile.TemporaryDirectory(prefix="moku-ugoira-badzip-") as raw_root:
+            root = Path(raw_root)
+            self.zip_bytes = b"<html>not a zip</html>"
+            status, body = self._post_single(root, "original")
+            self.assertEqual(status, 502)
+            self.assertIn("失败", body["error"])
+            self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
+
+    def _get_ugoira(self, query: str) -> tuple[int, dict, bytes]:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.httpd.server_port}/api/pixiv/ugoira/{self.UGOIRA_ID}{query}",
+            headers={
+                "Sec-Fetch-Site": "same-origin",
+                "Origin": f"http://127.0.0.1:{self.httpd.server_port}",
+                "X-MOKU-Request-Token": server.REQUEST_TOKEN,
+            },
+        )
+
+        def pixiv_side_effect(url, *args, **kwargs):
+            return self.zip_bytes, "application/zip"
+
+        with patch.object(server, "pixiv_json", side_effect=self._ugoira_meta), \
+             patch.object(server, "pixiv_request", side_effect=pixiv_side_effect):
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return response.status, dict(response.headers), response.read()
+            except urllib.error.HTTPError as exc:
+                return exc.code, dict(exc.headers), exc.read()
+
+    def test_ugoira_preview_streams_frame_meta_and_zip(self):
+        status, headers, raw = self._get_ugoira("")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "application/json; charset=utf-8")
+        meta = json.loads(raw)
+        self.assertEqual(meta["mime"], "image/jpeg")
+        self.assertEqual(meta["frames"][1], {"file": "000001.jpg", "delay": 120})
+
+        status, headers, raw = self._get_ugoira("?mode=zip")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "application/zip")
+        self.assertEqual(raw, self.zip_bytes)
+
+    def test_ugoira_preview_rejects_non_ugoira_artwork_and_bad_mode(self):
+        server.PIXIV_CACHE[self.UGOIRA_ID]["workType"] = "illustration"
+        try:
+            status, headers, raw = self._get_ugoira("")
+            self.assertEqual(status, 502)
+            self.assertIn("失败", json.loads(raw)["error"])
+        finally:
+            server.PIXIV_CACHE[self.UGOIRA_ID]["workType"] = "ugoira"
+        status, headers, raw = self._get_ugoira("?mode=something")
+        self.assertEqual(status, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

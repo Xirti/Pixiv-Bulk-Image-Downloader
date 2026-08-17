@@ -172,10 +172,24 @@ def build_user_profile_works_url(user_id: str, artwork_ids) -> str:
     return f"https://www.pixiv.net/ajax/user/{clean_user_id}/profile/illusts?{urllib.parse.urlencode(params)}"
 
 
+def build_ugoira_meta_url(artwork_id: str) -> str:
+    clean = str(artwork_id or "").strip()
+    if not clean.isascii() or not clean.isdigit():
+        raise PixivPolicyError("invalid Pixiv artwork id")
+    return f"https://www.pixiv.net/ajax/illust/{clean}/ugoira_meta?lang=zh"
+
+
 def _proxy_image(url: str) -> str:
     if not is_allowed_pixiv_url(url, image_only=True):
         raise PixivPolicyError("invalid image host")
     return "/api/pixiv/image?" + urllib.parse.urlencode({"url": url})
+
+
+def _proxy_image_or_empty(url: Any) -> str:
+    # Ugoira pages expose no original still image; keep the slot empty instead
+    # of failing the whole artwork.
+    clean = str(url or "").strip()
+    return _proxy_image(clean) if clean else ""
 
 
 def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18: bool = False) -> dict[str, Any]:
@@ -187,8 +201,21 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
     page_images = []
     for page in pages:
         urls = page.get("urls") or {}
-        page_images.append({"width": int(page.get("width") or 0), "height": int(page.get("height") or 0), "regular": _proxy_image(str(urls.get("regular") or "")), "original": _proxy_image(str(urls.get("original") or ""))})
-    return {"id": artwork_id, "restriction": restriction, "source": "pixiv", "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"), "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""), "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30], "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0), "bookmarks": int(raw.get("bookmarkCount") or 0), "date": str(raw.get("createDate") or "")[:10], "description": _plain_text(raw.get("description") or raw.get("illustComment")), "workType": {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType") or 0), "illustration"), "aiGenerated": int(raw.get("aiType") or 1) == 2, "thumb": page_images[0]["regular"] if page_images else "", "pageImages": page_images, "qualities": [{"id":"original","label":"Pixiv 原图","width":int(raw.get("width") or 0),"height":int(raw.get("height") or 0)},{"id":"regular","label":"Pixiv 常规预览","width":0,"height":0}], "formats":[{"id":"source","label":"保留源格式（推荐）"}]}
+        page_images.append({"width": int(page.get("width") or 0), "height": int(page.get("height") or 0), "regular": _proxy_image_or_empty(urls.get("regular")), "original": _proxy_image_or_empty(urls.get("original"))})
+    work_type = {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType") or 0), "illustration")
+    if work_type == "ugoira":
+        qualities = [
+            {"id": "original", "label": "动图原始帧 ZIP", "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0)},
+            {"id": "regular", "label": "动图标准帧 ZIP（600px）", "width": 0, "height": 0},
+        ]
+        formats = [{"id": "source", "label": "ZIP 帧包 + 帧延迟 JSON"}]
+    else:
+        qualities = [
+            {"id": "original", "label": "Pixiv 原图", "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0)},
+            {"id": "regular", "label": "Pixiv 常规预览", "width": 0, "height": 0},
+        ]
+        formats = [{"id": "source", "label": "保留源格式（推荐）"}]
+    return {"id": artwork_id, "restriction": restriction, "source": "pixiv", "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"), "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""), "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30], "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0), "bookmarks": int(raw.get("bookmarkCount") or 0), "date": str(raw.get("createDate") or "")[:10], "description": _plain_text(raw.get("description") or raw.get("illustComment")), "workType": work_type, "aiGenerated": int(raw.get("aiType") or 1) == 2, "thumb": (page_images[0]["regular"] or page_images[0]["original"]) if page_images else "", "pageImages": page_images, "qualities": qualities, "formats": formats}
 
 
 def should_retry_status(status: int) -> bool:

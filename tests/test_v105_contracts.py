@@ -220,7 +220,7 @@ class V105VisualContractTests(unittest.TestCase):
 
     def test_opening_detail_does_not_create_ghost_collection_pages(self):
         detail = APP[
-            APP.index("function renderDetail"):APP.index("function renderCollectionPageWindow")
+            APP.index("function renderDetail"):APP.index("function syncBasketArtworkMeta")
         ]
         self.assertNotIn("selectedPagesByArtwork.set", detail)
         count = APP[
@@ -234,55 +234,86 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("function clearSelection(ids)", APP)
         self.assertIn("archivedArtworkIds.add", APP)
 
-    def test_collection_basket_summary_never_renders_images_and_single_artwork_requires_two_jumps(self):
-        workspace = HTML[HTML.index('id="batchWorkspace"'):HTML.index('id="deck"')]
-        self.assertEqual(workspace.count('id="batchDownload"'), 1)
+    def test_collection_basket_opens_directly_into_the_artwork_picker(self):
+        workspace = HTML[HTML.index('id="basketPage"'):HTML.index('id="backTop"')]
+        self.assertNotIn('id="batchDownload"', workspace)
         self.assertIn('id="batchCollections"', workspace)
-        self.assertIn('id="openBasketDetail"', workspace)
+        self.assertIn('id="basketPages"', workspace)
+        self.assertIn('id="basketArtworkDetail"', workspace)
+        self.assertNotIn('id="basketOpenDetail"', workspace)
+        self.assertNotIn('id="basketImagePane"', workspace)
+        self.assertNotIn('id="openBasketDetail"', workspace)
         self.assertIn("function openSelectionBasket", APP)
         open_basket = APP[
-            APP.index("function openSelectionBasket"):APP.index("function renderBasketSummary")
+            APP.index("function openSelectionBasket"):APP.index("function applyBasketArtworkSelection")
         ]
         self.assertNotIn("selectAllCurrentPage()", open_basket)
-        self.assertIn("renderBasketSummary(chosen)", open_basket)
-        summary = APP[APP.index("function renderBasketSummary"):APP.index("function openBasketArtworkPicker")]
-        self.assertIn('innerHTML = ""', summary)
-        self.assertIn('$("#batchDownload").hidden = true', summary)
-        self.assertNotIn("<img", summary)
-        self.assertNotIn("fetchJson", summary)
-        self.assertIn("openBasketArtworkPicker", summary)
+        self.assertNotIn("<img", open_basket)
+        self.assertNotIn("fetchJson", open_basket)
+        self.assertIn("openBasketArtworkPicker()", open_basket)
+        self.assertIn("openBasketPage()", open_basket)
         picker = APP[APP.index("function openBasketArtworkPicker"):APP.index("function selectedGroups")]
         self.assertIn("chosen.slice(start, end).map", picker)
+        self.assertIn('class="batch-card-open"', picker)
         self.assertIn("data-open-collection", picker)
         self.assertIn("openBatchCollection", picker)
+        self.assertNotIn("openBasketArtworkDetail", APP)
 
-    def test_multi_artwork_picker_opens_only_after_summary_and_page_badge_opens_images(self):
+    def test_basket_artwork_opens_a_dedicated_detail_picker_without_leaving_the_basket(self):
+        workspace = HTML[HTML.index('id="basketPage"'):HTML.index('id="backTop"')]
+        self.assertIn('id="basketArtworkDetail"', workspace)
+        self.assertIn('class="detail-info"', workspace)
+        self.assertIn('class="detail-content"', workspace)
+        jump = APP[APP.index("async function openBatchCollection"):APP.index('$("#basketBack").onclick')]
+        self.assertIn("await fetchJson", jump)
+        self.assertIn("{ signal: controller.signal }", jump)
+        self.assertIn("generation !== viewGeneration", jump)
+        self.assertIn("renderBasketArtworkDetail(item)", jump)
+        self.assertNotIn("closeBasketPage()", jump)
+        self.assertNotIn("renderDetail(item", jump)
+
+    def test_detail_switches_to_batch_download_mode_when_the_basket_is_used(self):
+        detail_section = HTML[HTML.index('id="detail"'):HTML.index('</section>', HTML.index('id="detail"'))]
+        self.assertIn('id="downloadOptions"', detail_section)
+        self.assertIn('id="saveRoot"', detail_section)
+        self.assertIn('id="batchPanel"', detail_section)
+        self.assertIn('id="batchDownload"', detail_section)
+        self.assertIn('id="batchEntryPane"', detail_section)
+        self.assertIn('id="openBasketPicker"', detail_section)
+        self.assertIn('class="eyebrow single-only"', detail_section)
+        self.assertIn("body.batch-mode #detail .single-only{display:none!important}", STYLE)
+        self.assertIn("body.batch-mode #detail .batch-only{display:block}", STYLE)
+        hub = APP[APP.index("function showBatchDetail"):APP.index("function closeBasketPage")]
+        self.assertIn('document.body.classList.add("batch-mode")', hub)
+        self.assertIn("updateBatchDetailSummary()", hub)
+        back = APP[APP.index('$("#basketBack").onclick'):APP.index('$("#selectAllPage").onclick')]
+        self.assertIn("showBatchDetail()", back)
+        select_block = APP[APP.index("async function select(index)"):APP.index("function renderDetail")]
+        self.assertIn('document.body.classList.remove("batch-mode")', select_block)
+
+    def test_multi_artwork_picker_and_page_badge_open_images(self):
         picker = APP[APP.index("function openBasketArtworkPicker"):APP.index("function selectedGroups")]
         self.assertIn("chosen.slice(start, end).map", picker)
         self.assertIn("data-batch-select", picker)
         self.assertIn("data-open-collection", picker)
         self.assertIn("batch-page-count", picker)
         self.assertIn("openBatchCollection", picker)
-        self.assertIn('$("#batchDownload").hidden = false', picker)
-        summary = APP[APP.index("function renderBasketSummary"):APP.index("function openBasketArtworkPicker")]
-        self.assertNotIn("chosen.map", summary)
+        self.assertNotIn("renderBasketSummary", APP)
 
     def test_basket_detail_request_is_cancelled_when_cleared_or_replaced_by_normal_detail(self):
-        detail = APP[APP.index("async function openBatchCollection"):APP.index('$(\"#returnToBatch\").onclick')]
+        detail = APP[APP.index("async function openBatchCollection"):APP.index('$("#basketBack").onclick')]
         self.assertIn("detailController = new AbortController()", detail)
         self.assertIn("{ signal: controller.signal }", detail)
         self.assertIn("controller !== detailController", detail)
-        clear = APP[APP.index('$(\"#clearSelection\").onclick'):APP.index('$(\"#openBatch\").onclick')]
+        clear = APP[APP.index('$("#clearSelection").onclick'):APP.index('$("#openBatch").onclick')]
         self.assertIn("viewGeneration += 1", clear)
         self.assertIn("detailController.abort()", clear)
         self.assertIn("clearDetail()", clear)
         select = APP[APP.index("async function select(index)"):APP.index("function renderDetail")]
         self.assertIn("viewGeneration += 1", select)
-        self.assertIn('classList.remove("collection-basket-open", "basket-image-picker")', select)
-        self.assertIn('$("#batchWorkspace").hidden = true', select)
-        self.assertIn('$("#returnToBatch").hidden = true', select)
+        self.assertIn("closeBasketPage()", select)
         clear_detail = APP[APP.index("function clearDetail"):APP.index("function updateSelectionBar")]
-        self.assertIn('classList.remove("collection-basket-open", "basket-image-picker")', clear_detail)
+        self.assertIn("closeBasketPage()", clear_detail)
 
     def test_result_page_has_one_click_select_all_controls(self):
         self.assertIn('id="selectAllPage"', HTML)
@@ -302,29 +333,48 @@ class V105VisualContractTests(unittest.TestCase):
     def test_result_pagination_stays_visible_at_viewport_bottom(self):
         self.assertIn('class="pagination-dock"', HTML)
         self.assertIn(".pagination-dock{position:fixed;left:0;right:0;bottom:0", STYLE)
-        self.assertIn(".pagination-dock.is-visible{display:flex}", STYLE)
+        self.assertIn(".pagination-dock.is-visible{opacity:1;visibility:visible;transform:none}", STYLE)
+        self.assertIn("transition:opacity .25s ease,transform .25s ease,visibility .25s", STYLE)
         self.assertIn("function updatePaginationDock()", APP)
-        self.assertIn("const dockTop = window.innerHeight - dock.getBoundingClientRect().height", APP)
+        self.assertIn("const dockTop = window.innerHeight - (dock.offsetHeight || 0)", APP)
         self.assertIn("galleryRect.bottom > dockTop", APP)
         self.assertIn('Boolean($("#pagination").children.length)', APP)
+        self.assertIn("basketPageOpen()", APP)
         self.assertIn("function schedulePaginationDockUpdate()", APP)
         self.assertIn('window.addEventListener("scroll", schedulePaginationDockUpdate, { passive: true })', APP)
         self.assertIn('window.addEventListener("resize", schedulePaginationDockUpdate, { passive: true })', APP)
         self.assertIn("z-index:11", STYLE)
         self.assertIn(".results{padding:55px 5vw 96px", STYLE)
 
-    def test_basket_artwork_and_page_pickers_are_compact(self):
-        self.assertIn('class="detail scene collection-mode"', HTML)
-        self.assertIn("body.collection-basket-open #download{display:none}", STYLE)
-        self.assertIn("body.collection-basket-open .collection-pages", STYLE)
-        self.assertIn("grid-template-columns:repeat(auto-fill,minmax(96px,120px))", STYLE)
-        self.assertIn("object-position:center top", STYLE)
-        self.assertIn("body.basket-image-picker .detail-info dl", STYLE)
-        self.assertIn("body.basket-image-picker .detail-info .description", STYLE)
-        detail = APP[APP.index("async function openBatchCollection"):APP.index('$(\"#returnToBatch\").onclick')]
-        self.assertIn('classList.add("basket-image-picker")', detail)
-        prepare = APP[APP.index("function prepareBasketWorkspace"):APP.index("function openSelectionBasket")]
-        self.assertIn('classList.remove("basket-image-picker")', prepare)
+    def test_back_to_top_tracks_the_active_page_or_overlay_scroll_surface(self):
+        self.assertIn('id="backTop"', HTML)
+        floating = APP[
+            APP.index("function activeScrollSurface"):APP.index("async function select")
+        ]
+        self.assertIn('if (!$("#allViewer").hidden) return $("#allViewer")', floating)
+        self.assertIn('if (basketPageOpen()) return $("#basketPage")', floating)
+        self.assertIn("return window", floating)
+        self.assertIn("surface === window ? window.scrollY : surface.scrollTop", floating)
+        self.assertIn('$("#basketPage").addEventListener("scroll", schedulePaginationDockUpdate, { passive: true })', floating)
+        self.assertIn('$("#allViewer").addEventListener("scroll", schedulePaginationDockUpdate, { passive: true })', floating)
+        self.assertIn('$("#backTop").onclick = () => activeScrollSurface().scrollTo({ top: 0, behavior: "smooth" })', APP)
+        self.assertIn("#backTop{position:fixed", STYLE)
+        self.assertIn("z-index:55", STYLE)
+
+    def test_basket_picker_is_compact_and_artwork_detail_matches_the_single_layout(self):
+        self.assertIn('id="basketPage"', HTML)
+        self.assertIn(".basket-page{position:fixed;inset:0;z-index:40", STYLE)
+        self.assertIn(".batch-detail-grid{display:grid", STYLE)
+        workspace = HTML[HTML.index('id="basketArtworkDetail"'):HTML.index('id="backTop"')]
+        self.assertIn('class="detail basket-artwork-detail"', workspace)
+        self.assertIn('id="basketDetailDeck" class="deck"', workspace)
+        self.assertIn('id="basketPages" class="collection-pages"', workspace)
+        self.assertNotIn("#basketPages{display:grid", STYLE)
+        detail = APP[APP.index("async function openBatchCollection"):APP.index('$("#basketBack").onclick')]
+        self.assertIn("renderBasketArtworkDetail(item)", detail)
+        panes = APP[APP.index("function showBasketPane"):APP.index("function ensureDownloadOptionDefaults")]
+        self.assertIn('$("#batchCollections").hidden', panes)
+        self.assertIn('$("#basketArtworkDetail").hidden', panes)
 
     def test_capacity_dialog_buttons_use_restrained_monochrome_styles(self):
         for selector in ("#archiveAndContinue", "#clearAndContinue", "#cancelCapacity"):
@@ -425,7 +475,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertNotIn("单独超过", planner)
 
     def test_download_lock_guards_dynamic_page_controls_and_mutation_helpers(self):
-        page_window = APP[APP.index("function renderCollectionPageWindow"):APP.index("function previewDeckCard")]
+        page_window = APP[APP.index("function renderCollectionWindowInto"):APP.index("function previewDeckCard")]
         self.assertIn("basketSelectionLocked", page_window)
         self.assertIn('basketSelectionLocked ? "disabled" : ""', page_window)
         detach = APP[APP.index("function detachSelection"):APP.index("function clearSelection")]
