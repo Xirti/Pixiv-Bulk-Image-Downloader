@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import build_manifest
+from version import __version__
 
 
 class BuildManifestTests(unittest.TestCase):
@@ -268,15 +269,16 @@ class BuildManifestTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         portable = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertIn('__version__ = "1.0.11"', version)
-        self.assertIn("当前源码版本：**1.0.11**", readme)
-        self.assertIn("MOKU 1.0.11 已准备好作为 Windows x64 便携 ZIP 发布", readme)
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
+        self.assertIn(f'__version__ = "{__version__}"', version)
+        self.assertIn(f"当前源码版本：**{__version__}**", readme)
+        self.assertIn(f"MOKU {__version__} 已准备好作为 Windows x64 便携 ZIP 发布", readme)
         self.assertNotIn("当前源码版本：**1.0.10**", readme)
         self.assertNotIn("当前源码版本：**1.0.9**", readme)
         self.assertNotIn("当前源码版本：**1.0.8**", readme)
         self.assertIn("多标签严格 AND 搜索", readme)
         self.assertIn("采集篮支持任意数量的作品，最多选择 1,000 张图片", readme)
-        self.assertIn("## [1.0.11]", changelog)
+        self.assertIn(f"## [{__version__}]", changelog)
         self.assertIn("Separate multiple tags with ; or ；", portable)
         self.assertIn("pid:<artwork ID>", portable)
         self.assertIn("uid:<user ID>", portable)

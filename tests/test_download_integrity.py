@@ -330,7 +330,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
 
     def post_single(
         self, root: Path, create_folder: bool = False, context: dict | None = None,
-        *, pixiv_side_effect=None,
+        *, pixiv_side_effect=None, pages=None,
     ) -> tuple[int, dict]:
         body = json.dumps({
             "id": self.artwork_id,
@@ -338,6 +338,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             "saveRoot": str(root),
             "createFolder": create_folder,
             **({"context": context} if context is not None else {}),
+            **({"pages": pages} if pages is not None else {}),
         }).encode("utf-8")
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.httpd.server_port}/api/pixiv/download",
@@ -1266,6 +1267,27 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
             self.assertIn("失败", body["error"])
             self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
 
+    def test_single_download_saves_only_selected_pages(self):
+        with tempfile.TemporaryDirectory(prefix="moku-single-selection-") as raw_root:
+            root = Path(raw_root)
+            status, body = self.post_single(root, pages=[1])
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["pages"], 1)
+            self.assertEqual(len(body["saved"]), 1)
+            self.assertTrue(body["saved"][0].endswith("_p1.png"))
+            self.assertEqual(len(list(root.rglob("*.png"))), 1)
+
+    def test_single_download_rejects_invalid_page_selection(self):
+        with tempfile.TemporaryDirectory(prefix="moku-single-invalid-selection-") as raw_root:
+            root = Path(raw_root)
+            for pages in ([], [-1], [True], ["1"], [0] * 201):
+                with self.subTest(pages=pages[:3]):
+                    status, body = self.post_single(root, pages=pages)
+                    self.assertEqual(status, 400, body)
+            status, body = self.post_single(root, pages=[999])
+            self.assertEqual(status, 502, body)
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_single_download_publishes_all_pages_atomically(self):
         calls = 0
 
@@ -1412,6 +1434,30 @@ class UgoiraDownloadTests(unittest.TestCase):
             self.assertEqual(manifest["frames"][0], {"file": "000000.jpg", "delay": 80})
             self.assertEqual(manifest["source"], self.zip_url)
 
+    def test_ugoira_manifest_failure_cleans_staged_zip(self):
+        with tempfile.TemporaryDirectory(prefix="moku-ugoira-rollback-") as raw_root:
+            root = Path(raw_root)
+            staged = []
+            create = server._create_owned_staged_file
+
+            def fail_manifest(staging_root, final, raw):
+                if final.name.endswith(".frames.json"):
+                    raise OSError("manifest write failed")
+                ownership = create(staging_root, final, raw)
+                staged.append(ownership)
+                return ownership
+
+            try:
+                with patch.object(server, "_create_owned_staged_file", side_effect=fail_manifest):
+                    status, body = self._post_single(root, "original")
+                self.assertEqual(status, 502, body)
+                self.assertEqual(len(staged), 1)
+                self.assertIsNone(staged[0].handle)
+                self.assertIsNone(staged[0].staged_handle)
+                self.assertEqual(list(root.iterdir()), [])
+            finally:
+                server._discard_owned_staging(staged)
+
     def test_ugoira_rejects_payload_without_zip_signature(self):
         with tempfile.TemporaryDirectory(prefix="moku-ugoira-badzip-") as raw_root:
             root = Path(raw_root)
@@ -1420,6 +1466,15 @@ class UgoiraDownloadTests(unittest.TestCase):
             self.assertEqual(status, 502)
             self.assertIn("失败", body["error"])
             self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
+
+    def test_ugoira_rejects_out_of_range_pages_before_staging(self):
+        with patch.object(server, "stage_ugoira_zip") as stage:
+            with self.assertRaisesRegex(server.PixivPolicyError, "页码超出范围"):
+                server.stage_artwork_pages(
+                    server.PIXIV_CACHE[self.UGOIRA_ID], [1], "original",
+                    Path("unused"), False, Path("unused-staging"),
+                )
+            stage.assert_not_called()
 
     def _get_ugoira(self, query: str) -> tuple[int, dict, bytes]:
         request = urllib.request.Request(

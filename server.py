@@ -47,7 +47,7 @@ CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
     "pixiv_adapter.py", "search_aliases.py", "search_service.py", "version.py",
-    "web/index.html", "web/app.js", "web/style.css",
+    "web/index.html", "web/app.js", "web/ugoira-preview.js", "web/style.css",
 )
 
 
@@ -2081,6 +2081,21 @@ def approved_image_url(proxy_url: str, artwork_id: str) -> str:
     return str(approved[2])
 
 
+@contextmanager
+def owned_staging_batch():
+    """Release partial staging on failure; transfer ownership on success."""
+    staged: list[PublishedFileOwnership] = []
+    try:
+        yield staged
+    except Exception as original:
+        failures = _discard_owned_staging(staged)
+        if failures:
+            raise PublishRollbackError(
+                f"暂存失败且有 {failures} 个文件未能安全清理"
+            ) from original
+        raise
+
+
 def stage_ugoira_zip(
     item: dict, quality: str, folder: Path, staging_root: Path,
     *, authorization_epoch: int | None = None,
@@ -2100,10 +2115,10 @@ def stage_ugoira_zip(
         {"mime": meta["mime"], "frames": meta["frames"], "source": zip_url},
         ensure_ascii=False, indent=2,
     ).encode("utf-8")
-    return [
-        _create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.zip", raw),
-        _create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.frames.json", manifest),
-    ]
+    with owned_staging_batch() as staged:
+        staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.zip", raw))
+        staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.frames.json", manifest))
+        return staged
 
 
 def stage_artwork_pages(
@@ -2115,6 +2130,8 @@ def stage_artwork_pages(
     page_images = item.get("pageImages")
     if not artwork_id.isdigit() or not isinstance(page_images, list):
         raise PixivPolicyError("作品详情不完整")
+    if not selected_pages or any(page < 0 or page >= len(page_images) for page in selected_pages):
+        raise PixivPolicyError("图片页码超出范围")
     folder = resolve_download_target(
         save_root, str(item.get("title") or ""), artwork_id, create_folder,
         context=download_context, group_artwork=group_artwork,
@@ -2126,11 +2143,8 @@ def stage_artwork_pages(
             authorization_epoch=authorization_epoch,
         )
     stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
-    staged: list[PublishedFileOwnership] = []
-    try:
+    with owned_staging_batch() as staged:
         for page_no in selected_pages:
-            if page_no < 0 or page_no >= len(page_images):
-                raise PixivPolicyError("图片页码超出范围")
             page = page_images[page_no]
             if not isinstance(page, dict) or quality not in page:
                 raise PixivPolicyError("作品图片信息不完整")
@@ -2146,13 +2160,6 @@ def stage_artwork_pages(
             # one zero-share handle. No close-and-reopen staging window exists.
             staged.append(_create_owned_staged_file(staging_root, final, raw))
         return staged
-    except Exception as original:
-        failures = _discard_owned_staging(staged)
-        if failures:
-            raise PublishRollbackError(
-                f"暂存失败且有 {failures} 个文件未能安全清理"
-            ) from original
-        raise
 
 
 def _is_link_or_reparse(path: Path) -> bool:
@@ -3006,16 +3013,8 @@ def _stage_and_publish_download(
     """Stage a complete request, then transfer the whole batch to publication."""
     staging_context = secure_staging_directory(save_root, prefix=prefix)
     with staging_context as staging_root:
-        staged: list[PublishedFileOwnership] = []
-        try:
+        with owned_staging_batch() as staged:
             stage(staging_root, staged)
-        except Exception as original:
-            failures = _discard_owned_staging(staged)
-            if failures:
-                raise PublishRollbackError(
-                    f"暂存失败且有 {failures} 个文件未能安全清理"
-                ) from original
-            raise
 
         def publish() -> list[str]:
             # Calling the publisher transfers ownership of the complete batch,
@@ -3319,7 +3318,10 @@ class Handler(SimpleHTTPRequestHandler):
                 authorization_epoch=authorization_epoch if restricted else None,
             )
             if mode == "meta":
-                return self.send_json({"frames": meta["frames"], "mime": meta["mime"]})
+                return self.send_json({
+                    "frames": meta["frames"], "mime": meta["mime"],
+                    "width": item.get("width"), "height": item.get("height"),
+                })
             raw, _content_type = pixiv_request(str(meta["src"]), image_only=True)
             # Mirror the download path: revoked authorization mid-flight must
             # not publish restricted bytes.
@@ -3501,6 +3503,16 @@ class Handler(SimpleHTTPRequestHandler):
             raise RequestInputError(400, "下载目录上下文无效") from exc
 
     @staticmethod
+    def _selected_download_pages(pages: object) -> list[int]:
+        if not isinstance(pages, list) or not pages:
+            raise RequestInputError(400, "请至少选择一张图片")
+        if any(not isinstance(page, int) or isinstance(page, bool) or page < 0 for page in pages):
+            raise RequestInputError(400, "图片页码无效")
+        if len(pages) > DOWNLOAD_CHUNK_PAGES:
+            raise RequestInputError(400, f"单次下载最多处理 {DOWNLOAD_CHUNK_PAGES} 张图片")
+        return sorted(set(pages))
+
+    @staticmethod
     def _normalized_download_groups(groups: object) -> OrderedDict[str, set[int]]:
         if not isinstance(groups, list) or not 1 <= len(groups) <= DOWNLOAD_CHUNK_ARTWORKS:
             raise RequestInputError(400, "批量选择范围无效")
@@ -3512,9 +3524,7 @@ class Handler(SimpleHTTPRequestHandler):
             pages = group.get("pages")
             if not artwork_id.isdigit() or not isinstance(pages, list) or not pages:
                 raise RequestInputError(400, "作品或图片页码无效")
-            if any(not isinstance(page, int) or isinstance(page, bool) or page < 0 for page in pages):
-                raise RequestInputError(400, "图片页码无效")
-            normalized.setdefault(artwork_id, set()).update(pages)
+            normalized.setdefault(artwork_id, set()).update(Handler._selected_download_pages(pages))
         return normalized
 
     def _post_pixiv_batch_download(self, data: dict):
@@ -3609,6 +3619,10 @@ class Handler(SimpleHTTPRequestHandler):
             quality, create_folder = self._download_options(data)
             save_root = self._save_root(data)
             download_context = self._download_context(data, required=False)
+            selected_pages = self._selected_download_pages(data["pages"]) if "pages" in data else None
+            group_artworks = data.get("groupArtworks", False)
+            if not isinstance(group_artworks, bool):
+                raise RequestInputError(400, "groupArtworks 必须是布尔值")
         except RequestInputError as exc:
             return self.send_json({"error": str(exc)}, exc.status)
 
@@ -3622,10 +3636,14 @@ class Handler(SimpleHTTPRequestHandler):
             page_images = item.get("pageImages")
             if not isinstance(page_images, list) or not page_images:
                 raise PixivPolicyError("作品详情不完整")
-            if len(page_images) > DOWNLOAD_CHUNK_PAGES:
+            if selected_pages is None:
+                selected_pages = list(range(len(page_images)))
+            if len(selected_pages) > DOWNLOAD_CHUNK_PAGES:
                 raise PixivPolicyError(
                     f"单作品下载最多处理 {DOWNLOAD_CHUNK_PAGES} 张图片"
                 )
+            if any(page >= len(page_images) for page in selected_pages):
+                raise PixivPolicyError("图片页码超出范围")
             if item.get("restriction") == "r18" and not authorized:
                 raise PixivPolicyError("R-18 下载需要有效账户授权")
             restricted_epochs = (
@@ -3639,9 +3657,10 @@ class Handler(SimpleHTTPRequestHandler):
                 staged: list[PublishedFileOwnership],
             ) -> None:
                 staged.extend(stage_artwork_pages(
-                    item, list(range(len(page_images))), quality, save_root,
+                    item, selected_pages, quality, save_root,
                     create_folder, staging_root,
                     download_context=download_context,
+                    group_artwork=group_artworks,
                     authorization_epoch=authorization_epoch,
                 ))
 
@@ -3654,6 +3673,7 @@ class Handler(SimpleHTTPRequestHandler):
             response_payload = {
                 "ok": True, "saved": public_saved,
                 "quality": quality, "source": "pixiv",
+                "pages": len(selected_pages),
                 "cleanupPending": cleanup_pending,
             }
             response_status = 200

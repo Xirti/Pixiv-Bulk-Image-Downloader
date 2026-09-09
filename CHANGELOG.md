@@ -2,6 +2,41 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Download ugoira works as the official Pixiv frame ZIP plus a `_ugoira.frames.json` delay manifest, labelled as 动图清晰度 options in the detail panel; ugoira cards and details carry a 动图 badge.
+- Animate ugoira works on hover in the result grid and both basket pickers: a bounded `/api/pixiv/ugoira/{id}` endpoint serves the frame manifest and ZIP, and the page decodes frames via ImageBitmap (CSP-safe), attaches the canvas only once frames are ready, and cover-fits playback to the card.
+- Give the collection basket a dedicated flow: multi-selection turns the artwork detail page into a batch-download page with only the shared download options and a jump panel, the fullscreen basket page handles artwork and per-image selection, and returning lands back on the batch options. Single-artwork downloads remain available when nothing is selected.
+- Add floating chrome: an animated show/hide for the pagination dock, a download-progress task dock, a back-to-top chip, and a basket quick-entry chip.
+
+### Changed
+
+- Keep the download settings (save root, context folder, grouping) on the artwork detail page as the single source for single and batch downloads; the basket page no longer carries its own settings panel.
+- Pin the basket header with a sticky bar so the scrollbar tracks the page correctly.
+- Restyle the floating chips and task dock as translucent glass surfaces without `backdrop-filter`, and move back-to-top to the bottom-left corner away from the basket entry.
+
+### Fixed
+
+- Ugoira artworks no longer fail detail loading: Pixiv returns no original still image for them, so empty page URLs are tolerated instead of rejecting the whole artwork, and no image capability is issued for empty slots.
+- The ugoira badge no longer covers the card select checkbox.
+- Restricted (R-18) previews no longer linger in the hidden basket page DOM after authorization loss or view switches.
+
+## [1.0.13] - 2026-09-09
+
+### Fixed
+
+- Respect selected pages for single multi-page Pixiv downloads and refresh the basket when reopening it after selection changes.
+- Release staged animation files on write failure; share exception-safe staging cleanup across download paths.
+- Cancel inactive animation previews, release decoded frames on failure or logout, and bound preview memory use.
+- Keep batch download options independent of the last viewed artwork and count animation pages separately from output files.
+
+### Changed
+
+- Extract animation preview lifecycle management into a dedicated module and share download options and page validation.
+- Run only MOKU application tests during portable builds; the optional experimental suite is now explicit via `run_tests.py --subject-mvp0`.
+
 ## [1.0.11] - 2026-07-26
 
 ### Added

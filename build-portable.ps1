@@ -1,4 +1,8 @@
 ﻿# Build and smoke-test the current WebView2 desktop architecture as a portable Windows folder.
+param(
+  # Only for rebuilding after the application tests have already been verified.
+  [switch]$SkipTests
+)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $Root
@@ -27,9 +31,13 @@ $SourceBefore = (& $Python -I -B (Join-Path $Root 'build_manifest.py') 'source')
 if ($LASTEXITCODE -ne 0 -or $SourceBefore -notmatch '^source-sha256:[0-9a-f]{64}$') {
   throw 'Could not fingerprint build inputs'
 }
-& $Python -I -B (Join-Path $Root 'run_tests.py')
-if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed' }
+if (-not $SkipTests) {
+  & $Python -I -B (Join-Path $Root 'run_tests.py') --app-only
+  if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed' }
+}
 node --check web\app.js
+if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed' }
+node --check web\ugoira-preview.js
 if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed' }
 
 $BuildReleaseMutex = [Threading.Mutex]::new($false, 'Local\MOKU.PixivTagGallery.BuildRelease')
@@ -110,7 +118,7 @@ try {
   $env:MOKU_MUTEX_NAME = 'Local\MOKU.PixivTagGallery.BuildSmoke.' + [Guid]::NewGuid().ToString('N')
   $env:MOKU_NO_BROWSER = '1'
   $env:MOKU_TEST_EXIT_AFTER_SECONDS = '15'
-  $process = Start-Process -FilePath $Exe -ArgumentList '--serve-only' -WorkingDirectory $Dist -PassThru
+  $process = Start-Process -FilePath $Exe -ArgumentList '--serve-only' -WorkingDirectory $Dist -WindowStyle Hidden -PassThru
   $descriptorFile = Join-Path $Runtime 'backend.json'
   $deadline = (Get-Date).AddSeconds(30)
   $ready = $false
@@ -125,10 +133,13 @@ try {
         $page = Invoke-WebRequest -UseBasicParsing -Uri $base -TimeoutSec 3
         $style = Invoke-WebRequest -UseBasicParsing -Uri ($base + 'style.css') -TimeoutSec 3
         $script = Invoke-WebRequest -UseBasicParsing -Uri ($base + 'app.js') -TimeoutSec 3
+        $previewScript = Invoke-WebRequest -UseBasicParsing -Uri ($base + 'ugoira-preview.js') -TimeoutSec 3
         if ($healthResponse.StatusCode -eq 200 `
           -and $page.StatusCode -eq 200 `
           -and $style.StatusCode -eq 200 `
           -and $script.StatusCode -eq 200 `
+          -and $previewScript.StatusCode -eq 200 `
+          -and $previewScript.Content.Contains('globalThis.createUgoiraPreview') `
           -and [int]$runtimeData.protocolVersion -eq 5 `
           -and [string]$health.version -eq $Version `
           -and [string]$runtimeData.applicationId -eq 'MOKU.PixivTagGallery' `

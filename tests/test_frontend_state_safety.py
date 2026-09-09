@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP = (ROOT / "web" / "ugoira-preview.js").read_text(encoding="utf-8") + "\n" + (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 
 
@@ -22,6 +22,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn('$("#safety").value = "safe"', cleanup)
         self.assertIn("closeAllViewer()", cleanup)
         self.assertIn("discardRestrictedSelections()", cleanup)
+        self.assertIn("ugoiraPreview.clear()", cleanup)
         self.assertIn("clearDetail(", cleanup)
         self.assertIn('grid.innerHTML =', cleanup)
 
@@ -689,6 +690,18 @@ fakeElement("#tag").value = "old";
   currentDetailContext = originalContext;
   const basketPayload = downloadPayload(secondFreshItem, 0);
   check(basketPayload.body.context === originalContext, "single basket download lost its original search context");
+  selectedPagesByArtwork.set(secondFreshItem.id, new Set([2, 0]));
+  check(JSON.stringify(downloadPayload(secondFreshItem, 0).body.pages) === "[0,2]", "single download ignored the selected pages");
+  selectedPagesByArtwork.delete(secondFreshItem.id);
+  check(currentDownloadPages(secondFreshItem).length === 0, "empty multi-page selection silently downloaded everything");
+  check(currentDownloadPages(oldItem).length === 1, "single-image quick download regressed");
+  currentDetailItem = {...oldItem, workType: "ugoira"};
+  document.body.classList.add("batch-mode");
+  document.querySelector("#quality").value = "original";
+  renderBatchDownloadOptions();
+  check(document.querySelector("#quality").value === "original", "batch options lost the selected quality");
+  check(document.querySelector("#formatHint").textContent.startsWith("静态图片保留源格式"), "batch options inherited the last animation's hint");
+  check(!document.querySelector("#quality").innerHTML.includes("ZIP"), "batch quality labels described only animations");
 
   batchCandidateItems = Array.from({length: 1000}, (_, index) => ({
     ...oldItem, id: String(1000 + index), title: `work-${index}`,
@@ -765,6 +778,17 @@ fakeElement("#tag").value = "old";
   check(document.querySelector("#basketPage").hidden, "basket back did not return to the third-page download options");
   check(document.body.classList.contains("batch-mode"), "basket back did not restore third-page batch mode");
   check(document.querySelector("#batchDetailSummary").textContent.includes("2/1000 张已选"), "basket selection did not persist into third-page batch mode");
+  const addedBasketItem = {...oldItem, id: "basket-added", title: "basket-added"};
+  toggleArtworkSelection(addedBasketItem, true);
+  document.querySelector("#openBasketPicker").onclick();
+  check(document.querySelector("#batchCollections").innerHTML.includes('data-open-collection="basket-added"'), "reopened basket omitted a newly selected artwork");
+  check(batchCandidateItems.length === 2, "reopened basket did not refresh its candidate list");
+  check(selectedPagesByArtwork.get(basketFlowItem.id).size === 2, "reopening basket reset partial page selection");
+  document.querySelector("#basketBack").onclick();
+  toggleArtworkSelection(addedBasketItem, false);
+  document.querySelector("#openBasketPicker").onclick();
+  check(batchCandidateItems.length === 1 && batchCandidateItems[0].id === basketFlowItem.id, "reopened basket retained an externally deselected artwork");
+  document.querySelector("#basketBack").onclick();
   abortDetailRefreshes();
   check(detailRefreshes.size === 0 && detailRefreshAttempts.size === 0, "detail refresh state was not cleared");
 })().catch((error) => { console.error(error.stack || error); process.exitCode = 1; });

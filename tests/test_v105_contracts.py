@@ -422,6 +422,8 @@ class V105VisualContractTests(unittest.TestCase):
     def test_batch_download_snapshots_all_task_options_before_first_request(self):
         download = APP[APP.index('$(\"#batchDownload\").onclick'):APP.index('addEventListener("keydown"')]
         snapshot = download[download.index("const taskOptions"):download.index("const task =")]
+        self.assertIn("readDownloadOptions()", snapshot)
+        snapshot = APP[APP.index("function readDownloadOptions"):APP.index("function syncBasketHeader")]
         self.assertIn('quality: $("#quality").value || "regular"', snapshot)
         self.assertIn('saveRoot: $("#saveRoot").value.trim()', snapshot)
         self.assertIn('createFolder: $("#createFolder").checked', snapshot)

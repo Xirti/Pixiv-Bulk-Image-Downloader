@@ -300,152 +300,37 @@ function installImageFallbacks(root = document) {
   });
 }
 
-const UGOIRA_PREVIEW_CACHE_LIMIT = 6;
-const ugoiraPreviewCache = new Map();
-let ugoiraPlayer = null;
-
-async function fetchBytes(url, timeoutMs = 30000) {
+async function fetchBytes(url, { signal } = {}, timeoutMs = 30000) {
   const controller = new AbortController();
+  const abort = () => controller.abort(signal.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const headers = new Headers();
-    headers.set("X-MOKU-Request-Token", await getRequestToken());
+    headers.set("X-MOKU-Request-Token", await waitForPromiseOrAbort(getRequestToken(), controller.signal));
+    controller.signal.throwIfAborted();
     const response = await fetch(url, { headers, signal: controller.signal });
     if (!response.ok) throw new Error(`请求失败（HTTP ${response.status}）`);
     return await response.arrayBuffer();
-  } catch (error) {
-    if (controller.signal.aborted) throw new Error("动图预览加载超时");
-    throw error;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
   }
 }
 
-function parseZipEntries(buffer) {
-  const view = new DataView(buffer);
-  let eocd = -1;
-  for (let index = view.byteLength - 22; index >= 0; index -= 1) {
-    if (view.getUint32(index, true) === 0x06054b50) { eocd = index; break; }
-  }
-  if (eocd < 0) throw new Error("动图数据已损坏");
-  const count = view.getUint16(eocd + 10, true);
-  const decoder = new TextDecoder();
-  let offset = view.getUint32(eocd + 16, true);
-  const entries = new Map();
-  for (let index = 0; index < count; index += 1) {
-    if (view.getUint32(offset, true) !== 0x02014b50) throw new Error("动图数据已损坏");
-    const method = view.getUint16(offset + 10, true);
-    const compressedSize = view.getUint32(offset + 20, true);
-    const nameLength = view.getUint16(offset + 28, true);
-    const extraLength = view.getUint16(offset + 30, true);
-    const commentLength = view.getUint16(offset + 32, true);
-    const localOffset = view.getUint32(offset + 42, true);
-    entries.set(decoder.decode(new Uint8Array(buffer, offset + 46, nameLength)), { method, compressedSize, localOffset });
-    offset += 46 + nameLength + extraLength + commentLength;
-  }
-  return entries;
-}
-
-async function inflateZipEntry(buffer, entry) {
-  const view = new DataView(buffer);
-  if (view.getUint32(entry.localOffset, true) !== 0x04034b50) throw new Error("动图数据已损坏");
-  const nameLength = view.getUint16(entry.localOffset + 26, true);
-  const extraLength = view.getUint16(entry.localOffset + 28, true);
-  const start = entry.localOffset + 30 + nameLength + extraLength;
-  const compressed = buffer.slice(start, start + entry.compressedSize);
-  if (entry.method === 0) return compressed;
-  if (entry.method === 8) {
-    if (typeof DecompressionStream !== "function") throw new Error("当前 WebView 不支持动图预览");
-    const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-    return await new Response(stream).arrayBuffer();
-  }
-  throw new Error("动图数据使用了不支持的压缩方式");
-}
-
-function loadUgoiraFrames(artworkId) {
-  const cached = ugoiraPreviewCache.get(artworkId);
-  if (cached) return cached;
-  const task = (async () => {
-    if (typeof createImageBitmap !== "function") throw new Error("当前 WebView 不支持动图预览");
-    const meta = await fetchJson(`/api/pixiv/ugoira/${artworkId}`);
-    const buffer = await fetchBytes(`/api/pixiv/ugoira/${artworkId}?mode=zip`);
-    const entries = parseZipEntries(buffer);
-    const frames = [];
-    for (const frame of meta.frames || []) {
-      const entry = entries.get(frame.file);
-      if (!entry) continue;
-      const raw = await inflateZipEntry(buffer, entry);
-      // ImageBitmap decoding bypasses the strict CSP, which blocks blob: URLs.
-      const bitmap = await createImageBitmap(new Blob([raw], { type: meta.mime || "image/jpeg" }));
-      frames.push({ bitmap, delay: Math.max(16, Number(frame.delay) || 100) });
-    }
-    if (!frames.length) throw new Error("动图没有可播放的帧");
-    return frames;
-  })();
-  task.catch(() => {
-    if (ugoiraPreviewCache.get(artworkId) === task) ugoiraPreviewCache.delete(artworkId);
-  });
-  ugoiraPreviewCache.set(artworkId, task);
-  while (ugoiraPreviewCache.size > UGOIRA_PREVIEW_CACHE_LIMIT) {
-    const oldestKey = ugoiraPreviewCache.keys().next().value;
-    const evicted = ugoiraPreviewCache.get(oldestKey);
-    ugoiraPreviewCache.delete(oldestKey);
-    Promise.resolve(evicted).then((frames) => {
-      frames?.forEach((frame) => frame.bitmap?.close());
-    }).catch(() => {});
-  }
-  return task;
-}
-
-function stopUgoiraPreview() {
-  const player = ugoiraPlayer;
-  if (!player) return;
-  player.stopped = true;
-  clearTimeout(player.timer);
-  player.canvas?.remove();
-  if (ugoiraPlayer === player) ugoiraPlayer = null;
-}
-
-function startUgoiraPreview(host, artworkId) {
-  stopUgoiraPreview();
-  const player = { canvas: null, frames: null, index: 0, stopped: false, timer: 0 };
-  ugoiraPlayer = player;
-  loadUgoiraFrames(artworkId).then((frames) => {
-    if (player.stopped || ugoiraPlayer !== player) return;
-    player.frames = frames;
-    // Attach the canvas only once frames are decoded, so the static thumbnail
-    // stays visible during loading instead of flashing a dark panel.
-    const canvas = document.createElement("canvas");
-    canvas.className = "ugoira-preview";
-    player.canvas = canvas;
-    host.appendChild(canvas);
-    const ratio = Math.max(1, window.devicePixelRatio || 1);
-    canvas.width = Math.max(1, Math.round(host.clientWidth * ratio));
-    canvas.height = Math.max(1, Math.round(host.clientHeight * ratio));
-    const context = canvas.getContext("2d");
-    const draw = () => {
-      if (player.stopped || ugoiraPlayer !== player) return;
-      const frame = frames[player.index % frames.length];
-      const bitmap = frame.bitmap;
-      // Cover-fit: scale to fill the card while keeping the frame aspect ratio.
-      const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
-      const drawWidth = bitmap.width * scale;
-      const drawHeight = bitmap.height * scale;
-      context.drawImage(bitmap, (canvas.width - drawWidth) / 2, (canvas.height - drawHeight) / 2, drawWidth, drawHeight);
-      player.timer = setTimeout(() => { player.index = (player.index + 1) % frames.length; draw(); }, frame.delay);
-    };
-    draw();
-  }).catch((error) => {
-    if (!player.stopped) announceToast(error.message || "动图预览加载失败");
-  });
-}
+const ugoiraPreview = createUgoiraPreview({
+  fetchJson: (...args) => fetchJson(...args),
+  fetchBytes: (...args) => fetchBytes(...args),
+  onError: (message) => announceToast(message),
+});
 
 function attachUgoiraHoverTargets(root) {
   root.querySelectorAll("[data-ugoira-preview]").forEach((host) => {
     if (host.dataset.ugoiraHoverReady === "1") return;
     host.dataset.ugoiraHoverReady = "1";
-    host.addEventListener("mouseenter", () => startUgoiraPreview(host, host.dataset.ugoiraPreview));
-    host.addEventListener("mouseleave", stopUgoiraPreview);
+    host.addEventListener("mouseenter", () => ugoiraPreview.start(host, host.dataset.ugoiraPreview));
+    host.addEventListener("mouseleave", () => ugoiraPreview.stop(host));
   });
 }
 
@@ -464,6 +349,10 @@ function syncSearchScopedControls() {
     && String(currentDetailItem.id) === String(activeArtworkId),
   );
   $("#download").disabled = basketSelectionLocked || searchPending || singleDownloadPending || !detailReady;
+  if (detailReady && !singleDownloadPending) {
+    $("#download").disabled ||= currentDownloadPages(currentDetailItem).length === 0;
+    $("#download").textContent = downloadButtonLabel(currentDetailItem);
+  }
 }
 
 function clearDetail(message = "选择一件作品查看详情") {
@@ -520,6 +409,7 @@ function discardRestrictedSelections() {
 }
 
 function handleAuthorizationLoss() {
+  ugoiraPreview.clear();
   viewGeneration += 1;
   abortDetailRefreshes();
   cancelActiveSearch();
@@ -723,6 +613,7 @@ function clearAllCurrentPage() {
 
 async function search(tag, page = 1, filters = readSearchFilters()) {
   if (basketSelectionLocked || singleDownloadPending) return;
+  ugoiraPreview.stop();
   const previousView = searchController?._mokuRestoreView || {
     count: $("#count").textContent,
     hadCommittedResults: resultSelectionEnabled,
@@ -994,7 +885,16 @@ async function select(index) {
 }
 
 function downloadButtonLabel(item) {
-  return item?.workType === "ugoira" ? "下载动图 ZIP ↓" : "下载本作品 ↓";
+  const count = currentDownloadPages(item).length;
+  if (!count) return "选择图片后下载";
+  if (item?.workType === "ugoira") return "下载动图 ZIP ↓";
+  return item.pages === 1 ? "下载本图 ↓" : `下载已选 ${count} 张 ↓`;
+}
+
+function currentDownloadPages(item) {
+  if (!item) return [];
+  if (item.pages === 1) return [0];
+  return [...(selectedPagesByArtwork.get(item.id) || [])].sort((a, b) => a - b);
 }
 
 function renderDetail(item, index, detailContext = activeSearchContext) {
@@ -1253,7 +1153,7 @@ function updateBatchDetailSummary() {
 function showBatchDetail() {
   closeBasketPage();
   document.body.classList.add("batch-mode");
-  ensureDownloadOptionDefaults();
+  renderBatchDownloadOptions();
   updateBatchDetailSummary();
   $("#detail").scrollIntoView({ behavior: "auto" });
 }
@@ -1265,7 +1165,7 @@ function closeBasketPage() {
   basketReturnMode = "summary";
   basketDetailItem = null;
   basketLockedDeckPage = null;
-  stopUgoiraPreview();
+  ugoiraPreview.stop();
   // Restricted previews must not linger in the hidden basket DOM.
   $("#batchCollections").innerHTML = "";
   $("#basketArtworkDetail").hidden = true;
@@ -1282,6 +1182,7 @@ function closeBasketPage() {
 }
 
 function showBasketPane(mode) {
+  ugoiraPreview.stop();
   basketReturnMode = mode;
   $("#batchCollections").hidden = mode !== "picker";
   $("#basketArtworkDetail").hidden = mode !== "detail";
@@ -1294,6 +1195,23 @@ function ensureDownloadOptionDefaults() {
   if (!$("#format").options.length) {
     $("#format").innerHTML = '<option value="source">保留源格式</option>';
   }
+}
+
+function renderBatchDownloadOptions() {
+  const quality = $("#quality").value;
+  $("#quality").innerHTML = '<option value="regular">标准清晰度</option><option value="original">原始清晰度</option>';
+  $("#quality").value = quality === "original" ? "original" : "regular";
+  $("#format").innerHTML = '<option value="source">保留源格式（动图为 ZIP + JSON）</option>';
+  updateFormatHint();
+}
+
+function readDownloadOptions() {
+  return {
+    quality: $("#quality").value || "regular",
+    saveRoot: $("#saveRoot").value.trim(),
+    createFolder: $("#createFolder").checked,
+    groupArtworks: Boolean($("#groupArtworks")?.checked),
+  };
 }
 
 function syncBasketHeader() {
@@ -1475,7 +1393,7 @@ function downloadPayload(item, sourceIndex) {
     const downloadContext = currentDetailContext || activeSearchContext;
     return {
       endpoint: "/api/pixiv/download",
-      body: { id: item.id, quality: $("#quality").value, saveRoot: $("#saveRoot").value.trim(), createFolder: $("#createFolder").checked, context: downloadContext },
+      body: { id: item.id, pages: currentDownloadPages(item), ...readDownloadOptions(), context: downloadContext },
       timeout: 120000,
     };
   }
@@ -1676,16 +1594,7 @@ async function openBatchCollection(id) {
   }
 }
 
-$("#openBasketPicker").onclick = () => {
-  if (basketSelectionLocked || searchPending) return;
-  if (batchCandidateItems.length) {
-    openBasketArtworkPicker();
-    openBasketPage();
-    $("#basketPage").scrollTop = 0;
-  } else {
-    openSelectionBasket();
-  }
-};
+$("#openBasketPicker").onclick = openSelectionBasket;
 $("#basketBack").onclick = () => {
   if (basketSelectionLocked) return;
   viewGeneration += 1;
@@ -1731,12 +1640,7 @@ $("#batchDownload").onclick = async () => {
     return;
   }
   const button = $("#batchDownload");
-  const taskOptions = {
-    quality: $("#quality").value || "regular",
-    saveRoot: $("#saveRoot").value.trim(),
-    createFolder: $("#createFolder").checked,
-    groupArtworks: Boolean($("#groupArtworks")?.checked),
-  };
+  const taskOptions = readDownloadOptions();
   const task = prepareBatchTask(plannedChunks, taskOptions);
   const chunks = task.remainingChunks;
   setDownloadButtonState(button, "准备保存…", true);
@@ -1759,7 +1663,7 @@ $("#batchDownload").onclick = async () => {
           context: chunk.context,
         }),
       }, 300000);
-      task.savedCount += Array.isArray(data.saved) ? data.saved.length : chunk.pageCount;
+      task.savedCount += data.pages ?? chunk.pageCount;
       task.completedBatches += 1;
       task.remainingChunks = chunks.slice(index + 1);
     }
@@ -1793,7 +1697,9 @@ function updateFormatHint() {
   const format = $("#format").selectedOptions[0]?.textContent || "";
   $("#qualityText").textContent = quality;
   $("#formatText").textContent = format;
-  if (currentDetailItem?.workType === "ugoira") {
+  if (document.body.classList.contains("batch-mode")) {
+    $("#formatHint").textContent = "静态图片保留源格式；动图保存官方帧 ZIP 和帧延迟 JSON。";
+  } else if (currentDetailItem?.workType === "ugoira") {
     $("#formatHint").textContent = `动图将保存为官方帧 ZIP，并附带帧延迟 JSON（${quality}）。超过 40MB 的超大动图会被拒绝。`;
   } else {
     $("#formatHint").textContent = quality ? `将按 ${quality}，${format} 保存。源格式不可转换时会保留原扩展名。` : "";
@@ -1847,6 +1753,10 @@ $("#browseFolder").onclick = async () => {
 $("#download").onclick = async () => {
   const item = selectedArtworks.get(activeArtworkId) || items.find((row) => row.id === activeArtworkId);
   if (!item || basketSelectionLocked || searchPending || singleDownloadPending) return;
+  if (!currentDownloadPages(item).length) {
+    announceToast("请至少勾选一张图片");
+    return;
+  }
   const sourceIndex = Math.max(0, items.findIndex((row) => row.id === item.id));
   const button = $("#download");
   singleDownloadPending = true;
@@ -1860,8 +1770,9 @@ $("#download").onclick = async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request.body),
     }, request.timeout);
-    announceToast(`已保存 ${data.saved.length} 张：${data.saved[0]}`);
-    showTaskDock("保存完成", `已保存 ${data.saved.length} 张`);
+    const summary = `已保存 ${data.pages ?? data.saved.length} 页，${data.saved.length} 个文件`;
+    announceToast(`${summary}：${data.saved[0]}`);
+    showTaskDock("保存完成", summary);
   } catch (error) {
     announceToast(`保存失败：${error.message || "未知错误"}`);
     showTaskDock("保存失败", error.message || "未知错误", 8000);

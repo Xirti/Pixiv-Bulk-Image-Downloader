@@ -12,6 +12,7 @@ htmlcov/
 # Runtime state and user-owned content
 downloads/
 logs/
+subject_mvp0/artifacts/
 *.log
 .env
 .env.*
