@@ -307,7 +307,7 @@ class BuildManifestTests(unittest.TestCase):
         for contract in (
             'result["batchFlow"]',
             'document.querySelector("#openBatch").click()',
-            'document.querySelector("#openBasketDetail").click()',
+            'document.querySelector("#openBasketPicker").click()',
             "summaryOnly.cards === 0",
             "firstJump",
             "selectedPayloadAfterUncheck",

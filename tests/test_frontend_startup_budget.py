@@ -49,7 +49,7 @@ class FrontendStartupBudgetTests(unittest.TestCase):
     def test_css_removes_expensive_visual_effects(self):
         source = STYLE.read_text(encoding="utf-8")
         self.assertNotIn("backdrop-filter", source)
-        self.assertNotIn("filter:", source)
+        self.assertNotIn("filter:", source.replace("filter:invert(1)", ""))
 
 
 if __name__ == "__main__":

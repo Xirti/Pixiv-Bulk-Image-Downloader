@@ -799,12 +799,21 @@ function renderPagination() {
 
 function updatePaginationDock() {
   const dock = document.querySelector(".pagination-dock");
-  const hasPagination = Boolean($("#pagination").children.length);
+  const hasPagination = Boolean($("#pagination").children.length) || selectedArtworkIds.size > 0;
   const overlayOpen = !$("#allViewer").hidden || basketPageOpen();
   const galleryRect = $("#gallery").getBoundingClientRect();
   const dockTop = window.innerHeight - (dock.offsetHeight || 0);
   const dockOverGallery = galleryRect.top < dockTop && galleryRect.bottom > dockTop;
   dock.classList.toggle("is-visible", hasPagination && !overlayOpen && dockOverGallery);
+  const rail = document.querySelector('.page-rail');
+  rail.hidden = overlayOpen;
+  const sections = ['home', 'gallery', 'detail'];
+  const marker = window.innerHeight * .4;
+  const active = sections.reduce((current, id) => $(`#${id}`).getBoundingClientRect().top <= marker ? id : current, 'home');
+  rail.querySelectorAll('a').forEach(link => {
+    if (link.hash === `#${active}`) link.setAttribute('aria-current', 'location');
+    else link.removeAttribute('aria-current');
+  });
 }
 
 function activeScrollSurface() {
@@ -820,7 +829,8 @@ function updateFloatingChrome() {
   $("#backTop").classList.toggle("is-visible", scrollOffset > 600);
   const entry = $("#basketEntry");
   const count = selectedArtworkIds.size;
-  entry.classList.toggle("is-visible", !overlayOpen && count > 0);
+  entry.classList.remove("is-visible");
+  document.querySelector('.page-rail').hidden = overlayOpen;
   entry.textContent = `采集篮 ${count} 作品 · ${selectedPageCount()} 张`;
   entry.disabled = basketSelectionLocked || searchPending;
 }
@@ -839,6 +849,10 @@ function schedulePaginationDockUpdate() {
 
 window.addEventListener("scroll", schedulePaginationDockUpdate, { passive: true });
 window.addEventListener("resize", schedulePaginationDockUpdate, { passive: true });
+document.querySelectorAll('.page-rail a').forEach(link => link.addEventListener('click', event => {
+  event.preventDefault();
+  document.querySelector(link.hash).scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+}));
 $("#basketPage").addEventListener("scroll", schedulePaginationDockUpdate, { passive: true });
 $("#allViewer").addEventListener("scroll", schedulePaginationDockUpdate, { passive: true });
 
@@ -1623,7 +1637,7 @@ $("#clearSelection").onclick = () => {
   clearDetail();
   render();
 };
-$("#openBatch").onclick = openBatchHub;
+$("#openBatch").onclick = openSelectionBasket;
 
 $("#batchDownload").onclick = async () => {
   if (basketSelectionLocked || searchPending || singleDownloadPending) return;

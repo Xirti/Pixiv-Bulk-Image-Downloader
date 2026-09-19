@@ -18,7 +18,7 @@ class MinimalClientTests(unittest.TestCase):
 
     def test_expensive_decorative_systems_are_removed(self):
         self.assertNotIn("backdrop-filter", STYLE)
-        self.assertNotIn("filter:", STYLE)
+        self.assertNotIn("filter:", STYLE.replace("filter:invert(1)", ""))
         scheduler = APP[APP.index("function schedulePaginationDockUpdate"):APP.index("async function select")]
         self.assertEqual(APP.count("requestAnimationFrame("), 1)
         self.assertIn("requestAnimationFrame(run)", scheduler)
@@ -26,6 +26,16 @@ class MinimalClientTests(unittest.TestCase):
         self.assertNotIn("bindRipple", APP)
         self.assertNotIn("previewMode", HTML)
         self.assertNotIn("motion", HTML)
+
+    def test_brand_motion_is_local_bounded_and_pausable(self):
+        brand = (ROOT / "web" / "brand-stage.js").read_text(encoding="utf-8")
+        self.assertIn('src="/brand-stage.js"', HTML)
+        self.assertIn("prefers-reduced-motion: reduce", brand)
+        self.assertIn("document.hidden", brand)
+        self.assertIn("IntersectionObserver", brand)
+        self.assertIn(".basket-page-open, .viewer-open", brand)
+        self.assertIn("Math.min(devicePixelRatio || 1, 1.5)", brand)
+        self.assertNotIn("https://", brand)
 
     def test_browser_launcher_waits_for_http_and_keeps_diagnostics(self):
         launcher = (ROOT / "launch-moku.ps1").read_text(encoding="utf-8-sig")

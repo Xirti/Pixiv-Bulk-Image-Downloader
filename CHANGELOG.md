@@ -2,6 +2,15 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.14] - 2026-09-18
+
+### Changed
+
+- Replace the home headline with six locally rendered interactive brand logos: GPT spin and galaxy, Claude breathing light, Grok logo refraction, DeepSeek elastic water motion, Kimi lunar trails, and GLM slicing.
+- Move collection controls to the results-page bottom dock and open the selection basket directly; use three right-side navigation dots for search, preview, and download pages.
+- Remove the planetary page background and retain a quiet graphite backdrop.
+- Pause decorative animation offscreen, behind overlays, and in hidden tabs; respect reduced-motion settings.
+
 ## [Unreleased]
 
 ### Added

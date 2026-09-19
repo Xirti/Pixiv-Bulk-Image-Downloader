@@ -28,8 +28,7 @@ def main() -> None:
     result = {
         "ok": False,
         "folderButton": {},
-        "saturnRings": {},
-        "artDepth": {},
+        "brandStage": {},
         "galleryControls": {},
         "galleryControlsAfterScroll": {},
         "viewport": {},
@@ -50,9 +49,6 @@ def main() -> None:
             )
             visual = evaluate(ws, counter, """(() => {
                 const button = getComputedStyle(document.querySelector('#browseFolder'));
-                const rings = [...document.querySelectorAll('.saturn-ring')];
-                const depth = document.querySelector('.art-depth');
-                const depthStyle = getComputedStyle(depth);
                 const bodyStyle = getComputedStyle(document.body);
                 const pagerDock = document.querySelector('.pagination-dock');
                 const pagerStyle = getComputedStyle(pagerDock);
@@ -60,20 +56,13 @@ def main() -> None:
                 const clearPage = document.querySelector('#clearPageSelection');
                 return {
                     button: {color: button.color, backgroundImage: button.backgroundImage},
-                    rings: {
-                        count: rings.length,
-                        decorative: depth?.getAttribute('aria-hidden') === 'true',
-                        pointerEvents: depthStyle.pointerEvents,
-                        animation: getComputedStyle(rings[0]).animationName,
-                        conservative: document.documentElement.classList.contains('conservative')
-                    },
-                    artDepth: {
-                        moonRings: document.querySelectorAll('.moon-ring').length,
-                        moonRingSegments: document.querySelectorAll('.moon-ring').length ? 2 : 0,
-                        constellations: document.querySelectorAll('.art-constellation').length,
-                        decorative: depth?.getAttribute('aria-hidden') === 'true',
-                        pointerEvents: depthStyle.pointerEvents,
-                        backgroundLayers: bodyStyle.backgroundImage.split('gradient').length - 1
+                    brandStage: {
+                        choices: document.querySelectorAll('.brand-choices button').length,
+                        canvasReady: document.querySelector('#brandPlay').classList.contains('has-canvas'),
+                        logosLoaded: [...document.querySelectorAll('.brand-choices img')].every(img => img.complete && img.naturalWidth > 0),
+                        oldBackgroundRemoved: !document.querySelector('.art-depth'),
+                        navigationDots: document.querySelectorAll('.page-rail a').length,
+                        selectionDocked: !!document.querySelector('.pagination-dock #selectionBar')
                     },
                     galleryControls: {
                         selectAllVisible: !!selectAll && getComputedStyle(selectAll).display !== 'none',
@@ -81,7 +70,8 @@ def main() -> None:
                         pagerPosition: pagerStyle.position,
                         pagerBottom: pagerStyle.bottom,
                         pagerPointerEvents: pagerStyle.pointerEvents,
-                        pagerDisplay: pagerStyle.display
+                        pagerDisplay: pagerStyle.display,
+                        pagerActive: pagerDock.classList.contains("is-visible")
                     },
                     viewport: {
                         width: innerWidth,
@@ -93,8 +83,7 @@ def main() -> None:
                 };
             })()""")
             result["folderButton"] = visual["button"]
-            result["saturnRings"] = visual["rings"]
-            result["artDepth"] = visual["artDepth"]
+            result["brandStage"] = visual["brandStage"]
             result["galleryControls"] = visual["galleryControls"]
             after_scroll = evaluate(ws, counter, """(() => {
                 const gallery = document.querySelector('#gallery');
@@ -112,7 +101,7 @@ def main() -> None:
                 gallery.scrollIntoView({block:'start'});
                 updatePaginationDock();
                 const visibleStyle = getComputedStyle(dock);
-                const visibleWithResults = visibleStyle.display === 'flex';
+                const visibleWithResults = dock.classList.contains('is-visible');
                 const position = visibleStyle.position;
                 const bottom = visibleStyle.bottom;
                 const dockHeightWithResults = dock.getBoundingClientRect().height;
@@ -121,12 +110,12 @@ def main() -> None:
 
                 scrollTo(0, scrollY + bottomWithResults + 1);
                 updatePaginationDock();
-                const hiddenPastResults = getComputedStyle(dock).display === 'none';
+                const hiddenPastResults = !dock.classList.contains('is-visible');
                 const bottomPastResults = gallery.getBoundingClientRect().bottom;
 
                 gallery.scrollIntoView({block:'start'});
                 updatePaginationDock();
-                const visibleAfterReturn = getComputedStyle(dock).display === 'flex';
+                const visibleAfterReturn = dock.classList.contains('is-visible');
                 const bottomAfterReturn = gallery.getBoundingClientRect().bottom;
 
                 spacer.remove();
@@ -189,15 +178,17 @@ def main() -> None:
                 render();
                 document.querySelector("#openBatch").click();
                 await Promise.resolve();
+                const directBasket = basketPageOpen() && document.querySelectorAll("#batchCollections .batch-collection").length === 2;
+                openBatchHub();
                 const summaryOnly = {
                     cards: document.querySelectorAll("#batchCollections .batch-collection").length,
-                    summary: document.querySelector("#batchSummary").textContent,
-                    downloadHidden: document.querySelector("#batchDownload").hidden
+                    summary: document.querySelector("#batchDetailSummary").textContent,
+                    downloadVisible: getComputedStyle(document.querySelector("#batchDownload")).display !== "none"
                 };
-                document.querySelector("#openBasketDetail").click();
+                document.querySelector("#openBasketPicker").click();
                 const firstJump = {
                     cards: document.querySelectorAll("#batchCollections .batch-collection").length,
-                    title: document.querySelector("#dTitle").textContent
+                    title: document.querySelector("#basketTitle").textContent
                 };
                 const card = document.querySelector('[data-batch-artwork="probe-multi"]').getBoundingClientRect();
                 const check = document.querySelector('[data-batch-select="probe-multi"] + span').getBoundingClientRect();
@@ -211,11 +202,11 @@ def main() -> None:
                 const detailDefault = {
                     pages: document.querySelectorAll("[data-collection-page]").length,
                     selectedPages: document.querySelectorAll("[data-collection-page]:checked").length,
-                    returnVisible: !document.querySelector("#returnToBatch").hidden
+                    returnVisible: !document.querySelector("#basketBack").hidden
                 };
                 change(document.querySelector('[data-collection-page="1"]'), false);
                 const selectedPayloadAfterUncheck = selectedGroups().find((group) => group.id === "probe-multi")?.pages || [];
-                document.querySelector("#returnToBatch").click();
+                document.querySelector("#basketBack").click();
                 const partial = snapshot();
                 change(document.querySelector('[data-batch-select="probe-multi"]'), false);
                 const removed = snapshot();
@@ -223,7 +214,7 @@ def main() -> None:
                 await Promise.resolve();
                 const selectedAfterRemoval = document.querySelectorAll("[data-collection-page]:checked").length;
                 change(document.querySelector('[data-collection-page="2"]'), true);
-                document.querySelector("#returnToBatch").click();
+                document.querySelector("#basketBack").click();
                 const restored = snapshot();
                 clearAllSelection();
                 const normalItem = artwork("probe-normal", "Normal", 2);
@@ -241,8 +232,8 @@ def main() -> None:
                 await Promise.resolve();
                 await Promise.resolve();
                 const normalToBatchGuard = {
-                    title: document.querySelector("#dTitle").textContent,
-                    workspaceVisible: !document.querySelector("#batchWorkspace").hidden
+                    title: document.querySelector("#basketTitle").textContent,
+                    workspaceVisible: basketPageOpen()
                 };
                 clearAllSelection();
                 const clearRaceItem = artwork("probe-clear-race", "Clear race", 5);
@@ -258,7 +249,7 @@ def main() -> None:
                 });
                 openSelectionBasket();
                 await Promise.resolve();
-                document.querySelector("#openBasketDetail").click();
+                document.querySelector("#openBasketPicker").click();
                 document.querySelector('[data-open-collection="probe-clear-race"]').click();
                 await Promise.resolve();
                 document.querySelector("#clearSelection").click();
@@ -266,8 +257,8 @@ def main() -> None:
                 await Promise.resolve();
                 await Promise.resolve();
                 const clearRaceGuard = {
-                    workspaceHidden: document.querySelector("#batchWorkspace").hidden,
-                    title: document.querySelector("#dTitle").textContent,
+                    workspaceHidden: !basketPageOpen(),
+                    title: document.querySelector("#basketTitle").textContent,
                     selected: selectedArtworkIds.size,
                     imagePickerClosed: !document.body.classList.contains("basket-image-picker")
                 };
@@ -276,9 +267,9 @@ def main() -> None:
                 items = [singleJumpItem];
                 render();
                 toggleArtworkSelection(singleJumpItem, true);
-                openSelectionBasket();
+                openBatchHub();
                 const singleSummaryCards = document.querySelectorAll("#batchCollections .batch-collection").length;
-                document.querySelector("#openBasketDetail").click();
+                document.querySelector("#openBasketPicker").click();
                 const singleArtworkCards = document.querySelectorAll("#batchCollections .batch-collection").length;
                 document.querySelector('[data-open-collection="probe-single-jump"]').click();
                 await Promise.resolve();
@@ -304,7 +295,7 @@ def main() -> None:
                 selectedArtworks.set(staleItem.id, staleItem);
                 selectedArtworkIds.add(staleItem.id);
                 selectedPagesByArtwork.set(staleItem.id, new Set([0, 1]));
-                renderBasketSummary([staleItem, artwork("probe-stale-peer", "Peer", 1)]);
+                openSelectionBasket();
                 openBasketArtworkPicker();
                 const staleButton = document.querySelector('[data-batch-artwork="probe-stale"] [data-open-collection]');
                 let releaseStale;
@@ -315,7 +306,7 @@ def main() -> None:
                 releaseStale();
                 await Promise.resolve();
                 const staleGuard = {
-                    title: document.querySelector("#dTitle").textContent,
+                    title: document.querySelector("#basketTitle").textContent,
                     resultTitle: document.querySelector("#grid h3")?.textContent || ""
                 };
                 clearAllSelection();
@@ -325,7 +316,7 @@ def main() -> None:
                 render();
                 toggleArtworkSelection(optionItem, true);
                 openSelectionBasket();
-                document.querySelector("#openBasketDetail").click();
+                document.querySelector("#openBasketPicker").click();
                 document.querySelector("#quality").value = "regular";
                 document.querySelector("#saveRoot").value = "C:\\fixed";
                 document.querySelector("#createFolder").checked = true;
@@ -376,9 +367,9 @@ def main() -> None:
                     staleGuard,
                     optionSnapshot,
                     geometry,
-                    ok: summaryOnly.cards === 0
+                    ok: directBasket && summaryOnly.cards === 0
                         && summaryOnly.summary.includes("2 个作品")
-                        && summaryOnly.downloadHidden
+                        && summaryOnly.downloadVisible
                         && firstJump.cards === 2
                         && firstJump.title.includes("选择要下载的作品")
                         && initial.cards === 2
@@ -403,7 +394,7 @@ def main() -> None:
                         && restored.selectedWorks === 2
                         && restored.selectedResults === 2
                         && restored.multiLabel.includes("1/4")
-                        && normalToBatchGuard.title === "采集篮"
+                        && normalToBatchGuard.title.includes("采集篮")
                         && normalToBatchGuard.workspaceVisible
                         && clearRaceGuard.workspaceHidden
                         && clearRaceGuard.title !== "Resurrected"
@@ -434,23 +425,18 @@ def main() -> None:
         result["ok"] = (
             result["folderButton"].get("color") == "rgb(10, 17, 26)"
             and "linear-gradient" in result["folderButton"].get("backgroundImage", "")
-            and result["saturnRings"].get("count") == 2
-            and result["saturnRings"].get("decorative")
-            and result["saturnRings"].get("pointerEvents") == "none"
-            and result["saturnRings"].get("animation") == "none"
-            and result["saturnRings"].get("conservative")
-            and result["artDepth"].get("moonRings") == 1
-            and result["artDepth"].get("moonRingSegments") == 2
-            and result["artDepth"].get("constellations") == 2
-            and result["artDepth"].get("decorative")
-            and result["artDepth"].get("pointerEvents") == "none"
-            and result["artDepth"].get("backgroundLayers", 0) >= 2
+            and result["brandStage"].get("choices") == 6
+            and result["brandStage"].get("canvasReady")
+            and result["brandStage"].get("logosLoaded")
+            and result["brandStage"].get("oldBackgroundRemoved")
+            and result["brandStage"].get("navigationDots") == 3
+            and result["brandStage"].get("selectionDocked")
             and result["galleryControls"].get("selectAllVisible")
             and result["galleryControls"].get("clearPageVisible")
             and result["galleryControls"].get("pagerPosition") == "fixed"
             and result["galleryControls"].get("pagerBottom") == "0px"
             and result["galleryControls"].get("pagerPointerEvents") == "none"
-            and result["galleryControls"].get("pagerDisplay") == "none"
+            and not result["galleryControls"].get("pagerActive")
             and result["galleryControlsAfterScroll"].get("visibleWithResults")
             and result["galleryControlsAfterScroll"].get("hiddenPastResults")
             and result["galleryControlsAfterScroll"].get("visibleAfterReturn")
@@ -461,7 +447,7 @@ def main() -> None:
             and result["galleryControlsAfterScroll"].get("bottom") == "0px"
             and result["viewport"].get("scrollWidth", 0) <= result["viewport"].get("width", 0)
             and result["viewport"].get("scrollHeight", 0) > result["viewport"].get("height", 0)
-            and result["viewport"].get("bodyBackgroundImage") != "none"
+            and result["viewport"].get("bodyBackgroundImage") == "none"
             and result["batchFlow"].get("ok")
         )
     except Exception as exc:

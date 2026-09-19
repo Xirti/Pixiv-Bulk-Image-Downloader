@@ -8,7 +8,7 @@
 
 MOKU 是一只住在 Windows 里的 Pixiv 搜图猫娘。把 tag、作者名或作品 ID 告诉她，喜欢的作品很快就会被找回来；看中了便放进采集篮，挑好以后再整整齐齐地一起下载。界面跑在 pywebview 和 WebView2 上，后端乖乖待在本机回环地址，负责 Pixiv 请求、预览图片、文件夹选择和下载写入。
 
-当前源码版本：**1.0.13** 喵。
+当前源码版本：**1.0.14** 喵。
 
 想直接使用，就去 [MOKU Releases](https://github.com/Xirti/MOKU/releases) 把最新的 Windows x64 压缩包抱回家喵。记得把完整 ZIP 解压出来，再运行 `MOKU.exe`；若只拎走一个 EXE，它会因为找不到同伴而没法工作的。喜欢亲手打包的话，也可以在源码目录运行 `make-release.ps1`。
 
@@ -30,6 +30,8 @@ MOKU 是一只住在 Windows 里的 Pixiv 搜图猫娘。把 tag、作者名或�
 <img width="1770" height="677" alt="MOKU 搜索页" src="https://github.com/user-attachments/assets/14cede70-7876-4c5e-b9cb-87ae750c1af2" />
 
 ## 采集篮和预览
+
+首页提供六款可切换的互动 Logo；右侧三个圆点分别跳转到搜索、预览选图和下载页面。第二页底部的采集栏可以直接打开采集篮。装饰动效在离屏或打开查看器时暂停，并遵循系统的减少动态效果设置。
 
 看到喜欢的作品，先放进采集篮里慢慢挑就好喵。采集篮支持任意数量的作品，最多选择 1,000 张图片；作品页和大图查看器采用窗口化加载，不会一下把几百张图片和控件全塞进页面。
 
@@ -139,7 +141,7 @@ dist\MOKU\BUILD_MANIFEST.json
 
 ### 当前发布版
 
-当前源码版本是 `1.0.13`。便携版使用带哈希锁的 Python 3.12 依赖构建，测试通过后才会继续冻结；服务、文件夹选择、文件写入、官方登录窗口、使用指南和网络探针都会挨个跑一遍喵。真实 Pixiv 探针需要当前网络能访问 Pixiv 和图片 CDN。
+当前源码版本是 `1.0.14`。便携版使用带哈希锁的 Python 3.12 依赖构建，测试通过后才会继续冻结；服务、文件夹选择、文件写入、官方登录窗口、使用指南和网络探针都会挨个跑一遍喵。真实 Pixiv 探针需要当前网络能访问 Pixiv 和图片 CDN。
 
 权威的 EXE 和 ZIP 哈希会放在 Release 里的 `SHA256SUMS.txt`。生成的哈希不会写回源码，免得构建指纹和自己互相咬尾巴。`SHA256.txt` 只包含 `MOKU.exe` 的单向指纹和文件名，不会泄露账号、Cookie、路径或身份信息。
 
@@ -147,7 +149,7 @@ dist\MOKU\BUILD_MANIFEST.json
 
 ## 分发提醒
 
-MOKU 1.0.13 已准备好作为 Windows x64 便携 ZIP 发布。请解压完整的 `MOKU` 文件夹，再运行 `MOKU.exe`；Windows 版程序没有 Authenticode 签名，SmartScreen 可能显示未知发布者提示，运行前请用 `SHA256SUMS.txt` 核对 ZIP。
+MOKU 1.0.14 已准备好作为 Windows x64 便携 ZIP 发布。请解压完整的 `MOKU` 文件夹，再运行 `MOKU.exe`；Windows 版程序没有 Authenticode 签名，SmartScreen 可能显示未知发布者提示，运行前请用 `SHA256SUMS.txt` 核对 ZIP。
 
 发布前请再检查一下，别让日志、下载内容、Windows 凭据管理器数据、运行时描述文件、构建缓存或临时 WebView2 配置目录跟着溜进发布包喵。
 

@@ -147,26 +147,19 @@ class V105DownloadContractTests(unittest.TestCase):
 
 
 class V105VisualContractTests(unittest.TestCase):
-    def test_deep_art_direction_uses_static_layers_not_runtime_particles(self):
-        self.assertIn(".art-depth", STYLE)
-        self.assertIn(".moon-ring", STYLE)
-        self.assertIn(".art-constellation", STYLE)
-        self.assertIn('class="art-depth"', HTML)
-        self.assertIn('class="moon-ring"', HTML)
-        self.assertIn('class="art-constellation constellation-one"', HTML)
-        self.assertIn("aria-hidden=\"true\"", HTML)
+    def test_brand_stage_replaces_old_page_background(self):
+        self.assertIn('class="brand-stage"', HTML)
+        self.assertNotIn('class="art-depth"', HTML)
+        self.assertNotIn('class="moon-ring"', HTML)
         scheduler = APP[APP.index("function schedulePaginationDockUpdate"):APP.index("async function select")]
         self.assertEqual(APP.count("requestAnimationFrame("), 1)
         self.assertIn("requestAnimationFrame(run)", scheduler)
         self.assertNotIn("setInterval", APP)
 
-    def test_art_layers_are_bounded_and_disabled_in_conservative_mode(self):
-        self.assertIn(".art-depth{", STYLE)
-        self.assertIn("max-width:560px", STYLE)
-        self.assertIn("max-height:560px", STYLE)
-        self.assertIn("box-shadow:inset 22px 15px 28px", STYLE)
-        self.assertIn("html.conservative .moon-ring", STYLE)
-        self.assertIn("html.conservative .art-constellation", STYLE)
+    def test_brand_stage_has_bounded_responsive_dimensions(self):
+        self.assertIn("width:min(100%,480px)", STYLE)
+        self.assertIn("aspect-ratio:3/2", STYLE)
+        self.assertIn(".brand-play canvas", STYLE)
         self.assertIn("prefers-reduced-motion:reduce", STYLE)
 
     def test_folder_picker_button_has_explicit_dark_text_on_light_surface(self):
@@ -174,18 +167,15 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("#browseFolder{", STYLE)
         self.assertIn("color:#0a111a", STYLE)
 
-    def test_saturn_rings_are_decorative_and_low_cost(self):
-        self.assertIn('class="saturn-ring saturn-ring-outer"', HTML)
-        self.assertIn('aria-hidden="true"', HTML)
-        self.assertIn(".saturn-ring", STYLE)
-        self.assertIn("html.conservative .moon-ring,html.conservative .saturn-ring", STYLE)
+    def test_page_background_does_not_restore_saturn_rings(self):
+        self.assertNotIn('class="saturn-ring saturn-ring-outer"', HTML)
+        self.assertIn("background:#101112", STYLE)
         self.assertEqual(APP.count("requestAnimationFrame("), 1)
         self.assertNotIn("backdrop-filter", STYLE)
-        self.assertNotIn("filter:", STYLE)
+        self.assertNotIn("filter:", STYLE.replace("filter:invert(1)", ""))
 
-    def test_moon_theme_and_search_controls_are_present_without_removing_existing_actions(self):
-        self.assertIn("moon", STYLE)
-        self.assertIn("lunar", STYLE)
+    def test_brand_theme_keeps_existing_search_actions(self):
+        self.assertIn(".brand-stage", STYLE)
         self.assertIn("模糊", HTML)
         self.assertIn("采集篮", HTML + APP)
         self.assertIn("旧页缓存即将清理", HTML + APP)
@@ -384,14 +374,12 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertNotIn("#9a3542", capacity_styles)
         self.assertIn("color:#eef3f8", capacity_styles)
 
-    def test_home_uses_one_clean_monochrome_moon_ring_without_search_panel_arcs(self):
+    def test_home_keeps_decorations_inside_brand_stage(self):
         self.assertNotIn(".search-panel::before", STYLE)
         self.assertNotIn("body::after", STYLE)
-        self.assertIn('class="moon-ring"', HTML)
-        self.assertIn(".moon-ring::before", STYLE)
-        self.assertIn(".moon-ring::after", STYLE)
-        self.assertIn("conic-gradient", STYLE)
-        self.assertIn("saturn-ring", HTML + STYLE)
+        self.assertNotIn('class="moon-ring"', HTML)
+        self.assertNotIn("saturn-ring", HTML)
+        self.assertIn('id="brandPlay"', HTML)
         self.assertNotIn('class="light-ribbons"', HTML)
         self.assertNotIn("rgba(255,141,78", STYLE)
 

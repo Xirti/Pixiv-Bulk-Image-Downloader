@@ -48,6 +48,9 @@ CODE_GENERATION_FILES = (
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
     "pixiv_adapter.py", "search_aliases.py", "search_service.py", "version.py",
     "web/index.html", "web/app.js", "web/ugoira-preview.js", "web/style.css",
+    "web/brand-stage.js", "web/brand-logos/openai.svg", "web/brand-logos/claude-color.svg",
+    "web/brand-logos/grok.svg", "web/brand-logos/deepseek-color.svg",
+    "web/brand-logos/kimi-color.svg", "web/brand-logos/glm.svg",
 )
 
 

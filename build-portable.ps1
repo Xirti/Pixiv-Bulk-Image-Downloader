@@ -39,6 +39,8 @@ node --check web\app.js
 if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed' }
 node --check web\ugoira-preview.js
 if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed' }
+node --check web\brand-stage.js
+if ($LASTEXITCODE -ne 0) { throw 'Brand animation JavaScript syntax check failed' }
 
 $BuildReleaseMutex = [Threading.Mutex]::new($false, 'Local\MOKU.PixivTagGallery.BuildRelease')
 $BuildReleaseLockHeld = $false

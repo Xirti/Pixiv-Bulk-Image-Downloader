@@ -29,3 +29,5 @@ The generated license bundle intentionally covers every distribution in the exac
 `proxy-tools==0.1.0` omits its license file from both the wheel and PyPI source archive. Its PyPI metadata says MIT, while code-identical upstream commit `db43f1e35d4f90a65c5a4d56d9e9af88212ec6e6` contains BSD terms. MOKU includes that exact upstream license with a fixed hash and records the provenance in `third_party/proxy-tools/PROVENANCE.md`.
 
 Pixiv and artwork displayed or downloaded through MOKU are not third-party software dependencies. Artwork remains the property of its respective creators.
+
+The home screen includes local brand SVGs from Lobe Icons (MIT) and the official GLM-4.5 repository (see its bundled license). Original files, licenses, and source links are in `web/brand-logos/`. These marks belong to their respective owners; their decorative use does not indicate integration or endorsement. Animation effects are implemented by MOKU.

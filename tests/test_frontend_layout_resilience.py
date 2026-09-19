@@ -66,15 +66,15 @@ class FrontendLayoutResilienceTests(unittest.TestCase):
         ):
             self.assert_declarations(selector, "overflow-wrap:anywhere")
 
-    def test_narrow_layout_exposes_text_navigation_for_all_three_scenes(self):
+    def test_narrow_layout_exposes_labelled_navigation_for_all_three_scenes(self):
         for target, label in (
             ("home", "搜索"),
-            ("gallery", "画廊"),
-            ("detail", "作品"),
+            ("gallery", "预览选图"),
+            ("detail", "下载打包"),
         ):
             self.assertRegex(
                 HTML,
-                rf'<a href="#{target}"[^>]*>{label}</a>',
+                rf'<a href="#{target}"[^>]*aria-label="{label}"[^>]*></a>',
             )
         self.assertIn('@media(max-width:600px)', STYLE)
         self.assert_declarations(".page-rail", "display:flex")
