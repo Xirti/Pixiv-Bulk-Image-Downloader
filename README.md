@@ -154,7 +154,9 @@ dist\MOKU\BUILD_MANIFEST.json
 
 ## 分发提醒
 
-MOKU 1.0.15 源码已完成此轮修复，便携 EXE 已构建并通过本机桌面检查；当前网络下的实网长搜索验收尚未通过，正式 ZIP 发布暂缓。请解压完整的 `MOKU` 文件夹，再运行 `MOKU.exe`；Windows 版程序没有 Authenticode 签名，SmartScreen 可能显示未知发布者提示，运行前请用 `SHA256SUMS.txt` 核对 ZIP。
+MOKU 1.0.15 源码已完成此轮修复，启动修正版 ZIP 已通过本机桌面、来源标记和解压完整性检查，先以 [v1.0.15 预发布](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.0.15) 提供验证。此前实网长搜索验收出现 TLS 断连，尚未完整通过；预发布不代表该问题已定位或修复。请解压完整的 `MOKU` 文件夹，再运行 `MOKU.exe`；Windows 版程序没有 Authenticode 签名，SmartScreen 可能显示未知发布者提示，运行前请用 `SHA256SUMS.txt` 核对 ZIP。
+
+从网络下载后，部分解压方式会把“来自互联网”的标记保留到 DLL 上。便携包中的 `MOKU.exe.config` 需要与 EXE 一起保留：它只配置 MOKU 自身的 .NET 运行库加载，避免点“仍然运行”后出现 `Python.Runtime.Loader.Initialize` 或 `0x80131515` 错误，不会移除文件标记或修改 Windows 防护设置。构建流程会给独立测试副本的所有文件添加该标记，并检查真实桌面窗口正常打开、标记仍然保留；这不代表 SmartScreen 的未知发布者提示会消失。
 
 发布前请再检查一下，别让日志、下载内容、Windows 凭据管理器数据、运行时描述文件、构建缓存或临时 WebView2 配置目录跟着溜进发布包喵。
 

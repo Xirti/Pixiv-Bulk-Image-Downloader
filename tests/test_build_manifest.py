@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,16 @@ from version import __version__
 
 
 class BuildManifestTests(unittest.TestCase):
+    def test_portable_runtime_config_is_fingerprinted_and_copied_beside_exe(self):
+        self.assertIn("MOKU.exe.config", build_manifest.BUILD_INPUT_FILES)
+        config = ET.parse(ROOT / "MOKU.exe.config").getroot()
+        setting = config.find("runtime/loadFromRemoteSources")
+        self.assertIsNotNone(setting)
+        self.assertEqual(setting.attrib, {"enabled": "true"})
+        build = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("Copy-Item -LiteralPath (Join-Path $Root 'MOKU.exe.config')", build)
+        self.assertIn("-Destination (Join-Path $Dist 'MOKU.exe.config')", build)
+
     def _copy_build_inputs(self, destination: Path) -> None:
         for relative in build_manifest.BUILD_INPUT_FILES:
             source = ROOT / relative

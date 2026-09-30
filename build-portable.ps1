@@ -81,6 +81,7 @@ Requirements:
 Version: __MOKU_VERSION__
 
 Run MOKU.exe. No Python installation is required.
+Keep MOKU.exe.config beside MOKU.exe. It lets this application's .NET host load its bundled runtimes when an extractor preserves Internet download markers; it does not remove markers or change Windows protection settings.
 MOKU starts a loopback-only backend and opens the interface in its own WebView2 desktop window.
 Use the built-in Usage Guide button for the offline guide and the explicit anonymous network check.
 MOKU can use the target computer's enabled local Windows HTTP system proxy; TUN mode is not required.
@@ -95,6 +96,7 @@ Downloads and logs are written beside MOKU.exe. Do not expose the backend to LAN
 '@
 $Readme = $Readme.Replace('__MOKU_VERSION__', $Version)
 [IO.File]::WriteAllText((Join-Path $Dist 'README.txt'), $Readme, [Text.UTF8Encoding]::new($false))
+Copy-Item -LiteralPath (Join-Path $Root 'MOKU.exe.config') -Destination (Join-Path $Dist 'MOKU.exe.config') -Force
 Copy-Item -LiteralPath (Join-Path $Root 'PRIVACY.md') -Destination (Join-Path $Dist 'PRIVACY.md') -Force
 Copy-Item -LiteralPath (Join-Path $Root 'SECURITY.md') -Destination (Join-Path $Dist 'SECURITY.md') -Force
 Copy-Item -LiteralPath (Join-Path $Root 'THIRD_PARTY_NOTICES.md') -Destination (Join-Path $Dist 'THIRD_PARTY_NOTICES.md') -Force
@@ -178,6 +180,8 @@ $Hash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash
 [IO.File]::WriteAllText((Join-Path $Dist 'SHA256.txt'), ("$Hash  MOKU.exe`r`n"), [Text.UTF8Encoding]::new($false))
 & $Python -I -B (Join-Path $Root 'build_manifest.py') 'write' (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe --expected-source-generation $SourceBefore
 if ($LASTEXITCODE -ne 0) { throw 'Build manifest generation failed' }
+& $Python -B (Join-Path $Root 'tests\packaged_startup_probe.py') --exe $Exe --mark-of-web
+if ($LASTEXITCODE -ne 0) { throw 'Built EXE failed native startup with download markers' }
 Write-Host "Build verified: $Exe"
 Write-Host "Version: $Version"
 Write-Host "SHA256: $Hash"

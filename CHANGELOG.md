@@ -6,6 +6,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Fixed
 
+- Load bundled .NET runtimes when downloaded ZIP contents retain Internet zone markers, using an application-local configuration without removing markers or changing Windows protection settings.
 - Clear the previous artwork's selection controls while loading a new detail and cancel stale detail requests when entering batch mode.
 - Keep basket pagination on freshly renewed preview URLs and prevent late image errors from clearing newer previews.
 - Split single-artwork downloads into requests of at most 200 selected pages; resume failed requests without repeating completed chunks.
@@ -23,6 +24,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Share detail invalidation, artwork-cache updates, and resumable task execution across existing flows.
 - Add focused state regressions and an offline Edge browser probe for download retry, basket pagination, settings preservation, and responsive layout.
+- Verify actual packaged WebView2 startup with simulated Internet markers retained on every bundled file.
 - Bound download recovery to 64 records and at most 30 idle minutes, with earlier idle eviction at capacity; do not change secure file publication, dependency versions, or logo choreography.
 
 ## [1.0.14] - 2026-09-18
