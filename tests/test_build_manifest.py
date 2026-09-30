@@ -272,7 +272,7 @@ class BuildManifestTests(unittest.TestCase):
         self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
         self.assertIn(f'__version__ = "{__version__}"', version)
         self.assertIn(f"当前源码版本：**{__version__}**", readme)
-        self.assertIn(f"MOKU {__version__} 已准备好作为 Windows x64 便携 ZIP 发布", readme)
+        self.assertIn(f"MOKU {__version__} 源码已完成此轮修复", readme)
         self.assertNotIn("当前源码版本：**1.0.10**", readme)
         self.assertNotIn("当前源码版本：**1.0.9**", readme)
         self.assertNotIn("当前源码版本：**1.0.8**", readme)
@@ -406,6 +406,10 @@ class BuildManifestTests(unittest.TestCase):
             archive = release / f"MOKU-v{version}-windows-x64.zip"
             self.assertTrue(archive.is_file())
             self.assertTrue((release / "SHA256SUMS.txt").is_file())
+            notes = (release / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+            self.assertIn(f"## [{version}]", notes)
+            self.assertEqual(sum(line.startswith("## [") for line in notes.splitlines()), 1)
+            self.assertNotIn("## [Unreleased]", notes)
             with zipfile.ZipFile(archive) as packaged:
                 self.assertIsNone(packaged.testzip())
                 names = {name.replace("\\", "/") for name in packaged.namelist()}

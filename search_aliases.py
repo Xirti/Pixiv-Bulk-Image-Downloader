@@ -46,10 +46,11 @@ def aliases_for(value: str) -> tuple[str, ...]:
     aliases = ANIME_TAG_ALIASES.get(normalize_alias_key(clean))
     if not aliases:
         return (clean,)
-    # Preserve dictionary order while removing accidental duplicate spellings.
+    # Search the user's spelling first; a sparse alias must not delay the tag
+    # they explicitly requested. Preserve reviewed order for the other aliases.
     result: list[str] = []
     seen: set[str] = set()
-    for alias in aliases:
+    for alias in (clean, *aliases):
         key = normalize_alias_key(alias)
         if key and key not in seen:
             seen.add(key)

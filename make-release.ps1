@@ -5,6 +5,15 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $Root
 
+function Get-CurrentReleaseNotes([string]$Text, [string]$Version) {
+  $Heading = [regex]::Escape("## [$Version]")
+  $Sections = [regex]::Matches($Text, "(?ms)^$Heading[^\r\n]*\r?\n.*?(?=^## |\z)")
+  if ($Sections.Count -ne 1) {
+    throw "CHANGELOG.md must contain exactly one section for $Version"
+  }
+  return $Sections[0].Value.Trim() + "`r`n"
+}
+
 $License = Join-Path $Root 'LICENSE'
 if (-not (Test-Path -LiteralPath $License)) {
   throw 'LICENSE is missing. Choose the project license before creating a public release.'
@@ -55,6 +64,7 @@ if ($VersionText -notmatch '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
   throw 'Invalid version.py'
 }
 $Version = $Matches[1]
+$ReleaseNotes = Get-CurrentReleaseNotes -Text ([IO.File]::ReadAllText((Join-Path $Root 'CHANGELOG.md'), [Text.Encoding]::UTF8)) -Version $Version
 $SourceAfterMetadata = (& $Python -I -B (Join-Path $Root 'build_manifest.py') 'source').Trim()
 if ($LASTEXITCODE -ne 0 -or $SourceAfterMetadata -ne $SourceInitial) {
   throw 'Release inputs changed while metadata was being read'
@@ -127,7 +137,7 @@ try {
   if ($FinalArchiveHash -ne $ArchiveHash) { throw 'Release archive hash changed while moving to the release directory' }
   $Sums = "$FinalArchiveHash  $ArchiveName`r`n$ExeHash  MOKU/MOKU.exe`r`n"
   [IO.File]::WriteAllText((Join-Path $ReleaseRoot 'SHA256SUMS.txt'), $Sums, [Text.UTF8Encoding]::new($false))
-  Copy-Item -LiteralPath (Join-Path $Root 'CHANGELOG.md') -Destination (Join-Path $ReleaseRoot 'RELEASE_NOTES.md')
+  [IO.File]::WriteAllText((Join-Path $ReleaseRoot 'RELEASE_NOTES.md'), $ReleaseNotes, [Text.UTF8Encoding]::new($false))
   $SourceFinal = (& $Python -I -B (Join-Path $Root 'build_manifest.py') 'source').Trim()
   if ($LASTEXITCODE -ne 0 -or $SourceFinal -ne $SourceInitial) {
     throw 'Release inputs changed while the archive was being created'

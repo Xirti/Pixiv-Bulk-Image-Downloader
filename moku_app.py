@@ -95,7 +95,9 @@ def load_runtime(path: Path) -> dict | None:
 
 
 def healthy_runtime(runtime: dict | None) -> str | None:
-    if not runtime:
+    # An embedded backend dies with its desktop window. Only independent
+    # backends can be shared without tying another window to that lifetime.
+    if not runtime or runtime.get("shareable", True) is not True:
         return None
     try:
         port = int(runtime["port"])
@@ -158,6 +160,8 @@ def write_runtime(
     port: int,
     instance_id: str,
     desktop_auth_token: str,
+    *,
+    shareable: bool = True,
 ) -> None:
     if not runtime_desktop_auth_token({"desktopAuthToken": desktop_auth_token}):
         raise ValueError("invalid desktop auth capability")
@@ -169,6 +173,7 @@ def write_runtime(
         "instanceId": instance_id,
         "pid": os.getpid(),
         "port": port,
+        "shareable": shareable,
         # Native-host-only capability. It is deliberately absent from health
         # responses and is never made available to the page's JavaScript.
         "desktopAuthToken": desktop_auth_token,
@@ -313,6 +318,8 @@ def run(argv: list[str] | None = None) -> int:
         launch_desktop(_run_backend_for_test())
         return 0
 
+    no_browser = options.serve_only or os.environ.get("MOKU_NO_BROWSER") == "1"
+
     resource_root = runtime_resource_root()
     data_root = writable_data_root()
     configure_logging(data_root)
@@ -350,6 +357,7 @@ def run(argv: list[str] | None = None) -> int:
                     port,
                     server.INSTANCE_ID,
                     desktop_auth_token,
+                    shareable=no_browser,
                 )
             except Exception:
                 httpd.shutdown()
@@ -359,7 +367,6 @@ def run(argv: list[str] | None = None) -> int:
             owns_backend = True
             LOG.info("start pid=%s url=%s instance=%s", os.getpid(), url, server.INSTANCE_ID)
 
-    no_browser = options.serve_only or os.environ.get("MOKU_NO_BROWSER") == "1"
     exit_after = float(os.environ.get("MOKU_TEST_EXIT_AFTER_SECONDS") or 0)
     try:
         if no_browser:

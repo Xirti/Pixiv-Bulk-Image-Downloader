@@ -279,7 +279,9 @@ class V105VisualContractTests(unittest.TestCase):
         back = APP[APP.index('$("#basketBack").onclick'):APP.index('$("#selectAllPage").onclick')]
         self.assertIn("showBatchDetail()", back)
         select_block = APP[APP.index("async function select(index)"):APP.index("function renderDetail")]
-        self.assertIn('document.body.classList.remove("batch-mode")', select_block)
+        self.assertIn('clearDetail(', select_block)
+        clear = APP[APP.index("function clearDetail"):APP.index("function discardRestrictedSelections")]
+        self.assertIn('document.body.classList.remove("batch-mode")', clear)
 
     def test_multi_artwork_picker_and_page_badge_open_images(self):
         picker = APP[APP.index("function openBasketArtworkPicker"):APP.index("function selectedGroups")]
@@ -296,12 +298,14 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("{ signal: controller.signal }", detail)
         self.assertIn("controller !== detailController", detail)
         clear = APP[APP.index('$("#clearSelection").onclick'):APP.index('$("#openBatch").onclick')]
-        self.assertIn("viewGeneration += 1", clear)
-        self.assertIn("detailController.abort()", clear)
+        self.assertIn("invalidateDetailView()", clear)
         self.assertIn("clearDetail()", clear)
         select = APP[APP.index("async function select(index)"):APP.index("function renderDetail")]
-        self.assertIn("viewGeneration += 1", select)
-        self.assertIn("closeBasketPage()", select)
+        self.assertIn("invalidateDetailView()", select)
+        self.assertIn("clearDetail(", select)
+        invalidation = APP[APP.index("function invalidateDetailView"):APP.index("function rememberArtworkDetail")]
+        self.assertIn("viewGeneration += 1", invalidation)
+        self.assertIn("detailController.abort()", invalidation)
         clear_detail = APP[APP.index("function clearDetail"):APP.index("function updateSelectionBar")]
         self.assertIn("closeBasketPage()", clear_detail)
 
@@ -416,18 +420,19 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn('saveRoot: $("#saveRoot").value.trim()', snapshot)
         self.assertIn('createFolder: $("#createFolder").checked', snapshot)
         self.assertIn('groupArtworks: Boolean($("#groupArtworks")?.checked)', snapshot)
-        request_loop = download[download.index("for (let index"):download.index("task.savedCount +=")]
+        request_loop = download[download.index("await executeDownloadTask"):download.index("resumableBatchTask = null")]
         self.assertIn("...taskOptions", request_loop)
         self.assertNotIn('$("#quality")', request_loop)
         self.assertNotIn('$("#saveRoot")', request_loop)
 
     def test_failed_batch_task_keeps_only_unfinished_chunks_in_memory(self):
-        task = APP[APP.index("function prepareBatchTask"):APP.index("function setDownloadButtonState")]
-        self.assertIn("resumableBatchTask?.signature === signature", task)
+        task = APP[APP.index("function prepareDownloadTask"):APP.index("function executeDownloadTask")]
+        self.assertIn("previousTask?.signature === signature", task)
         self.assertIn("remainingChunks", task)
         download = APP[APP.index('$(\"#batchDownload\").onclick'):APP.index('addEventListener("keydown"')]
-        self.assertIn("task.remainingChunks = chunks.slice(index + 1)", download)
-        self.assertIn("task.remainingChunks = chunks.slice(activeChunkIndex)", download)
+        execution = APP[APP.index("async function executeDownloadTask"):APP.index("function setDownloadButtonState")]
+        self.assertIn("task.remainingChunks = chunks.slice(index + 1)", execution)
+        self.assertIn("resumableBatchTask = task", download)
         self.assertIn("再次点击只继续剩余", download)
 
     def test_search_and_basket_cache_status_is_reported_without_binary_image_cache_claims(self):

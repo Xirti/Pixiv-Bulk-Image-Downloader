@@ -11,18 +11,16 @@ $logDir = Join-Path $root 'logs'; $log = Join-Path $logDir 'launcher.log'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 function Log([string]$message) { Add-Content -LiteralPath $log -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $message" -Encoding UTF8 }
 
-$generationFiles = @(
-  'server.py', 'auth_store.py', 'fixture_gallery.py', 'folder_picker.py',
-  'pixiv_login.py', 'moku_app.py', 'desktop_client.py',
-  'network_config.py', 'pixiv_adapter.py', 'search_aliases.py', 'search_service.py', 'version.py',
-  'web\index.html', 'web\app.js', 'web\style.css'
-) | ForEach-Object { Join-Path $root $_ }
-$missingGenerationFile = $generationFiles | Where-Object { -not (Test-Path -LiteralPath $_) } | Select-Object -First 1
-if ($missingGenerationFile) { throw "MOKU generation input missing: $missingGenerationFile" }
-$codeGeneration = (($generationFiles | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join ':').ToLowerInvariant()
-
 $python = Join-Path $env:LocalAppData 'Programs\Python\Python312\python.exe'
 if (-not (Test-Path -LiteralPath $python)) { throw "Python not found: $python" }
+
+# Use the backend's canonical file list and hash format. Do not let a stale
+# inherited override identify changed preview/animation assets as old code.
+$generationScript = 'import sys; sys.path.insert(0, sys.argv[1]); import server; print(server.compute_code_generation(frozen=False))'
+$codeGeneration = (& $python -c $generationScript $root | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $codeGeneration -notmatch '^source-sha256:[0-9a-f]{64}$') {
+  throw 'MOKU source fingerprint failed'
+}
 
 $runtimeDir = Join-Path $env:LocalAppData 'MOKU/runtime'
 $runtimeFile = Join-Path $runtimeDir 'backend.json'
@@ -37,7 +35,7 @@ $url = $null; $instanceId = $null; $desktopAuthToken = $null
 if (Test-Path -LiteralPath $runtimeFile) {
   try {
     $runtime = Get-Content -LiteralPath $runtimeFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ([int]$runtime.protocolVersion -eq $protocolVersion -and [string]$runtime.applicationId -eq $applicationId -and [string]$runtime.codeGeneration -eq $codeGeneration -and [int]$runtime.port -ge 1 -and [int]$runtime.port -le 65535 -and [string]$runtime.instanceId) {
+    if ($runtime.shareable -ne $false -and [int]$runtime.protocolVersion -eq $protocolVersion -and [string]$runtime.applicationId -eq $applicationId -and [string]$runtime.codeGeneration -eq $codeGeneration -and [int]$runtime.port -ge 1 -and [int]$runtime.port -le 65535 -and [string]$runtime.instanceId) {
       $candidateUrl = "http://127.0.0.1:$([int]$runtime.port)/"
       $candidate = Invoke-WebRequest -UseBasicParsing -Uri ($candidateUrl+'api/health') -Headers @{ 'Sec-Fetch-Site' = 'same-origin' } -TimeoutSec 3
       $candidateHealth = $candidate.Content | ConvertFrom-Json

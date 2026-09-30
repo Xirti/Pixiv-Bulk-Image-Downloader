@@ -2,6 +2,29 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.0.15] - 2026-09-30
+
+### Fixed
+
+- Clear the previous artwork's selection controls while loading a new detail and cancel stale detail requests when entering batch mode.
+- Keep basket pagination on freshly renewed preview URLs and prevent late image errors from clearing newer previews.
+- Split single-artwork downloads into requests of at most 200 selected pages; resume failed requests without repeating completed chunks.
+- Report native folder-picker errors instead of treating them as user cancellation.
+- Clear transparent animation frames before playback so previous pixels do not linger.
+- Generate release notes for the current version only, without repeating the full changelog.
+- Prevent a second desktop window from depending on an embedded backend that exits with the first window; independent preloaded backends remain reusable.
+- Use one source fingerprint algorithm in the launcher and backend, including preview scripts and logo assets, even when launched from another directory.
+- Recover lost download responses using stable chunk identities: coalesce in-flight retries, replay successful results, and allow failed operations to retry.
+- Share search request and time budgets fairly across aliases and safety scopes, rotate overflowing sources, and prioritize the user's original tag spelling.
+- Clear restricted views on account changes, stop old tasks before their next chunk, and prevent old failures from restoring stale retry state.
+- Stop hover animation work in hidden pages and release decoded preview resources when leaving the page.
+
+### Changed
+
+- Share detail invalidation, artwork-cache updates, and resumable task execution across existing flows.
+- Add focused state regressions and an offline Edge browser probe for download retry, basket pagination, settings preservation, and responsive layout.
+- Bound download recovery to 64 records and at most 30 idle minutes, with earlier idle eviction at capacity; do not change secure file publication, dependency versions, or logo choreography.
+
 ## [1.0.14] - 2026-09-18
 
 ### Changed

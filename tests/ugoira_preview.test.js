@@ -50,7 +50,7 @@ function setup({ count = 2, fetchBytes, decode } = {}) {
   globalThis.document = {
     createElement: () => ({
       remove() {},
-      getContext: () => ({ drawImage: (bitmap) => assert.equal(bitmap.closed, 0) }),
+      getContext: () => ({ clearRect() {}, drawImage: (bitmap) => assert.equal(bitmap.closed, 0) }),
     }),
   };
   const bitmap = (width = 480, height = 240) => {
@@ -155,4 +155,31 @@ test("deflated frames are decompressed before decoding", async () => {
     assert.deepEqual(state.errors, []);
     assert.equal(state.bitmaps.length, 2);
   } finally { state.preview.clear(); }
+});
+
+test("transparent animation frames do not retain pixels from earlier frames", async () => {
+  const state = setup();
+  let pixel = "transparent";
+  let advance;
+  const nativeSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = callback => { advance = callback; return 0; };
+  globalThis.document.createElement = () => ({
+    remove() {},
+    getContext: () => ({
+      clearRect() { pixel = "transparent"; },
+      drawImage(bitmap) {
+        if (bitmap === state.bitmaps[0]) pixel = "red";
+        // The second bitmap is transparent and leaves existing pixels untouched.
+      },
+    }),
+  });
+  try {
+    await state.preview.start(state.host, "1");
+    assert.equal(pixel, "red");
+    advance();
+    assert.equal(pixel, "transparent");
+  } finally {
+    state.preview.clear();
+    globalThis.setTimeout = nativeSetTimeout;
+  }
 });

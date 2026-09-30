@@ -33,7 +33,10 @@ let searchPending = false;
 let resultSelectionEnabled = false;
 let singleDownloadPending = false;
 let resumableBatchTask = null;
+let resumableSingleTask = null;
 let lastKnownLoggedIn = null;
+let lastKnownAuthorizationGeneration = null;
+let downloadAuthorizationRevision = 0;
 let authStatusGeneration = 0;
 const batchCandidateContextByArtwork = new Map();
 const batchCandidateResultPageByArtwork = new Map();
@@ -176,10 +179,18 @@ async function fetchJson(url, options = {}, timeoutMs = 12000) {
     } catch {
       throw new Error("服务返回了无法解析的数据");
     }
-    if (!response.ok) throw new Error(data.error || `请求失败（HTTP ${response.status}）`);
+    if (!response.ok) {
+      const error = new Error(data.error || `请求失败（HTTP ${response.status}）`);
+      error.requestIdConflict = Boolean(data.requestIdConflict);
+      throw error;
+    }
     return data;
   } catch (error) {
-    if (timedOut) throw new Error("请求超时，请检查 VPN / 系统代理后重试");
+    if (timedOut) {
+      const timeout = new Error("请求超时，请检查 VPN / 系统代理后重试");
+      timeout.timedOut = true;
+      throw timeout;
+    }
     throw error;
   } finally {
     clearTimeout(timer);
@@ -224,6 +235,24 @@ function abortDetailRefreshes() {
   detailRefreshAttempts.clear();
 }
 
+function invalidateDetailView() {
+  viewGeneration += 1;
+  abortDetailRefreshes();
+  if (detailController) detailController.abort();
+  detailController = null;
+}
+
+function rememberArtworkDetail(item) {
+  const artworkId = String(item.id);
+  const itemIndex = items.findIndex((row) => String(row.id) === artworkId);
+  if (itemIndex >= 0) items[itemIndex] = item;
+  const candidateIndex = batchCandidateItems.findIndex((row) => String(row.id) === artworkId);
+  if (candidateIndex >= 0) batchCandidateItems[candidateIndex] = item;
+  if (selectedArtworkIds.has(item.id)) selectedArtworks.set(item.id, item);
+  if (String(basketDetailItem?.id || "") === artworkId) basketDetailItem = item;
+  staleBasketPreviewIds.delete(artworkId);
+}
+
 async function refreshArtworkPreview(rawArtworkId) {
   const artworkId = String(rawArtworkId || "");
   if (!/^\d+$/.test(artworkId)) return false;
@@ -247,13 +276,8 @@ async function refreshArtworkPreview(rawArtworkId) {
         || !Array.isArray(fresh.pageImages)
       ) return false;
 
-      const itemIndex = items.findIndex((item) => String(item.id) === artworkId);
-      if (itemIndex >= 0) items[itemIndex] = fresh;
-      const candidateIndex = batchCandidateItems.findIndex((item) => String(item.id) === artworkId);
-      if (candidateIndex >= 0) batchCandidateItems[candidateIndex] = fresh;
-      if (selectedArtworkIds.has(artworkId)) selectedArtworks.set(artworkId, fresh);
+      rememberArtworkDetail(fresh);
       currentDetailItem = fresh;
-      staleBasketPreviewIds.delete(artworkId);
 
       document.querySelectorAll("[data-detail-artwork]").forEach((img) => {
         if (String(img.dataset.detailArtwork || "") !== artworkId) return;
@@ -288,10 +312,17 @@ function installImageFallbacks(root = document) {
       const artworkId = img.dataset.detailArtwork;
       const basketArtworkId = img.dataset.basketArtwork;
       const failedUrl = img.currentSrc || img.getAttribute?.("src") || img.src || "";
+      const failedSource = img.getAttribute?.("src") || img.src || "";
+      const generation = viewGeneration;
       if (artworkId && failedUrl && img.dataset.detailRefreshAttemptedUrl !== failedUrl) {
         img.dataset.detailRefreshAttemptedUrl = failedUrl;
         if (await refreshArtworkPreview(artworkId)) return;
       }
+      if (
+        generation !== viewGeneration
+        || img.isConnected === false
+        || (img.getAttribute?.("src") || img.src || "") !== failedSource
+      ) return;
       img.removeAttribute("src");
       img.classList.add("image-unavailable");
       if (basketArtworkId) staleBasketPreviewIds.add(String(basketArtworkId));
@@ -324,6 +355,12 @@ const ugoiraPreview = createUgoiraPreview({
   fetchBytes: (...args) => fetchBytes(...args),
   onError: (message) => announceToast(message),
 });
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) ugoiraPreview.stop();
+  else void syncAuthStatus();
+});
+window.addEventListener("pagehide", () => ugoiraPreview.clear());
 
 function attachUgoiraHoverTargets(root) {
   root.querySelectorAll("[data-ugoira-preview]").forEach((host) => {
@@ -408,15 +445,14 @@ function discardRestrictedSelections() {
   staleBasketPreviewIds.clear();
 }
 
-function handleAuthorizationLoss() {
+function handleAuthorizationLoss(reason = "Pixiv 已断开") {
+  resumableSingleTask = null;
+  resumableBatchTask = null;
   ugoiraPreview.clear();
-  viewGeneration += 1;
-  abortDetailRefreshes();
+  invalidateDetailView();
   cancelActiveSearch();
-  if (detailController) detailController.abort();
   searchController = null;
   activeSearchRequestId = null;
-  detailController = null;
   searchPending = false;
   resultSelectionEnabled = false;
   $("#safety").value = "safe";
@@ -430,10 +466,10 @@ function handleAuthorizationLoss() {
   preloadedThrough = 1;
   searchHasMore = false;
   $("#pagination").innerHTML = "";
-  $("#count").textContent = "Pixiv 已断开，请重新搜索";
+  $("#count").textContent = `${reason}，请重新搜索`;
   $("#tagTitle").textContent = "等待搜索";
-  grid.innerHTML = '<div class="empty-state"><b>Pixiv 已断开</b><p>受限预览已清理，请重新搜索。</p></div>';
-  clearDetail("Pixiv 已断开，请重新搜索");
+  grid.innerHTML = `<div class="empty-state"><b>${esc(reason)}</b><p>受限预览已清理，请重新搜索。</p></div>`;
+  clearDetail(`${reason}，请重新搜索`);
   updateSelectionBar();
   searchButton.disabled = basketSelectionLocked;
   searchButton.innerHTML = "开始寻找 <span>↗</span>";
@@ -619,9 +655,7 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     hadCommittedResults: resultSelectionEnabled,
   };
   cancelActiveSearch();
-  viewGeneration += 1;
-  abortDetailRefreshes();
-  if (detailController) detailController.abort();
+  invalidateDetailView();
   searchController = new AbortController();
   const controller = searchController;
   controller._mokuRestoreView = previousView;
@@ -859,11 +893,9 @@ $("#allViewer").addEventListener("scroll", schedulePaginationDockUpdate, { passi
 async function select(index) {
   let item = items[index];
   if (!item) return;
-  closeBasketPage();
-  document.body.classList.remove("batch-mode");
-  if (detailController) detailController.abort();
-  viewGeneration += 1;
-  abortDetailRefreshes();
+  clearDetail("正在加载作品详情…");
+  closeAllViewer();
+  invalidateDetailView();
   detailController = new AbortController();
   const controller = detailController;
   const generation = viewGeneration;
@@ -879,12 +911,7 @@ async function select(index) {
     if (item.source === "pixiv" && !item.pageImages) {
       item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, 18000);
       if (controller !== detailController || generation !== viewGeneration) return;
-      items[index] = item;
-      if (selectedArtworkIds.has(item.id)) {
-        selectedArtworks.set(item.id, item);
-        const candidateIndex = batchCandidateItems.findIndex((candidate) => String(candidate.id) === String(item.id));
-        if (candidateIndex >= 0) batchCandidateItems[candidateIndex] = item;
-      }
+      rememberArtworkDetail(item);
     }
     if (controller !== detailController || generation !== viewGeneration) return;
     renderDetail(item, index, detailContext);
@@ -1165,10 +1192,14 @@ function updateBatchDetailSummary() {
 }
 
 function showBatchDetail() {
-  closeBasketPage();
+  const quality = $("#quality").value;
+  clearDetail();
+  closeAllViewer();
+  invalidateDetailView();
   document.body.classList.add("batch-mode");
-  renderBatchDownloadOptions();
+  renderBatchDownloadOptions(quality);
   updateBatchDetailSummary();
+  syncSearchScopedControls();
   $("#detail").scrollIntoView({ behavior: "auto" });
 }
 
@@ -1188,10 +1219,7 @@ function closeBasketPage() {
   $("#basketPageMore").hidden = true;
   $("#basketViewAll").hidden = true;
   if (!wasOpen) return;
-  viewGeneration += 1;
-  abortDetailRefreshes();
-  if (detailController) detailController.abort();
-  detailController = null;
+  invalidateDetailView();
   updateFloatingChrome();
 }
 
@@ -1211,8 +1239,7 @@ function ensureDownloadOptionDefaults() {
   }
 }
 
-function renderBatchDownloadOptions() {
-  const quality = $("#quality").value;
+function renderBatchDownloadOptions(quality = $("#quality").value) {
   $("#quality").innerHTML = '<option value="regular">标准清晰度</option><option value="original">原始清晰度</option>';
   $("#quality").value = quality === "original" ? "original" : "regular";
   $("#format").innerHTML = '<option value="source">保留源格式（动图为 ZIP + JSON）</option>';
@@ -1245,10 +1272,7 @@ function openSelectionBasket() {
     $("#pageSelectionStatus").textContent = "请先勾选至少一个作品";
     return;
   }
-  viewGeneration += 1;
-  abortDetailRefreshes();
-  if (detailController) detailController.abort();
-  detailController = null;
+  invalidateDetailView();
   batchCandidateItems = chosen;
   batchCandidateContextByArtwork.clear();
   batchCandidateResultPageByArtwork.clear();
@@ -1360,21 +1384,73 @@ function planContextDownloadChunks(groups) {
   );
 }
 
-function prepareBatchTask(chunks, taskOptions) {
+function prepareDownloadTask(chunks, taskOptions, previousTask) {
   const signature = JSON.stringify({ chunks, taskOptions });
   if (
-    resumableBatchTask?.signature === signature
-    && resumableBatchTask.remainingChunks.length
+    previousTask?.signature === signature
+    && previousTask.remainingChunks.length
   ) {
-    return resumableBatchTask;
+    return previousTask;
   }
   return {
     signature,
-    remainingChunks: chunks,
+    authorizationRevision: downloadAuthorizationRevision,
+    remainingChunks: chunks.map((chunk) => ({ ...chunk, requestId: nextDownloadRequestId() })),
     savedCount: 0,
+    fileCount: 0,
+    firstSaved: "",
+    cleanupPending: false,
     completedBatches: 0,
     totalBatches: chunks.length,
   };
+}
+
+function nextDownloadRequestId() {
+  return globalThis.crypto?.randomUUID?.() || `download-${nextSearchRequestId()}`;
+}
+
+async function fetchDownloadResult(request, chunk, task) {
+  const body = JSON.stringify({ ...request.body, requestId: chunk.requestId });
+  let timeoutRetries = 0;
+  while (true) {
+    if (task.authorizationRevision !== downloadAuthorizationRevision) {
+      throw new Error("Pixiv 账户状态已变更，下载已中断，请重新发起");
+    }
+    let data;
+    try {
+      data = await fetchJson(request.endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      }, request.timeout);
+    } catch (error) {
+      // A slow local save may outlive the response. Reconnect once using the
+      // same identity; the backend returns pending or the completed result.
+      if (error.timedOut && timeoutRetries++ === 0) continue;
+      if (error.requestIdConflict) chunk.requestId = nextDownloadRequestId();
+      throw error;
+    }
+    if (!data.pending) return data;
+    const delay = Math.max(250, Math.min(3000, Number(data.retryAfterMs) || 1000));
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
+async function executeDownloadTask(task, requestForChunk, reportProgress) {
+  const chunks = task.remainingChunks;
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    reportProgress();
+    const request = requestForChunk(chunk);
+    const data = await fetchDownloadResult(request, chunk, task);
+    task.savedCount += data.pages ?? chunk.pageCount;
+    task.fileCount += data.saved?.length || 0;
+    task.firstSaved ||= data.saved?.[0] || "";
+    task.cleanupPending ||= Boolean(data.cleanupPending);
+    task.completedBatches += 1;
+    // Advance only after publication succeeds; failures retain this chunk.
+    task.remainingChunks = chunks.slice(index + 1);
+  }
 }
 
 function setDownloadButtonState(button, text, disabled) {
@@ -1573,9 +1649,7 @@ function renderBasketArtworkDetail(item) {
 async function openBatchCollection(id) {
   let item = selectedArtworks.get(id) || batchCandidateItems.find((candidate) => candidate.id === id);
   if (!item) return;
-  if (detailController) detailController.abort();
-  viewGeneration += 1;
-  abortDetailRefreshes();
+  invalidateDetailView();
   detailController = new AbortController();
   const controller = detailController;
   const generation = viewGeneration;
@@ -1584,10 +1658,7 @@ async function openBatchCollection(id) {
       $("#basketTitle").textContent = "正在加载合集详情…";
       item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, 18000);
       if (controller !== detailController || generation !== viewGeneration) return;
-      const candidateIndex = batchCandidateItems.findIndex((candidate) => candidate.id === item.id);
-      if (candidateIndex >= 0) batchCandidateItems[candidateIndex] = item;
-      if (selectedArtworkIds.has(item.id)) selectedArtworks.set(item.id, item);
-      staleBasketPreviewIds.delete(String(item.id));
+      rememberArtworkDetail(item);
     }
     if (controller !== detailController || generation !== viewGeneration) return;
     activeArtworkId = item.id;
@@ -1611,10 +1682,7 @@ async function openBatchCollection(id) {
 $("#openBasketPicker").onclick = openSelectionBasket;
 $("#basketBack").onclick = () => {
   if (basketSelectionLocked) return;
-  viewGeneration += 1;
-  abortDetailRefreshes();
-  if (detailController) detailController.abort();
-  detailController = null;
+  invalidateDetailView();
   if (basketReturnMode === "detail") {
     basketDetailItem = null;
     basketLockedDeckPage = null;
@@ -1629,10 +1697,7 @@ $("#selectAllPage").onclick = selectAllCurrentPage;
 $("#clearPageSelection").onclick = clearAllCurrentPage;
 $("#clearSelection").onclick = () => {
   if (basketSelectionLocked || searchPending) return;
-  viewGeneration += 1;
-  abortDetailRefreshes();
-  if (detailController) detailController.abort();
-  detailController = null;
+  invalidateDetailView();
   clearAllSelection();
   clearDetail();
   render();
@@ -1655,44 +1720,34 @@ $("#batchDownload").onclick = async () => {
   }
   const button = $("#batchDownload");
   const taskOptions = readDownloadOptions();
-  const task = prepareBatchTask(plannedChunks, taskOptions);
-  const chunks = task.remainingChunks;
+  const task = prepareDownloadTask(plannedChunks, taskOptions, resumableBatchTask);
   setDownloadButtonState(button, "准备保存…", true);
   setBasketSelectionLocked(true);
   announceToast("本次任务已锁定当前勾选；完成前不能修改采集篮。");
   showTaskDock("批量下载", "任务已锁定，正在准备保存…", 0);
-  let activeChunkIndex = 0;
   try {
-    for (let index = 0; index < chunks.length; index += 1) {
-      activeChunkIndex = index;
-      const chunk = chunks[index];
+    await executeDownloadTask(task, (chunk) => ({
+      endpoint: "/api/pixiv/batch-download",
+      body: { groups: chunk.groups, ...taskOptions, context: chunk.context },
+      timeout: 300000,
+    }), () => {
       setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
       showTaskDock("批量下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${task.savedCount} 张`, 0);
-      const data = await fetchJson("/api/pixiv/batch-download", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          groups: chunk.groups,
-          ...taskOptions,
-          context: chunk.context,
-        }),
-      }, 300000);
-      task.savedCount += data.pages ?? chunk.pageCount;
-      task.completedBatches += 1;
-      task.remainingChunks = chunks.slice(index + 1);
-    }
+    });
     resumableBatchTask = null;
-    announceToast(`已保存 ${task.savedCount} 张图片，共 ${task.totalBatches} 批`);
+    announceToast(`已保存 ${task.savedCount} 张图片，共 ${task.totalBatches} 批${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}`);
     showTaskDock("批量下载完成", `已保存 ${task.savedCount} 张图片，共 ${task.totalBatches} 批`);
   } catch (error) {
-    task.remainingChunks = chunks.slice(activeChunkIndex);
-    resumableBatchTask = task;
+    resumableBatchTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
     const prefix = task.savedCount ? `已保存 ${task.savedCount} 张；后续` : "批量下载";
-    announceToast(`${prefix}失败：${error.message}。再次点击只继续剩余 ${task.remainingChunks.length} 批。`);
-    showTaskDock("批量下载中断", `${prefix}失败：${error.message}；重试只继续剩余 ${task.remainingChunks.length} 批`, 8000);
+    const retryHint = resumableBatchTask
+      ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
+      : "账户状态已变更，请重新确认后发起下载。";
+    announceToast(`${prefix}失败：${error.message}。${retryHint}`);
+    showTaskDock("批量下载中断", `${prefix}失败：${error.message}；${retryHint}`, 8000);
   } finally {
-    setBasketSelectionLocked(false);
     setDownloadButtonState(button, "下载已勾选图片", false);
+    setBasketSelectionLocked(false);
   }
 };
 
@@ -1750,6 +1805,7 @@ $("#browseFolder").onclick = async () => {
         body: JSON.stringify({ initial: $("#saveRoot").value }),
       }, 300000);
     }
+    if (data.error) throw new Error(data.error);
     if (data.selected) {
       $("#saveRoot").value = data.selected;
       announceToast(`保存位置：${data.selected}`);
@@ -1765,30 +1821,43 @@ $("#browseFolder").onclick = async () => {
 };
 
 $("#download").onclick = async () => {
-  const item = selectedArtworks.get(activeArtworkId) || items.find((row) => row.id === activeArtworkId);
+  const item = currentDetailItem && String(currentDetailItem.id) === String(activeArtworkId)
+    ? currentDetailItem
+    : selectedArtworks.get(activeArtworkId) || items.find((row) => row.id === activeArtworkId);
   if (!item || basketSelectionLocked || searchPending || singleDownloadPending) return;
   if (!currentDownloadPages(item).length) {
     announceToast("请至少勾选一张图片");
     return;
   }
   const sourceIndex = Math.max(0, items.findIndex((row) => row.id === item.id));
+  const request = downloadPayload(item, sourceIndex);
+  const chunks = item.source === "pixiv"
+    ? planDownloadChunks([{ id: item.id, pages: request.body.pages }])
+    : [{ pageCount: item.pages }];
+  const task = prepareDownloadTask(chunks, { endpoint: request.endpoint, body: request.body }, resumableSingleTask);
   const button = $("#download");
   singleDownloadPending = true;
   setDownloadButtonState(button, "正在保存…", true);
   showTaskDock("正在保存", "正在保存当前作品…", 0);
   syncSearchScopedControls();
   try {
-    const request = downloadPayload(item, sourceIndex);
-    const data = await fetchJson(request.endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request.body),
-    }, request.timeout);
-    const summary = `已保存 ${data.pages ?? data.saved.length} 页，${data.saved.length} 个文件`;
-    announceToast(`${summary}：${data.saved[0]}`);
+    await executeDownloadTask(task, (chunk) => ({
+      ...request,
+      body: item.source === "pixiv" ? { ...request.body, pages: chunk.groups[0].pages } : request.body,
+    }), () => {
+      setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
+      showTaskDock("正在保存", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${task.savedCount} 页`, 0);
+    });
+    resumableSingleTask = null;
+    const summary = `已保存 ${task.savedCount} 页，${task.fileCount} 个文件`;
+    announceToast(`${summary}：${task.firstSaved}${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}`);
     showTaskDock("保存完成", summary);
   } catch (error) {
-    announceToast(`保存失败：${error.message || "未知错误"}`);
+    resumableSingleTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
+    const retryHint = resumableSingleTask
+      ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
+      : "账户状态已变更，请重新确认后发起下载。";
+    announceToast(`已保存 ${task.savedCount} 页；保存失败：${error.message || "未知错误"}。${retryHint}`);
     showTaskDock("保存失败", error.message || "未知错误", 8000);
   } finally {
     singleDownloadPending = false;
@@ -1804,7 +1873,16 @@ async function syncAuthStatus() {
     if (generation !== authStatusGeneration) return;
     const logged = Boolean(data.loggedIn);
     const authorizationLost = lastKnownLoggedIn === true && !logged;
+    const accountGeneration = Number.isInteger(data.authorizationGeneration) ? data.authorizationGeneration : null;
+    const accountChanged = lastKnownAuthorizationGeneration !== null
+      && accountGeneration !== null && accountGeneration !== lastKnownAuthorizationGeneration;
+    if (accountChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged)) {
+      downloadAuthorizationRevision += 1;
+      resumableSingleTask = null;
+      resumableBatchTask = null;
+    }
     lastKnownLoggedIn = logged;
+    lastKnownAuthorizationGeneration = accountGeneration;
     $("#mode").textContent = logged ? "PIXIV AUTHORIZED" : "PIXIV PUBLIC";
     $("#loginBtn").textContent = logged ? "Pixiv 已连接" : "登录 Pixiv";
     $("#authStateTitle").textContent = logged ? "当前：已连接" : "当前：未连接";
@@ -1812,6 +1890,7 @@ async function syncAuthStatus() {
     $("#authAction").textContent = logged ? "退出 Pixiv 账户" : "打开应用内登录窗口";
     $("#safety").querySelectorAll('option[value="r18"],option[value="all"]').forEach((option) => { option.disabled = !logged; });
     if (authorizationLost) handleAuthorizationLoss();
+    else if (accountChanged) handleAuthorizationLoss("Pixiv 账户状态已变更");
   } catch (error) {
     if (generation !== authStatusGeneration) return;
     $("#mode").textContent = "PIXIV OFFLINE";

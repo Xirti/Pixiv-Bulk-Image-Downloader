@@ -38,6 +38,7 @@ from auth_store import (
     validate_session_value,
 )
 from folder_picker import select_folder
+from download_requests import DownloadRequestError, DownloadRequests
 from network_config import normalize_loopback_proxy
 from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
 from search_service import SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
@@ -46,7 +47,7 @@ from version import __version__
 CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
-    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "version.py",
+    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "version.py",
     "web/index.html", "web/app.js", "web/ugoira-preview.js", "web/style.css",
     "web/brand-stage.js", "web/brand-logos/openai.svg", "web/brand-logos/claude-color.svg",
     "web/brand-logos/grok.svg", "web/brand-logos/deepseek-color.svg",
@@ -137,6 +138,7 @@ FOLDER_PICKER_LOCK = threading.Lock()
 # server may create many request threads, but only a small bounded number may
 # consume Pixiv bandwidth and local staging/publish resources at once.
 DOWNLOAD_TASK_SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_DOWNLOAD_TASKS)
+DOWNLOAD_REQUESTS = DownloadRequests()
 # Search requests run through a small process-wide pool. A cancelled HTTP
 # handler can stop waiting immediately even if urllib is still establishing a
 # connection, while the worker cap prevents abandoned connects from piling up.
@@ -535,10 +537,14 @@ def validated_authorization(force: bool = False) -> tuple[bool, int | None]:
 
 
 def auth_status_snapshot() -> dict:
-    session_present, _epoch = validated_authorization()
-    if not session_present:
-        return {"loggedIn": False, "sessionPresent": False, "authState": "unauthenticated"}
-    return {"loggedIn": True, "sessionPresent": True, "authState": "authorized"}
+    with SEARCH_SESSION_LOCKS_GUARD:
+        session_present, _epoch = validated_authorization()
+        return {
+            "loggedIn": session_present,
+            "sessionPresent": session_present,
+            "authState": "authorized" if session_present else "unauthenticated",
+            "authorizationGeneration": AUTHORIZATION_GENERATION,
+        }
 
 
 def history_lock_for(*parts) -> threading.Lock:
@@ -1138,7 +1144,9 @@ def extend_history(
 
         def budget_available() -> bool:
             raise_if_search_cancelled(cancel_event)
-            return budget["requests"] < max_requests and time.monotonic() - budget["started"] < max_seconds
+            request_limit = min(max_requests, budget.get("requestLimit", max_requests))
+            deadline = min(budget["started"] + max_seconds, budget.get("deadline", float("inf")))
+            return budget["requests"] < request_limit and time.monotonic() < deadline
 
         def consume_request() -> None:
             budget["requests"] += 1
@@ -1339,6 +1347,24 @@ def load_search_source(
         "truncatedDates": list(state.get("truncatedDates") or []),
     }
     return result
+
+
+@contextmanager
+def _allocated_search_source_budget(budget: dict, remaining_sources: int):
+    """Reserve a fair share while retaining the shared request/time totals."""
+    now = time.monotonic()
+    count = max(1, remaining_sources)
+    remaining_requests = max(0, MAX_HISTORY_REQUESTS - budget["requests"])
+    remaining_seconds = max(0.0, budget["started"] + MAX_HISTORY_SECONDS - now)
+    budget["requestLimit"] = min(
+        MAX_HISTORY_REQUESTS, budget["requests"] + max(1, remaining_requests // count),
+    )
+    budget["deadline"] = now + remaining_seconds / count
+    try:
+        yield
+    finally:
+        budget.pop("requestLimit", None)
+        budget.pop("deadline", None)
 
 
 def _search_sort_key(item: dict) -> tuple[str, int]:
@@ -1773,23 +1799,32 @@ def search_pixiv_results(
             round_truncated_dates: set[str] = set()
             any_more = False
             any_rows = False
-            for tag, mode in sources:
+            cursor = int(session.get("sourceCursor", 0)) % len(sources)
+            ordered_sources = list(enumerate(sources))
+            ordered_sources = ordered_sources[cursor:] + ordered_sources[:cursor]
+            pending_sources = [
+                entry for entry in ordered_sources if not session["sourceDone"].get(entry[1])
+            ]
+            next_source_cursor = cursor
+            for index, (source_index, (tag, mode)) in enumerate(pending_sources):
                 raise_if_search_cancelled(cancel_event)
                 source_key = (tag, mode)
-                if session["sourceDone"].get(source_key):
-                    continue
                 with SEARCH_SESSION_LOCKS_GUARD:
                     absolute_offset = int(SEARCH_SOURCE_OFFSETS.get((session_key, tag, mode), 0))
-                if cancel_event is None:
-                    source = load_search_source(
-                        session_key, tag, mode, absolute_offset + per_source,
-                        mode == "r18", budget,
-                    )
-                else:
-                    source = load_search_source(
-                        session_key, tag, mode, absolute_offset + per_source,
-                        mode == "r18", budget, cancel_event=cancel_event,
-                    )
+                requests_before = budget["requests"]
+                with _allocated_search_source_budget(budget, len(pending_sources) - index):
+                    if cancel_event is None:
+                        source = load_search_source(
+                            session_key, tag, mode, absolute_offset + per_source,
+                            mode == "r18", budget,
+                        )
+                    else:
+                        source = load_search_source(
+                            session_key, tag, mode, absolute_offset + per_source,
+                            mode == "r18", budget, cancel_event=cancel_event,
+                        )
+                if budget["requests"] > requests_before:
+                    next_source_cursor = (source_index + 1) % len(sources)
                 round_budget_exhausted = round_budget_exhausted or source["budgetExhausted"]
                 round_truncated_dates.update(source["truncatedDates"])
                 source_done[source_key] = not source["hasMore"]
@@ -1819,6 +1854,7 @@ def search_pixiv_results(
                 )
                 session["truncatedDates"].update(round_truncated_dates)
                 session["sourceDone"].update(source_done)
+                session["sourceCursor"] = next_source_cursor
                 for candidate in incoming:
                     if not matches_tag_groups(candidate.get("tags") or [], tag_groups):
                         continue
@@ -3411,18 +3447,33 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/pixiv/batch-download",
             "/api/pixiv/download",
         }
-        if is_download_task and not DOWNLOAD_TASK_SLOTS.acquire(blocking=False):
-            return self.send_json({
-                "error": "下载任务繁忙，请等待当前任务完成后重试",
-                "retryable": True,
-            }, 429)
-        try:
-            if path.startswith("/api/pixiv/"):
-                ensure_network_opener_current()
-            return route[1](data)
-        finally:
-            if is_download_task:
-                DOWNLOAD_TASK_SLOTS.release()
+        if is_download_task:
+            def download_result() -> tuple[dict, int]:
+                if not DOWNLOAD_TASK_SLOTS.acquire(blocking=False):
+                    return {
+                        "error": "下载任务繁忙，请等待当前任务完成后重试",
+                        "retryable": True,
+                    }, 429
+                try:
+                    ensure_network_opener_current()
+                    return route[1](data)
+                finally:
+                    DOWNLOAD_TASK_SLOTS.release()
+
+            try:
+                authorized, epoch = validated_authorization()
+                payload, status = DOWNLOAD_REQUESTS.run(
+                    data.get("requestId"), path, data, download_result,
+                    scope=str(epoch) if authorized else "public",
+                )
+            except DownloadRequestError as exc:
+                payload, status = {"error": str(exc), "requestIdConflict": exc.status == 409}, exc.status
+            except (TypeError, ValueError) as exc:
+                payload, status = {"error": "下载请求格式无效"}, 400
+            return self.send_json(payload, status)
+        if path.startswith("/api/pixiv/"):
+            ensure_network_opener_current()
+        return route[1](data)
 
     def _post_logout(self, _data: dict):
         try:
@@ -3530,7 +3581,7 @@ class Handler(SimpleHTTPRequestHandler):
             normalized.setdefault(artwork_id, set()).update(Handler._selected_download_pages(pages))
         return normalized
 
-    def _post_pixiv_batch_download(self, data: dict):
+    def _post_pixiv_batch_download(self, data: dict) -> tuple[dict, int]:
         try:
             quality, create_folder = self._download_options(data)
             save_root = self._save_root(data)
@@ -3539,14 +3590,14 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(group_artworks, bool):
                 raise RequestInputError(400, "groupArtworks 必须是布尔值")
         except RequestInputError as exc:
-            return self.send_json({"error": str(exc)}, exc.status)
+            return {"error": str(exc)}, exc.status
         try:
             normalized = self._normalized_download_groups(data.get("groups"))
         except RequestInputError as exc:
-            return self.send_json({"error": str(exc)}, exc.status)
+            return {"error": str(exc)}, exc.status
         total_pages = sum(len(pages) for pages in normalized.values())
         if total_pages > DOWNLOAD_CHUNK_PAGES:
-            return self.send_json({"error": f"单次下载最多处理 {DOWNLOAD_CHUNK_PAGES} 张图片"}, 400)
+            return {"error": f"单次下载最多处理 {DOWNLOAD_CHUNK_PAGES} 张图片"}, 400
         chunk_groups = [{"id": artwork_id, "pages": sorted(pages)} for artwork_id, pages in normalized.items()]
         try:
             chunks = plan_download_chunks(
@@ -3555,14 +3606,14 @@ class Handler(SimpleHTTPRequestHandler):
                 max_pages=DOWNLOAD_CHUNK_PAGES,
             )
         except SearchInputError as exc:
-            return self.send_json({"error": str(exc)}, 400)
+            return {"error": str(exc)}, 400
         if len(chunks) > 1:
-            return self.send_json({
+            return {
                 "error": "请求必须按图片优先分块提交",
                 "chunks": len(chunks),
                 "maxPagesPerChunk": DOWNLOAD_CHUNK_PAGES,
                 "maxArtworksPerChunk": DOWNLOAD_CHUNK_ARTWORKS,
-            }, 400)
+            }, 400
 
         try:
             restricted_epochs: set[int] = set()
@@ -3612,12 +3663,12 @@ class Handler(SimpleHTTPRequestHandler):
                 "error": public_pixiv_error("批量下载", exc, saving=True),
             }
             response_status = 502
-        return self.send_json(response_payload, response_status)
+        return response_payload, response_status
 
-    def _post_pixiv_download(self, data: dict):
+    def _post_pixiv_download(self, data: dict) -> tuple[dict, int]:
         artwork_id = str(data.get("id") or "")
         if not artwork_id.isdigit():
-            return self.send_json({"error": "作品 ID 无效"}, 400)
+            return {"error": "作品 ID 无效"}, 400
         try:
             quality, create_folder = self._download_options(data)
             save_root = self._save_root(data)
@@ -3627,7 +3678,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(group_artworks, bool):
                 raise RequestInputError(400, "groupArtworks 必须是布尔值")
         except RequestInputError as exc:
-            return self.send_json({"error": str(exc)}, exc.status)
+            return {"error": str(exc)}, exc.status
 
         try:
             authorized, authorization_epoch = validated_authorization()
@@ -3688,7 +3739,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "error": public_pixiv_error("Pixiv 下载", exc, saving=True),
             }
             response_status = 502
-        return self.send_json(response_payload, response_status)
+        return response_payload, response_status
 
     def _post_fixture_download(self, data: dict):
         try:

@@ -109,7 +109,7 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn("requestToken", LAUNCHER)
         self.assertIn("codeGeneration", LAUNCHER)
         self.assertIn("MOKU_CODE_GENERATION", LAUNCHER)
-        self.assertIn("Get-FileHash", LAUNCHER)
+        self.assertIn("server.compute_code_generation", LAUNCHER)
         self.assertNotIn("protocolVersion -eq 1", LAUNCHER)
 
     def test_browser_mode_never_attempts_pixiv_login(self):

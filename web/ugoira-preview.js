@@ -165,6 +165,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError }) {
         const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
         const width = bitmap.width * scale;
         const height = bitmap.height * scale;
+        context.clearRect(0, 0, canvas.width, canvas.height);
         context.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
         player.timer = setTimeout(() => { index = (index + 1) % frames.length; draw(); }, delay);
       };
