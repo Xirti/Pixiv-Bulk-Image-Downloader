@@ -117,7 +117,9 @@ def main() -> int:
     parser.add_argument("--mark-of-web", action="store_true")
     args = parser.parse_args()
     exe = args.exe.resolve(strict=True)
-    with tempfile.TemporaryDirectory(prefix="moku-startup-probe-") as temporary:
+    # WebView child processes can briefly retain metrics files after shutdown;
+    # a fixture-cleanup lock must not override the actual startup verdict.
+    with tempfile.TemporaryDirectory(prefix="moku-startup-probe-", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary).resolve()
         if root.parent != Path(tempfile.gettempdir()).resolve() or not root.name.startswith("moku-startup-probe-"):
             raise ValueError("Unexpected probe directory")

@@ -305,6 +305,14 @@ test("decoded memory budget rejects oversized previews and frees their frames", 
   assert.equal(state.host.attached, 0, "a partially loaded oversized preview was left visible");
 });
 
+test("a preview network timeout also cancels the backend request", async () => {
+  const state = setup({ fetchBytes: async () => { throw new Error("network timeout"); } });
+  await state.preview.start(state.host, "1");
+  assert.deepEqual(state.errors, ["network timeout"]);
+  assert.equal(state.cancelled.length, 1, "timed-out preview left its upstream operation running");
+  assert.equal(state.host.attached, 0);
+});
+
 test("deflated frames are decompressed before decoding", async () => {
   const state = setup({ fetchBytes: async () => archive(["0.jpg", "1.jpg"], true) });
   try {

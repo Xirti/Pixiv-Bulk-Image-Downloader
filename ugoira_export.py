@@ -80,6 +80,8 @@ def _gif(raw, frames) -> bytes:
     try:
         with closing(_decoded_frames(raw, frames)) as decoded:
             for image, delay in decoded:
+                if delay < 10:
+                    raise PixivPolicyError("GIF 无法准确保存小于 10ms 的帧时长，请选择 MP4 或原始帧 ZIP")
                 if time.monotonic() >= deadline:
                     raise PixivPolicyError("GIF 转换超出处理预算，请选择标准清晰度或原始帧 ZIP")
                 frame_pixels = image.width * image.height
@@ -174,6 +176,7 @@ def _mp4(raw, frames, encoder) -> bytes:
                  "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white,format=yuv420p",
                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-threads", "2",
                  "-fps_mode", "vfr", "-enc_time_base", "1:1000", "-video_track_timescale", "1000",
+                 "-fs", str(MAX_ARCHIVE_BYTES + 1),
                  "-movflags", "+faststart", "-f", "mp4", "animation.mp4"],
                 cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, timeout=max(.1, deadline - time.monotonic()),

@@ -1644,7 +1644,7 @@ function updateFormatHint() {
   $("#qualityText").textContent = quality;
   $("#formatText").textContent = format;
   const animation = $("#format").value === "gif"
-    ? "动图转为 GIF；色彩会量化，帧时长按 10ms 精度保存，保留透明背景。"
+    ? "动图转为 GIF；色彩会量化，帧时长按 10ms 精度保存，保留透明背景。单帧小于 10ms 时请选 MP4 或原始帧 ZIP。"
     : $("#format").value === "mp4"
       ? "动图转为 H.264 MP4；需本机 FFmpeg，透明区域以白底合成。"
       : "动图保存官方帧 ZIP 和帧延迟 JSON。";

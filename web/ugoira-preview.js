@@ -232,7 +232,6 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
       await load(id, player.controller.signal, showFrames, requestId);
       player.loading = false;
     } catch (error) {
-      player.loading = false;
       if (active === player) {
         stop();
         host.dataset.ugoiraState = "error";

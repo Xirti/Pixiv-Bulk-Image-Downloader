@@ -1692,6 +1692,89 @@ class UgoiraDownloadTests(unittest.TestCase):
             self.assertTrue(json.loads(raw)["cancelled"])
             self.assertTrue(stopped.wait(2), "the discarded preview continued its upstream ZIP request")
 
+    def test_cancel_cold_preview_also_stops_the_initial_artwork_detail_request(self):
+        server.PIXIV_CACHE[self.UGOIRA_ID].pop("pageImages")
+        started, stopped, finish = threading.Event(), threading.Event(), threading.Event()
+
+        def fetch_detail(_url, *, cancel_event=None, **_kwargs):
+            started.set()
+            if cancel_event is not None:
+                if cancel_event.wait(3):
+                    stopped.set()
+            else:
+                finish.wait(3)
+            raise server.SearchCancelledError("cancelled external artwork request")
+
+        origin = f"http://127.0.0.1:{self.httpd.server_port}"
+        request = urllib.request.Request(
+            origin + "/api/pixiv/ugoira/cancel",
+            data=b'{"requestId":"ugoira-cold-cancel"}',
+            headers={"Content-Type": "application/json", "Origin": origin,
+                     "X-MOKU-Request-Token": server.REQUEST_TOKEN}, method="POST",
+        )
+        with patch.object(server, "pixiv_json", side_effect=fetch_detail), \
+             ThreadPoolExecutor(max_workers=1) as workers:
+            pending = workers.submit(self._http_get_ugoira, "?requestId=ugoira-cold-cancel")
+            try:
+                self.assertTrue(started.wait(2))
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    self.assertTrue(json.loads(response.read())["cancelled"])
+                self.assertTrue(stopped.wait(2), "cold-hover artwork request never received cancellation")
+                self.assertEqual(pending.result(timeout=2)[0], 499)
+            finally:
+                finish.set()
+
+    def test_gif_rejects_sub_ten_ms_frames_instead_of_slowing_the_animation(self):
+        from PIL import Image
+
+        archive = io.BytesIO()
+        image = io.BytesIO()
+        with Image.new("RGB", (16, 16), "red") as frame:
+            frame.save(image, format="PNG")
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as frames:
+            for index in range(2):
+                frames.writestr(f"{index:06d}.jpg", image.getvalue())
+        self.zip_bytes = archive.getvalue()
+        original = self._ugoira_meta
+
+        def fetch_meta(url, **kwargs):
+            meta = original(url, **kwargs)
+            for frame in meta["body"]["frames"]:
+                frame["delay"] = 1
+            return meta
+
+        self._ugoira_meta = fetch_meta
+        with tempfile.TemporaryDirectory(prefix="moku-gif-short-delay-") as raw_root:
+            root = Path(raw_root)
+            status, body = self._post_single(root, "regular", "gif")
+            self.assertEqual(status, 502, body)
+            self.assertIn("10ms", body["error"])
+            self.assertEqual(list(root.iterdir()), [])
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "local FFmpeg is required")
+    def test_mp4_limits_encoder_output_and_rejects_oversize_instead_of_publishing_a_clip(self):
+        from PIL import Image
+        import ugoira_export
+
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as frames:
+            for index, color in enumerate(("red", "blue")):
+                image = io.BytesIO()
+                with Image.new("RGB", (16, 16), color) as frame:
+                    frame.save(image, format="PNG")
+                frames.writestr(f"{index:06d}.jpg", image.getvalue())
+        self.zip_bytes = archive.getvalue()
+        with tempfile.TemporaryDirectory(prefix="moku-mp4-output-limit-") as raw_root, \
+             patch.object(ugoira_export, "MAX_ARCHIVE_BYTES", 1024), \
+             patch.object(ugoira_export.subprocess, "run", wraps=subprocess.run) as encode:
+            root = Path(raw_root)
+            status, body = self._post_single(root, "regular", "mp4")
+            self.assertEqual(status, 502, body)
+            self.assertIn("转换文件超过", body["error"])
+            self.assertEqual(list(root.iterdir()), [])
+            command = encode.call_args.args[0]
+            self.assertEqual(command[command.index("-fs") + 1], "1025")
+
     def test_ugoira_preview_streams_frame_meta_and_zip(self):
         status, headers, raw = self._get_ugoira("")
         self.assertEqual(status, 200)

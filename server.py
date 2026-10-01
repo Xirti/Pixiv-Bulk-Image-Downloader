@@ -3420,6 +3420,7 @@ class Handler(SimpleHTTPRequestHandler):
                 artwork_id,
                 allow_r18=authorized,
                 authorization_epoch=authorization_epoch,
+                cancel_event=cancel_event,
             )
             if item.get("workType") != "ugoira":
                 raise PixivPolicyError("该作品不是动图")
