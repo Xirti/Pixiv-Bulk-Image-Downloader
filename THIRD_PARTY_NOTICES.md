@@ -12,6 +12,7 @@ Primary runtime components:
 | clr-loader | 0.3.1 | MIT | https://github.com/pythonnet/clr-loader |
 | packaging | 26.2 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | pefile | 2024.8.26 | MIT | https://github.com/erocarrera/pefile |
+| Pillow | 12.3.0 | HPND | https://python-pillow.github.io/ |
 | proxy-tools | 0.1.0 | Upstream BSD terms; PyPI metadata says MIT | https://github.com/jtushman/proxy_tools |
 | pycparser | 3.0 | BSD-3-Clause | https://github.com/eliben/pycparser |
 | PyInstaller | 6.21.0 | GPL-2.0-or-later with bootloader exception | https://github.com/pyinstaller/pyinstaller |
@@ -31,3 +32,5 @@ The generated license bundle intentionally covers every distribution in the exac
 Pixiv and artwork displayed or downloaded through MOKU are not third-party software dependencies. Artwork remains the property of its respective creators.
 
 MOKU Lite does not distribute the decorative model brand SVGs from earlier releases.
+
+Optional MP4 export invokes an FFmpeg executable already registered in the user's local PATH. FFmpeg is not included in MOKU's distribution, and MOKU does not install or download it. Its license depends on the user's chosen FFmpeg build.

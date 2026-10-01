@@ -14,6 +14,7 @@ DISTRIBUTIONS = (
     "iniconfig",
     "packaging",
     "pefile",
+    "Pillow",
     "pluggy",
     "proxy-tools",
     "Pygments",

@@ -228,10 +228,14 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
     work_type = {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType") or 0), "illustration")
     if work_type == "ugoira":
         qualities = [
-            {"id": "original", "label": "动图原始帧 ZIP", "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0)},
-            {"id": "regular", "label": "动图标准帧 ZIP（600px）", "width": 0, "height": 0},
+            {"id": "original", "label": "动图原始清晰度", "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0)},
+            {"id": "regular", "label": "动图标准清晰度（600px）", "width": 0, "height": 0},
         ]
-        formats = [{"id": "source", "label": "ZIP 帧包 + 帧延迟 JSON"}]
+        formats = [
+            {"id": "source", "label": "ZIP 帧包 + 帧延迟 JSON"},
+            {"id": "gif", "label": "GIF 动图"},
+            {"id": "mp4", "label": "MP4 视频（需本机 FFmpeg）"},
+        ]
     else:
         qualities = [
             {"id": "original", "label": "Pixiv 原图", "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0)},

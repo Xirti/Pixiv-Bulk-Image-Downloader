@@ -1,7 +1,7 @@
 "use strict";
 
 // Owns every request, decoded frame and playback timer for hover previews.
-globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hoverDelay = 0 }) {
+globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, cancelRequest = () => {}, hoverDelay = 0 }) {
   const cache = new Map();
   const maxBytes = 96 * 1024 * 1024;
   let cachedBytes = 0;
@@ -100,23 +100,24 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
     release(entry);
   }
 
-  async function load(id, signal, showFrames) {
+  async function load(id, signal, showFrames, requestId) {
     if (cache.has(id)) {
       const entry = cache.get(id);
       cache.delete(id);
       cache.set(id, entry);
-      showFrames(entry.frames);
+      showFrames(entry);
       return entry.frames;
     }
-    const entry = { frames: [], bytes: 0 };
+    const entry = { frames: [], bytes: 0, complete: false };
     try {
       signal.throwIfAborted();
-      const meta = await fetchJson(`/api/pixiv/ugoira/${id}`, { signal });
+      const query = `requestId=${encodeURIComponent(requestId)}`;
+      const meta = await fetchJson(`/api/pixiv/ugoira/${id}?${query}`, { signal });
       signal.throwIfAborted();
       if (!Array.isArray(meta.frames) || !meta.frames.length || meta.frames.length > 1500) {
         throw new Error("动图帧数超出预览范围，仍可下载原始 ZIP");
       }
-      const buffer = await fetchBytes(`/api/pixiv/ugoira/${id}?mode=zip`, { signal });
+      const buffer = await fetchBytes(`/api/pixiv/ugoira/${id}?mode=zip&${query}`, { signal });
       signal.throwIfAborted();
       const entries = parseZipEntries(buffer);
       const width = Number(meta.width);
@@ -143,9 +144,11 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
         entry.bytes += bitmap.width * bitmap.height * 4;
         if (entry.bytes > maxBytes) throw new Error("动图超过预览内存上限，仍可下载原始 ZIP");
         while (cache.size && cachedBytes + entry.bytes > maxBytes) evictOldest();
-        if (entry.frames.length === 1) showFrames(entry.frames);
+        showFrames(entry);
       }
       signal.throwIfAborted();
+      entry.complete = true;
+      showFrames(entry);
       while (cache.size >= 6) evictOldest();
       cache.set(id, entry);
       cachedBytes += entry.bytes;
@@ -162,6 +165,9 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
     const player = active;
     active = null;
     player.controller.abort();
+    if (player.loading) {
+      Promise.resolve().then(() => cancelRequest(player.requestId)).catch(() => {});
+    }
     clearTimeout(player.timer);
     player.canvas?.remove();
     delete player.host.dataset.ugoiraState;
@@ -169,10 +175,11 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
 
   async function start(host, id) {
     stop();
-    const player = { host, controller: new AbortController(), canvas: null, timer: null };
+    const requestId = `ugoira_${globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
+    const player = { host, requestId, loading: false, controller: new AbortController(), canvas: null, timer: null };
     active = player;
     try {
-      if (hoverDelay > 0) {
+      if (hoverDelay > 0 && !cache.has(id)) {
         await new Promise((resolve) => {
           const finish = () => {
             clearTimeout(player.timer);
@@ -185,9 +192,14 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
         if (active !== player) return;
       }
       host.dataset.ugoiraState = "loading";
-      const showFrames = (frames) => {
+      player.loading = !cache.has(id);
+      const showFrames = (entry) => {
         if (active !== player) return;
         if (host.isConnected === false) { stop(); return; }
+        if (player.canvas) {
+          if (player.waiting) { player.waiting = false; player.draw(); }
+          return;
+        }
         const canvas = document.createElement("canvas");
         canvas.className = "ugoira-preview";
         player.canvas = canvas;
@@ -202,18 +214,25 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
         const draw = () => {
           if (active !== player) return;
           if (host.isConnected === false) { stop(); return; }
-          const { bitmap, delay } = frames[index];
+          if (index >= entry.frames.length) {
+            if (entry.complete) index = 0;
+            else { player.waiting = true; return; }
+          }
+          const { bitmap, delay } = entry.frames[index];
           const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
           const width = bitmap.width * scale;
           const height = bitmap.height * scale;
           context.clearRect(0, 0, canvas.width, canvas.height);
           context.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-          player.timer = setTimeout(() => { index = (index + 1) % frames.length; draw(); }, delay);
+          player.timer = setTimeout(() => { index += 1; draw(); }, delay);
         };
+        player.draw = draw;
         draw();
       };
-      await load(id, player.controller.signal, showFrames);
+      await load(id, player.controller.signal, showFrames, requestId);
+      player.loading = false;
     } catch (error) {
+      player.loading = false;
       if (active === player) {
         stop();
         host.dataset.ugoiraState = "error";

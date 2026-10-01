@@ -57,7 +57,7 @@ class PixivAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             safe_download_name("../bad", 0, "jpg")
 
-    def test_ugoira_detail_tolerates_missing_original_and_uses_zip_labels(self):
+    def test_ugoira_detail_tolerates_missing_original_and_exposes_optional_exports(self):
         raw = {
             "illustId": "990101", "title": "动图", "userName": "作者",
             "userId": "7", "tags": {"tags": [{"tag": "うごイラ"}]},
@@ -81,8 +81,9 @@ class PixivAdapterTests(unittest.TestCase):
         self.assertTrue(item["pageImages"][0]["regular"].startswith("/api/pixiv/image?"))
         self.assertTrue(item["thumb"].startswith("/api/pixiv/image?"))
         self.assertEqual(item["qualities"][0]["id"], "original")
-        self.assertIn("ZIP", item["qualities"][0]["label"])
+        self.assertIn("清晰度", item["qualities"][0]["label"])
         self.assertIn("ZIP", item["formats"][0]["label"])
+        self.assertEqual([format["id"] for format in item["formats"]], ["source", "gif", "mp4"])
 
     def test_ugoira_meta_url_stays_on_the_approved_ajax_host(self):
         self.assertEqual(

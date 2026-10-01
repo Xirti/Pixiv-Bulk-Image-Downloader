@@ -39,6 +39,8 @@ from auth_store import (
 )
 from folder_picker import select_folder
 from download_requests import DownloadRequestError, DownloadRequests
+from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
+from ugoira_export import export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
 from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status
 from search_service import SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
@@ -47,7 +49,7 @@ from version import __version__
 CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
-    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "version.py",
+    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "preview_resources.py", "ugoira_export.py", "version.py",
     "web/index.html", "web/app.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
 )
 
@@ -253,6 +255,7 @@ SEARCH_REQUESTS: OrderedDict[str, dict] = OrderedDict()
 SEARCH_REQUESTS_LOCK = threading.Lock()
 AUTHORIZATION_GENERATION = 0
 AUTHORIZATION_ACTIVE = False
+UGOIRA_RESOURCES = PreviewResources()
 
 
 class AuthorizationRevokedError(PixivPolicyError):
@@ -470,6 +473,7 @@ def clear_authorized_state(*, force: bool = True) -> bool:
             return False
         AUTHORIZATION_ACTIVE = False
         AUTHORIZATION_GENERATION += 1
+        UGOIRA_RESOURCES.clear()
         restricted_sessions = [
             session_key for session_key in SEARCH_SESSIONS
             if search_session_scope(session_key) in {"r18", "all"}
@@ -2033,9 +2037,32 @@ def pixiv_ugoira_meta(
     artwork_id: str,
     *,
     authorization_epoch: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
     """Fetch the ugoira animation manifest (frame zip URLs and delays)."""
-    body = pixiv_json(build_ugoira_meta_url(artwork_id)).get("body") or {}
+    if authorization_epoch is not None:
+        assert_authorization_generation(authorization_epoch)
+    try:
+        meta = UGOIRA_RESOURCES.get(
+            ("meta", artwork_id, authorization_epoch),
+            lambda event: _fetch_ugoira_meta(artwork_id, authorization_epoch, event),
+            ttl=60, cancel_event=cancel_event,
+        )
+    except (PreviewCancelledError, SearchCancelledError) as exc:
+        if authorization_epoch is not None:
+            assert_authorization_generation(authorization_epoch)
+        if cancel_event is not None:
+            raise
+        raise PixivPolicyError("动图信息读取已取消，请重试") from exc
+    except PreviewBusyError as exc:
+        raise PixivPolicyError("动图资源繁忙，请稍后再试") from exc
+    if authorization_epoch is not None:
+        assert_authorization_generation(authorization_epoch)
+    return meta
+
+
+def _fetch_ugoira_meta(artwork_id, authorization_epoch, cancel_event) -> dict:
+    body = pixiv_json(build_ugoira_meta_url(artwork_id), cancel_event=cancel_event).get("body") or {}
     if not isinstance(body, dict):
         raise PixivPolicyError("Pixiv 动图数据格式异常")
     original_src = str(body.get("originalSrc") or "")
@@ -2162,8 +2189,10 @@ def owned_staging_batch():
 
 def stage_ugoira_zip(
     item: dict, quality: str, folder: Path, staging_root: Path,
-    *, authorization_epoch: int | None = None,
+    *, authorization_epoch: int | None = None, ugoira_format: str = "source",
 ) -> list[PublishedFileOwnership]:
+    if ugoira_format == "mp4":
+        require_mp4_encoder()
     artwork_id = str(item.get("id") or "")
     meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch)
     zip_url = str(meta["originalSrc"] if quality == "original" else meta["src"])
@@ -2175,6 +2204,13 @@ def stage_ugoira_zip(
     if not raw.startswith(UGOIRA_ZIP_MAGIC):
         raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
     stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
+    if ugoira_format != "source":
+        converted = export_ugoira(raw, meta["frames"], ugoira_format)
+        if item.get("restriction") == "r18" and authorization_epoch is not None:
+            assert_authorization_generation(authorization_epoch)
+        with owned_staging_batch() as staged:
+            staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.{ugoira_format}", converted))
+            return staged
     manifest = json.dumps(
         {"mime": meta["mime"], "frames": meta["frames"], "source": zip_url},
         ensure_ascii=False, indent=2,
@@ -2189,6 +2225,7 @@ def stage_artwork_pages(
     item: dict, selected_pages: list[int], quality: str, save_root: Path,
     create_folder: bool, staging_root: Path, *, download_context: dict | None = None,
     group_artwork: bool = False, authorization_epoch: int | None = None,
+    ugoira_format: str = "source",
 ) -> list[PublishedFileOwnership]:
     artwork_id = str(item.get("id") or "")
     page_images = item.get("pageImages")
@@ -2205,6 +2242,7 @@ def stage_artwork_pages(
         return stage_ugoira_zip(
             item, quality, folder, staging_root,
             authorization_epoch=authorization_epoch,
+            ugoira_format=ugoira_format,
         )
     stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
     with owned_staging_batch() as staged:
@@ -3219,6 +3257,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "instanceId": INSTANCE_ID,
                 "protocolVersion": PROTOCOL_VERSION,
                 "version": __version__,
+                "animationFormats": export_formats(),
             }
             if health_request_may_disclose_token(self):
                 payload["requestToken"] = REQUEST_TOKEN
@@ -3367,7 +3406,15 @@ class Handler(SimpleHTTPRequestHandler):
         mode = urllib.parse.parse_qs(request.query).get("mode", ["meta"])[0]
         if mode not in {"meta", "zip"}:
             return self.send_json({"error": "mode 无效"}, 400)
+        request_id = ""
+        cancel_event = None
         try:
+            request_id = parse_search_request_id(
+                urllib.parse.parse_qs(request.query).get("requestId", [""])[0],
+            )
+            if request_id:
+                cancel_event = register_search_request(request_id)
+            raise_if_search_cancelled(cancel_event)
             authorized, authorization_epoch = validated_authorization()
             item = pixiv_item_for_download(
                 artwork_id,
@@ -3382,13 +3429,24 @@ class Handler(SimpleHTTPRequestHandler):
             meta = pixiv_ugoira_meta(
                 artwork_id,
                 authorization_epoch=authorization_epoch if restricted else None,
+                cancel_event=cancel_event,
             )
             if mode == "meta":
                 return self.send_json({
                     "frames": meta["frames"], "mime": meta["mime"],
                     "width": item.get("width"), "height": item.get("height"),
                 })
-            raw, _content_type = pixiv_request(str(meta["src"]), image_only=True)
+            def fetch_zip(event):
+                raw, _content_type = pixiv_request(str(meta["src"]), image_only=True, cancel_event=event)
+                if not raw.startswith(UGOIRA_ZIP_MAGIC):
+                    raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
+                return raw
+
+            raw = UGOIRA_RESOURCES.get(
+                ("zip", artwork_id, authorization_epoch if restricted else None),
+                fetch_zip, ttl=15, cancel_event=cancel_event,
+            )
+            raise_if_search_cancelled(cancel_event)
             # Mirror the download path: revoked authorization mid-flight must
             # not publish restricted bytes.
             if restricted and authorization_epoch is not None:
@@ -3396,10 +3454,21 @@ class Handler(SimpleHTTPRequestHandler):
             if not raw.startswith(UGOIRA_ZIP_MAGIC):
                 raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
             return self.send_bytes(raw, "application/zip", "private, no-store")
+        except SearchInputError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except SearchRequestConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
+        except (SearchRequestLimitError, PreviewBusyError) as exc:
+            return self.send_json({"error": "动图预览繁忙，请稍后再试"}, 429)
+        except (SearchCancelledError, PreviewCancelledError):
+            return self.send_json({"cancelled": True}, 499)
         except AuthorizationRevokedError as exc:
             return self.send_json({"error": str(exc)}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json({"error": public_pixiv_error("动图预览", exc)}, 502)
+        finally:
+            if request_id and cancel_event is not None:
+                release_search_request(request_id, cancel_event)
 
     def _get_pixiv_image(self, request):
         token = urllib.parse.parse_qs(request.query).get("token", [""])[0]
@@ -3458,6 +3527,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/desktop/auth/logout": (4096, self._post_desktop_logout),
             "/api/system/select-folder": (4096, self._post_select_folder),
             "/api/pixiv/search/cancel": (4096, self._post_cancel_search),
+            "/api/pixiv/ugoira/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
             "/api/pixiv/download": (16384, self._post_pixiv_download),
         }
@@ -3572,6 +3642,13 @@ class Handler(SimpleHTTPRequestHandler):
         return quality, create_folder
 
     @staticmethod
+    def _ugoira_format(data: dict) -> str:
+        value = data.get("ugoiraFormat", "source")
+        if not isinstance(value, str) or value not in {"source", "gif", "mp4"}:
+            raise RequestInputError(400, "动图下载格式无效")
+        return value
+
+    @staticmethod
     def _download_context(data: dict, *, required: bool = False) -> dict | None:
         raw = data.get("context")
         if raw is None and not required:
@@ -3611,6 +3688,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _post_pixiv_batch_download(self, data: dict) -> tuple[dict, int]:
         try:
             quality, create_folder = self._download_options(data)
+            ugoira_format = self._ugoira_format(data)
             save_root = self._save_root(data)
             download_context = self._download_context(data, required=create_folder)
             group_artworks = data.get("groupArtworks", False)
@@ -3668,6 +3746,7 @@ class Handler(SimpleHTTPRequestHandler):
                         download_context=download_context,
                         group_artwork=group_artworks,
                         authorization_epoch=authorization_epoch,
+                        ugoira_format=ugoira_format,
                     ))
 
             public_saved, cleanup_pending = _stage_and_publish_download(
@@ -3698,6 +3777,7 @@ class Handler(SimpleHTTPRequestHandler):
             return {"error": "作品 ID 无效"}, 400
         try:
             quality, create_folder = self._download_options(data)
+            ugoira_format = self._ugoira_format(data)
             save_root = self._save_root(data)
             download_context = self._download_context(data, required=False)
             selected_pages = self._selected_download_pages(data["pages"]) if "pages" in data else None
@@ -3743,6 +3823,7 @@ class Handler(SimpleHTTPRequestHandler):
                     download_context=download_context,
                     group_artwork=group_artworks,
                     authorization_epoch=authorization_epoch,
+                    ugoira_format=ugoira_format,
                 ))
 
             public_saved, cleanup_pending = _stage_and_publish_download(

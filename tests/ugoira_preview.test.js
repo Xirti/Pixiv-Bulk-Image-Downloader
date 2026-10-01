@@ -45,6 +45,7 @@ function setup({ count = 2, fetchBytes, decode, hoverDelay = 0 } = {}) {
   const errors = [];
   const options = [];
   const requests = [];
+  const cancelled = [];
   const host = {
     isConnected: true, dataset: {}, clientWidth: 200, clientHeight: 300, appended: 0, attached: 0,
     appendChild() { this.appended += 1; this.attached += 1; },
@@ -67,11 +68,12 @@ function setup({ count = 2, fetchBytes, decode, hoverDelay = 0 } = {}) {
   };
   const preview = createUgoiraPreview({
     hoverDelay,
+    cancelRequest: id => cancelled.push(id),
     fetchJson: async (url) => { requests.push(url); return { width: 4096, height: 2048, frames: names.map(file => ({ file, delay: 60000 })) }; },
     fetchBytes: fetchBytes || (async () => archive(names)),
     onError: message => errors.push(message),
   });
-  return { preview, host, bitmaps, errors, options, requests, zip: archive(names) };
+  return { preview, host, bitmaps, errors, options, requests, cancelled, zip: archive(names) };
 }
 
 test("brief hover cancels the dwell without requesting or decoding an archive", async () => {
@@ -109,6 +111,30 @@ test("sustained hover starts loading only after the dwell completes", async () =
   }
 });
 
+test("a cached animation plays immediately without a second hover dwell", async () => {
+  const state = setup({count: 1, hoverDelay: 180});
+  const nativeSetTimeout = globalThis.setTimeout;
+  let finishDwell, dwells = 0;
+  globalThis.setTimeout = (callback, delay) => {
+    if (delay === 180) { dwells += 1; finishDwell = callback; }
+    return 0;
+  };
+  try {
+    const first = state.preview.start(state.host, "1");
+    finishDwell();
+    await first;
+    state.preview.stop(state.host);
+    const second = state.preview.start(state.host, "1");
+    assert.equal(state.host.attached, 1, "the cached preview waited for the hover delay");
+    assert.equal(dwells, 1);
+    await second;
+    assert.equal(state.requests.length, 1);
+  } finally {
+    state.preview.clear();
+    globalThis.setTimeout = nativeSetTimeout;
+  }
+});
+
 test("stopping cancels an in-flight archive and prevents decoding", async () => {
   let resolve, signal;
   const state = setup({ fetchBytes: (_url, options) => {
@@ -122,6 +148,26 @@ test("stopping cancels an in-flight archive and prevents decoding", async () => 
   resolve(state.zip);
   await pending;
   assert.equal(state.bitmaps.length, 0);
+  assert.deepEqual(state.errors, []);
+});
+
+test("leaving an in-flight preview also cancels its matching backend request", async () => {
+  let finish, zipUrl;
+  const state = setup({fetchBytes: url => {
+    zipUrl = url;
+    return new Promise(resolve => { finish = () => resolve(state.zip); });
+  }});
+  const pending = state.preview.start(state.host, "1");
+  for (let i = 0; i < 10 && !finish; i += 1) await Promise.resolve();
+  assert.ok(finish);
+  state.preview.stop(state.host);
+  finish();
+  await pending;
+  assert.equal(state.cancelled.length, 1, "leaving stopped only the browser, not its backend request");
+  const id = new URL(zipUrl, "http://localhost").searchParams.get("requestId");
+  assert.equal(state.cancelled[0], id);
+  assert.equal(new URL(state.requests[0], "http://localhost").searchParams.get("requestId"), id);
+  assert.match(id, /^[A-Za-z0-9_-]{16,128}$/);
   assert.deepEqual(state.errors, []);
 });
 
@@ -176,6 +222,38 @@ test("the first frame is visible while later frames are still decoding", async (
     finish();
     await pending;
   } finally { state.preview.clear(); }
+});
+
+test("playback waits for an undecoded frame instead of looping a partial animation", async () => {
+  let count = 0, finish;
+  const state = setup({count: 3, decode: bitmap => ++count < 3
+    ? bitmap() : new Promise(resolve => { finish = () => resolve(bitmap()); })});
+  const nativeSetTimeout = globalThis.setTimeout;
+  const timers = [], drawn = [];
+  globalThis.setTimeout = callback => { timers.push(callback); return 0; };
+  globalThis.document.createElement = () => ({
+    remove() { state.host.attached -= 1; },
+    getContext: () => ({clearRect() {}, drawImage(bitmap) {
+      assert.equal(bitmap.closed, 0);
+      drawn.push(state.bitmaps.indexOf(bitmap));
+    }}),
+  });
+  try {
+    const pending = state.preview.start(state.host, "1");
+    for (let i = 0; i < 30 && !finish; i += 1) await Promise.resolve();
+    assert.ok(finish);
+    timers.shift()();
+    timers.shift()();
+    assert.deepEqual(drawn, [0, 1], "an incomplete prefix was replayed as a full loop");
+    finish();
+    await pending;
+    assert.deepEqual(drawn, [0, 1, 2]);
+    timers.shift()();
+    assert.deepEqual(drawn, [0, 1, 2, 0]);
+  } finally {
+    state.preview.clear();
+    globalThis.setTimeout = nativeSetTimeout;
+  }
 });
 
 test("clearing during decode closes the late bitmap without attaching a canvas", async () => {

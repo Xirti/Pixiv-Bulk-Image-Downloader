@@ -15,6 +15,7 @@ let prefetchController = null;
 let prefetchRequestId = null;
 let detailController = null;
 let requestToken = null;
+let animationFormats = {gif: true, mp4: null};
 let requestTokenPromise = null;
 let requestTokenController = null;
 let viewGeneration = 0;
@@ -115,6 +116,7 @@ async function getRequestToken() {
         if (data.protocolVersion !== 5 || data.applicationId !== "MOKU.PixivTagGallery") throw new Error("MOKU 后端版本过旧，请关闭当前窗口并重新启动 MOKU");
         if (!data.requestToken) throw new Error("本机请求授权未初始化");
         requestToken = data.requestToken;
+        if (data.animationFormats) animationFormats = data.animationFormats;
         return requestToken;
       })
       .catch((error) => {
@@ -199,10 +201,10 @@ function nextSearchRequestId() {
   return `${Date.now().toString(36)}-${searchRequestSequence.toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-async function notifySearchCancellation(requestId) {
+async function notifySearchCancellation(requestId, endpoint = "/api/pixiv/search/cancel") {
   if (!requestId || !requestToken) return;
   try {
-    await fetch("/api/pixiv/search/cancel", {
+    await fetch(endpoint, {
       method: "POST",
       cache: "no-store",
       keepalive: true,
@@ -410,6 +412,7 @@ const ugoiraPreview = createUgoiraPreview({
   hoverDelay: 180,
   fetchJson: (url, options) => fetchJson(url, options, 30000),
   fetchBytes: (...args) => fetchBytes(...args),
+  cancelRequest: requestId => notifySearchCancellation(requestId, "/api/pixiv/ugoira/cancel"),
   onError: (message) => announceToast(message),
 });
 
@@ -919,7 +922,10 @@ async function select(index) {
 function downloadButtonLabel(item) {
   const count = currentDownloadPages(item).length;
   if (!count) return "选择图片后下载";
-  if (item?.workType === "ugoira") return "下载动图 ZIP ↓";
+  if (item?.workType === "ugoira") {
+    const format = $("#format").value;
+    return `下载动图 ${format === "gif" ? "GIF" : format === "mp4" ? "MP4" : "ZIP"} ↓`;
+  }
   return item.pages === 1 ? "下载本图 ↓" : `下载已选 ${count} 张 ↓`;
 }
 
@@ -948,8 +954,8 @@ function renderDetail(item, index, detailContext = activeSearchContext) {
   const visible = normalDetailView.render(item, page => `/api/image/${(currentPage - 1) * 12 + index}/${page}?size=preview`);
   renderCollectionPageWindow(item);
   $("#viewAll").hidden = item.pages <= visible;
-  $("#quality").innerHTML = item.qualities.map((quality) => `<option value="${quality.id}">${esc(quality.label)} · ${quality.width} × ${quality.height}</option>`).join("");
-  $("#format").innerHTML = item.formats.map((format) => `<option value="${format.id}">${esc(format.label)}</option>`).join("");
+  $("#quality").innerHTML = item.qualities.map((quality) => `<option value="${quality.id}">${esc(quality.label)}${quality.width > 0 && quality.height > 0 ? ` · ${quality.width} × ${quality.height}` : ""}</option>`).join("");
+  $("#format").innerHTML = downloadFormatOptions(item.formats);
   $("#download").textContent = downloadButtonLabel(item);
   syncSearchScopedControls();
   updateFormatHint();
@@ -1159,16 +1165,31 @@ function ensureDownloadOptionDefaults() {
   }
 }
 
-function renderBatchDownloadOptions(quality = $("#quality").value) {
+function downloadFormatOptions(formats) {
+  return formats.map(format => {
+    const unavailable = format.id === "mp4" && animationFormats.mp4 === false;
+    const label = unavailable ? "MP4 视频（未检测到 FFmpeg）" : format.label;
+    return `<option value="${format.id}" ${unavailable ? "disabled" : ""}>${esc(label)}</option>`;
+  }).join("");
+}
+
+function renderBatchDownloadOptions(quality = $("#quality").value, format = $("#format").value) {
   $("#quality").innerHTML = '<option value="regular">标准清晰度</option><option value="original">原始清晰度</option>';
   $("#quality").value = quality === "original" ? "original" : "regular";
-  $("#format").innerHTML = '<option value="source">保留源格式（动图为 ZIP + JSON）</option>';
+  $("#format").innerHTML = downloadFormatOptions([
+    {id: "source", label: "保留源格式（动图为 ZIP + JSON）"},
+    {id: "gif", label: "动图转 GIF，静态图保留源格式"},
+    {id: "mp4", label: "动图转 MP4（需本机 FFmpeg）"},
+  ]);
+  $("#format").value = ["gif", "mp4"].includes(format) && (format !== "mp4" || animationFormats.mp4 !== false)
+    ? format : "source";
   updateFormatHint();
 }
 
 function readDownloadOptions() {
   return {
     quality: $("#quality").value || "regular",
+    ugoiraFormat: ["gif", "mp4"].includes($("#format").value) ? $("#format").value : "source",
     saveRoot: $("#saveRoot").value.trim(),
     createFolder: $("#createFolder").checked,
     groupArtworks: Boolean($("#groupArtworks")?.checked),
@@ -1622,10 +1643,16 @@ function updateFormatHint() {
   const format = $("#format").selectedOptions[0]?.textContent || "";
   $("#qualityText").textContent = quality;
   $("#formatText").textContent = format;
+  const animation = $("#format").value === "gif"
+    ? "动图转为 GIF；色彩会量化，帧时长按 10ms 精度保存，保留透明背景。"
+    : $("#format").value === "mp4"
+      ? "动图转为 H.264 MP4；需本机 FFmpeg，透明区域以白底合成。"
+      : "动图保存官方帧 ZIP 和帧延迟 JSON。";
   if (document.body.classList.contains("batch-mode")) {
-    $("#formatHint").textContent = "静态图片保留源格式；动图保存官方帧 ZIP 和帧延迟 JSON。";
+    $("#formatHint").textContent = `静态图片保留源格式；${animation}`;
   } else if (currentDetailItem?.workType === "ugoira") {
-    $("#formatHint").textContent = `动图将保存为官方帧 ZIP，并附带帧延迟 JSON（${quality}）。超过 40MB 的超大动图会被拒绝。`;
+    $("#formatHint").textContent = `${animation} ${quality}；超大文件或超出转换资源预算时，请选择标准清晰度或原始帧 ZIP。`;
+    if (!singleDownloadPending) $("#download").textContent = downloadButtonLabel(currentDetailItem);
   } else {
     $("#formatHint").textContent = quality ? `将按 ${quality}，${format} 保存。源格式不可转换时会保留原扩展名。` : "";
   }

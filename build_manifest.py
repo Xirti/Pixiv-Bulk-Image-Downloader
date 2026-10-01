@@ -35,12 +35,14 @@ PYWEBVIEW_REQUIRED_LOADER_MARKERS = (
 )
 ALLOWED_TOP_LEVEL_DISTRIBUTION_METADATA = (
     "clr_loader-0.3.1.dist-info",
+    "pillow-12.3.0.dist-info",
     "pythonnet-3.1.0.dist-info",
     "pywebview-6.2.1.dist-info",
 )
 BUILD_INPUT_FILES = (
     *server.CODE_GENERATION_FILES,
     "MOKU.spec",
+    "build_hooks/hook-PIL.Image.py",
     "MOKU.exe.config",
     "assets/moku-icon.ico",
     "assets/moku-icon.png",

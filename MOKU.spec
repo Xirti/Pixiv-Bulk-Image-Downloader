@@ -38,6 +38,7 @@ PYWEBVIEW_REQUIRED_LOADER_RUNTIMES = (
 )
 ALLOWED_TOP_LEVEL_METADATA = (
     "clr_loader-0.3.1.dist-info",
+    "pillow-12.3.0.dist-info",
     "pythonnet-3.1.0.dist-info",
     "pywebview-6.2.1.dist-info",
 )
@@ -83,7 +84,7 @@ a = Analysis(
     binaries=pythonnet_binaries + clr_binaries + webview_binaries,
     datas=[('web', 'web')] + pythonnet_datas + clr_datas + webview_datas,
     hiddenimports=pythonnet_hiddenimports + clr_hiddenimports + webview_hiddenimports + ['clr'],
-    hookspath=[],
+    hookspath=['build_hooks'],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],

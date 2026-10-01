@@ -89,6 +89,7 @@ MOKU never changes Windows proxy settings, starts a VPN, or scans local ports.
 Separate multiple tags with ; or ； for strict AND matching. Optional bounded tag aliases are disabled by default. The current page is shown first, then three later pages of result data are prefetched in the background; unopened-page thumbnails are not downloaded; old pages and temporary preview authorization are released outside the retained window.
 Use pid:<artwork ID> for one exact work, uid:<user ID> for one creator, or author:<exact name>. Search options are applied only after Start Search is pressed, and an active search can be cancelled explicitly.
 The collection basket accepts any number of artworks within a 1,000 selected-image limit and sends image-first bounded download chunks. A batch is stored in one shared tag, author, or artwork context folder unless folder creation is disabled.
+Animation downloads default to the original frame ZIP plus timing JSON. GIF export is built in; MP4 uses a local PATH-registered FFmpeg with H.264 support and does not install or bundle an encoder. Static images in mixed batches keep their source format.
 Pixiv authorization opens as a second MOKU desktop window on the official Pixiv website.
 The "keep me signed in" option stores only PHPSESSID in Windows Credential Manager for the current Windows user.
 Downloads and logs are written beside MOKU.exe. Do not expose the backend to LAN or the Internet.

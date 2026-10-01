@@ -57,6 +57,50 @@ await pending;
 assert.equal(currentDetailItem.id, "20");
 ''')
 
+    def test_animation_format_choice_is_carried_into_single_and_batch_downloads(self):
+        self.run_frontend(r'''
+const item = {...artwork("movie", 1), workType: "ugoira", formats: [
+  {id: "source", label: "ZIP"}, {id: "gif", label: "GIF"}, {id: "mp4", label: "MP4"}
+]};
+animationFormats.mp4 = false;
+renderDetail(item, 0);
+assert.match($("#format").innerHTML, /value="mp4" disabled/);
+$("#format").value = "gif";
+updateFormatHint();
+assert.equal(readDownloadOptions().ugoiraFormat, "gif");
+assert.equal($("#download").textContent, "下载动图 GIF ↓");
+assert.match($("#formatHint").textContent, /10ms/);
+renderBatchDownloadOptions();
+assert.equal(readDownloadOptions().ugoiraFormat, "gif");
+assert.match($("#format").innerHTML, /静态图保留源格式/);
+singleDownloadPending = true;
+$("#download").textContent = "正在保存…";
+$("#format").value = "source";
+updateFormatHint();
+assert.equal($("#download").textContent, "正在保存…");
+''')
+
+    def test_hover_leave_sends_cancellation_through_the_real_page_binding(self):
+        self.run_frontend(r'''
+requestToken = "local-test-token";
+let finish, cancelled;
+fetchJson = () => new Promise(resolve => { finish = resolve; });
+globalThis.fetch = async (url, options) => {
+  if (url === "/api/pixiv/ugoira/cancel") cancelled = JSON.parse(options.body);
+  return {ok: true, json: async () => ({ok: true})};
+};
+const host = new FakeElement();
+host.dataset = {};
+const pending = ugoiraPreview.start(host, "1");
+for (let i = 0; i < 40 && !finish; i += 1) await new Promise(resolve => setTimeout(resolve, 10));
+assert.ok(finish);
+ugoiraPreview.stop(host);
+finish({frames: [{file: "0.jpg", delay: 100}]});
+await pending;
+await Promise.resolve();
+assert.match(cancelled.requestId, /^ugoira_/);
+''')
+
     def test_detail_decks_share_behavior_but_not_locked_state(self):
         self.run_frontend(r'''
 const makeView = () => {

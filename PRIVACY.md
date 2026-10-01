@@ -5,6 +5,7 @@ MOKU is a local Windows application. It has no analytics, advertising SDK, crash
 ## Data stored locally
 
 - Downloads are written to the folder selected by the user.
+- Animation previews use bounded in-memory caches, cleared on account changes. GIF conversion runs locally. Optional MP4 conversion uses a local FFmpeg registered in PATH and an owned temporary folder, which is removed after conversion; no artwork is sent to a conversion service.
 - Runtime logs are written beside the application. HTTP logs omit query parameters, cookies, request bodies, and image authorization tokens.
 - Temporary WebView2 profiles are removed when the desktop window closes; stale `session-*` profiles older than 24 hours are cleaned on startup.
 - When **Keep me signed in** is selected, only Pixiv's `PHPSESSID` is stored for the current Windows user in Windows Credential Manager under `MOKU.Pixiv.PHPSESSID`.
