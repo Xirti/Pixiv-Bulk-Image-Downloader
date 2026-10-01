@@ -28,7 +28,7 @@ def main() -> None:
     result = {
         "ok": False,
         "folderButton": {},
-        "brandStage": {},
+        "flashLanding": {},
         "galleryControls": {},
         "galleryControlsAfterScroll": {},
         "viewport": {},
@@ -55,11 +55,11 @@ def main() -> None:
                 const selectAll = document.querySelector('#selectAllPage');
                 const clearPage = document.querySelector('#clearPageSelection');
                 return {
-                    button: {color: button.color, backgroundImage: button.backgroundImage},
-                    brandStage: {
-                        choices: document.querySelectorAll('.brand-choices button').length,
-                        canvasReady: document.querySelector('#brandPlay').classList.contains('has-canvas'),
-                        logosLoaded: [...document.querySelectorAll('.brand-choices img')].every(img => img.complete && img.naturalWidth > 0),
+                    button: {color: button.color, background: button.backgroundColor, paletteForeground: bodyStyle.getPropertyValue("--on-accent").trim()},
+                    flashLanding: {
+                        noBrandAssets: !document.querySelector('.brand-stage, .brand-choices, #brandPlay'),
+                        themeSwitch: !!document.querySelector('#themeToggle'),
+                        titleCentered: getComputedStyle(document.querySelector('.home-intro')).textAlign === 'center',
                         oldBackgroundRemoved: !document.querySelector('.art-depth'),
                         navigationDots: document.querySelectorAll('.page-rail a').length,
                         selectionDocked: !!document.querySelector('.pagination-dock #selectionBar')
@@ -83,7 +83,7 @@ def main() -> None:
                 };
             })()""")
             result["folderButton"] = visual["button"]
-            result["brandStage"] = visual["brandStage"]
+            result["flashLanding"] = visual["flashLanding"]
             result["galleryControls"] = visual["galleryControls"]
             after_scroll = evaluate(ws, counter, """(() => {
                 const gallery = document.querySelector('#gallery');
@@ -259,7 +259,7 @@ def main() -> None:
                 const clearRaceGuard = {
                     workspaceHidden: !basketPageOpen(),
                     title: document.querySelector("#basketTitle").textContent,
-                    selected: selectedArtworkIds.size,
+                    selected: selection.size,
                     imagePickerClosed: !document.body.classList.contains("basket-image-picker")
                 };
                 clearAllSelection();
@@ -278,7 +278,7 @@ def main() -> None:
                 clearAllSelection();
                 const capacityItems = Array.from({length: 1001}, (_, index) => artwork(`probe-capacity-${index}`, `Capacity ${index}`, 1));
                 for (const item of capacityItems.slice(0, 300)) toggleArtworkSelection(item, true);
-                const selectedAt300 = selectedArtworkIds.size;
+                const selectedAt300 = selection.size;
                 for (const item of capacityItems.slice(300, 1000)) toggleArtworkSelection(item, true);
                 const overflowAccepted = toggleArtworkSelection(capacityItems[1000], true);
                 const capacityGuard = {
@@ -292,9 +292,8 @@ def main() -> None:
                 const staleItem = artwork("probe-stale", "Stale", 2);
                 delete staleItem.pageImages;
                 batchCandidateItems = [staleItem];
-                selectedArtworks.set(staleItem.id, staleItem);
-                selectedArtworkIds.add(staleItem.id);
-                selectedPagesByArtwork.set(staleItem.id, new Set([0, 1]));
+                selection.remove([staleItem.id]);
+                for (const page of [0, 1]) selection.setPage(staleItem, page, true, {context: activeSearchContext, resultPage: currentPage});
                 openSelectionBasket();
                 openBasketArtworkPicker();
                 const staleButton = document.querySelector('[data-batch-artwork="probe-stale"] [data-open-collection]');
@@ -423,14 +422,14 @@ def main() -> None:
         finally:
             ws.close()
         result["ok"] = (
-            result["folderButton"].get("color") == "rgb(10, 17, 26)"
-            and "linear-gradient" in result["folderButton"].get("backgroundImage", "")
-            and result["brandStage"].get("choices") == 6
-            and result["brandStage"].get("canvasReady")
-            and result["brandStage"].get("logosLoaded")
-            and result["brandStage"].get("oldBackgroundRemoved")
-            and result["brandStage"].get("navigationDots") == 3
-            and result["brandStage"].get("selectionDocked")
+            result["folderButton"].get("color") != result["folderButton"].get("background")
+            and result["folderButton"].get("background") != "rgba(0, 0, 0, 0)"
+            and result["flashLanding"].get("noBrandAssets")
+            and result["flashLanding"].get("themeSwitch")
+            and result["flashLanding"].get("titleCentered")
+            and result["flashLanding"].get("oldBackgroundRemoved")
+            and result["flashLanding"].get("navigationDots") == 3
+            and result["flashLanding"].get("selectionDocked")
             and result["galleryControls"].get("selectAllVisible")
             and result["galleryControls"].get("clearPageVisible")
             and result["galleryControls"].get("pagerPosition") == "fixed"

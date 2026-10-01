@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import time
 
@@ -70,35 +71,38 @@ def wait_for(page, expression):
     raise TimeoutError(expression)
 
 
-def check_brand_motion(page):
-    timings = {}
-    for brand in ("openai", "claude-color", "grok", "deepseek-color", "kimi-color", "glm"):
-        page.locator(f"button[data-brand='{brand}']").click()
-        page.locator("#brandPlay").click()
-        page.evaluate("window.motionSamples.length = 0")
-        page.wait_for_timeout(750)
-        samples = page.evaluate("window.motionSamples")
-        assert len(samples) >= 10, (brand, len(samples))
-        durations = sorted(sample["ms"] for sample in samples)
-        timings[brand] = {
-            "frames": len(samples),
-            "meanCallbackMs": round(sum(durations) / len(durations), 3),
-            "p95CallbackMs": round(durations[min(len(durations) - 1, int(len(durations) * 0.95))], 3),
+def check_theme(page, theme):
+    if page.evaluate("document.documentElement.dataset.theme") != theme:
+        page.locator("#themeToggle").click()
+    assert page.evaluate("document.documentElement.dataset.theme") == theme
+    return page.evaluate(r"""(() => {
+        const rgb = value => (value.match(/[\d.]+/g) || []).map(Number);
+        const lum = color => rgb(color).slice(0,3).map(x => {
+            x /= 255; return x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4;
+        }).reduce((sum, x, i) => sum + x * [.2126,.7152,.0722][i], 0);
+        const failures = [];
+        let minimum = 100, checked = 0;
+        for (const node of document.querySelectorAll("body *")) {
+            if (!node.getClientRects().length || node.disabled || (!node.matches("input:not([type=checkbox]),select,textarea") && ![...node.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()))) continue;
+            const style = getComputedStyle(node);
+            let parent = node, background = "rgb(22,22,22)";
+            while (parent) {
+                const value = getComputedStyle(parent).backgroundColor;
+                const channels = rgb(value);
+                if (channels.length === 3 || channels[3] >= .95) { background = value; break; }
+                parent = parent.parentElement;
+            }
+            const values = [lum(style.color), lum(background)].sort((a,b) => a-b);
+            const ratio = (values[1] + .05) / (values[0] + .05);
+            const large = parseFloat(style.fontSize) >= 24 || (parseFloat(style.fontSize) >= 18.66 && Number(style.fontWeight) >= 700);
+            const required = large ? 3 : 4.5;
+            checked++;
+            minimum = Math.min(minimum, ratio);
+            if (ratio < required) failures.push({node: node.id || node.className || node.tagName, text: node.textContent.slice(0,30), ratio});
         }
-    page.evaluate("document.body.classList.add('viewer-open')")
-    page.wait_for_timeout(100)
-    page.evaluate("window.motionSamples.length = 0")
-    page.wait_for_timeout(250)
-    assert page.evaluate("window.motionSamples.length") == 0, "decorative work continued behind viewer"
-    page.evaluate("document.body.classList.remove('viewer-open')")
-    page.emulate_media(reduced_motion="reduce")
-    page.wait_for_timeout(100)
-    page.evaluate("window.motionSamples.length = 0")
-    page.wait_for_timeout(250)
-    assert page.evaluate("window.motionSamples.length") == 0, "reduced motion kept requesting decorative frames"
-    page.emulate_media(reduced_motion="no-preference")
-    page.locator("button[data-brand='openai']").click()
-    return timings
+        if (failures.length) throw new Error(JSON.stringify(failures));
+        return {theme: document.documentElement.dataset.theme, checked, minimum: Math.round(minimum * 100) / 100};
+    })()""")
 
 
 def main():
@@ -111,18 +115,6 @@ def main():
             browser = browser_runtime.chromium.launch(channel="msedge", headless=True)
             try:
                 page = browser.new_page(viewport={"width": 1280, "height": 820})
-                page.add_init_script("""
-                    window.motionSamples = [];
-                    const scheduleFrame = window.requestAnimationFrame.bind(window);
-                    window.requestAnimationFrame = callback => scheduleFrame(now => {
-                        const started = performance.now();
-                        try { callback(now); }
-                        finally {
-                            if (window.motionSamples.length < 2000)
-                                window.motionSamples.push({ms: performance.now() - started});
-                        }
-                    });
-                """)
                 page.set_default_timeout(8000)
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.route("**/api/pixiv/image?*", lambda route: route.fulfill(
@@ -130,13 +122,25 @@ def main():
                     body='<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="blue"/></svg>',
                 ))
                 page.goto(f"http://127.0.0.1:{httpd.server_port}/")
-                wait_for(page, "document.querySelector('#brandPlay').classList.contains('has-canvas')")
-                motion = check_brand_motion(page)
+                assert page.locator(".brand-stage, .brand-choices, #brandPlay").count() == 0
+                screenshots = Path(tempfile.mkdtemp(prefix="moku-flash-visual-"))
+                themes = []
+                for width, height in ((1280, 820), (375, 812)):
+                    page.set_viewport_size({"width": width, "height": height})
+                    for theme in ("dark", "light"):
+                        themes.append(check_theme(page, theme))
+                        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+                        page.screenshot(path=str(screenshots / f"home-{theme}-{width}.png"))
+                page.set_viewport_size({"width": 1280, "height": 820})
+                page.reload()
+                assert page.evaluate("document.documentElement.dataset.theme") == "light"
                 page.locator("#searchSubmit").click()
                 page.locator("[data-select='0']").wait_for()
                 page.locator("[data-select='0']").check()
                 page.locator(".card .poster").click()
                 wait_for(page, "currentDetailItem?.id === '50'")
+                for theme in ("dark", "light"):
+                    themes.append(check_theme(page, theme))
                 page.locator("#download").click()
                 wait_for(page, "!singleDownloadPending && !!resumableSingleTask")
                 page.locator("#download").click()
@@ -150,6 +154,9 @@ def main():
                 page.locator("#openBasketPicker").click()
                 page.locator("[data-open-collection='50']").click()
                 wait_for(page, "basketDetailItem?.id === '50'")
+                for theme in ("dark", "light"):
+                    page.evaluate("document.querySelector('#themeToggle').click()")
+                    themes.append(check_theme(page, theme))
                 assert page.evaluate("refreshArtworkPreview('50')") is True
                 page.locator("#basketPageMore").click()
                 assert "revision-2-48" in page.locator("#basketPages img").first.get_attribute("src")
@@ -158,16 +165,23 @@ def main():
                 assert page.locator("#quality").input_value() == "original"
                 assert page.locator("#basketPage").is_hidden()
                 assert page.evaluate("document.body.classList.contains('batch-mode')")
+                for dialog in ("#helpDialog", "#capacityDialog", "#selectionLimitDialog", "#loginDialog"):
+                    page.evaluate("(selector) => document.querySelector(selector).showModal()", dialog)
+                    for theme in ("dark", "light"):
+                        if page.evaluate("document.documentElement.dataset.theme") != theme:
+                            page.evaluate("document.querySelector('#themeToggle').click()")
+                        themes.append(check_theme(page, theme))
+                    page.evaluate("(selector) => document.querySelector(selector).close()", dialog)
                 for width, height in ((1280, 820), (375, 812)):
                     page.set_viewport_size({"width": width, "height": height})
                     page.evaluate("document.querySelector('#home').scrollIntoView()")
-                    wait_for(page, "document.querySelector('#brandPlay').classList.contains('has-canvas')")
+
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
                 assert not errors, errors
                 print(json.dumps({"ok": True, "downloadChunks": [len(row) for row in ProbeHandler.requests],
                                   "basketFreshPages": True, "qualityPreserved": True,
                                   "viewports": [1280, 375], "scriptErrors": errors,
-                                  "brandMotion": motion, "overlayAndReducedMotionPaused": True}))
+                                  "themes": themes, "screenshots": str(screenshots)}))
             finally:
                 browser.close()
     finally:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = (ROOT / "web" / "ugoira-preview.js").read_text(encoding="utf-8") + "\n" + (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "app.js"))
 STYLE = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 
 
@@ -50,13 +50,13 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn('$("#openBatch").disabled', controls)
         self.assertIn('$("#clearSelection").disabled', controls)
         self.assertIn('$("#batchDownload").disabled', controls)
-        self.assertIn("searchButton.disabled = basketSelectionLocked || searchPending || singleDownloadPending", controls)
-        self.assertIn("basketSelectionLocked || searchPending", controls)
+        self.assertIn("searchButton.disabled = selection.locked || searchPending || singleDownloadPending", controls)
+        self.assertIn("selection.locked || searchPending", controls)
         open_basket = block("function openSelectionBasket", "function applyBasketArtworkSelection")
-        self.assertIn("if (basketSelectionLocked || searchPending) return", open_basket)
+        self.assertIn("if (selection.locked || searchPending) return", open_basket)
 
         reconciliation = block("function reconcileSelectedArtworkPreviews", "function render()")
-        self.assertIn("selectedArtworks.set(artworkId, merged)", reconciliation)
+        self.assertIn("selection.remember(merged)", reconciliation)
         self.assertIn("batchCandidateItems = batchCandidateItems.map(mergePreview)", reconciliation)
         self.assertIn("merged.pageImages = existing.pageImages", reconciliation)
         self.assertIn("merged.thumb = fresh.thumb || existing.thumb", reconciliation)
@@ -75,12 +75,12 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertNotIn("requestTokenPromise", cancellation)
 
         basket_download = block('$("#batchDownload").onclick', 'addEventListener("keydown"')
-        self.assertIn("if (basketSelectionLocked || searchPending || singleDownloadPending) return", basket_download)
+        self.assertIn("if (selection.locked || searchPending || singleDownloadPending) return", basket_download)
         basket_lock = block("function setBasketSelectionLocked", "function downloadPayload")
         self.assertIn("#searchSubmit", basket_lock)
         self.assertNotIn("#searchForm button", basket_lock)
         single_download = block('$("#download").onclick', "async function syncAuthStatus")
-        self.assertIn("basketSelectionLocked || searchPending || singleDownloadPending", single_download)
+        self.assertIn("selection.locked || searchPending || singleDownloadPending", single_download)
         self.assertLess(
             single_download.index("singleDownloadPending = true"),
             single_download.index("syncSearchScopedControls()"),
@@ -116,7 +116,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn("refreshArtworkPreview(artworkId)", fallback)
         self.assertIn("detailRefreshAttemptedUrl", fallback)
         self.assertIn("failedUrl", fallback)
-        self.assertIn('data-detail-artwork="${esc(item.id)}"', APP)
+        self.assertIn('data-detail-artwork="${escape(item.id)}"', APP)
         self.assertIn("delete img.dataset.detailRefreshAttemptedUrl", refresh)
         self.assertIn('data-basket-artwork="${esc(item.id)}"', APP)
         basket_detail = block("async function openBatchCollection", '$("#basketBack").onclick')
@@ -129,13 +129,13 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertLess(detail.index("if (!item) return"), detail.index("detailController = new AbortController()"))
         self.assertIn("rememberArtworkDetail(item)", detail)
         replacement = block("function rememberArtworkDetail", "async function refreshArtworkPreview")
-        self.assertIn("selectedArtworks.set(item.id, item)", replacement)
+        self.assertIn("selection.remember(item)", replacement)
         self.assertIn("batchCandidateItems[candidateIndex] = item", replacement)
         basket = block("async function openBatchCollection", '$("#basketBack").onclick')
         self.assertLess(basket.index("if (!item) return"), basket.index("detailController = new AbortController()"))
 
         viewer = block("function openAllViewer", "function closeAllViewer")
-        self.assertLess(viewer.index("currentDetailItem"), viewer.index("selectedArtworks.get(activeArtworkId)"))
+        self.assertLess(viewer.index("currentDetailItem"), viewer.index("selection.get(activeArtworkId)?.item"))
 
     def test_large_basket_and_viewer_views_are_windowed_before_rendering(self):
         self.assertIn("const BASKET_ARTWORK_WINDOW = 120", APP)
@@ -186,7 +186,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn("currentDetailContext = { ...detailContext }", detail)
         basket_detail = block("async function openBatchCollection", '$("#basketBack").onclick')
         self.assertIn("renderBasketArtworkDetail(item)", basket_detail)
-        context_apply = block("function applyBasketArtworkSelection", "function openBasketArtworkPicker")
+        context_apply = block("function detailSelectionOrigin", "function openBasketArtworkPicker")
         self.assertIn("batchCandidateContextByArtwork.get(item.id)", context_apply)
         self.assertIn("batchCandidateResultPageByArtwork.get(item.id)", context_apply)
 
@@ -195,19 +195,6 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn("finally", action)
         self.assertIn("await syncAuthStatus()", action)
         self.assertLess(action.index("await syncAuthStatus()"), action.index("if (actionError)"))
-
-    def test_select_all_validates_page_counts_before_allocating_page_sets(self):
-        select_all = block("function selectAllCurrentPage", "function clearAllCurrentPage")
-        self.assertIn("validatedArtworkPageCount(item)", select_all)
-        self.assertIn("selectionWouldExceedPageLimit(additionalPages)", select_all)
-        self.assertNotIn("Array.from", select_all)
-        capacity_rejection = select_all.index("if (selectionWouldExceedPageLimit(additionalPages)) {")
-        page_set_allocation = select_all.index("const pages = new Set()")
-        self.assertLess(capacity_rejection, page_set_allocation)
-        self.assertNotIn("new Set", select_all[:capacity_rejection])
-        self.assertIn("selectedPagesByArtwork.set(item.id, pages)", select_all)
-        toggle = block("function toggleArtworkSelection", "function selectAllCurrentPage")
-        self.assertLess(toggle.index("selectionWouldExceedPageLimit"), toggle.index("Array.from"))
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for the browser-state harness")
     def test_search_and_logout_state_transitions_execute_atomically(self):
@@ -230,18 +217,16 @@ class FrontendStateSafetyTests(unittest.TestCase):
   activeArtworkId = oldItem.id;
   resultSelectionEnabled = true;
   const selectedSearchItem = {...oldItem, pageImages: undefined};
-  selectedArtworkIds.add(oldItem.id);
-  selectedArtworks.set(oldItem.id, selectedSearchItem);
-  selectedPagesByArtwork.set(oldItem.id, new Set([0]));
+  selection.choose([selectedSearchItem], {context: activeSearchContext, resultPage: currentPage});
   batchCandidateItems = [selectedSearchItem];
   const reorderedItem = {...oldItem, thumb: "/api/pixiv/image?token=reordered", bookmarks: 77, pageImages: undefined};
   reconcileSelectedArtworkPreviews([reorderedItem]);
-  check(selectedArtworks.get(oldItem.id).thumb === reorderedItem.thumb, "selected artwork kept the revoked search thumbnail");
-  selectedArtworks.set(oldItem.id, oldItem);
+  check(selection.get(oldItem.id)?.item.thumb === reorderedItem.thumb, "selected artwork kept the revoked search thumbnail");
+  selection.remember(oldItem);
   batchCandidateItems = [oldItem];
   reconcileSelectedArtworkPreviews([reorderedItem]);
-  check(selectedArtworks.get(oldItem.id).pageImages === oldItem.pageImages, "search reconciliation discarded loaded detail pages");
-  check(selectedArtworks.get(oldItem.id).thumb === reorderedItem.thumb, "search reconciliation retained an expired detail thumbnail");
+  check(selection.get(oldItem.id)?.item.pageImages === oldItem.pageImages, "search reconciliation discarded loaded detail pages");
+  check(selection.get(oldItem.id)?.item.thumb === reorderedItem.thumb, "search reconciliation retained an expired detail thumbnail");
   check(batchCandidateItems[0].pageImages === oldItem.pageImages, "open basket candidate discarded loaded detail pages");
 
   const realFetchJson = fetchJson;
@@ -332,9 +317,9 @@ class FrontendStateSafetyTests(unittest.TestCase):
   openSelectionBasket();
   check(batchCandidateItems.length === 0, "pending search opened the stale basket programmatically");
   document.querySelector("#clearSelection").onclick();
-  check(selectedArtworkIds.has(oldItem.id), "pending search cleared stale selection programmatically");
+  check(selection.has(oldItem.id), "pending search cleared stale selection programmatically");
   await document.querySelector("#batchDownload").onclick();
-  check(!basketSelectionLocked, "pending search started a batch download programmatically");
+  check(!selection.locked, "pending search started a batch download programmatically");
   check(!document.querySelector("#cancelSearch").disabled, "pending search lost its cancellation control");
   releaseSearch({
     items: [], page: 1, availablePages: [1], preloadedThrough: 1, hasMore: false,
@@ -403,9 +388,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
 
   const restricted = {...oldItem, id: "18", restriction: "r18", thumb: "/api/pixiv/image?token=r18"};
   items = [restricted];
-  selectedArtworkIds.add(restricted.id);
-  selectedArtworks.set(restricted.id, restricted);
-  selectedPagesByArtwork.set(restricted.id, new Set([0]));
+  selection.choose([restricted], {context: activeSearchContext, resultPage: currentPage});
   currentDetailItem = restricted;
   activeArtworkId = restricted.id;
   document.querySelector("#grid").innerHTML = '<img src="/api/pixiv/image?token=r18">';
@@ -422,7 +405,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
   await syncAuthStatus();
   check(searchSignal.aborted && detailSignal.aborted, "authorization loss did not abort requests");
   check(document.querySelector("#safety").value === "safe", "authorization loss did not restore safe mode");
-  check(!selectedArtworkIds.has(restricted.id), "authorization loss retained restricted selection");
+  check(!selection.has(restricted.id), "authorization loss retained restricted selection");
   check(currentDetailItem === null && activeArtworkId === null, "authorization loss retained restricted detail");
   const dynamicMarkup = ["#grid", "#deck", "#collectionPages", "#viewerGrid", "#batchCollections"]
     .map((selector) => document.querySelector(selector).innerHTML).join("");
@@ -430,9 +413,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
 
   const failedLogoutItem = {...restricted, id: "19", thumb: "/api/pixiv/image?token=r18-failed-logout"};
   items = [failedLogoutItem];
-  selectedArtworkIds.add(failedLogoutItem.id);
-  selectedArtworks.set(failedLogoutItem.id, failedLogoutItem);
-  selectedPagesByArtwork.set(failedLogoutItem.id, new Set([0]));
+  selection.choose([failedLogoutItem], {context: activeSearchContext, resultPage: currentPage});
   currentDetailItem = failedLogoutItem;
   currentDetailContext = {kind: "tags", value: "restricted"};
   activeArtworkId = failedLogoutItem.id;
@@ -451,17 +432,14 @@ class FrontendStateSafetyTests(unittest.TestCase):
   };
   await document.querySelector("#authAction").onclick();
   check(failedLogoutStatusChecks === 1, "failed logout did not reconcile server authorization state");
-  check(!selectedArtworkIds.has(failedLogoutItem.id), "failed logout response retained restricted selection");
+  check(!selection.has(failedLogoutItem.id), "failed logout response retained restricted selection");
   check(currentDetailItem === null && currentDetailContext === null, "failed logout response retained restricted detail state");
   check(!document.querySelector("#grid").innerHTML.includes("r18-failed-logout"), "failed logout response retained restricted DOM");
   check(document.querySelector("#authStateText").textContent === "credential deletion failed", "failed logout error was not preserved after reconciliation");
 
   clearAllSelection();
   const resumableItem = {...oldItem, id: "88", pages: 201};
-  selectedArtworkIds.add(resumableItem.id);
-  selectedArtworks.set(resumableItem.id, resumableItem);
-  selectedPagesByArtwork.set(resumableItem.id, new Set(Array.from({length: 201}, (_, page) => page)));
-  selectedContextByArtwork.set(resumableItem.id, {kind: "tags", value: "resume"});
+  selection.choose([resumableItem], {context: {kind: "tags", value: "resume"}, resultPage: currentPage});
   syncSearchScopedControls();
   let batchRequests = 0;
   fetchJson = async (url) => {
@@ -481,19 +459,17 @@ class FrontendStateSafetyTests(unittest.TestCase):
   const partialItem = {...oldItem, id: "partial", pages: 3};
   const partialPages = new Set([1]);
   items = [partialItem];
-  selectedArtworkIds.add(partialItem.id);
-  selectedArtworks.set(partialItem.id, partialItem);
-  selectedPagesByArtwork.set(partialItem.id, partialPages);
+  for (const page of partialPages) selection.setPage(partialItem, page, true, {context: activeSearchContext, resultPage: currentPage});
   resultSelectionEnabled = true;
   check(selectAllCurrentPage() === true, "current-page selection rejected a valid partial artwork");
-  const completedPages = selectedPagesByArtwork.get(partialItem.id);
+  const completedPages = selection.get(partialItem.id)?.pages;
   check(completedPages.size === 3 && [0, 1, 2].every((page) => completedPages.has(page)), "current-page selection did not fill missing artwork pages");
 
   clearAllSelection();
   items = [{...oldItem, id: "huge", pages: Number.MAX_SAFE_INTEGER}];
   resultSelectionEnabled = true;
   check(selectAllCurrentPage() === false, "oversized page count bypassed the selection limit");
-  check(!selectedArtworkIds.has("huge"), "oversized artwork was partially selected");
+  check(!selection.has("huge"), "oversized artwork was partially selected");
 
   clearAllSelection();
   const detailSummary = {...oldItem, id: "66", pages: 2, pageImages: undefined, thumb: "/summary"};
@@ -506,17 +482,15 @@ class FrontendStateSafetyTests(unittest.TestCase):
     ],
   };
   items = [detailSummary];
-  selectedArtworkIds.add(detailSummary.id);
-  selectedArtworks.set(detailSummary.id, detailSummary);
-  selectedPagesByArtwork.set(detailSummary.id, new Set([0, 1]));
+  selection.choose([detailSummary], {context: activeSearchContext, resultPage: currentPage});
   batchCandidateItems = [detailSummary];
   fetchJson = async () => loadedDetail;
   await select(0);
   check(items[0] === loadedDetail, "normal detail load did not replace the search summary");
-  check(selectedArtworks.get(detailSummary.id) === loadedDetail, "normal detail load left a stale selected artwork");
+  check(selection.get(detailSummary.id)?.item === loadedDetail, "normal detail load left a stale selected artwork");
   check(batchCandidateItems[0] === loadedDetail, "normal detail load left a stale basket candidate");
 
-  selectedArtworks.set(detailSummary.id, {...loadedDetail, pageImages: [{regular: "/stale-selected", original: "/stale-selected"}]});
+  selection.remember({...loadedDetail, pageImages: [{regular: "/stale-selected", original: "/stale-selected"}]});
   openAllViewer();
   check(document.querySelector("#viewerGrid").innerHTML.includes("/fresh-detail-0"), "viewer did not prefer the current loaded detail");
   check(!document.querySelector("#viewerGrid").innerHTML.includes("/stale-selected"), "viewer reopened a stale selected artwork");
@@ -588,16 +562,17 @@ class FrontendStateSafetyTests(unittest.TestCase):
 
   const originalContext = {kind: "author", value: "original-artist"};
   activeSearchContext = {kind: "tags", value: "new-search"};
-  selectedContextByArtwork.set(staleItem.id, originalContext);
+  selection.choose([staleItem], {context: originalContext, resultPage: currentPage});
   currentDetailContext = {...activeSearchContext};
   const ordinaryPayload = downloadPayload(secondFreshItem, 0);
   check(ordinaryPayload.body.context.value === "new-search", "old basket context hijacked a normally opened detail");
   currentDetailContext = originalContext;
   const basketPayload = downloadPayload(secondFreshItem, 0);
   check(basketPayload.body.context === originalContext, "single basket download lost its original search context");
-  selectedPagesByArtwork.set(secondFreshItem.id, new Set([2, 0]));
+  selection.remove([secondFreshItem.id]);
+  for (const page of [2, 0]) selection.setPage(secondFreshItem, page, true, {context: originalContext, resultPage: currentPage});
   check(JSON.stringify(downloadPayload(secondFreshItem, 0).body.pages) === "[0,2]", "single download ignored the selected pages");
-  selectedPagesByArtwork.delete(secondFreshItem.id);
+  selection.remove([secondFreshItem.id]);
   check(currentDownloadPages(secondFreshItem).length === 0, "empty multi-page selection silently downloaded everything");
   check(currentDownloadPages(oldItem).length === 1, "single-image quick download regressed");
   currentDetailItem = {...oldItem, workType: "ugoira"};
@@ -652,10 +627,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
     })),
   };
   batchCandidateItems = [basketFlowItem];
-  selectedArtworkIds.add(basketFlowItem.id);
-  selectedArtworks.set(basketFlowItem.id, basketFlowItem);
-  selectedPagesByArtwork.set(basketFlowItem.id, new Set([0, 1, 2]));
-  selectedContextByArtwork.set(basketFlowItem.id, {kind: "tags", value: "basket-flow"});
+  selection.choose([basketFlowItem], {context: {kind: "tags", value: "basket-flow"}, resultPage: currentPage});
   document.body.classList.add("batch-mode");
   openBasketArtworkPicker();
   openBasketPage();
@@ -672,7 +644,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
   check(basketPageInputs.length === 3, "basket artwork detail did not bind every rendered page checkbox");
   basketPageInputs[1].checked = false;
   basketPageInputs[1].onchange();
-  check(!selectedPagesByArtwork.get(basketFlowItem.id).has(1), "basket page checkbox did not update the selected page set");
+  check(!selection.get(basketFlowItem.id)?.pages.has(1), "basket page checkbox did not update the selected page set");
   check(document.querySelector("#batchSummary").textContent === "已选 2/3 张", "basket page checkbox did not update the detail summary");
   document.querySelector("#basketBack").onclick();
   check(!document.querySelector("#batchCollections").hidden, "detail back did not return to the basket artwork list");
@@ -688,7 +660,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
   document.querySelector("#openBasketPicker").onclick();
   check(document.querySelector("#batchCollections").innerHTML.includes('data-open-collection="basket-added"'), "reopened basket omitted a newly selected artwork");
   check(batchCandidateItems.length === 2, "reopened basket did not refresh its candidate list");
-  check(selectedPagesByArtwork.get(basketFlowItem.id).size === 2, "reopening basket reset partial page selection");
+  check(selection.get(basketFlowItem.id)?.pages.size === 2, "reopening basket reset partial page selection");
   document.querySelector("#basketBack").onclick();
   toggleArtworkSelection(addedBasketItem, false);
   document.querySelector("#openBasketPicker").onclick();

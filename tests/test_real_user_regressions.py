@@ -39,12 +39,9 @@ class WorkflowRegressionTests(unittest.TestCase):
             APP.index("function toggleArtworkSelection"):
             APP.index("function selectAllCurrentPage")
         ]
-        self.assertIn("const pageCount = validatedArtworkPageCount(item)", toggle_block)
-        self.assertIn("if (pageCount === null)", toggle_block)
-        self.assertIn(
-            "selectedPagesByArtwork.set(item.id, new Set(Array.from({ length: pageCount }, (_, page) => page)))",
-            toggle_block,
-        )
+        self.assertIn("selection.choose([item], origin)", toggle_block)
+        self.assertIn("reportSelectionRejection(result)", toggle_block)
+        self.assertNotIn("Array.from", toggle_block)
 
     def test_clear_detail_removes_stale_page_controls(self):
         clear_block = APP[APP.index("function clearDetail"):APP.index("function updateSelectionBar")]

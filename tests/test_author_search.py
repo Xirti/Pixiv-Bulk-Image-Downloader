@@ -237,14 +237,18 @@ class AuthorSearchRegressionTests(unittest.TestCase):
             first = server.search_pixiv_results(
                 "author:目标画师", "safe", 1, "all", True, authorized=False,
             )
+            warmed = server.search_pixiv_results(
+                "author:目标画师", "safe", 1, "all", True, authorized=False, prefetch=True,
+            )
             second = server.search_pixiv_results(
                 "author:目标画师", "safe", 2, "all", True, authorized=False,
             )
 
-        self.assertEqual(first["total"], 53)
+        self.assertEqual(first["total"], 48)
         self.assertEqual(len(first["items"]), 36)
-        self.assertEqual(first["availablePages"], [1, 2])
-        self.assertEqual(first["preloadedThrough"], 2)
+        self.assertEqual(warmed["total"], 53)
+        self.assertEqual(warmed["availablePages"], [1, 2])
+        self.assertEqual(warmed["preloadedThrough"], 2)
         self.assertEqual(len(second["items"]), 17)
         self.assertFalse(second["hasMore"])
 

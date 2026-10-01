@@ -1,7 +1,7 @@
 "use strict";
 
 // Owns every request, decoded frame and playback timer for hover previews.
-globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError }) {
+globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hoverDelay = 0 }) {
   const cache = new Map();
   const maxBytes = 96 * 1024 * 1024;
   let cachedBytes = 0;
@@ -145,6 +145,18 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError }) {
     const player = { host, controller: new AbortController(), canvas: null, timer: null };
     active = player;
     try {
+      if (hoverDelay > 0) {
+        await new Promise((resolve) => {
+          const finish = () => {
+            clearTimeout(player.timer);
+            player.controller.signal.removeEventListener("abort", finish);
+            resolve();
+          };
+          player.controller.signal.addEventListener("abort", finish, {once: true});
+          player.timer = setTimeout(finish, hoverDelay);
+        });
+        if (active !== player) return;
+      }
       const frames = await load(id, player.controller.signal);
       if (active !== player) return;
       if (host.isConnected === false) { stop(); return; }

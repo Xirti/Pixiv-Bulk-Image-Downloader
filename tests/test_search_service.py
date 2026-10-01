@@ -286,6 +286,7 @@ class SearchAggregationTests(unittest.TestCase):
         server.IMAGE_TOKENS.clear()
         with patch.object(server, "load_search_source", side_effect=fake_source):
             first = server.search_pixiv_results("猫；夜景", "safe", 1, "all", True, authorized=False)
+            warmed = server.search_pixiv_results("猫；夜景", "safe", 1, "all", True, authorized=False, prefetch=True)
             first_tokens = {
                 urllib.parse.parse_qs(urllib.parse.urlsplit(item["thumb"]).query)["token"][0]
                 for item in first["items"]
@@ -293,7 +294,7 @@ class SearchAggregationTests(unittest.TestCase):
             self.assertEqual(first["tags"], ["猫", "夜景"])
             self.assertEqual(first["tag"], "猫；夜景")
             self.assertEqual(len(server.IMAGE_TOKENS), len(first["items"]))
-            self.assertEqual(first["availablePages"], [1, 2, 3, 4])
+            self.assertEqual(warmed["availablePages"], [1, 2, 3, 4])
 
             second = server.search_pixiv_results("猫；夜景", "safe", 2, "all", True, authorized=False)
             second_tokens = {
@@ -331,11 +332,13 @@ class SearchAggregationTests(unittest.TestCase):
 
         with patch.object(server, "load_search_source", side_effect=fake_source):
             first = server.search_pixiv_results("猫", "safe", 1, "all", True, authorized=False)
+            first_warm = server.search_pixiv_results("猫", "safe", 1, "all", True, authorized=False, prefetch=True)
             tenth = server.search_pixiv_results("猫", "safe", 10, "all", True, authorized=False)
+            tenth_warm = server.search_pixiv_results("猫", "safe", 10, "all", True, authorized=False, prefetch=True)
 
-        self.assertEqual(first["availablePages"], [1, 2, 3, 4])
-        self.assertEqual(tenth["availablePages"], list(range(4, 14)))
-        self.assertEqual(tenth["preloadedThrough"], 13)
+        self.assertEqual(first_warm["availablePages"], [1, 2, 3, 4])
+        self.assertEqual(tenth_warm["availablePages"], list(range(4, 14)))
+        self.assertEqual(tenth_warm["preloadedThrough"], 13)
         key = ("tags", (("猫",),), "safe", "all", True, False)
         self.assertIsNone(server.SEARCH_PAGE_CACHE.get_page(key, 3))
         self.assertIsNotNone(server.SEARCH_PAGE_CACHE.get_page(key, 4))
@@ -362,7 +365,7 @@ class SearchAggregationTests(unittest.TestCase):
             restarted = server.search_pixiv_results("猫", "safe", 1, "all", True, authorized=False)
 
         self.assertEqual(restarted["page"], 1)
-        self.assertEqual(restarted["availablePages"], [1, 2, 3, 4])
+        self.assertEqual(restarted["availablePages"], [1])
         self.assertEqual(
             [row["id"] for row in restarted["items"]],
             [row["id"] for row in original["items"]],

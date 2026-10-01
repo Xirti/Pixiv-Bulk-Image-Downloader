@@ -148,7 +148,7 @@ class V105DownloadContractTests(unittest.TestCase):
 
 class V105VisualContractTests(unittest.TestCase):
     def test_brand_stage_replaces_old_page_background(self):
-        self.assertIn('class="brand-stage"', HTML)
+        self.assertIn('class="home-intro"', HTML)
         self.assertNotIn('class="art-depth"', HTML)
         self.assertNotIn('class="moon-ring"', HTML)
         scheduler = APP[APP.index("function schedulePaginationDockUpdate"):APP.index("async function select")]
@@ -156,26 +156,26 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("requestAnimationFrame(run)", scheduler)
         self.assertNotIn("setInterval", APP)
 
-    def test_brand_stage_has_bounded_responsive_dimensions(self):
-        self.assertIn("width:min(100%,480px)", STYLE)
-        self.assertIn("aspect-ratio:3/2", STYLE)
-        self.assertIn(".brand-play canvas", STYLE)
+    def test_flash_landing_has_bounded_responsive_dimensions(self):
+        self.assertIn("width:min(100%,860px)", STYLE)
+        self.assertIn(".home-intro{text-align:center}", STYLE)
         self.assertIn("prefers-reduced-motion:reduce", STYLE)
+        self.assertIn(':root[data-theme=light]', STYLE)
 
     def test_folder_picker_button_has_explicit_dark_text_on_light_surface(self):
         self.assertIn('id="browseFolder"', HTML)
         self.assertIn("#browseFolder{", STYLE)
-        self.assertIn("color:#0a111a", STYLE)
+        self.assertIn("color:var(--on-accent)", STYLE)
 
     def test_page_background_does_not_restore_saturn_rings(self):
         self.assertNotIn('class="saturn-ring saturn-ring-outer"', HTML)
-        self.assertIn("background:#101112", STYLE)
+        self.assertIn("background:var(--bg)", STYLE)
         self.assertEqual(APP.count("requestAnimationFrame("), 1)
         self.assertNotIn("backdrop-filter", STYLE)
         self.assertNotIn("filter:", STYLE.replace("filter:invert(1)", ""))
 
     def test_brand_theme_keeps_existing_search_actions(self):
-        self.assertIn(".brand-stage", STYLE)
+        self.assertIn(".home-intro", STYLE)
         self.assertIn("模糊", HTML)
         self.assertIn("采集篮", HTML + APP)
         self.assertIn("旧页缓存即将清理", HTML + APP)
@@ -191,7 +191,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("pendingNavigationPage", APP)
         self.assertIn("openCapacityDialog", APP)
         self.assertIn("SEARCH_KEEP_BEHIND = 6", APP)
-        self.assertIn("const selectedResultPageByArtwork = new Map()", APP)
+        self.assertIn("selection.get(id)?.resultPage", APP)
         self.assertIn("function selectionWouldBeEvicted(targetPage)", APP)
         navigate = APP[
             APP.index("function navigateToPage"):APP.index("function archiveAndContinue")
@@ -216,13 +216,13 @@ class V105VisualContractTests(unittest.TestCase):
         count = APP[
             APP.index("function selectedPageCount"):APP.index("function unarchivedSelectionIds")
         ]
-        self.assertIn("selectedArtworkIds", count)
+        self.assertIn("selection.pageCount", count)
 
     def test_collection_basket_detaches_unarchived_selection_before_cache_eviction(self):
-        self.assertIn("const archivedArtworkIds = new Set()", APP)
+        self.assertIn("selection.archivedCount", APP)
         self.assertIn("function detachSelection(ids)", APP)
         self.assertIn("function clearSelection(ids)", APP)
-        self.assertIn("archivedArtworkIds.add", APP)
+        self.assertIn("selection.archive(ids)", APP)
 
     def test_collection_basket_opens_directly_into_the_artwork_picker(self):
         workspace = HTML[HTML.index('id="basketPage"'):HTML.index('id="backTop"')]
@@ -317,9 +317,9 @@ class V105VisualContractTests(unittest.TestCase):
             APP.index("function selectAllCurrentPage"):APP.index("function clearAllCurrentPage")
         ]
         self.assertNotIn("toggleArtworkSelection(item, true)", select_all)
-        self.assertIn("selectedPagesByArtwork.set(item.id, pages)", select_all)
-        self.assertIn("additionalPages", select_all)
-        self.assertIn("validatedArtworkPageCount(item)", select_all)
+        self.assertIn("selection.choose(items,", select_all)
+        self.assertIn("{fill: true}", select_all)
+        self.assertIn("reportSelectionRejection(result)", select_all)
         self.assertNotIn("Array.from", select_all)
         self.assertIn("无法全选", select_all)
         self.assertIn("render()", select_all)
@@ -376,14 +376,14 @@ class V105VisualContractTests(unittest.TestCase):
         capacity_styles = STYLE[STYLE.index("#archiveAndContinue{"):]
         self.assertNotIn("#9dd6ff", capacity_styles)
         self.assertNotIn("#9a3542", capacity_styles)
-        self.assertIn("color:#eef3f8", capacity_styles)
+        self.assertIn("color:var(--ink)", capacity_styles)
 
     def test_home_keeps_decorations_inside_brand_stage(self):
         self.assertNotIn(".search-panel::before", STYLE)
         self.assertNotIn("body::after", STYLE)
         self.assertNotIn('class="moon-ring"', HTML)
         self.assertNotIn("saturn-ring", HTML)
-        self.assertIn('id="brandPlay"', HTML)
+        self.assertNotIn('id="brandPlay"', HTML)
         self.assertNotIn('class="light-ribbons"', HTML)
         self.assertNotIn("rgba(255,141,78", STYLE)
 
@@ -392,11 +392,11 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("MAX_SELECTED_PAGES = 1000", APP)
         self.assertIn('id="selectionLimitDialog"', HTML)
         self.assertIn("showSelectionLimitDialog", APP)
-        self.assertIn("selectionWouldExceedPageLimit", APP)
+        self.assertIn('result.reason === "capacity"', APP)
 
     def test_download_snapshot_comes_only_from_selected_page_sets(self):
         groups = APP[APP.index("function selectedGroups"):APP.index("function contextKey")]
-        self.assertIn("selectedPagesByArtwork.entries()", groups)
+        self.assertIn("selection.snapshot()", groups)
         self.assertNotIn("selectedArtworks.keys()", groups)
         download = APP[APP.index('$(\"#batchDownload\").onclick'):APP.index('addEventListener("keydown"')]
         self.assertIn("const groups = selectedGroups()", download)
@@ -409,7 +409,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("basketLockDisabled", lock)
         self.assertIn("control.disabled = control.dataset.basketLockDisabled === \"true\"", lock)
         clear = APP[APP.index('$(\"#clearSelection\").onclick'):APP.index('$(\"#openBatch\").onclick')]
-        self.assertIn("basketSelectionLocked", clear)
+        self.assertIn("selection.locked", clear)
 
     def test_batch_download_snapshots_all_task_options_before_first_request(self):
         download = APP[APP.index('$(\"#batchDownload\").onclick'):APP.index('addEventListener("keydown"')]
@@ -442,10 +442,10 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("缩略图仅加载当前打开页", APP)
 
     def test_collection_downloads_are_grouped_by_their_original_search_context(self):
-        self.assertIn("const selectedContextByArtwork = new Map()", APP)
+        self.assertIn("context: row.context", APP)
         self.assertIn("function planContextDownloadChunks", APP)
         self.assertIn("context: chunk.context", APP)
-        self.assertIn("selectedContextByArtwork.delete", APP)
+        self.assertIn("selection.remove(ids)", APP)
 
     def test_large_artwork_page_picker_is_windowed(self):
         self.assertIn("DETAIL_PAGE_WINDOW = 48", APP)
@@ -470,15 +470,15 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertNotIn("单独超过", planner)
 
     def test_download_lock_guards_dynamic_page_controls_and_mutation_helpers(self):
-        page_window = APP[APP.index("function renderCollectionWindowInto"):APP.index("function previewDeckCard")]
-        self.assertIn("basketSelectionLocked", page_window)
-        self.assertIn('basketSelectionLocked ? "disabled" : ""', page_window)
+        page_window = APP[APP.index("function renderCollectionWindowInto"):APP.index("function renderViewerWindow")]
+        self.assertIn("selection.locked", page_window)
+        self.assertIn('selection.locked ? "disabled" : ""', page_window)
         detach = APP[APP.index("function detachSelection"):APP.index("function clearSelection")]
         clear_one = APP[APP.index("function clearSelection"):APP.index("function clearAllSelection")]
         clear_all = APP[APP.index("function clearAllSelection"):APP.index("function toggleArtworkSelection")]
-        self.assertIn("basketSelectionLocked", detach)
-        self.assertIn("basketSelectionLocked", clear_one)
-        self.assertIn("basketSelectionLocked", clear_all)
+        self.assertIn("selection.archive(ids)", detach)
+        self.assertIn("selection.remove(ids)", clear_one)
+        self.assertIn("selection.clear().accepted", clear_all)
 
 
 if __name__ == "__main__":

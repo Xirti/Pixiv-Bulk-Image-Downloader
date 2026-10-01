@@ -5,7 +5,7 @@ from unittest.mock import patch
 import auth_store
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+APP = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in ("artwork-detail-view.js", "app.js"))
 HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 STYLE = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 SERVER = (ROOT / "server.py").read_text(encoding="utf-8")
@@ -38,7 +38,7 @@ class FeatureUpgradeTests(unittest.TestCase):
         self.assertIn('id="basketPage"', HTML)
         self.assertIn('id="batchCollections"', HTML)
         self.assertIn('id="basketBack"', HTML)
-        self.assertIn("selectedArtworkIds", APP)
+        self.assertIn("selection.size", APP)
         self.assertIn("openSelectionBasket", APP)
         self.assertIn("openBasketArtworkPicker", APP)
 
@@ -49,8 +49,8 @@ class FeatureUpgradeTests(unittest.TestCase):
         self.assertIn("selected_pages", SERVER)
 
     def test_deck_click_locks_one_card_and_ignores_other_cards(self):
-        self.assertIn("toggleDeckCard(card)", APP)
-        self.assertIn("lockedDeckPage", APP)
+        self.assertIn("toggle(card)", APP)
+        self.assertIn("lockedPage", APP)
         self.assertIn('row.classList.toggle("deck-inert", !selected)', APP)
         self.assertIn('row.setAttribute("aria-pressed", String(selected))', APP)
 

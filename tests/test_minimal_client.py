@@ -27,15 +27,11 @@ class MinimalClientTests(unittest.TestCase):
         self.assertNotIn("previewMode", HTML)
         self.assertNotIn("motion", HTML)
 
-    def test_brand_motion_is_local_bounded_and_pausable(self):
-        brand = (ROOT / "web" / "brand-stage.js").read_text(encoding="utf-8")
-        self.assertIn('src="/brand-stage.js"', HTML)
-        self.assertIn("prefers-reduced-motion: reduce", brand)
-        self.assertIn("document.hidden", brand)
-        self.assertIn("IntersectionObserver", brand)
-        self.assertIn(".basket-page-open, .viewer-open", brand)
-        self.assertIn("Math.min(devicePixelRatio || 1, 1.5)", brand)
-        self.assertNotIn("https://", brand)
+    def test_flash_removes_brand_assets_and_loads_theme_before_styles(self):
+        self.assertNotIn("brand-stage", HTML)
+        self.assertFalse((ROOT / "web" / "brand-stage.js").exists())
+        self.assertFalse(list((ROOT / "web" / "brand-logos").glob("*.svg")))
+        self.assertLess(HTML.index('src="/theme.js"'), HTML.index('href="/style.css"'))
 
     def test_browser_launcher_waits_for_http_and_keeps_diagnostics(self):
         launcher = (ROOT / "launch-moku.ps1").read_text(encoding="utf-8-sig")

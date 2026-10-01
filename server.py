@@ -48,10 +48,7 @@ CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
     "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "version.py",
-    "web/index.html", "web/app.js", "web/ugoira-preview.js", "web/style.css",
-    "web/brand-stage.js", "web/brand-logos/openai.svg", "web/brand-logos/claude-color.svg",
-    "web/brand-logos/grok.svg", "web/brand-logos/deepseek-color.svg",
-    "web/brand-logos/kimi-color.svg", "web/brand-logos/glm.svg",
+    "web/index.html", "web/app.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
 )
 
 
@@ -1509,6 +1506,7 @@ def search_user_results(
     work_type: str, include_ai: bool, *, authorized: bool, fuzzy: bool = False,
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
+    prefetch: bool = False,
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     resolve_source_modes(scope, authorized=authorized)
@@ -1525,7 +1523,9 @@ def search_user_results(
         "user", query_kind, target.casefold(), user_id,
         scope, work_type, bool(include_ai), bool(fuzzy),
     )
-    desired_items = prefetch_item_count(page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD)
+    desired_items = prefetch_item_count(
+        page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD if prefetch else 0,
+    )
 
     with locked_search_session(session_key, cancel_event):
         raise_if_search_cancelled(cancel_event)
@@ -1644,9 +1644,9 @@ def search_user_results(
                 session["baseIndex"] += remove_count
                 session["seen"] = {str(item["id"]) for item in session["items"]}
             prune_search_image_tokens(
-                session_key, retained_pages=set(available_pages), replace_page=page,
+                session_key, retained_pages=set(available_pages), replace_page=None if prefetch else page,
             )
-            authorized_items = [
+            authorized_items = [] if prefetch else [
                 authorize_item_images(
                     copy.deepcopy(item),
                     search_session=session_key,
@@ -1735,6 +1735,7 @@ def search_pixiv_results(
     fuzzy: bool = False,
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
+    prefetch: bool = False,
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     if work_type not in {"all", "illustration", "manga", "ugoira"}:
@@ -1755,6 +1756,8 @@ def search_pixiv_results(
         }
         if cancel_event is not None:
             kwargs["cancel_event"] = cancel_event
+        if prefetch:
+            kwargs["prefetch"] = True
         return search_user_results(
             query.kind, query.value, scope, page, work_type, include_ai, **kwargs,
         )
@@ -1773,7 +1776,7 @@ def search_pixiv_results(
     page = max(1, int(page))
     session_key = ("tags", tag_groups, scope, work_type, bool(include_ai), bool(fuzzy))
     desired_items = prefetch_item_count(
-        page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD,
+        page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD if prefetch else 0,
     )
 
     with locked_search_session(session_key, cancel_event):
@@ -1791,7 +1794,12 @@ def search_pixiv_results(
         while absolute_loaded < desired_items and rounds < 8:
             raise_if_search_cancelled(cancel_event)
             missing = desired_items - absolute_loaded
-            per_source = max(SEARCH_PER_PAGE, (missing * 2 + len(sources) - 1) // len(sources))
+            # Foreground reads only the useful page target. Background prefetch
+            # may over-read to absorb filtered rows without delaying first paint.
+            per_source = max(
+                SEARCH_PER_PAGE,
+                (missing * (2 if prefetch else 1) + len(sources) - 1) // len(sources),
+            )
             incoming: list[dict] = []
             source_commits: list[tuple[str, str, int]] = []
             source_done: dict[tuple[str, str], bool] = {}
@@ -1917,9 +1925,9 @@ def search_pixiv_results(
                 session["seen"] = {str(item["id"]) for item in session["items"]}
             has_more = any(not done for done in session["sourceDone"].values())
             prune_search_image_tokens(
-                session_key, retained_pages=set(available_pages), replace_page=page,
+                session_key, retained_pages=set(available_pages), replace_page=None if prefetch else page,
             )
-            authorized_items = [
+            authorized_items = [] if prefetch else [
                 authorize_item_images(
                     copy.deepcopy(item),
                     search_session=session_key,
@@ -3303,6 +3311,8 @@ class Handler(SimpleHTTPRequestHandler):
                     "authorization_epoch": authorization_epoch,
                 }
                 kwargs["cancel_event"] = cancel_event
+                if query.get("prefetch", ["false"])[0].lower() == "true":
+                    kwargs["prefetch"] = True
                 result = search_pixiv_results(
                     tag_query, search_scope, page, work_type, include_ai, **kwargs,
                 )

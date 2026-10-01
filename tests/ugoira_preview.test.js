@@ -37,11 +37,12 @@ function archive(names, compressed = false) {
   return zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength);
 }
 
-function setup({ count = 2, fetchBytes, decode } = {}) {
+function setup({ count = 2, fetchBytes, decode, hoverDelay = 0 } = {}) {
   const names = Array.from({ length: count }, (_, i) => `${i}.jpg`);
   const bitmaps = [];
   const errors = [];
   const options = [];
+  const requests = [];
   const host = {
     isConnected: true, clientWidth: 200, clientHeight: 300, appended: 0,
     appendChild() { this.appended += 1; },
@@ -63,12 +64,48 @@ function setup({ count = 2, fetchBytes, decode } = {}) {
     return decode ? decode(bitmap) : bitmap();
   };
   const preview = createUgoiraPreview({
-    fetchJson: async () => ({ width: 4096, height: 2048, frames: names.map(file => ({ file, delay: 60000 })) }),
+    hoverDelay,
+    fetchJson: async (url) => { requests.push(url); return { width: 4096, height: 2048, frames: names.map(file => ({ file, delay: 60000 })) }; },
     fetchBytes: fetchBytes || (async () => archive(names)),
     onError: message => errors.push(message),
   });
-  return { preview, host, bitmaps, errors, options, zip: archive(names) };
+  return { preview, host, bitmaps, errors, options, requests, zip: archive(names) };
 }
+
+test("brief hover cancels the dwell without requesting or decoding an archive", async () => {
+  let requests = 0;
+  const state = setup({hoverDelay: 180, fetchBytes: async () => { requests += 1; return archive(["0.jpg"]); }});
+  const pending = state.preview.start(state.host, "1");
+  state.preview.stop();
+  await pending;
+  assert.equal(state.requests.length, 0);
+  assert.equal(requests, 0);
+  assert.equal(state.bitmaps.length, 0);
+  assert.equal(state.host.appended, 0);
+  assert.deepEqual(state.errors, []);
+});
+
+test("sustained hover starts loading only after the dwell completes", async () => {
+  const state = setup({hoverDelay: 180});
+  const originalTimer = globalThis.setTimeout;
+  let finishDwell;
+  globalThis.setTimeout = (callback, delay) => {
+    if (delay === 180) finishDwell = callback;
+    return 0;
+  };
+  try {
+    const pending = state.preview.start(state.host, "1");
+    assert.equal(state.requests.length, 0);
+    assert.equal(state.host.appended, 0);
+    finishDwell();
+    await pending;
+    assert.equal(state.requests.length, 1);
+    assert.equal(state.host.appended, 1);
+  } finally {
+    state.preview.clear();
+    globalThis.setTimeout = originalTimer;
+  }
+});
 
 test("stopping cancels an in-flight archive and prevents decoding", async () => {
   let resolve, signal;

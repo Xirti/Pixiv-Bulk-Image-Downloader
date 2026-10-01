@@ -35,12 +35,10 @@ if (-not $SkipTests) {
   & $Python -I -B (Join-Path $Root 'run_tests.py') --app-only
   if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed' }
 }
-node --check web\app.js
-if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed' }
-node --check web\ugoira-preview.js
-if ($LASTEXITCODE -ne 0) { throw 'JavaScript syntax check failed' }
-node --check web\brand-stage.js
-if ($LASTEXITCODE -ne 0) { throw 'Brand animation JavaScript syntax check failed' }
+foreach ($script in @('app.js', 'ugoira-preview.js', 'theme.js', 'selection-store.js', 'artwork-detail-view.js')) {
+  node --check (Join-Path (Join-Path $Root 'web') $script)
+  if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $script" }
+}
 
 $BuildReleaseMutex = [Threading.Mutex]::new($false, 'Local\MOKU.PixivTagGallery.BuildRelease')
 $BuildReleaseLockHeld = $false
@@ -71,7 +69,7 @@ if ($VersionSource -notmatch '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') { t
 $Version = $Matches[1]
 
 $Readme = @'
-MOKU for Windows
+MOKU Flash for Windows
 
 Requirements:
 - Windows 10 or Windows 11, x64
@@ -83,11 +81,12 @@ Version: __MOKU_VERSION__
 Run MOKU.exe. No Python installation is required.
 Keep MOKU.exe.config beside MOKU.exe. It lets this application's .NET host load its bundled runtimes when an extractor preserves Internet download markers; it does not remove markers or change Windows protection settings.
 MOKU starts a loopback-only backend and opens the interface in its own WebView2 desktop window.
+Use the top-right day/night toggle to switch the global palette. Flash removes decorative model logos and animation loops.
 Use the built-in Usage Guide button for the offline guide and the explicit anonymous network check.
 MOKU can use the target computer's enabled local Windows HTTP system proxy; TUN mode is not required.
 If both the system proxy and TUN are off and direct Pixiv access is blocked, search cannot connect.
 MOKU never changes Windows proxy settings, starts a VPN, or scans local ports.
-Separate multiple tags with ; or ； for strict AND matching. Optional bounded tag aliases are disabled by default. Three later pages of result data are prefetched, but unopened-page thumbnails are not downloaded; old pages and temporary preview authorization are released outside the retained window.
+Separate multiple tags with ; or ； for strict AND matching. Optional bounded tag aliases are disabled by default. The current page is shown first, then three later pages of result data are prefetched in the background; unopened-page thumbnails are not downloaded; old pages and temporary preview authorization are released outside the retained window.
 Use pid:<artwork ID> for one exact work, uid:<user ID> for one creator, or author:<exact name>. Search options are applied only after Start Search is pressed, and an active search can be cancelled explicitly.
 The collection basket accepts any number of artworks within a 1,000 selected-image limit and sends image-first bounded download chunks. A batch is stored in one shared tag, author, or artwork context folder unless folder creation is disabled.
 Pixiv authorization opens as a second MOKU desktop window on the official Pixiv website.

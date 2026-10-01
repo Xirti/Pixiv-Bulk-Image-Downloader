@@ -30,4 +30,4 @@ The generated license bundle intentionally covers every distribution in the exac
 
 Pixiv and artwork displayed or downloaded through MOKU are not third-party software dependencies. Artwork remains the property of its respective creators.
 
-The home screen includes local brand SVGs from Lobe Icons (MIT) and the official GLM-4.5 repository (see its bundled license). Original files, licenses, and source links are in `web/brand-logos/`. These marks belong to their respective owners; their decorative use does not indicate integration or endorsement. Animation effects are implemented by MOKU.
+MOKU Flash does not distribute the decorative model brand SVGs from earlier releases.

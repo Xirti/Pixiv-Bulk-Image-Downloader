@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS = (ROOT / "tests" / "frontend_harness.js").read_text(encoding="utf-8")
 APP = "\n".join(
     (ROOT / "web" / name).read_text(encoding="utf-8")
-    for name in ("ugoira-preview.js", "app.js")
+    for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "app.js")
 )
 FIXTURE = r'''
 const assert = require("node:assert/strict");
@@ -20,9 +20,7 @@ const artwork = (id, count = 3, token = "old") => ({
   formats: [{id: "source", label: "source"}],
 });
 const choose = (item) => {
-  selectedArtworkIds.add(item.id);
-  selectedArtworks.set(item.id, item);
-  selectedPagesByArtwork.set(item.id, new Set(Array.from({length: item.pages}, (_, page) => page)));
+  selection.choose([item], {context: activeSearchContext, resultPage: currentPage});
 };
 '''
 
@@ -57,6 +55,47 @@ assert.equal($("#viewAll").hidden, true);
 finish(artwork("20"));
 await pending;
 assert.equal(currentDetailItem.id, "20");
+''')
+
+    def test_detail_decks_share_behavior_but_not_locked_state(self):
+        self.run_frontend(r'''
+const makeView = () => {
+  const deck = new FakeElement(), hint = new FakeElement();
+  const cards = [0, 1, 2].map(page => { const card = new FakeElement(); card.dataset.page = String(page); return card; });
+  deck.querySelectorAll = selector => selector === ".deck-card" ? cards : [];
+  const fields = Object.fromEntries(["Title", "WorkType", "Desc", "Artist", "Size", "Bookmarks", "Date", "Tags"].map(name => [name, new FakeElement()]));
+  const view = createArtworkDetailView({deck, hint, fields, escape: esc, installImages: () => {}});
+  view.render(artwork("deck", 3));
+  return {view, cards, fields};
+};
+const normal = makeView(), basket = makeView();
+normal.cards[0].onclick();
+assert.equal(normal.cards[0].getAttribute("aria-pressed"), "true");
+normal.cards[1].onclick();
+assert.equal(normal.cards[0].getAttribute("aria-pressed"), "true", "another card displaced the lock");
+basket.cards[2].onclick();
+assert.equal(basket.cards[2].getAttribute("aria-pressed"), "true");
+normal.cards[0].onclick();
+assert.equal(normal.cards[1].classList.contains("deck-inert"), false);
+assert.equal(basket.cards[2].classList.contains("deck-locked"), true, "one detail unlocked another detail");
+basket.view.render(artwork("replacement", 3));
+assert.equal(basket.cards[2].getAttribute("aria-pressed"), "false");
+assert.equal(basket.fields.Title.textContent, "replacement");
+''')
+
+    def test_normal_detail_page_choice_does_not_inherit_a_previous_basket_origin(self):
+        self.run_frontend(r'''
+const item = artwork("origin", 3);
+batchCandidateContextByArtwork.set(item.id, {kind: "tags", value: "old-basket"});
+batchCandidateResultPageByArtwork.set(item.id, 2);
+currentPage = 9;
+activeSearchContext = {kind: "tags", value: "new-search"};
+renderDetail(item, 0);
+const box = $("#collectionPages").querySelectorAll("[data-collection-page]")[0];
+box.checked = true;
+box.onchange();
+assert.equal(selection.get(item.id).context.value, "new-search");
+assert.equal(selection.get(item.id).resultPage, 9);
 ''')
 
     def test_entering_batch_mode_invalidates_an_inflight_single_detail(self):
@@ -189,6 +228,57 @@ windowListeners.get("pagehide")();
 assert.equal(clears, 1);
 ''')
 
+    def test_prefetch_updates_navigation_without_replacing_displayed_results(self):
+        self.run_frontend(r'''
+let warm;
+const originalSetTimeout = setTimeout;
+globalThis.setTimeout = (callback, delay, ...args) => {
+  if (delay === 650) { warm = callback; return 123; }
+  return originalSetTimeout(callback, delay, ...args);
+};
+fetchJson = async (url) => {
+  const query = new URL(url, "http://localhost").searchParams;
+  return query.get("prefetch") === "true"
+    ? {items: [], page: 1, availablePages: [1,2,3,4], preloadedThrough: 4, hasMore: true}
+    : {items: [artwork("101")], page: 1, availablePages: [1], preloadedThrough: 1, hasMore: true, total: 36};
+};
+await search("cat");
+const displayed = grid.innerHTML;
+assert.equal(typeof warm, "function", "first result delivery never scheduled background prefetch");
+await warm();
+assert.equal(grid.innerHTML, displayed, "prefetch replaced visible results and their image URLs");
+assert.equal(preloadedThrough, 4);
+assert.equal(items[0].id, "101");
+''')
+
+    def test_new_search_cancels_prefetch_and_ignores_its_late_metadata(self):
+        self.run_frontend(r'''
+let warm, finish, signal;
+const originalSetTimeout = setTimeout;
+globalThis.setTimeout = (callback, delay, ...args) => {
+  if (delay === 650) { warm = callback; return 123; }
+  return originalSetTimeout(callback, delay, ...args);
+};
+fetchJson = async (url, options) => {
+  const query = new URL(url, "http://localhost").searchParams;
+  if (query.get("prefetch") === "true") {
+    signal = options.signal;
+    return new Promise(resolve => { finish = resolve; });
+  }
+  return {items: [artwork(query.get("tag"))], page: 1, availablePages: [1], preloadedThrough: 1, hasMore: true};
+};
+await search("101");
+const pending = warm();
+await search("102");
+assert.equal(signal.aborted, true);
+finish({items: [], availablePages: [1,2,3,4], preloadedThrough: 4, hasMore: false});
+await pending;
+assert.equal(items[0].id, "102");
+assert.equal(preloadedThrough, 1, "old prefetch rewrote the new query's cached range");
+assert.equal(searchHasMore, true);
+cancelSearchPrefetch();
+''')
+
     def test_account_switch_clears_old_restricted_views_and_retry_identity(self):
         self.run_frontend(r'''
 const old = {...artwork("70"), restriction: "r18"};
@@ -200,7 +290,7 @@ resumableSingleTask = {old: true};
 resumableBatchTask = {old: true};
 fetchJson = async () => ({loggedIn: true, authorizationGeneration: 11});
 await syncAuthStatus();
-assert.equal(selectedArtworkIds.has(old.id), false, "account switch retained the previous account's restricted selection");
+assert.equal(selection.has(old.id), false, "account switch retained the previous account's restricted selection");
 assert.equal(resumableSingleTask, null);
 assert.equal(resumableBatchTask, null);
 assert.ok($("#count").textContent.includes("已变更"));

@@ -83,7 +83,7 @@ class WorkflowV2Tests(unittest.TestCase):
 
     def test_desktop_mode_uses_webview2_main_and_pixiv_login_windows(self):
         self.assertIn("webview.create_window", DESKTOP)
-        self.assertIn("MOKU \u2014 Pixiv \u6807\u7b7e\u91c7\u96c6\u518c", DESKTOP)
+        self.assertIn("MOKU Flash — Pixiv 搜图与采集", DESKTOP)
         self.assertIn("MOKU \u2014 Pixiv \u5b98\u65b9\u767b\u5f55", DESKTOP)
         self.assertIn("login.get_cookies()", DESKTOP)
         self.assertIn("is_completed_pixiv_login_url", DESKTOP)
@@ -190,7 +190,7 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertNotIn('id="saveRoot"', basket)
         self.assertNotIn('id="batchPicker"', HTML)
         self.assertIn("openBatchCollection", APP)
-        self.assertIn("selectedPagesByArtwork", APP)
+        self.assertIn("selection.setPage", APP)
         self.assertIn("basketBack", APP)
         self.assertIn("closeBasketPage", APP)
         self.assertIn("page-select", STYLE)
@@ -206,8 +206,8 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn("generation !== viewGeneration", detail_block)
 
     def test_page_selection_enrolls_collection_in_cross_collection_batch(self):
-        self.assertIn("selectedArtworks.set(item.id, item)", APP)
-        self.assertIn("selectedArtworkIds.add(item.id)", APP)
+        self.assertIn("selection.setPage(item, page, box.checked, detailSelectionOrigin(item))", APP)
+        self.assertIn("selection.choose([item], origin)", APP)
 
 
 if __name__ == "__main__": unittest.main()
