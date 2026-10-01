@@ -53,6 +53,8 @@ body.batch-mode #detail .batch-only{display:block}
 /* Ugoira hover preview canvas overlays only the static first frame. */
 .poster{position:relative}
 .ugoira-preview{position:absolute;inset:0;z-index:1;width:100%;height:100%;pointer-events:none}
+.poster[data-ugoira-state=loading]::after,.poster[data-ugoira-state=error]::after{position:absolute;left:8px;right:8px;bottom:8px;z-index:2;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--badge);color:var(--ink);font-size:11px;pointer-events:none;content:"动图加载中…"}
+.poster[data-ugoira-state=error]::after{content:"预览失败，移开鼠标后重试"}
 .page-select span{z-index:2}
 
 /* Floating chrome: glass chips and task dock; back-to-top sits alone bottom-left. */
@@ -149,13 +151,14 @@ header{background:var(--bg)}
 @media(max-width:900px){.hero{gap:32px;padding-top:30px;padding-bottom:40px}}
 @media(max-width:600px){.hero,.results,.detail{padding-right:44px;padding-left:16px}.page-rail{right:0}.pagination-dock{padding-right:44px;gap:6px}.pagination-dock .selection-bar{justify-content:center}.results{padding-bottom:220px}.scene{scroll-margin-top:12px}}
 
-/* Flash landing: one useful search surface, no decorative rendering loop. */
+/* Lite landing: one useful search surface, no decorative rendering loop. */
 .edition-label{font-size:11px;letter-spacing:.03em;margin-left:7px;vertical-align:middle}
 .theme-toggle{white-space:nowrap;font-size:12px}
-.hero{min-height:calc(100svh - 68px);display:flex;flex-direction:column;justify-content:center;gap:38px;padding:64px 56px 84px 7vw}
+.hero{min-height:calc(100svh - 68px);display:flex;flex-direction:column;justify-content:center;gap:38px;padding:64px 56px 84px}
 .home-intro{text-align:center}
-.home-intro .eyebrow{margin:0 0 14px;letter-spacing:.18em}
-.home-intro h1{font-size:clamp(30px,4.5vw,46px);font-weight:500;letter-spacing:.02em;margin:0;color:var(--ink)}
+.home-intro .eyebrow{margin:0 0 14px;letter-spacing:0}
+.home-intro h1{display:inline-block;position:relative;font-size:clamp(30px,4.5vw,46px);font-weight:500;letter-spacing:0;margin:0;color:var(--ink)}
+.home-title-mark{position:absolute;left:100%;top:0}
 .search-panel{width:min(100%,860px);padding:24px;border-radius:20px;background:var(--surface);border:1px solid var(--line);box-shadow:0 6px 28px var(--shadow)}
 .search-label{display:block;color:var(--muted);font-size:13px}
 .search-row{margin:8px 0 18px;align-items:center}
@@ -167,4 +170,4 @@ header{background:var(--bg)}
 .filters select{border-radius:9px;background:var(--surface-2)}
 .ai-choice,.fuzzy-choice{padding-top:0!important;min-height:42px}
 @media(max-width:900px){.hero{min-height:calc(100svh - 68px);gap:30px;padding-top:48px;padding-bottom:56px}}
-@media(max-width:600px){.hero{padding:36px 44px 52px 16px;gap:25px}.search-panel{padding:20px 16px;border-radius:16px}.search-row{flex-wrap:wrap;gap:10px}.search-row input{flex-basis:100%;min-height:58px;font-size:18px}.search-row button[type=submit]{flex:1}.filters{grid-template-columns:1fr 1fr}.head-actions{gap:6px}.theme-toggle{padding:8px}.home-intro h1{font-size:30px}}
+@media(max-width:600px){.hero{padding:36px 44px 52px;gap:25px}.search-panel{padding:20px 16px;border-radius:16px}.search-row{flex-wrap:wrap;gap:10px}.search-row input{flex-basis:100%;min-height:58px;font-size:18px}.search-row button[type=submit]{flex:1}.filters{grid-template-columns:1fr 1fr}.head-actions{gap:6px}.theme-toggle{padding:8px}.home-intro h1{font-size:30px}}

@@ -69,7 +69,7 @@ if ($VersionSource -notmatch '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') { t
 $Version = $Matches[1]
 
 $Readme = @'
-MOKU Flash for Windows
+MOKU Lite for Windows
 
 Requirements:
 - Windows 10 or Windows 11, x64
@@ -81,7 +81,7 @@ Version: __MOKU_VERSION__
 Run MOKU.exe. No Python installation is required.
 Keep MOKU.exe.config beside MOKU.exe. It lets this application's .NET host load its bundled runtimes when an extractor preserves Internet download markers; it does not remove markers or change Windows protection settings.
 MOKU starts a loopback-only backend and opens the interface in its own WebView2 desktop window.
-Use the top-right day/night toggle to switch the global palette. Flash removes decorative model logos and animation loops.
+Use the top-right day/night toggle to switch the global palette. Lite removes decorative model logos and animation loops.
 Use the built-in Usage Guide button for the offline guide and the explicit anonymous network check.
 MOKU can use the target computer's enabled local Windows HTTP system proxy; TUN mode is not required.
 If both the system proxy and TUN are off and direct Pixiv access is blocked, search cannot connect.

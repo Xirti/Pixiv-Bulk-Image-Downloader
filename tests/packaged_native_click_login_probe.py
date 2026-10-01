@@ -200,7 +200,7 @@ def launch(exe: Path, root: Path, port: int):
     )
     base = f"http://127.0.0.1:{int(descriptor['port'])}/"
     main = wait_until(
-        lambda: next((row for row in top_windows(process.pid) if row["title"] == "MOKU Flash — Pixiv 搜图与采集"), None),
+        lambda: next((row for row in top_windows(process.pid) if row["title"] == "MOKU Lite — Pixiv 搜图与采集"), None),
         25,
         "main window",
     )
@@ -212,7 +212,7 @@ def launch(exe: Path, root: Path, port: int):
 
 def stop(process, root: Path, *, remove_root: bool = True):
     if process is not None and process.poll() is None:
-        main = next((row for row in top_windows(process.pid) if row["title"] == "MOKU Flash — Pixiv 搜图与采集"), None)
+        main = next((row for row in top_windows(process.pid) if row["title"] == "MOKU Lite — Pixiv 搜图与采集"), None)
         if main:
             user32.PostMessageW(main["hwnd"], WM_CLOSE, 0, 0)
         try:
@@ -361,7 +361,7 @@ def main() -> None:
             )
         finally:
             ws.close()
-        current = next((row for row in top_windows(actual.pid) if row["title"] == "MOKU Flash — Pixiv 搜图与采集"), None)
+        current = next((row for row in top_windows(actual.pid) if row["title"] == "MOKU Lite — Pixiv 搜图与采集"), None)
         result["mainResponsive"] = bool(current and not current["hung"])
         result["ok"] = (
             len(result["nativeClicks"]) == 2

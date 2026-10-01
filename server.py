@@ -40,7 +40,7 @@ from auth_store import (
 from folder_picker import select_folder
 from download_requests import DownloadRequestError, DownloadRequests
 from network_config import normalize_loopback_proxy
-from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, should_retry_status
+from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status
 from search_service import SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
 
@@ -1126,6 +1126,7 @@ def extend_history(
     need_count: int,
     allow_r18: bool = False,
     *,
+    work_type: str = "all",
     max_requests: int = MAX_HISTORY_REQUESTS,
     max_seconds: float = MAX_HISTORY_SECONDS,
     budget: dict | None = None,
@@ -1158,10 +1159,10 @@ def extend_history(
             window = state["queue"][0]
             if not window["initialized"]:
                 consume_request()
-                block = (search_pixiv_json(
-                    build_search_url(tag, 1, mode=mode, start_date=window["start"], end_date=window["end"]),
+                block = search_response_block(search_pixiv_json(
+                    build_search_url(tag, 1, mode=mode, start_date=window["start"], end_date=window["end"], work_type=work_type),
                     cancel_event,
-                ).get("body") or {}).get("illustManga") or {}
+                ), work_type)
                 total = int(block.get("total") or 0)
                 first_data = block.get("data") or []
                 if mode == "r18" and total > 0 and not any(int(row.get("xRestrict", -1)) == 1 for row in first_data):
@@ -1185,10 +1186,10 @@ def extend_history(
                     state["budgetExhausted"] = True
                     break
                 consume_request()
-                block = (search_pixiv_json(
-                    build_search_url(tag, window["page"], mode=mode, start_date=window["start"], end_date=window["end"]),
+                block = search_response_block(search_pixiv_json(
+                    build_search_url(tag, window["page"], mode=mode, start_date=window["start"], end_date=window["end"], work_type=work_type),
                     cancel_event,
-                ).get("body") or {}).get("illustManga") or {}
+                ), work_type)
                 rows = block.get("data") or []
             for raw in rows:
                 artwork_id = str(raw.get("id") or "")
@@ -1327,7 +1328,7 @@ def load_search_source(
 ) -> dict:
     state = extend_history(
         tag, mode, need_count, allow_r18=allow_r18, budget=budget,
-        namespace=session_key, cancel_event=cancel_event,
+        namespace=session_key, cancel_event=cancel_event, work_type=session_key[3],
     )
     source_key = (session_key, tag, mode)
     base = int(state.get("baseOffset", 0))
@@ -1462,13 +1463,20 @@ def resolve_author_user(
 def load_user_profile_ids(
     user_id: str,
     *,
+    work_type: str = "all",
     cancel_event: threading.Event | None = None,
 ) -> list[str]:
     body = search_pixiv_json(build_user_profile_all_url(user_id), cancel_event).get("body") or {}
     if not isinstance(body, dict):
         raise PixivPolicyError("Pixiv 画师作品索引格式异常")
     ids: set[str] = set()
-    for category in ("illusts", "manga"):
+    # Pixiv's index distinguishes manga from illustration/ugoira IDs, but
+    # does not distinguish static illustrations from animation; rows still
+    # receive the exact type and authorization checks after batch loading.
+    categories = ("illusts", "manga") if work_type == "all" else (
+        ("manga",) if work_type == "manga" else ("illusts",)
+    )
+    for category in categories:
         rows = body.get(category)
         candidates = rows.keys() if isinstance(rows, dict) else (rows if isinstance(rows, list) else [])
         for artwork_id in candidates:
@@ -1536,9 +1544,9 @@ def search_user_results(
             session = _touch_search_session(session_key)
         if "profileIds" not in session or session.get("targetUserId") != user_id:
             profile_ids = (
-                load_user_profile_ids(user_id)
+                load_user_profile_ids(user_id, work_type=work_type)
                 if cancel_event is None
-                else load_user_profile_ids(user_id, cancel_event=cancel_event)
+                else load_user_profile_ids(user_id, work_type=work_type, cancel_event=cancel_event)
             )
             with SEARCH_SESSION_LOCKS_GUARD:
                 assert_search_commit_allowed(

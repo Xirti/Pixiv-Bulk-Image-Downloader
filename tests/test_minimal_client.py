@@ -27,7 +27,7 @@ class MinimalClientTests(unittest.TestCase):
         self.assertNotIn("previewMode", HTML)
         self.assertNotIn("motion", HTML)
 
-    def test_flash_removes_brand_assets_and_loads_theme_before_styles(self):
+    def test_lite_removes_brand_assets_and_loads_theme_before_styles(self):
         self.assertNotIn("brand-stage", HTML)
         self.assertFalse((ROOT / "web" / "brand-stage.js").exists())
         self.assertFalse(list((ROOT / "web" / "brand-logos").glob("*.svg")))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import threading
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 import server
@@ -225,6 +226,22 @@ class AuthorSearchRegressionTests(unittest.TestCase):
         self.assertEqual(first["items"][0]["id"], ids[0])
         self.assertEqual(len(third["items"]), 3)
         self.assertFalse(third["hasMore"])
+
+    def test_manga_author_search_does_not_spend_its_budget_on_illustration_ids(self):
+        queried_ids = []
+        def remote(url, _cancel):
+            if "/profile/all?" in url:
+                return {"body": {"illusts": {str(i): None for i in range(1000, 1384)}, "manga": {"7": None}}}
+            ids = parse_qs(urlsplit(url).query)["ids[]"]
+            queried_ids.extend(ids)
+            return {"body": {"works": {
+                artwork_id: {**self.raw(artwork_id), "illustType": 1 if artwork_id == "7" else 0}
+                for artwork_id in ids
+            }}}
+        with patch.object(server, "search_pixiv_json", side_effect=remote):
+            result = server.search_pixiv_results("uid:42", "safe", 1, "manga", True, authorized=False)
+        self.assertEqual([item["id"] for item in result["items"]], ["7"], "mixed author IDs exhausted the budget before reaching manga")
+        self.assertEqual(queried_ids, ["7"])
 
     def test_author_first_page_exposes_exhausted_partial_second_page(self):
         ids = [str(7000 - index) for index in range(53)]

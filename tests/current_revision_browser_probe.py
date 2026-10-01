@@ -22,6 +22,8 @@ class ProbeHandler(server.Handler):
     detail_revision = 0
     fail_once = True
     partial_pages = []
+    back_pages = []
+    back_floor = 1
 
     @classmethod
     def artwork(cls):
@@ -45,6 +47,19 @@ class ProbeHandler(server.Handler):
 
     def _get_pixiv_search(self, _request):
         query = parse_qs(_request.query)
+        if query.get("tag") == ["back-probe"]:
+            page = int(query.get("page", ["1"])[0])
+            prefetch = query.get("prefetch") == ["true"]
+            if page < type(self).back_floor:
+                type(self).back_floor = 1
+            type(self).back_floor = max(type(self).back_floor, page - 6)
+            if not prefetch:
+                type(self).back_pages.append(page)
+            return self.send_json({
+                "items": [] if prefetch else [{**self.artwork(), "id": str(i), "pages": 1} for i in range((page - 1) * 36 + 1, page * 36 + 1)],
+                "page": page, "availablePages": list(range(type(self).back_floor, page + 4)),
+                "preloadedThrough": page + 3, "hasMore": True, "total": page * 36, "perPage": 36,
+            })
         if query.get("tag") == ["partial-probe"]:
             page = int(query.get("page", ["1"])[0])
             type(self).partial_pages.append(page)
@@ -135,17 +150,46 @@ def main():
                 ))
                 page.goto(f"http://127.0.0.1:{httpd.server_port}/")
                 assert page.locator(".brand-stage, .brand-choices, #brandPlay").count() == 0
-                screenshots = Path(tempfile.mkdtemp(prefix="moku-flash-visual-"))
+                screenshots = Path(tempfile.mkdtemp(prefix="moku-lite-visual-"))
                 themes = []
                 for width, height in ((1280, 820), (375, 812)):
                     page.set_viewport_size({"width": width, "height": height})
                     for theme in ("dark", "light"):
                         themes.append(check_theme(page, theme))
+                        centers = page.evaluate("""(() => {
+                            const title = document.querySelector('.home-intro h1');
+                            const text = title.firstChild.nodeType === Node.TEXT_NODE ? title.firstChild : title.firstChild.firstChild;
+                            const range = document.createRange();
+                            range.setStart(text, 0); range.setEnd(text, 5);
+                            const rect = range.getBoundingClientRect();
+                            const eyebrow = document.createRange();
+                            eyebrow.selectNodeContents(document.querySelector('.home-intro .eyebrow'));
+                            const mark = eyebrow.getBoundingClientRect();
+                            return {title: (rect.left + rect.right) / 2, wordmark: (mark.left + mark.right) / 2, target: innerWidth / 2};
+                        })()""")
+                        assert abs(centers["title"] - centers["target"]) < 1, centers
+                        assert abs(centers["wordmark"] - centers["target"]) < 1, centers
                         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
                         page.screenshot(path=str(screenshots / f"home-{theme}-{width}.png"))
                 page.set_viewport_size({"width": 1280, "height": 820})
                 page.reload()
                 assert page.evaluate("document.documentElement.dataset.theme") == "light"
+                page.locator("#tag").fill("back-probe")
+                page.locator("#searchSubmit").click()
+                wait_for(page, "currentPage === 1 && items.length === 36 && !searchPending")
+                for target in range(2, 13):
+                    page.locator('#pagination [aria-label="下一页"]').click()
+                    wait_for(page, f"currentPage === {target} && !searchPending")
+                assert page.evaluate("firstAvailablePage") == 6
+                for target in range(11, 4, -1):
+                    previous = page.locator('#pagination [aria-label="上一页"]')
+                    assert previous.is_enabled(), f"cache boundary prevented returning to page {target}"
+                    previous.click()
+                    wait_for(page, f"currentPage === {target} && !searchPending")
+                assert page.locator('#pagination [data-page="1"]').count() == 1
+                page.locator('#pagination [data-page="1"]').click()
+                wait_for(page, "currentPage === 1 && !searchPending")
+                assert page.evaluate("items.map(item => item.id)") == [str(i) for i in range(1, 37)]
                 page.locator("#tag").fill("partial-probe")
                 page.locator("#searchSubmit").click()
                 wait_for(page, "items.length === 10 && !searchPending")
@@ -204,7 +248,8 @@ def main():
                 print(json.dumps({"ok": True, "downloadChunks": [len(row) for row in ProbeHandler.requests],
                                   "basketFreshPages": True, "qualityPreserved": True,
                                   "viewports": [1280, 375], "scriptErrors": errors,
-                                  "themes": themes, "partialPageRequests": ProbeHandler.partial_pages, "screenshots": str(screenshots)}))
+                                  "themes": themes, "partialPageRequests": ProbeHandler.partial_pages,
+                                  "evictedPageBackNavigation": ProbeHandler.back_pages, "screenshots": str(screenshots)}))
             finally:
                 browser.close()
     finally:

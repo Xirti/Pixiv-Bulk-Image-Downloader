@@ -83,7 +83,7 @@ class WorkflowV2Tests(unittest.TestCase):
 
     def test_desktop_mode_uses_webview2_main_and_pixiv_login_windows(self):
         self.assertIn("webview.create_window", DESKTOP)
-        self.assertIn("MOKU Flash — Pixiv 搜图与采集", DESKTOP)
+        self.assertIn("MOKU Lite — Pixiv 搜图与采集", DESKTOP)
         self.assertIn("MOKU \u2014 Pixiv \u5b98\u65b9\u767b\u5f55", DESKTOP)
         self.assertIn("login.get_cookies()", DESKTOP)
         self.assertIn("is_completed_pixiv_login_url", DESKTOP)

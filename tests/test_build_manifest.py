@@ -283,7 +283,7 @@ class BuildManifestTests(unittest.TestCase):
         self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
         self.assertIn(f'__version__ = "{__version__}"', version)
         self.assertIn(f"当前源码版本：**{__version__}**", readme)
-        self.assertIn(f"当前源码版本是 `{__version__} Flash`", readme)
+        self.assertIn(f"当前源码版本是 `{__version__} Lite`", readme)
         self.assertNotIn("当前源码版本：**1.0.10**", readme)
         self.assertNotIn("当前源码版本：**1.0.9**", readme)
         self.assertNotIn("当前源码版本：**1.0.8**", readme)
@@ -414,7 +414,7 @@ class BuildManifestTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             version = build_manifest.__version__
             release = root / "release" / f"v{version}"
-            archive = release / f"MOKU-v{version}-Flash-windows-x64.zip"
+            archive = release / f"MOKU-v{version}-Lite-windows-x64.zip"
             self.assertTrue(archive.is_file())
             self.assertTrue((release / "SHA256SUMS.txt").is_file())
             notes = (release / "RELEASE_NOTES.md").read_text(encoding="utf-8")

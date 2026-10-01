@@ -122,7 +122,7 @@ try {
   Copy-Item -LiteralPath $Dist -Destination (Join-Path $Staging 'MOKU') -Recurse
   & $Python -I -B (Join-Path $Root 'build_manifest.py') 'verify' (Join-Path $Staging 'MOKU\BUILD_MANIFEST.json') (Join-Path $Staging 'MOKU\MOKU.exe')
   if ($LASTEXITCODE -ne 0) { throw 'Staged distribution failed build-manifest verification' }
-  $ArchiveName = "MOKU-v$Version-Flash-windows-x64.zip"
+  $ArchiveName = "MOKU-v$Version-Lite-windows-x64.zip"
   $TemporaryArchive = Join-Path $Staging $ArchiveName
   Compress-Archive -LiteralPath (Join-Path $Staging 'MOKU') -DestinationPath $TemporaryArchive -CompressionLevel Optimal
   $Expanded = Join-Path $Staging 'expanded'

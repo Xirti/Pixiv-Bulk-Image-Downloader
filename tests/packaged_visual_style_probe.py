@@ -28,7 +28,7 @@ def main() -> None:
     result = {
         "ok": False,
         "folderButton": {},
-        "flashLanding": {},
+        "liteLanding": {},
         "galleryControls": {},
         "galleryControlsAfterScroll": {},
         "viewport": {},
@@ -56,7 +56,7 @@ def main() -> None:
                 const clearPage = document.querySelector('#clearPageSelection');
                 return {
                     button: {color: button.color, background: button.backgroundColor, paletteForeground: bodyStyle.getPropertyValue("--on-accent").trim()},
-                    flashLanding: {
+                    liteLanding: {
                         noBrandAssets: !document.querySelector('.brand-stage, .brand-choices, #brandPlay'),
                         themeSwitch: !!document.querySelector('#themeToggle'),
                         titleCentered: getComputedStyle(document.querySelector('.home-intro')).textAlign === 'center',
@@ -83,7 +83,7 @@ def main() -> None:
                 };
             })()""")
             result["folderButton"] = visual["button"]
-            result["flashLanding"] = visual["flashLanding"]
+            result["liteLanding"] = visual["liteLanding"]
             result["galleryControls"] = visual["galleryControls"]
             after_scroll = evaluate(ws, counter, """(() => {
                 const gallery = document.querySelector('#gallery');
@@ -424,12 +424,12 @@ def main() -> None:
         result["ok"] = (
             result["folderButton"].get("color") != result["folderButton"].get("background")
             and result["folderButton"].get("background") != "rgba(0, 0, 0, 0)"
-            and result["flashLanding"].get("noBrandAssets")
-            and result["flashLanding"].get("themeSwitch")
-            and result["flashLanding"].get("titleCentered")
-            and result["flashLanding"].get("oldBackgroundRemoved")
-            and result["flashLanding"].get("navigationDots") == 3
-            and result["flashLanding"].get("selectionDocked")
+            and result["liteLanding"].get("noBrandAssets")
+            and result["liteLanding"].get("themeSwitch")
+            and result["liteLanding"].get("titleCentered")
+            and result["liteLanding"].get("oldBackgroundRemoved")
+            and result["liteLanding"].get("navigationDots") == 3
+            and result["liteLanding"].get("selectionDocked")
             and result["galleryControls"].get("selectAllVisible")
             and result["galleryControls"].get("clearPageVisible")
             and result["galleryControls"].get("pagerPosition") == "fixed"

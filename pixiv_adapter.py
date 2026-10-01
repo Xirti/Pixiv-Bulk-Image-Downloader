@@ -122,16 +122,39 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
     }
 
 
-def build_search_url(tag: str, page: int, mode: str = "safe", start_date=None, end_date=None) -> str:
+SEARCH_TYPES = {
+    "all": ("artworks", "all", "illustManga"),
+    "illustration": ("illustrations", "illust", "illust"),
+    "manga": ("manga", "manga", "manga"),
+    "ugoira": ("illustrations", "ugoira", "illust"),
+}
+
+
+def build_search_url(tag: str, page: int, mode: str = "safe", start_date=None, end_date=None, *, work_type: str = "all") -> str:
     if mode not in {"safe", "r18"}:
         raise PixivPolicyError("unsupported search mode")
+    if work_type not in SEARCH_TYPES:
+        raise PixivPolicyError("unsupported search type")
+    route, remote_type, _block_key = SEARCH_TYPES[work_type]
     clean_tag = str(tag).strip()[:60] or "原创"
     encoded = urllib.parse.quote(clean_tag, safe="")
-    params = {"word": clean_tag, "order": "date_d", "mode": mode, "p": max(1, int(page)), "s_mode": "s_tag_full", "type": "all", "lang": "zh"}
+    params = {"word": clean_tag, "order": "date_d", "mode": mode, "p": max(1, int(page)), "s_mode": "s_tag_full", "type": remote_type, "lang": "zh"}
     if start_date and end_date:
         params["scd"] = start_date.isoformat(); params["ecd"] = end_date.isoformat()
     query = urllib.parse.urlencode(params)
-    return f"https://www.pixiv.net/ajax/search/artworks/{encoded}?{query}"
+    return f"https://www.pixiv.net/ajax/search/{route}/{encoded}?{query}"
+
+
+def search_response_block(data: dict, work_type: str = "all") -> dict:
+    if work_type not in SEARCH_TYPES:
+        raise PixivPolicyError("unsupported search type")
+    body = data.get("body")
+    if not isinstance(body, dict):
+        raise PixivPolicyError("Pixiv 搜索数据格式异常")
+    block = body.get(SEARCH_TYPES[work_type][2])
+    if not isinstance(block, dict) or not isinstance(block.get("data"), list):
+        raise PixivPolicyError("Pixiv 搜索数据格式异常")
+    return block
 
 
 def _validated_user_id(user_id: str) -> str:

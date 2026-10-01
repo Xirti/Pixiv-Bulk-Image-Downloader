@@ -156,7 +156,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("requestAnimationFrame(run)", scheduler)
         self.assertNotIn("setInterval", APP)
 
-    def test_flash_landing_has_bounded_responsive_dimensions(self):
+    def test_lite_landing_has_bounded_responsive_dimensions(self):
         self.assertIn("width:min(100%,860px)", STYLE)
         self.assertIn(".home-intro{text-align:center}", STYLE)
         self.assertIn("prefers-reduced-motion:reduce", STYLE)

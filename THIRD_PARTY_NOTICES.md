@@ -30,4 +30,4 @@ The generated license bundle intentionally covers every distribution in the exac
 
 Pixiv and artwork displayed or downloaded through MOKU are not third-party software dependencies. Artwork remains the property of its respective creators.
 
-MOKU Flash does not distribute the decorative model brand SVGs from earlier releases.
+MOKU Lite does not distribute the decorative model brand SVGs from earlier releases.

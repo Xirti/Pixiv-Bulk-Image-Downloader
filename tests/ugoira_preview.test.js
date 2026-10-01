@@ -14,12 +14,14 @@ function archive(names, compressed = false) {
     const payload = compressed ? deflateRawSync(Buffer.from([1])) : Buffer.from([1]);
     const local = Buffer.alloc(30 + bytes.length + payload.length);
     local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt32LE(0xa505df1b, 14); // CRC32 of the one-byte frame fixture.
     local.writeUInt16LE(bytes.length, 26);
     bytes.copy(local, 30);
     payload.copy(local, 30 + bytes.length);
     const entry = Buffer.alloc(46 + bytes.length);
     entry.writeUInt32LE(0x02014b50, 0);
     entry.writeUInt16LE(compressed ? 8 : 0, 10);
+    entry.writeUInt32LE(0xa505df1b, 16);
     entry.writeUInt32LE(payload.length, 20);
     entry.writeUInt32LE(1, 24);
     entry.writeUInt16LE(bytes.length, 28);
@@ -44,13 +46,13 @@ function setup({ count = 2, fetchBytes, decode, hoverDelay = 0 } = {}) {
   const options = [];
   const requests = [];
   const host = {
-    isConnected: true, clientWidth: 200, clientHeight: 300, appended: 0,
-    appendChild() { this.appended += 1; },
+    isConnected: true, dataset: {}, clientWidth: 200, clientHeight: 300, appended: 0, attached: 0,
+    appendChild() { this.appended += 1; this.attached += 1; },
   };
   globalThis.window = { devicePixelRatio: 1 };
   globalThis.document = {
     createElement: () => ({
-      remove() {},
+      remove() { host.attached -= 1; },
       getContext: () => ({ clearRect() {}, drawImage: (bitmap) => assert.equal(bitmap.closed, 0) }),
     }),
   };
@@ -136,6 +138,22 @@ test("a partial decode failure closes every completed bitmap", async () => {
   assert.equal(state.bitmaps[0].closed, 1);
 });
 
+test("the first frame is visible while later frames are still decoding", async () => {
+  let count = 0, finish;
+  const state = setup({decode: bitmap => ++count === 1
+    ? bitmap()
+    : new Promise(resolve => { finish = () => resolve(bitmap()); })});
+  try {
+    const pending = state.preview.start(state.host, "1");
+    for (let i = 0; i < 20 && !finish; i += 1) await Promise.resolve();
+    assert.ok(finish, "the second frame was not reached");
+    assert.equal(state.host.appended, 1, "preview stayed invisible until every frame was decoded");
+    assert.equal(state.host.dataset.ugoiraState, "playing");
+    finish();
+    await pending;
+  } finally { state.preview.clear(); }
+});
+
 test("clearing during decode closes the late bitmap without attaching a canvas", async () => {
   let finish;
   const state = setup({ decode: bitmap => new Promise(resolve => { finish = () => resolve(bitmap()); }) });
@@ -182,7 +200,7 @@ test("decoded memory budget rejects oversized previews and frees their frames", 
   assert.equal(state.errors.length, 1);
   assert.match(state.errors[0], /内存上限/);
   assert.ok(state.bitmaps.every(bitmap => bitmap.closed === 1));
-  assert.equal(state.host.appended, 0);
+  assert.equal(state.host.attached, 0, "a partially loaded oversized preview was left visible");
 });
 
 test("deflated frames are decompressed before decoding", async () => {
@@ -192,6 +210,33 @@ test("deflated frames are decompressed before decoding", async () => {
     assert.deepEqual(state.errors, []);
     assert.equal(state.bitmaps.length, 2);
   } finally { state.preview.clear(); }
+});
+
+test("hosts without raw-deflate decode the same ZIP through a gzip wrapper", async () => {
+  const nativeDecompressionStream = globalThis.DecompressionStream;
+  const formats = [];
+  globalThis.DecompressionStream = class {
+    constructor(format) {
+      formats.push(format);
+      if (format === "deflate-raw") throw new TypeError("unsupported format");
+      return new nativeDecompressionStream(format);
+    }
+  };
+  const urls = [];
+  const state = setup({fetchBytes: async (url) => {
+    urls.push(url);
+    return archive(["0.jpg", "1.jpg"], true);
+  }});
+  try {
+    await state.preview.start(state.host, "1");
+    assert.deepEqual(state.errors, [], "the older WebView could not decode a valid compressed ZIP");
+    assert.equal(state.host.attached, 1);
+    assert.equal(urls.length, 1);
+    assert.deepEqual(formats, ["deflate-raw", "gzip", "gzip"]);
+  } finally {
+    state.preview.clear();
+    globalThis.DecompressionStream = nativeDecompressionStream;
+  }
 });
 
 test("transparent animation frames do not retain pixels from earlier frames", async () => {

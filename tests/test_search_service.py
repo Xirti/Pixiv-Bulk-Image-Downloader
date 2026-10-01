@@ -384,7 +384,7 @@ class SearchAggregationTests(unittest.TestCase):
         self.assertIn("currentPage < preloadedThrough || searchHasMore", app)
         self.assertIn("继续加载下一页", app)
         self.assertIn("firstAvailablePage", app)
-        self.assertIn("currentPage <= firstAvailablePage", app)
+        self.assertIn("currentPage <= 1", app)
         self.assertIn("}, 90000);", app)
 
 

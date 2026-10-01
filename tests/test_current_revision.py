@@ -116,6 +116,31 @@ navigateToPage(2);
 assert.equal(requestedPage, 1, "programmatic forward navigation skipped undisplayed current-page results");
 ''')
 
+    def test_previous_page_remains_reachable_after_its_cache_is_evicted(self):
+        self.run_frontend(r'''
+items = Array.from({length: 36}, (_, i) => artwork(String(i)));
+currentPage = 4;
+firstAvailablePage = 4;
+pageNumbers = [4, 5, 6, 7];
+preloadedThrough = 7;
+searchHasMore = true;
+renderPagination();
+const previous = $("#pagination").innerHTML.match(/<button([^>]*)aria-label="上一页"/)[1];
+assert.ok(!previous.includes("disabled"), "cache eviction disabled the user's only route back");
+assert.ok($("#pagination").innerHTML.includes('data-page="1"'), "page one disappeared instead of remaining reloadable");
+let requestedPage;
+search = async (_tag, page) => { requestedPage = page; };
+navigateToPage(3);
+assert.equal(requestedPage, 3);
+''')
+
+    def test_animation_zip_failure_preserves_the_network_diagnostic(self):
+        self.run_frontend(r'''
+requestToken = "probe-token";
+fetch = async () => ({ok: false, status: 502, json: async () => ({error: "动图预览失败：证书或 TLS 连接异常"})});
+await assert.rejects(fetchBytes("/api/pixiv/ugoira/1?mode=zip"), /证书或 TLS/);
+''')
+
     def test_entering_batch_mode_invalidates_an_inflight_single_detail(self):
         self.run_frontend(r'''
 const next = {...artwork("20"), pageImages: undefined};

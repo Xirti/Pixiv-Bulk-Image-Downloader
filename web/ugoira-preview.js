@@ -6,6 +6,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
   const maxBytes = 96 * 1024 * 1024;
   let cachedBytes = 0;
   let active = null;
+  let decompressionFormat;
 
   function parseZipEntries(buffer) {
     const view = new DataView(buffer);
@@ -30,7 +31,8 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
       const extraLength = view.getUint16(offset + 30, true);
       const commentLength = view.getUint16(offset + 32, true);
       const localOffset = view.getUint32(offset + 42, true);
-      entries.set(decoder.decode(new Uint8Array(buffer, offset + 46, nameLength)), { method, compressedSize, localOffset });
+      const crc32 = view.getUint32(offset + 16, true);
+      entries.set(decoder.decode(new Uint8Array(buffer, offset + 46, nameLength)), { method, compressedSize, rawSize, crc32, localOffset });
       offset += 46 + nameLength + extraLength + commentLength;
     }
     return entries;
@@ -46,7 +48,27 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
     if (entry.method === 0) return compressed;
     if (entry.method === 8) {
       if (typeof DecompressionStream !== "function") throw new Error("当前 WebView 不支持动图预览");
-      const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+      let inflater;
+      if (decompressionFormat !== "gzip") {
+        try {
+          inflater = new DecompressionStream("deflate-raw");
+          decompressionFormat = "deflate-raw";
+        } catch { decompressionFormat = "gzip"; }
+      }
+      let payload = compressed;
+      if (decompressionFormat === "gzip") {
+        // Older WebView2 hosts support gzip but not raw DEFLATE. Both wrap
+        // the same compressed bytes; ZIP already supplies gzip's CRC and size.
+        const wrapped = new Uint8Array(compressed.byteLength + 18);
+        wrapped.set([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255]);
+        wrapped.set(new Uint8Array(compressed), 10);
+        const trailer = new DataView(wrapped.buffer);
+        trailer.setUint32(wrapped.byteLength - 8, entry.crc32, true);
+        trailer.setUint32(wrapped.byteLength - 4, entry.rawSize, true);
+        payload = wrapped;
+        inflater = new DecompressionStream("gzip");
+      }
+      const stream = new Blob([payload]).stream().pipeThrough(inflater);
       const reader = stream.getReader();
       const chunks = [];
       let size = 0;
@@ -78,11 +100,12 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
     release(entry);
   }
 
-  async function load(id, signal) {
+  async function load(id, signal, showFrames) {
     if (cache.has(id)) {
       const entry = cache.get(id);
       cache.delete(id);
       cache.set(id, entry);
+      showFrames(entry.frames);
       return entry.frames;
     }
     const entry = { frames: [], bytes: 0 };
@@ -120,6 +143,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
         entry.bytes += bitmap.width * bitmap.height * 4;
         if (entry.bytes > maxBytes) throw new Error("动图超过预览内存上限，仍可下载原始 ZIP");
         while (cache.size && cachedBytes + entry.bytes > maxBytes) evictOldest();
+        if (entry.frames.length === 1) showFrames(entry.frames);
       }
       while (cache.size >= 6) evictOldest();
       cache.set(id, entry);
@@ -138,6 +162,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
     player.controller.abort();
     clearTimeout(player.timer);
     player.canvas?.remove();
+    delete player.host.dataset.ugoiraState;
   }
 
   async function start(host, id) {
@@ -157,34 +182,39 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
         });
         if (active !== player) return;
       }
-      const frames = await load(id, player.controller.signal);
-      if (active !== player) return;
-      if (host.isConnected === false) { stop(); return; }
-      const canvas = document.createElement("canvas");
-      canvas.className = "ugoira-preview";
-      player.canvas = canvas;
-      const ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-      canvas.width = Math.max(1, Math.round(host.clientWidth * ratio));
-      canvas.height = Math.max(1, Math.round(host.clientHeight * ratio));
-      const context = canvas.getContext("2d");
-      if (!context) throw new Error("无法创建动图预览画布");
-      host.appendChild(canvas);
-      let index = 0;
-      const draw = () => {
+      host.dataset.ugoiraState = "loading";
+      const showFrames = (frames) => {
         if (active !== player) return;
         if (host.isConnected === false) { stop(); return; }
-        const { bitmap, delay } = frames[index];
-        const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
-        const width = bitmap.width * scale;
-        const height = bitmap.height * scale;
-        context.clearRect(0, 0, canvas.width, canvas.height);
-        context.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
-        player.timer = setTimeout(() => { index = (index + 1) % frames.length; draw(); }, delay);
+        const canvas = document.createElement("canvas");
+        canvas.className = "ugoira-preview";
+        player.canvas = canvas;
+        const ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+        canvas.width = Math.max(1, Math.round(host.clientWidth * ratio));
+        canvas.height = Math.max(1, Math.round(host.clientHeight * ratio));
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("无法创建动图预览画布");
+        host.appendChild(canvas);
+        host.dataset.ugoiraState = "playing";
+        let index = 0;
+        const draw = () => {
+          if (active !== player) return;
+          if (host.isConnected === false) { stop(); return; }
+          const { bitmap, delay } = frames[index];
+          const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
+          const width = bitmap.width * scale;
+          const height = bitmap.height * scale;
+          context.clearRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+          player.timer = setTimeout(() => { index = (index + 1) % frames.length; draw(); }, delay);
+        };
+        draw();
       };
-      draw();
+      await load(id, player.controller.signal, showFrames);
     } catch (error) {
       if (active === player) {
         stop();
+        host.dataset.ugoiraState = "error";
         onError(error.message || "动图预览加载失败");
       }
     }

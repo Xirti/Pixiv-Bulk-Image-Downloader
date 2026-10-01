@@ -381,17 +381,25 @@ function installImageFallbacks(root = document) {
 
 async function fetchBytes(url, { signal } = {}, timeoutMs = 30000) {
   const controller = new AbortController();
+  let timedOut = false;
   const abort = () => controller.abort(signal.reason);
   if (signal?.aborted) abort();
   else signal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   try {
     const headers = new Headers();
     headers.set("X-MOKU-Request-Token", await waitForPromiseOrAbort(getRequestToken(), controller.signal));
     controller.signal.throwIfAborted();
     const response = await fetch(url, { headers, signal: controller.signal });
-    if (!response.ok) throw new Error(`请求失败（HTTP ${response.status}）`);
+    if (!response.ok) {
+      let data;
+      try { data = await response.json(); } catch { /* Non-JSON errors retain the status fallback. */ }
+      throw new Error(data?.error || `请求失败（HTTP ${response.status}）`);
+    }
     return await response.arrayBuffer();
+  } catch (error) {
+    if (timedOut) throw new Error("动图加载超时，请检查网络后移开鼠标重试");
+    throw error;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);
@@ -400,7 +408,7 @@ async function fetchBytes(url, { signal } = {}, timeoutMs = 30000) {
 
 const ugoiraPreview = createUgoiraPreview({
   hoverDelay: 180,
-  fetchJson: (...args) => fetchJson(...args),
+  fetchJson: (url, options) => fetchJson(url, options, 30000),
   fetchBytes: (...args) => fetchBytes(...args),
   onError: (message) => announceToast(message),
 });
@@ -797,7 +805,14 @@ function renderPagination() {
   const incomplete = currentPageNeedsMoreResults();
   const nextPage = incomplete ? currentPage : currentPage + 1;
   const nextLabel = incomplete ? "继续加载当前页" : (currentPage < preloadedThrough ? "下一页" : "继续加载下一页");
-  pagination.innerHTML = `<button ${currentPage <= firstAvailablePage ? "disabled" : ""} data-page="${currentPage - 1}" aria-label="上一页">←</button>${pageNumbers.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" ${incomplete && number > currentPage ? "disabled" : ""} data-page="${number}">${number}</button>`).join("")}<button ${canLoadNext ? "" : "disabled"} data-page="${nextPage}" aria-label="${nextLabel}">${incomplete ? "继续加载本页" : "→"}</button>`;
+  // Cache residency is not a navigation boundary: evicted pages can be reloaded.
+  const lastPage = Math.max(currentPage, preloadedThrough, ...pageNumbers.filter(Number.isInteger));
+  const visiblePages = new Set([1, lastPage]);
+  for (let number = Math.max(1, currentPage - 2); number <= Math.min(lastPage, currentPage + 2); number += 1) visiblePages.add(number);
+  const navigationPages = [...visiblePages].sort((a, b) => a - b).flatMap((number, index, pages) => (
+    index && number > pages[index - 1] + 1 ? [null, number] : [number]
+  ));
+  pagination.innerHTML = `<button ${currentPage <= 1 ? "disabled" : ""} data-page="${currentPage - 1}" aria-label="上一页">←</button>${navigationPages.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" ${incomplete && number > currentPage ? "disabled" : ""} data-page="${number}">${number}</button>`).join("")}<button ${canLoadNext ? "" : "disabled"} data-page="${nextPage}" aria-label="${nextLabel}">${incomplete ? "继续加载本页" : "→"}</button>`;
   pagination.querySelectorAll("button:not([disabled])").forEach((button) => {
     button.onclick = () => {
       navigateToPage(Number(button.dataset.page));
