@@ -1802,6 +1802,8 @@ def search_pixiv_results(
             )
             incoming: list[dict] = []
             source_commits: list[tuple[str, str, int]] = []
+            qualified_ids: set[str] = set()
+            can_finish_foreground = not prefetch and not fuzzy and len(modes) == 1
             source_done: dict[tuple[str, str], bool] = {}
             round_budget_exhausted = False
             round_truncated_dates: set[str] = set()
@@ -1852,6 +1854,13 @@ def search_pixiv_results(
                     if not include_ai and candidate["aiGenerated"]:
                         continue
                     incoming.append(candidate)
+                    if matches_tag_groups(candidate.get("tags") or [], tag_groups) and candidate["id"] not in session["seen"]:
+                        qualified_ids.add(candidate["id"])
+                # Literal tags within one safety scope cover the same AND
+                # intersection. Do not wait for redundant sources once this
+                # page is full; aliases/mixed safety scopes still merge fairly.
+                if can_finish_foreground and absolute_loaded + len(qualified_ids) >= desired_items:
+                    break
             incoming.sort(key=_search_sort_key, reverse=True)
             with SEARCH_SESSION_LOCKS_GUARD:
                 assert_search_commit_allowed(

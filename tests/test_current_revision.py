@@ -98,6 +98,24 @@ assert.equal(selection.get(item.id).context.value, "new-search");
 assert.equal(selection.get(item.id).resultPage, 9);
 ''')
 
+    def test_partial_page_continues_the_same_page_before_advance(self):
+        self.run_frontend(r'''
+items = Array.from({length: 10}, (_, i) => artwork(String(i)));
+currentPage = 1;
+pageNumbers = [1, 2];
+preloadedThrough = 2;
+searchHasMore = true;
+scheduleSearchPrefetch("cat", 1, activeSearchFilters, searchGeneration);
+assert.equal(prefetchTimer, null, "short-page warm-up hid newly loaded results");
+renderPagination();
+assert.ok($("#pagination").innerHTML.includes('data-page="1" aria-label="继续加载当前页"'));
+assert.ok(/<button[^>]*disabled[^>]*data-page="2"/.test($("#pagination").innerHTML), "future numeric page skipped an incomplete current page");
+let requestedPage;
+search = async (_tag, page) => { requestedPage = page; };
+navigateToPage(2);
+assert.equal(requestedPage, 1, "programmatic forward navigation skipped undisplayed current-page results");
+''')
+
     def test_entering_batch_mode_invalidates_an_inflight_single_detail(self):
         self.run_frontend(r'''
 const next = {...artwork("20"), pageImages: undefined};
@@ -240,7 +258,7 @@ fetchJson = async (url) => {
   const query = new URL(url, "http://localhost").searchParams;
   return query.get("prefetch") === "true"
     ? {items: [], page: 1, availablePages: [1,2,3,4], preloadedThrough: 4, hasMore: true}
-    : {items: [artwork("101")], page: 1, availablePages: [1], preloadedThrough: 1, hasMore: true, total: 36};
+    : {items: Array.from({length: 36}, (_, i) => artwork(String(101 + i))), page: 1, availablePages: [1], preloadedThrough: 1, hasMore: true, total: 36};
 };
 await search("cat");
 const displayed = grid.innerHTML;
@@ -265,7 +283,7 @@ fetchJson = async (url, options) => {
     signal = options.signal;
     return new Promise(resolve => { finish = resolve; });
   }
-  return {items: [artwork(query.get("tag"))], page: 1, availablePages: [1], preloadedThrough: 1, hasMore: true};
+  return {items: Array.from({length: 36}, (_, i) => artwork(i === 0 ? query.get("tag") : `extra-${i}`)), page: 1, availablePages: [1], preloadedThrough: 1, hasMore: true};
 };
 await search("101");
 const pending = warm();

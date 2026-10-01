@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import parse_qs
 
 os.environ["MOKU_DISABLE_PERSISTENT_SESSION"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -20,6 +21,7 @@ class ProbeHandler(server.Handler):
     requests = []
     detail_revision = 0
     fail_once = True
+    partial_pages = []
 
     @classmethod
     def artwork(cls):
@@ -42,6 +44,16 @@ class ProbeHandler(server.Handler):
         }
 
     def _get_pixiv_search(self, _request):
+        query = parse_qs(_request.query)
+        if query.get("tag") == ["partial-probe"]:
+            page = int(query.get("page", ["1"])[0])
+            type(self).partial_pages.append(page)
+            count = 10 if len(type(self).partial_pages) == 1 else 36
+            return self.send_json({
+                "items": [{**self.artwork(), "id": str(i), "pages": 1} for i in range((page - 1) * 36 + 1, (page - 1) * 36 + 1 + count)],
+                "page": page, "availablePages": [1, 2], "preloadedThrough": 2,
+                "hasMore": page == 1, "total": 72, "perPage": 36, "label": "Partial page probe",
+            })
         item = self.artwork()
         item.pop("pageImages")
         return self.send_json({
@@ -134,6 +146,17 @@ def main():
                 page.set_viewport_size({"width": 1280, "height": 820})
                 page.reload()
                 assert page.evaluate("document.documentElement.dataset.theme") == "light"
+                page.locator("#tag").fill("partial-probe")
+                page.locator("#searchSubmit").click()
+                wait_for(page, "items.length === 10 && !searchPending")
+                assert page.locator('#pagination [data-page="2"]').is_disabled()
+                page.locator('#pagination [aria-label="继续加载当前页"]').click()
+                wait_for(page, "items.length === 36 && !searchPending")
+                page.locator('#pagination [aria-label="下一页"]').click()
+                wait_for(page, "currentPage === 2 && !searchPending")
+                assert page.evaluate("items.map(item => item.id)") == [str(i) for i in range(37, 73)]
+                assert ProbeHandler.partial_pages == [1, 1, 2], ProbeHandler.partial_pages
+                page.locator("#tag").fill("cat")
                 page.locator("#searchSubmit").click()
                 page.locator("[data-select='0']").wait_for()
                 page.locator("[data-select='0']").check()
@@ -181,7 +204,7 @@ def main():
                 print(json.dumps({"ok": True, "downloadChunks": [len(row) for row in ProbeHandler.requests],
                                   "basketFreshPages": True, "qualityPreserved": True,
                                   "viewports": [1280, 375], "scriptErrors": errors,
-                                  "themes": themes, "screenshots": str(screenshots)}))
+                                  "themes": themes, "partialPageRequests": ProbeHandler.partial_pages, "screenshots": str(screenshots)}))
             finally:
                 browser.close()
     finally:

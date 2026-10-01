@@ -98,6 +98,30 @@ class FlashSearchTests(unittest.TestCase):
         self.assertEqual(warmed["items"], [], "prefetch should not issue replacement display tokens")
         self.assertEqual(warmed["preloadedThrough"], 4)
 
+    def test_literal_and_foreground_does_not_wait_for_a_redundant_source(self):
+        calls = []
+        def load(_key, tag, _mode, _target, _allow_r18, budget):
+            calls.append(tag)
+            budget["requests"] += 1
+            if tag == "night":
+                raise RuntimeError("redundant source unavailable")
+            rows = [{**self.row(i), "tags": ["cat", "night"]} for i in range(36)]
+            return {"rows": rows, "hasMore": True, "budgetExhausted": False, "truncatedDates": [], "nextOffset": 36}
+        with patch.object(server, "load_search_source", side_effect=load):
+            result = server.search_pixiv_results("cat;night", "safe", 1, "all", True, authorized=False)
+        self.assertEqual(len(result["items"]), 36)
+        self.assertEqual(calls, ["cat"])
+        def warm_load(_key, tag, _mode, _target, _allow_r18, budget):
+            calls.append(tag)
+            budget["requests"] += 1
+            rows = [{**self.row(len(calls) * 36 + i), "tags": ["cat", "night"]} for i in range(36)]
+            return {"rows": rows, "hasMore": True, "budgetExhausted": False, "truncatedDates": [], "nextOffset": len(calls) * 36}
+        with patch.object(server, "load_search_source", side_effect=warm_load):
+            warmed = server.search_pixiv_results("cat;night", "safe", 1, "all", True, authorized=False, prefetch=True)
+        self.assertEqual(calls[1], "night", "warm-up starved the next source after fast foreground delivery")
+        self.assertIn("cat", calls[2:])
+        self.assertEqual(warmed["items"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

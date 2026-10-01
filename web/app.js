@@ -237,8 +237,12 @@ function cancelSearchPrefetch() {
   prefetchRequestId = null;
 }
 
+function currentPageNeedsMoreResults() {
+  return activeSearchContext.kind !== "pid" && searchHasMore && items.length < 36;
+}
+
 function scheduleSearchPrefetch(tag, page, filters, generation) {
-  if (!searchHasMore || preloadedThrough >= page + 3 || activeSearchContext.kind === "pid") return;
+  if (!searchHasMore || currentPageNeedsMoreResults() || preloadedThrough >= page + 3 || activeSearchContext.kind === "pid") return;
   prefetchTimer = setTimeout(async () => {
     prefetchTimer = null;
     if (document.hidden || generation !== searchGeneration || currentPage !== page) return;
@@ -674,7 +678,9 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     searchHasMore = Boolean(data.hasMore);
     $("#tagTitle").textContent = data.label || (Array.isArray(data.tags) && data.tags.length ? data.tags.join(" + ") : (data.tag || cleanTag));
     const preloadStatus = data.preloadedThrough > currentPage ? ` · 已预加载至第 ${data.preloadedThrough} 页` : "";
-    const historyStatus = data.budgetExhausted ? " · 本次加载达到请求预算，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到历史末尾");
+    const historyStatus = currentPageNeedsMoreResults()
+      ? " · 当前页尚未满，可继续加载本页"
+      : (data.budgetExhausted ? " · 本次加载达到请求预算，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到历史末尾"));
     const fuzzyLabel = data.fuzzy ? " · 别名扩展已启用" : "";
     $("#count").textContent = `已加载 ${data.total} 件 · 第 ${currentPage} 页 · 每页 ${data.perPage || 36} 件${fuzzyLabel}${preloadStatus}${historyStatus}${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 个高密度日期受平台截断` : ""}`;
     resultSelectionEnabled = true;
@@ -747,7 +753,9 @@ function render() {
   updateSelectionBar();
   syncSearchScopedControls();
   if (!items.length) {
-    grid.innerHTML = '<p class="empty-state">当前页没有符合安全范围的作品。</p>';
+    grid.innerHTML = currentPageNeedsMoreResults()
+      ? '<p class="empty-state">本次尚未找到符合条件的作品，可点击“继续加载本页”再查一段。</p>'
+      : '<p class="empty-state">当前页没有符合安全范围的作品。</p>';
     return;
   }
 
@@ -786,7 +794,10 @@ function render() {
 function renderPagination() {
   const pagination = $("#pagination");
   const canLoadNext = currentPage < preloadedThrough || searchHasMore;
-  pagination.innerHTML = `<button ${currentPage <= firstAvailablePage ? "disabled" : ""} data-page="${currentPage - 1}" aria-label="上一页">←</button>${pageNumbers.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" data-page="${number}">${number}</button>`).join("")}<button ${canLoadNext ? "" : "disabled"} data-page="${currentPage + 1}" aria-label="${currentPage < preloadedThrough ? "下一页" : "继续加载下一页"}">→</button>`;
+  const incomplete = currentPageNeedsMoreResults();
+  const nextPage = incomplete ? currentPage : currentPage + 1;
+  const nextLabel = incomplete ? "继续加载当前页" : (currentPage < preloadedThrough ? "下一页" : "继续加载下一页");
+  pagination.innerHTML = `<button ${currentPage <= firstAvailablePage ? "disabled" : ""} data-page="${currentPage - 1}" aria-label="上一页">←</button>${pageNumbers.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" ${incomplete && number > currentPage ? "disabled" : ""} data-page="${number}">${number}</button>`).join("")}<button ${canLoadNext ? "" : "disabled"} data-page="${nextPage}" aria-label="${nextLabel}">${incomplete ? "继续加载本页" : "→"}</button>`;
   pagination.querySelectorAll("button:not([disabled])").forEach((button) => {
     button.onclick = () => {
       navigateToPage(Number(button.dataset.page));
@@ -1423,6 +1434,7 @@ function selectionWouldBeEvicted(targetPage) {
 
 function navigateToPage(page) {
   if (selection.locked) return;
+  if (page > currentPage && currentPageNeedsMoreResults()) page = currentPage;
   if (selectionWouldBeEvicted(page)) {
     openCapacityDialog(page);
     return;
