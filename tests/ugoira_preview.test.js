@@ -138,6 +138,30 @@ test("a partial decode failure closes every completed bitmap", async () => {
   assert.equal(state.bitmaps[0].closed, 1);
 });
 
+test("leaving a failed preview clears its hover-only error state", async () => {
+  const state = setup({fetchBytes: async () => { throw new Error("offline"); }});
+  await state.preview.start(state.host, "1");
+  assert.equal(state.host.dataset.ugoiraState, "error");
+  state.preview.stop(state.host);
+  assert.equal(state.host.dataset.ugoiraState, undefined);
+  assert.deepEqual(state.errors, ["offline"]);
+});
+
+test("a host detached on the final frame does not retain an aborted cache entry", async () => {
+  const state = setup({count: 1});
+  state.host.isConnected = false;
+  try {
+    await state.preview.start(state.host, "1");
+    assert.equal(state.bitmaps[0].closed, 1, "the cancelled last frame remained cached");
+    assert.equal(state.host.attached, 0);
+    state.host.isConnected = true;
+    await state.preview.start(state.host, "1");
+    assert.equal(state.requests.length, 2, "a cancelled decode was reused instead of reloaded");
+    assert.equal(state.host.attached, 1);
+    assert.deepEqual(state.errors, []);
+  } finally { state.preview.clear(); }
+});
+
 test("the first frame is visible while later frames are still decoding", async () => {
   let count = 0, finish;
   const state = setup({decode: bitmap => ++count === 1

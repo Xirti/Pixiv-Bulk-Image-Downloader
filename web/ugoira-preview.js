@@ -145,6 +145,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
         while (cache.size && cachedBytes + entry.bytes > maxBytes) evictOldest();
         if (entry.frames.length === 1) showFrames(entry.frames);
       }
+      signal.throwIfAborted();
       while (cache.size >= 6) evictOldest();
       cache.set(id, entry);
       cachedBytes += entry.bytes;
@@ -156,6 +157,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, hov
   }
 
   function stop(host) {
+    if (host) delete host.dataset.ugoiraState;
     if (!active || (host && active.host !== host)) return;
     const player = active;
     active = null;
