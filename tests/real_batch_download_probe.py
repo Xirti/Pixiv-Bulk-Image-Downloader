@@ -33,7 +33,10 @@ def wait_health(port: int) -> str:
     raise TimeoutError("batch probe server not ready")
 
 
-def fake_detail(artwork_id: str, allow_r18: bool = False) -> dict:
+def fake_detail(
+    artwork_id: str, allow_r18: bool = False, *,
+    authorization_epoch: int | None = None, cancel_event=None,
+) -> dict:
     if artwork_id not in {"910001", "910002"}:
         raise server.PixivPolicyError("unexpected artwork")
     pages = 2 if artwork_id == "910001" else 3

@@ -117,7 +117,11 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
       if (!Array.isArray(meta.frames) || !meta.frames.length || meta.frames.length > 1500) {
         throw new Error("动图帧数超出预览范围，仍可下载原始 ZIP");
       }
-      const buffer = await fetchBytes(`/api/pixiv/ugoira/${id}?mode=zip&${query}`, { signal });
+      // Do not reuse an HTTP request identity across phases: the manifest
+      // handler may still be finishing after its body reaches the browser.
+      const zipRequestId = `${requestId}_zip`;
+      if (active?.controller.signal === signal) active.requestId = zipRequestId;
+      const buffer = await fetchBytes(`/api/pixiv/ugoira/${id}?mode=zip&requestId=${encodeURIComponent(zipRequestId)}`, { signal });
       signal.throwIfAborted();
       const entries = parseZipEntries(buffer);
       const width = Number(meta.width);

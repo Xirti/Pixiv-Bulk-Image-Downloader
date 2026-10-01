@@ -166,9 +166,25 @@ test("leaving an in-flight preview also cancels its matching backend request", a
   assert.equal(state.cancelled.length, 1, "leaving stopped only the browser, not its backend request");
   const id = new URL(zipUrl, "http://localhost").searchParams.get("requestId");
   assert.equal(state.cancelled[0], id);
-  assert.equal(new URL(state.requests[0], "http://localhost").searchParams.get("requestId"), id);
+  assert.notEqual(new URL(state.requests[0], "http://localhost").searchParams.get("requestId"), id);
   assert.match(id, /^[A-Za-z0-9_-]{16,128}$/);
   assert.deepEqual(state.errors, []);
+});
+
+test("manifest response cleanup cannot block the frame ZIP request", async () => {
+  const state = setup({fetchBytes: async url => {
+    const zipId = new URL(url, "http://localhost").searchParams.get("requestId");
+    const metaId = new URL(state.requests[0], "http://localhost").searchParams.get("requestId");
+    // A response may already be readable while its HTTP handler is finishing.
+    if (zipId === metaId) throw new Error("409: request identifier still in use");
+    return state.zip;
+  }});
+  try {
+    await state.preview.start(state.host, "1");
+    assert.deepEqual(state.errors, [], "completed metadata collided with the next preview phase");
+    assert.equal(state.host.attached, 1);
+    assert.equal(state.bitmaps.length, 2);
+  } finally { state.preview.clear(); }
 });
 
 test("a partial decode failure closes every completed bitmap", async () => {
