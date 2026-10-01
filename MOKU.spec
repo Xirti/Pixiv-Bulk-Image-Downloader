@@ -87,7 +87,9 @@ a = Analysis(
     hookspath=['build_hooks'],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Pillow helpers also reference NumPy for optional typing/array support.
+    # No MOKU conversion path uses arrays; exclude the entire unused closure.
+    excludes=['numpy'],
     noarchive=False,
     optimize=0,
 )
