@@ -306,6 +306,19 @@ def main() -> None:
 
         actual_port = free_port()
         actual, actual_base, actual_hwnd = launch(exe, actual_root, actual_port)
+        # Backend readiness does not imply the current WebView has attached its
+        # native login bridge. Calibration waited for its own, separate window.
+        target = wait_until(lambda: main_target(actual_port, actual_base), 25, "actual page target")
+        ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=10, suppress_origin=True)
+        counter = [0]
+        try:
+            wait_until(
+                lambda: evaluate(ws, counter, "document.readyState === 'complete' && typeof window.pywebview?.api?.pixiv_login === 'function'"),
+                20,
+                "actual page login bridge",
+            )
+        finally:
+            ws.close()
         health = local_json(
             actual_base + "api/health",
             headers={"Sec-Fetch-Site": "same-origin"},
