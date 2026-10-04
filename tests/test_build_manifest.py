@@ -290,10 +290,10 @@ class BuildManifestTests(unittest.TestCase):
         self.assertIn("多标签严格 AND 搜索", readme)
         self.assertIn("采集篮支持任意数量的作品，最多选择 1,000 张图片", readme)
         self.assertIn(f"## [{__version__}]", changelog)
-        self.assertIn("Separate multiple tags with ; or ；", portable)
-        self.assertIn("pid:<artwork ID>", portable)
-        self.assertIn("uid:<user ID>", portable)
-        self.assertIn("any number of artworks within a 1,000 selected-image limit", portable)
+        self.assertIn("多标签用 ; 或 ； 分隔", portable)
+        self.assertIn("pid:作品ID", portable)
+        self.assertIn("uid:画师ID", portable)
+        self.assertIn("采集篮支持任意数量的作品，最多选择 1,000 张图片", portable)
         self.assertNotIn("Space-separated tags use OR semantics", portable)
 
     def test_real_batch_probe_does_not_mutate_tracked_evidence_by_default(self):

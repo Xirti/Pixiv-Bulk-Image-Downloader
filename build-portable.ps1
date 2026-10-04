@@ -69,30 +69,31 @@ if ($VersionSource -notmatch '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') { t
 $Version = $Matches[1]
 
 $Readme = @'
-MOKU Lite for Windows
+MOKU Lite __MOKU_VERSION__
 
-Requirements:
-- Windows 10 or Windows 11, x64
-- Microsoft Edge WebView2 Runtime
-- Network access to www.pixiv.net and i.pximg.net
+完整解压后双击 MOKU.exe 即可使用，无需安装 Python。
+程序文件请放在同一文件夹，MOKU.exe.config 也一起保留。
 
-Version: __MOKU_VERSION__
+运行环境：Windows 10/11 x64、Microsoft Edge WebView2 Runtime。
+网络需要能访问 www.pixiv.net 和 i.pximg.net；可使用 Windows 已开启的本地 HTTP 代理或 TUN。
 
-Run MOKU.exe. No Python installation is required.
-Keep MOKU.exe.config beside MOKU.exe. It lets this application's .NET host load its bundled runtimes when an extractor preserves Internet download markers; it does not remove markers or change Windows protection settings.
-MOKU starts a loopback-only backend and opens the interface in its own WebView2 desktop window.
-Use the top-right day/night toggle to switch the global palette. Lite removes decorative model logos and animation loops.
-Use the built-in Usage Guide button for the offline guide and the explicit anonymous network check.
-MOKU can use the target computer's enabled local Windows HTTP system proxy; TUN mode is not required.
-If both the system proxy and TUN are off and direct Pixiv access is blocked, search cannot connect.
-MOKU never changes Windows proxy settings, starts a VPN, or scans local ports.
-Separate multiple tags with ; or ； for strict AND matching. Optional bounded tag aliases are disabled by default. The current page is shown first, then three later pages of result data are prefetched in the background; unopened-page thumbnails are not downloaded; old pages and temporary preview authorization are released outside the retained window.
-Use pid:<artwork ID> for one exact work, uid:<user ID> for one creator, or author:<exact name>. Search options are applied only after Start Search is pressed, and an active search can be cancelled explicitly.
-The collection basket accepts any number of artworks within a 1,000 selected-image limit and sends image-first bounded download chunks. A batch is stored in one shared tag, author, or artwork context folder unless folder creation is disabled.
-Animation downloads default to the original frame ZIP plus timing JSON. GIF export is built in; MP4 uses a local PATH-registered FFmpeg with H.264 support and does not install or bundle an encoder. Static images in mixed batches keep their source format.
-Pixiv authorization opens as a second MOKU desktop window on the official Pixiv website.
-The "keep me signed in" option stores only PHPSESSID in Windows Credential Manager for the current Windows user.
-Downloads and logs are written beside MOKU.exe. Do not expose the backend to LAN or the Internet.
+搜图小提示
+- 多标签用 ; 或 ； 分隔，结果同时包含全部标签。
+- pid:作品ID 查作品，uid:画师ID 查画师，author:画师名 按名字查找。
+- 自定义日期的开始和结束设成同一天，就能查询当天发布的作品。
+- 采集篮支持任意数量的作品，最多选择 1,000 张图片。
+
+左侧图标栏切换页面，右上角切换日夜主题。
+输入框右键可剪切、复制、粘贴和全选，普通文字也可右键复制。
+下载历史里可以查看保存路径、复制路径或删除记录，图片保留在原文件夹。
+
+下载默认保留原图。动图可选原始帧 ZIP + JSON、GIF 或 MP4：
+GIF 内置转换；MP4 需要本机安装支持 libx264 的 FFmpeg 并加入 PATH，安装后重启 MOKU。
+
+登录 Pixiv 后可查看账号权限范围内的作品。
+搜索或图片加载不顺畅时，可打开右上角「使用说明」里的网络检查。
+
+项目与更新：https://github.com/Xirti/Pixiv-Bulk-Image-Downloader
 '@
 $Readme = $Readme.Replace('__MOKU_VERSION__', $Version)
 [IO.File]::WriteAllText((Join-Path $Dist 'README.txt'), $Readme, [Text.UTF8Encoding]::new($false))
