@@ -44,13 +44,14 @@ function createDownloadHistoryView({ fetchJson }) {
       rows = data.items;
       get("historyStatus").textContent = `${total} 条${query ? "匹配" : ""}记录`;
       get("historyList").innerHTML = rows.map((row, index) => {
-        const time = new Date(row.completedAt).toLocaleString();
+        const time = new Date(row.completedAt).toLocaleString(undefined, {year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false});
         const format = row.format === "source" ? (row.workType === "ugoira" ? "帧 ZIP + JSON" : "源格式") : row.format.toUpperCase();
-        return `<article class="history-record"><div class="history-heading"><input type="checkbox" data-select-history="${row.id}" ${selected.has(row.id) ? "checked" : ""} aria-label="选择 ${escape(row.title || "未命名作品")}"><h3>${escape(row.title || "未命名作品")}</h3></div>
-          <p>${escape(row.artist || "未知画师")} · ID ${escape(row.artworkId)} · ${escape(time)}</p>
-          <p>${row.quality === "original" ? "原图" : "标准预览"} · ${escape(format)} · ${row.files.length} 个文件</p>
-          <textarea class="history-paths" rows="${Math.min(4, row.files.length)}" readonly aria-label="保存路径">${escape(row.files.join("\n"))}</textarea>
-          <div class="history-record-actions"><button type="button" data-copy-history="${index}">复制路径</button><button type="button" data-delete-history="${row.id}">删除记录</button></div></article>`;
+        const work = `${row.title || "未命名作品"} · ${row.artist || "未知画师"} · ID ${row.artworkId}`;
+        const info = `${time} · ${row.quality === "original" ? "原图" : "标准预览"} · ${format} · ${row.files.length} 个文件`;
+        return `<article class="history-record"><input type="checkbox" data-select-history="${row.id}" ${selected.has(row.id) ? "checked" : ""} aria-label="选择 ${escape(row.title || "未命名作品")}">
+          <h3 title="${escape(work)}">${escape(work)}</h3><p class="history-info">${escape(info)}</p>
+          <span class="history-paths" title="${escape(row.files.join("\n"))}">${escape(row.files[0] || "")}${row.files.length > 1 ? ` · +${row.files.length - 1}` : ""}</span>
+          <div class="history-record-actions"><button type="button" data-copy-history="${index}" title="复制全部保存路径">复制</button><button type="button" data-delete-history="${row.id}" title="只删除这条记录，不删除文件">删除</button></div></article>`;
       }).join("") || `<p class="empty-state">${query ? "没有匹配记录。" : "还没有下载记录。之后成功下载的作品会显示在这里。"}</p>`;
       get("historyList").querySelectorAll("[data-select-history]").forEach(box => {
         box.onchange = () => {
@@ -69,7 +70,7 @@ function createDownloadHistoryView({ fetchJson }) {
             await navigator.clipboard.writeText(data.items[Number(button.dataset.copyHistory)].files.join("\n"));
             if (current === generation) get("historyStatus").textContent = "路径已复制";
           } catch {
-            if (current === generation) get("historyStatus").textContent = "复制失败，可在保存路径框中手动复制。";
+            if (current === generation) get("historyStatus").textContent = "复制失败，请重试。";
           }
         };
       });

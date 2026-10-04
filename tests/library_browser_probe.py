@@ -141,7 +141,8 @@ def main():
                     assert page.locator(".history-record h3 b").count() == 0
                     assert page.locator(".history-record details").count() == 0
                     assert page.locator(".history-paths").is_visible()
-                    assert page.locator(".history-paths").input_value() == "\n".join(saved["files"])
+                    assert page.locator(".history-paths").get_attribute("title") == "\n".join(saved["files"])
+                    assert saved["files"][0] in page.locator(".history-paths").inner_text()
                     page.locator('[data-copy-history="0"]').click()
                     page.wait_for_function("() => document.querySelector('#historyStatus').textContent === '路径已复制'")
                     assert page.evaluate("globalThis.probeCopiedPaths") == "\n".join(saved["files"])
@@ -175,6 +176,14 @@ def main():
                                 top = page.locator(f"#{view}").bounding_box()["y"]
                                 chrome = page.locator("body > header").bounding_box()
                                 assert top >= chrome["y"] + chrome["height"] - 1, (width, view, top, chrome)
+                                if view == "historyPage":
+                                    page.locator("#historyList").evaluate("node => node.scrollLeft = 0")
+                                    for record in page.locator(".history-record").all():
+                                        assert record.bounding_box()["height"] <= 64, (width, record.bounding_box())
+                                        for action in record.locator(".history-record-actions button").all():
+                                            box = action.bounding_box()
+                                            assert box["x"] >= 0 and box["x"] + box["width"] <= width, (width, box)
+                                            assert action.evaluate("node => { const r = node.getBoundingClientRect(); return node.contains(document.elementFromPoint(r.x + r.width/2, r.y + r.height/2)); }")
                                 page.screenshot(path=str(screenshots / f"{view}-{theme}-{width}.png"))
                     page.set_viewport_size({"width": 1280, "height": 820})
                     page.locator("#navHistory").click()

@@ -91,6 +91,13 @@ class FrontendLayoutResilienceTests(unittest.TestCase):
     def test_basket_content_layers_are_contained_below_toolbar(self):
         self.assert_declarations(".basket-body", "isolation:isolate")
 
+    def test_history_rows_keep_actions_at_right_and_overflow_in_the_list(self):
+        self.assert_declarations(".history-record", "display:grid", "align-items:center")
+        self.assert_declarations(".history-record h3", "white-space:nowrap", "text-overflow:ellipsis")
+        self.assert_declarations(".history-paths", "white-space:nowrap", "text-overflow:ellipsis")
+        self.assert_declarations(".history-record-actions", "position:sticky", "right:0")
+        self.assert_declarations("#historyList", "overflow-x:auto", "max-width:100%")
+
 
 if __name__ == "__main__":
     unittest.main()
