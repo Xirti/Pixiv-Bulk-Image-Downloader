@@ -488,6 +488,7 @@ function syncSearchScopedControls() {
     $("#download").disabled ||= currentDownloadPages(currentDetailItem).length === 0;
     $("#download").textContent = downloadButtonLabel(currentDetailItem);
   }
+  syncNavigationAvailability();
 }
 
 function clearDetail(message = "选择一件作品查看详情") {
@@ -886,8 +887,6 @@ function updatePaginationDock() {
   rail.querySelectorAll('a, button').forEach(link => {
     if (link.hash === `#${active}` || link.dataset.view === active) link.setAttribute('aria-current', 'location');
     else link.removeAttribute('aria-current');
-    const locked = contextNavigationLocked() && !["history", "favorites"].includes(link.dataset.view);
-    link.setAttribute('aria-disabled', String(locked));
   });
 }
 
@@ -944,6 +943,13 @@ for (const id of ["basketPage", "allViewer", "downloadPage", "historyPage", "fav
 
 function contextNavigationLocked() {
   return selection.locked || singleDownloadPending || searchPending;
+}
+
+function syncNavigationAvailability() {
+  const locked = contextNavigationLocked();
+  document.querySelector('.page-rail').querySelectorAll('a, button').forEach(link => {
+    link.setAttribute('aria-disabled', String(locked && !["history", "favorites"].includes(link.dataset.view)));
+  });
 }
 
 function libraryWorkspaceOpen() {

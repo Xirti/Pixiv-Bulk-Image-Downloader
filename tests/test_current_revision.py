@@ -82,6 +82,27 @@ assert.equal($("#basketClear").disabled, true);
 assert.equal(requests, 0);
 ''')
 
+    def test_rail_unlocks_after_search_without_waiting_for_scroll(self):
+        self.run_frontend(r'''
+const basket = new FakeElement(), preview = new FakeElement(), history = new FakeElement();
+basket.dataset.view = "basket";
+preview.hash = "#gallery";
+history.dataset.view = "history";
+$(".page-rail").queryCache.set("a, button", [basket, preview, history]);
+let finish;
+fetchJson = () => new Promise(resolve => { finish = resolve; });
+const pending = search("猫");
+assert.equal(basket.getAttribute("aria-disabled"), "true");
+assert.equal(preview.getAttribute("aria-disabled"), "true");
+assert.equal(history.getAttribute("aria-disabled"), "false");
+finish({items: [artwork("77")], total: 1, page: 1, perPage: 36, availablePages: [1], hasMore: false});
+await pending;
+assert.equal(searchPending, false);
+assert.equal(basket.getAttribute("aria-disabled"), "false");
+assert.equal(preview.getAttribute("aria-disabled"), "false");
+assert.equal(history.getAttribute("aria-disabled"), "false");
+''')
+
     def test_clear_basket_aborts_detail_and_discards_late_result(self):
         self.run_frontend(r'''
 const item = {...artwork("77"), pageImages: undefined};
@@ -188,6 +209,34 @@ $("#historyList").querySelectorAll("[data-delete-history]")[0].onclick();
 await $("#historyClearConfirm").onclick();
 assert.equal(rows.length, 0);
 assert.equal($("#historyClear").disabled, true);
+''')
+
+    def test_history_delete_failure_after_reentry_refreshes_and_reports(self):
+        self.run_frontend(r'''
+const row = {id: 1, title: "猫", artist: "画师", artworkId: "77", completedAt: "2026-10-03T00:00:00Z", quality: "original", format: "source", workType: "illustration", files: ["C:\\art\\77.png"]};
+let rejectDelete, reads = 0;
+const view = createDownloadHistoryView({fetchJson: (url, options = {}) => {
+  if (options.method === "POST") return new Promise((_resolve, reject) => { rejectDelete = reject; });
+  reads++;
+  return Promise.resolve({items: [row], total: 1, page: 1, pages: 1, limit: 5000});
+}});
+$("#historyPage").hidden = false;
+await view.open();
+$("#historySelectAll").checked = true;
+$("#historySelectAll").onchange();
+$("#historyDeleteSelected").onclick();
+const pending = $("#historyClearConfirm").onclick();
+view.close();
+$("#historyPage").hidden = true;
+$("#historyPage").hidden = false;
+await view.open();
+rejectDelete(new Error("删除失败，请重试"));
+await pending;
+assert.equal($("#historyStatus").textContent, "删除失败，请重试");
+assert.equal(reads, 2);
+assert.equal($("#historyList").querySelectorAll("[data-select-history]")[0].checked, false);
+assert.equal($("#historyDeleteSelected").disabled, true);
+assert.equal($("#historyClear").disabled, false);
 ''')
 
     def test_independent_workspaces_preserve_context_and_download_options(self):

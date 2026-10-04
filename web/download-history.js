@@ -137,7 +137,13 @@ function createDownloadHistoryView({ fetchJson }) {
       deleting = false;
       if (!get("historyPage").hidden) await load(ids === null ? 1 : page);
     } catch (error) {
-      if (current === generation) get("historyStatus").textContent = error.message || "删除失败，请重试";
+      // Re-entry while a mutation is pending skips load(). Refresh its old DOM
+      // on failure too, so cleared selections and the error remain consistent.
+      if (current !== generation && !get("historyPage").hidden) {
+        deleting = false;
+        await load();
+      }
+      if (!get("historyPage").hidden) get("historyStatus").textContent = error.message || "删除失败，请重试";
     } finally {
       deleting = false;
       syncControls();

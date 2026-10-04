@@ -88,6 +88,9 @@ class FrontendLayoutResilienceTests(unittest.TestCase):
         self.assert_declarations("#batchCollections[hidden]", "display:none")
         self.assert_declarations(".basket-artwork-detail[hidden]", "display:none")
 
+    def test_basket_content_layers_are_contained_below_toolbar(self):
+        self.assert_declarations(".basket-body", "isolation:isolate")
+
 
 if __name__ == "__main__":
     unittest.main()

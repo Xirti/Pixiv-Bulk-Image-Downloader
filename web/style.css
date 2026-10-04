@@ -40,7 +40,7 @@ header{height:68px;padding:0 4vw;display:flex;align-items:center;gap:28px;border
 #basketDownload{background:var(--action-fill);color:var(--on-accent)}
 .basket-header-actions button:disabled,.history-selection button:disabled,.history-tools button:disabled{opacity:.45;cursor:default}
 .basket-empty{grid-column:1/-1}
-.basket-body{padding:20px clamp(16px,4vw,44px) 90px;max-width:1560px;margin:0 auto}
+.basket-body{isolation:isolate;padding:20px clamp(16px,4vw,44px) 90px;max-width:1560px;margin:0 auto}
 .basket-toast{min-height:18px;margin:0 0 10px;color:var(--muted);font-size:12px}
 .batch-only{display:none}
 body.batch-mode #detail .single-only{display:none!important}
