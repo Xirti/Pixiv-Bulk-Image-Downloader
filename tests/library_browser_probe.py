@@ -180,10 +180,13 @@ def main():
                                     page.locator("#historyList").evaluate("node => node.scrollLeft = 0")
                                     for record in page.locator(".history-record").all():
                                         assert record.bounding_box()["height"] <= 64, (width, record.bounding_box())
-                                        for action in record.locator(".history-record-actions button").all():
+                                    for edge in (0, 1):
+                                        page.locator("#historyList").evaluate("(node, edge) => node.scrollLeft = edge ? node.scrollWidth : 0", edge)
+                                        for action in page.locator(".history-record-actions button").all():
                                             box = action.bounding_box()
-                                            assert box["x"] >= 0 and box["x"] + box["width"] <= width, (width, box)
+                                            assert box["x"] >= 0 and box["x"] + box["width"] <= width, (width, edge, box)
                                             assert action.evaluate("node => { const r = node.getBoundingClientRect(); return node.contains(document.elementFromPoint(r.x + r.width/2, r.y + r.height/2)); }")
+                                    page.locator("#historyList").evaluate("node => node.scrollLeft = 0")
                                 page.screenshot(path=str(screenshots / f"{view}-{theme}-{width}.png"))
                     page.set_viewport_size({"width": 1280, "height": 820})
                     page.locator("#navHistory").click()
