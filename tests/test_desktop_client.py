@@ -2,14 +2,86 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from webview.event import Event
 from webview.util import create_cookie
 
 import desktop_client
 
 
+def desktop_window():
+    core = SimpleNamespace(
+        Settings=SimpleNamespace(AreDefaultContextMenusEnabled=False, AreDevToolsEnabled=False),
+        ContextMenuRequested=Event(None),
+    )
+    window = SimpleNamespace(native=SimpleNamespace(webview=SimpleNamespace(CoreWebView2=core)))
+    window.events = SimpleNamespace(before_load=Event(window, True))
+    return window
+
+
+class MenuItems(list):
+    def RemoveAt(self, index):
+        self.pop(index)
+
+
 class DesktopClientTests(unittest.TestCase):
+    def test_desktop_enables_native_text_context_menu_without_debug_mode(self):
+        observed = {}
+        main = desktop_window()
+
+        def capture_start(*_args, **kwargs):
+            main.events.before_load.set()
+            observed["menus"] = main.native.webview.CoreWebView2.Settings.AreDefaultContextMenusEnabled
+            observed["debug"] = kwargs["debug"]
+
+        with patch.object(
+            desktop_client.webview, "create_window", return_value=main
+        ), patch.object(desktop_client.webview, "start", side_effect=capture_start):
+            desktop_client.start_desktop("http://127.0.0.1:45678/", Path("C:/tmp/moku-profile"))
+
+        self.assertTrue(observed["menus"], "native context menus are disabled in the desktop host")
+        self.assertFalse(observed["debug"])
+        self.assertFalse(main.native.webview.CoreWebView2.Settings.AreDevToolsEnabled)
+
+    def test_desktop_allows_selecting_display_text_for_copying(self):
+        with patch.object(desktop_client.webview, "create_window", return_value=desktop_window()) as create, patch.object(
+            desktop_client.webview, "start"
+        ):
+            desktop_client.start_desktop("http://127.0.0.1:45678/", Path("C:/tmp/moku-profile"))
+
+        self.assertTrue(create.call_args.kwargs.get("text_select", False), "display text cannot be selected")
+
+    def test_native_menu_keeps_clipboard_commands_and_their_enabled_states(self):
+        names = ["back", "cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll", "undo", "redo", "reload", "print", "inspect", "searchWeb", "separator"]
+        args = SimpleNamespace(
+            MenuItems=MenuItems(SimpleNamespace(Name=name, IsEnabled=name != "cut") for name in names),
+            Handled=False,
+        )
+
+        desktop_client._filter_text_context_menu(None, args)
+
+        self.assertEqual([item.Name for item in args.MenuItems], ["cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll", "undo", "redo"])
+        self.assertFalse(args.MenuItems[0].IsEnabled)
+        self.assertFalse(args.Handled)
+
+    def test_native_menu_does_not_show_a_navigation_menu_on_blank_space(self):
+        args = SimpleNamespace(MenuItems=MenuItems([SimpleNamespace(Name="reload")]), Handled=False)
+
+        desktop_client._filter_text_context_menu(None, args)
+
+        self.assertEqual(args.MenuItems, [])
+        self.assertTrue(args.Handled)
+
+    def test_native_menu_setup_is_idempotent_after_navigation(self):
+        main = desktop_window()
+
+        desktop_client._enable_text_context_menu(main)
+        desktop_client._enable_text_context_menu(main)
+
+        self.assertEqual(len(main.native.webview.CoreWebView2.ContextMenuRequested), 1)
+
     def test_desktop_api_keeps_native_windows_and_factories_private(self):
         api = desktop_client.DesktopApi(window_factory=Mock())
 
@@ -142,7 +214,7 @@ class DesktopClientTests(unittest.TestCase):
         auth_request.assert_not_called()
 
     def test_start_desktop_can_run_internal_probe_callback_without_enabling_it_by_default(self):
-        main = Mock()
+        main = desktop_window()
         callback = Mock()
         with patch.object(desktop_client.webview, "create_window", return_value=main), patch.object(
             desktop_client.webview, "start"
@@ -153,7 +225,7 @@ class DesktopClientTests(unittest.TestCase):
         self.assertEqual(start.call_args.kwargs["args"], [main])
 
     def test_desktop_does_not_let_second_webview_controller_clear_shared_login_cookies(self):
-        main = Mock()
+        main = desktop_window()
         with patch.object(desktop_client.webview, "create_window", return_value=main), patch.object(
             desktop_client.webview, "start"
         ) as start:

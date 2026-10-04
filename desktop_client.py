@@ -20,6 +20,29 @@ from pixiv_login import LOGIN, select_session_cookie, session_cookie_metadata
 LOG = logging.getLogger("moku.desktop")
 
 
+_TEXT_MENU_COMMANDS = frozenset({
+    "undo", "redo", "cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll",
+})
+
+
+def _filter_text_context_menu(_sender, args) -> None:
+    for index in range(len(args.MenuItems) - 1, -1, -1):
+        if str(args.MenuItems[index].Name) not in _TEXT_MENU_COMMANDS:
+            args.MenuItems.RemoveAt(index)
+    if not len(args.MenuItems):
+        args.Handled = True
+
+
+def _enable_text_context_menu(window) -> None:
+    # before_load runs on the WebView2 UI thread, after pywebview disables
+    # native menus in non-debug mode. Keep clipboard commands, not navigation.
+    core = window.native.webview.CoreWebView2
+    core.Settings.AreDefaultContextMenusEnabled = True
+    if not getattr(window, "_moku_text_menu_configured", False):
+        core.ContextMenuRequested += _filter_text_context_menu
+        window._moku_text_menu_configured = True
+
+
 class DesktopLoginCancelled(RuntimeError):
     pass
 
@@ -289,8 +312,10 @@ def start_desktop(
         min_size=(900, 620),
         resizable=True,
         background_color="#fbf7ed",
+        text_select=True,
     )
     api._window = window
+    window.events.before_load += _enable_text_context_menu
     storage_path.mkdir(parents=True, exist_ok=True)
     if startup is None:
         webview.start(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
