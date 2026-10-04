@@ -101,6 +101,26 @@ assert.equal($("#basketArtworkDetail").hidden, true);
 assert.match($("#batchCollections").innerHTML, /采集篮为空/);
 ''')
 
+    def test_basket_clear_also_updates_restored_normal_detail_checkboxes(self):
+        self.run_frontend(r'''
+const normal = artwork("77"), basket = artwork("88");
+choose(normal); choose(basket);
+activeArtworkId = normal.id;
+renderDetail(normal, 0);
+const boxes = $("#collectionPages").querySelectorAll("[data-collection-page]");
+assert.equal(boxes.every(box => box.checked), true);
+openSelectionBasket();
+await openBatchCollection(basket.id);
+$("#basketClear").onclick();
+$("#basketClearConfirm").onclick();
+assert.equal(selection.size, 0);
+navigatePrimary("#gallery");
+navigatePrimary("#detail");
+assert.equal(currentDetailItem.id, normal.id);
+assert.equal(boxes.every(box => !box.checked), true);
+assert.equal($("#download").disabled, true);
+''')
+
     def test_original_quality_defaults_and_preview_remains_explicit(self):
         self.run_frontend(r'''
 const item = {...artwork("77"), qualities: [{id: "regular", label: "regular"}, {id: "original", label: "original", width: 4000, height: 3000}]};

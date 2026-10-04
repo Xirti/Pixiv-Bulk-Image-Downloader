@@ -118,8 +118,9 @@ class WorkflowV2Tests(unittest.TestCase):
         desktop_branch = APP[APP.index('$("#authAction").onclick'):]
         self.assertNotIn('fetchJson("/api/auth/login"', desktop_branch)
 
-    def test_login_ui_describes_live_monitoring_and_global_rounded_controls(self):
-        self.assertIn("实时监控", HTML + APP)
+    def test_login_ui_describes_automatic_connection_and_global_rounded_controls(self):
+        self.assertIn("完成登录后会自动连接", HTML)
+        self.assertIn("完成后会自动连接", APP)
         self.assertNotIn("完成后请关闭", HTML + APP)
         self.assertNotIn("完成后关闭", HTML + APP)
         self.assertIn("--radius", STYLE)
@@ -166,7 +167,7 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn("errorLabels[row?.errorKind]", APP)
         self.assertIn("pointer-events:none", STYLE)
         self.assertIn(".batch-collection.image-unavailable .batch-card-cover::after", STYLE)
-        self.assertIn('content:"预览已清理"', STYLE)
+        self.assertIn('content:"预览暂不可用"', STYLE)
 
     def test_detail_selection_uses_artwork_identity_not_search_index(self):
         self.assertIn("let activeArtworkId", APP)

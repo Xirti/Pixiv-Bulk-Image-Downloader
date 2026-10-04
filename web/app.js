@@ -1291,6 +1291,9 @@ function closeBasketPage() {
     collectionPageOffset = basketDownloadSnapshot.pageOffset;
     basketDownloadSnapshot = null;
   }
+  $("#collectionPages").querySelectorAll("[data-collection-page]").forEach(box => {
+    box.checked = Boolean(selection.get(currentDetailItem?.id)?.pages.has(Number(box.dataset.collectionPage)));
+  });
   invalidateDetailView();
   syncSearchScopedControls();
   updateFloatingChrome();
