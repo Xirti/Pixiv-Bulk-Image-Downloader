@@ -53,6 +53,14 @@ def main():
     png = io.BytesIO()
     Image.new("RGB", (4, 4), "blue").save(png, "PNG")
     errors, requests, themes = [], [], []
+    hold_download = [False]
+    release_download = threading.Event()
+
+    def image_bytes(*_args, **_kwargs):
+        if hold_download[0] and not release_download.wait(20):
+            raise TimeoutError("probe download was not released")
+        return png.getvalue(), "image/png"
+
     screenshots = Path(tempfile.mkdtemp(prefix="moku-library-visual-"))
     with tempfile.TemporaryDirectory(prefix="moku-library-probe-") as directory:
         root = Path(directory)
@@ -63,7 +71,7 @@ def main():
         worker = threading.Thread(target=httpd.serve_forever, daemon=True)
         worker.start()
         try:
-            with patch.object(server, "DOWNLOAD_HISTORY", history), patch.object(server, "ensure_network_opener_current"), patch.object(server, "validated_authorization", return_value=(False, None)), patch.object(server, "pixiv_item_for_download", side_effect=authorized_artwork), patch.object(server, "pixiv_request", return_value=(png.getvalue(), "image/png")), sync_playwright() as runtime:
+            with patch.object(server, "DOWNLOAD_HISTORY", history), patch.object(server, "ensure_network_opener_current"), patch.object(server, "validated_authorization", return_value=(False, None)), patch.object(server, "pixiv_item_for_download", side_effect=authorized_artwork), patch.object(server, "pixiv_request", side_effect=image_bytes), sync_playwright() as runtime:
                 browser = runtime.chromium.launch(channel="msedge", headless=True)
                 try:
                     context = browser.new_context(viewport={"width": 1280, "height": 820}, reduced_motion="reduce", permissions=["clipboard-read", "clipboard-write"])
@@ -124,8 +132,17 @@ def main():
                     page.locator("#basketBack").click()
                     assert page.locator("#quality").input_value() == "original"
                     assert page.locator("#downloadPage").is_visible()
+                    hold_download[0] = True
                     page.locator("#batchDownload").click()
+                    page.wait_for_function("() => selection.locked")
+                    page.locator("#navHistory").click()
+                    page.locator('.page-rail a[href="#gallery"]').click(force=True)
+                    assert page.locator("#historyPage").is_visible(), "navigation changed a live download context"
+                    assert page.evaluate("[...selection.get('11').pages]") == [0, 2]
+                    release_download.set()
                     page.wait_for_function("() => !selection.locked && document.querySelector('#toast').textContent.includes('已保存 2')")
+                    page.wait_for_function("() => document.querySelectorAll('.history-record').length === 2")
+                    page.locator("#historyBack").click()
                     assert history.list()["total"] == 25
                     for width, height in ((1280, 820), (375, 812), (320, 740)):
                         page.set_viewport_size({"width": width, "height": height})
@@ -159,10 +176,11 @@ def main():
                     assert page.locator("#downloadPage").is_hidden()
                     assert page.evaluate("selection.size") == 1
                     assert not errors, errors
-                    print(json.dumps({"ok": True, "independentViews": True, "publishedFiles": len(list(root.rglob("*.png"))), "copyPaths": True, "clearKeptFiles": True, "themesChecked": len(themes), "viewports": [1280, 375, 320], "scriptErrors": errors, "screenshots": str(screenshots)}, ensure_ascii=False))
+                    print(json.dumps({"ok": True, "independentViews": True, "historyDuringDownload": True, "publishedFiles": len(list(root.rglob("*.png"))), "copyPaths": True, "clearKeptFiles": True, "themesChecked": len(themes), "viewports": [1280, 375, 320], "scriptErrors": errors, "screenshots": str(screenshots)}, ensure_ascii=False))
                 finally:
                     browser.close()
         finally:
+            release_download.set()
             httpd.shutdown()
             httpd.server_close()
             worker.join(timeout=5)

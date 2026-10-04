@@ -109,6 +109,61 @@ await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal($("#historyList").innerHTML, before);
 ''')
 
+    def test_basket_detail_never_leaks_another_work_into_the_download_view(self):
+        self.run_frontend(r'''
+const normal = artwork("77", 80), basket = artwork("88", 3);
+choose(normal);
+choose(basket);
+activeArtworkId = normal.id;
+renderDetail(normal, 0, {kind: "pid", value: "77"});
+collectionPageOffset = 48;
+$("#quality").value = "original";
+openDownloadPage();
+openSelectionBasket();
+await openBatchCollection("88");
+assert.equal(currentDetailItem.id, "88");
+navigatePrimary("#gallery");
+assert.equal(currentDetailItem.id, "77");
+assert.equal(activeArtworkId, "77");
+assert.equal(collectionPageOffset, 48);
+navigatePrimary("#detail");
+assert.equal($("#dTitle").textContent, "77");
+assert.equal(downloadPayload(currentDetailItem, 0).body.id, "77");
+assert.equal(downloadPayload(currentDetailItem, 0).body.context.value, "77");
+assert.equal($("#quality").value, "original");
+openSelectionBasket();
+await openBatchCollection("88");
+navigatePrimary("#detail");
+assert.equal(basketPageOpen(), false);
+assert.equal(document.body.classList.contains("batch-mode"), true);
+assert.equal(activeWorkspace, "download");
+assert.equal(currentDetailItem, null);
+assert.equal(selection.size, 2);
+assert.equal($("#quality").value, "original");
+''')
+
+    def test_history_failure_is_visible_outside_single_and_batch_download_views(self):
+        self.run_frontend(r'''
+const item = artwork("77");
+choose(item);
+activeArtworkId = item.id;
+renderDetail(item, 0);
+fetchJson = async () => ({items: [], total: 0, page: 1, pages: 0, limit: 5000});
+for (const batch of [false, true]) {
+  if (batch) showBatchDetail(); else openDownloadPage();
+  let release;
+  fetchDownloadResult = () => new Promise(resolve => { release = resolve; });
+  const pending = $(batch ? "#batchDownload" : "#download").onclick();
+  openLibrary("history");
+  release({pages: 3, saved: ["saved.png"], historyWarning: "history unavailable"});
+  await pending;
+  assert.equal($("#historyPage").hidden, false);
+  assert.ok($("#taskDockText").textContent.includes("下载历史记录失败"));
+  assert.ok($("#taskDockText").textContent.includes("文件已保存"));
+  closeLibrary();
+}
+''')
+
     def test_loading_a_new_work_removes_the_previous_selection_controls(self):
         self.run_frontend(r'''
 const first = artwork("10");

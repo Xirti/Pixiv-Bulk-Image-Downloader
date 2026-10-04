@@ -27,6 +27,7 @@ let currentDetailContext = null;
 let collectionPageOffset = 0;
 let batchCandidateItems = [];
 let basketDetailItem = null;
+let basketDownloadSnapshot = null;
 let basketReturnMode = "summary";
 let basketArtworkOffset = 0;
 let viewerPageOffset = 0;
@@ -878,7 +879,7 @@ function updatePaginationDock() {
   rail.hidden = !$("#allViewer").hidden;
   const sections = ['home', 'gallery'];
   const marker = window.innerHeight * .4;
-  const active = ["history", "favorites"].includes(activeWorkspace) ? activeWorkspace
+  const active = libraryWorkspaceOpen() ? activeWorkspace
     : basketPageOpen() ? "basket" : activeWorkspace === "download" ? "detail"
     : sections.reduce((current, id) => $(`#${id}`).getBoundingClientRect().top <= marker ? id : current, 'home');
   rail.querySelectorAll('a, button').forEach(link => {
@@ -891,7 +892,7 @@ function updatePaginationDock() {
 
 function activeScrollSurface() {
   if (!$("#allViewer").hidden) return $("#allViewer");
-  if (["history", "favorites"].includes(activeWorkspace)) return $(`#${activeWorkspace}Page`);
+  if (libraryWorkspaceOpen()) return $(`#${activeWorkspace}Page`);
   if (basketPageOpen()) return $("#basketPage");
   if (activeWorkspace === "download") return $("#downloadPage");
   return window;
@@ -944,6 +945,10 @@ function contextNavigationLocked() {
   return selection.locked || singleDownloadPending || searchPending;
 }
 
+function libraryWorkspaceOpen() {
+  return activeWorkspace === "history" || activeWorkspace === "favorites";
+}
+
 function setWorkspace(view) {
   if (activeWorkspace === "history" && view !== "history") historyView.close();
   activeWorkspace = view;
@@ -963,10 +968,11 @@ function navigatePrimary(hash) {
     showTaskDock("请等待当前操作", "搜索或下载完成后可切换选图视图；下载历史仍可查看。", 3000);
     return;
   }
+  const fromBasket = basketPageOpen();
   closeAllViewer();
   closeBasketPage();
   if (hash === "#detail") {
-    if (selection.size && !currentDetailItem && !document.body.classList.contains("batch-mode")) showBatchDetail();
+    if (fromBasket || (selection.size && !currentDetailItem && !document.body.classList.contains("batch-mode"))) showBatchDetail();
     else openDownloadPage();
   } else {
     workspaceReturn = null;
@@ -976,7 +982,7 @@ function navigatePrimary(hash) {
 }
 
 function openLibrary(view) {
-  if (!["history", "favorites"].includes(activeWorkspace)) workspaceReturn = activeWorkspace;
+  if (!libraryWorkspaceOpen()) workspaceReturn = activeWorkspace;
   closeAllViewer();
   setWorkspace(view);
   if (view === "history") historyView.open();
@@ -996,7 +1002,7 @@ $("#navBasket").onclick = () => {
     showTaskDock("采集篮为空", "先在预览页勾选作品，再来选择图片。", 3000);
     return;
   }
-  if (["history", "favorites"].includes(activeWorkspace)) closeLibrary();
+  if (libraryWorkspaceOpen()) closeLibrary();
   closeAllViewer();
   openSelectionBasket();
 };
@@ -1228,6 +1234,14 @@ function basketPageOpen() {
 }
 
 function openBasketPage() {
+  if (!basketPageOpen()) {
+    // Basket detail uses the active preview identity; keep the normal download
+    // view's identity alongside its untouched DOM until the basket is closed.
+    basketDownloadSnapshot = {
+      item: currentDetailItem, context: currentDetailContext,
+      artworkId: activeArtworkId, pageOffset: collectionPageOffset,
+    };
+  }
   $("#basketPage").hidden = false;
   document.body.classList.add("basket-page-open");
   updatePaginationDock();
@@ -1267,7 +1281,15 @@ function closeBasketPage() {
   $("#basketPageMore").hidden = true;
   $("#basketViewAll").hidden = true;
   if (!wasOpen) return;
+  if (basketDownloadSnapshot) {
+    currentDetailItem = basketDownloadSnapshot.item;
+    currentDetailContext = basketDownloadSnapshot.context;
+    activeArtworkId = basketDownloadSnapshot.artworkId;
+    collectionPageOffset = basketDownloadSnapshot.pageOffset;
+    basketDownloadSnapshot = null;
+  }
   invalidateDetailView();
+  syncSearchScopedControls();
   updateFloatingChrome();
 }
 
@@ -1512,6 +1534,10 @@ async function executeDownloadTask(task, requestForChunk, reportProgress) {
   }
 }
 
+function downloadCompletionWarnings(task) {
+  return `${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}${task.historyWarning ? "；下载历史记录失败，文件已保存" : ""}`;
+}
+
 function setDownloadButtonState(button, text, disabled) {
   button.disabled = disabled;
   button.textContent = text;
@@ -1742,8 +1768,9 @@ $("#batchDownload").onclick = async () => {
       showTaskDock("批量下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${task.savedCount} 张`, 0);
     });
     resumableBatchTask = null;
-    announceToast(`已保存 ${task.savedCount} 张图片，共 ${task.totalBatches} 批${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}${task.historyWarning ? "；下载历史记录失败，文件已保存" : ""}`);
-    showTaskDock("批量下载完成", `已保存 ${task.savedCount} 张图片，共 ${task.totalBatches} 批`);
+    const summary = `已保存 ${task.savedCount} 张图片，共 ${task.totalBatches} 批${downloadCompletionWarnings(task)}`;
+    announceToast(summary);
+    showTaskDock("批量下载完成", summary, task.historyWarning ? 8000 : 3200);
   } catch (error) {
     resumableBatchTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
     const prefix = task.savedCount ? `已保存 ${task.savedCount} 张；后续` : "批量下载";
@@ -1765,7 +1792,7 @@ addEventListener("keydown", (event) => {
     closeAllViewer();
     return;
   }
-  if (["history", "favorites"].includes(activeWorkspace)) { closeLibrary(); return; }
+  if (libraryWorkspaceOpen()) { closeLibrary(); return; }
   if (contextNavigationLocked()) return;
   if (basketPageOpen()) $("#basketBack").click();
   else if (activeWorkspace === "download") navigatePrimary("#gallery");
@@ -1866,8 +1893,8 @@ $("#download").onclick = async () => {
     });
     resumableSingleTask = null;
     const summary = `已保存 ${task.savedCount} 页，${task.fileCount} 个文件`;
-    announceToast(`${summary}：${task.firstSaved}${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}${task.historyWarning ? "；下载历史记录失败，文件已保存" : ""}`);
-    showTaskDock("保存完成", summary);
+    announceToast(`${summary}：${task.firstSaved}${downloadCompletionWarnings(task)}`);
+    showTaskDock("保存完成", `${summary}${downloadCompletionWarnings(task)}`, task.historyWarning ? 8000 : 3200);
   } catch (error) {
     resumableSingleTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
     const retryHint = resumableSingleTask
