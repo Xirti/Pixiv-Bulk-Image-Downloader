@@ -198,10 +198,13 @@ class PublicationDateFrontendTests(unittest.TestCase):
     def test_presets_validation_and_committed_filters_survive_input_changes(self):
         harness = (ROOT / "tests/frontend_harness.js").read_text(encoding="utf-8")
         app = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in (
-            "ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "app.js",
+            "ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "app.js",
         ))
         assertions = r'''
 const assert = require("node:assert/strict");
+assert.deepEqual(publicationDateBounds("1", "", "", new Date("2024-03-01T15:00:00Z")), {
+  startDate: "2024-03-02", endDate: "2024-03-02",
+});
 assert.deepEqual(publicationDateBounds("7", "", "", new Date("2024-03-01T15:00:00Z")), {
   startDate: "2024-02-25", endDate: "2024-03-02",
 });

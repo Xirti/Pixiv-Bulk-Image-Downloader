@@ -93,6 +93,7 @@ globalThis.document = {
   addEventListener: (type, handler) => documentListeners.set(type, handler),
 };
 globalThis.window = globalThis;
+globalThis.matchMedia = () => ({matches: false});
 globalThis.addEventListener = (type, handler) => windowListeners.set(type, handler);
 globalThis.requestIdleCallback = () => {};
 fakeElement("#safety").value = "safe";
@@ -100,3 +101,4 @@ fakeElement("#workType").value = "all";
 fakeElement("#quality").value = "regular";
 fakeElement("#format").value = "source";
 fakeElement("#tag").value = "old";
+for (const id of ["allViewer", "basketPage", "downloadPage", "historyPage", "favoritesPage"]) fakeElement(`#${id}`).hidden = true;

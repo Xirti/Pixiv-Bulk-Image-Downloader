@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,12 +26,22 @@ def main() -> int:
         parser.error("--app-only and --subject-mvp0 cannot be combined")
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    suite = unittest.defaultTestLoader.discover(
-        start_dir=str(TESTS),
-        pattern="test*.py",
-        top_level_dir=str(TESTS),
-    )
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    # Download tests must never append to the current user's actual library.
+    previous_library = os.environ.get("MOKU_LIBRARY_DIR")
+    with tempfile.TemporaryDirectory(prefix="moku-test-library-") as directory:
+        os.environ["MOKU_LIBRARY_DIR"] = directory
+        try:
+            suite = unittest.defaultTestLoader.discover(
+                start_dir=str(TESTS),
+                pattern="test*.py",
+                top_level_dir=str(TESTS),
+            )
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
+        finally:
+            if previous_library is None:
+                os.environ.pop("MOKU_LIBRARY_DIR", None)
+            else:
+                os.environ["MOKU_LIBRARY_DIR"] = previous_library
     if not result.wasSuccessful():
         return 1
     if args.app_only or not args.subject_mvp0:

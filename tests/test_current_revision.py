@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS = (ROOT / "tests" / "frontend_harness.js").read_text(encoding="utf-8")
 APP = "\n".join(
     (ROOT / "web" / name).read_text(encoding="utf-8")
-    for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "app.js")
+    for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "app.js")
 )
 FIXTURE = r'''
 const assert = require("node:assert/strict");
@@ -38,6 +38,76 @@ class CurrentRevisionTests(unittest.TestCase):
             text=True, encoding="utf-8", capture_output=True, timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_independent_workspaces_preserve_context_and_download_options(self):
+        self.run_frontend(r'''
+const item = {...artwork("77"), workType: "ugoira", formats: [{id: "source", label: "ZIP"}, {id: "gif", label: "GIF"}]};
+choose(item);
+activeArtworkId = item.id;
+renderDetail(item, 0);
+$("#quality").value = "original";
+$("#format").value = "gif";
+$("#saveRoot").value = "C:\\pictures";
+openDownloadPage();
+assert.equal(activeScrollSurface(), $("#downloadPage"));
+assert.equal($("main").inert, true);
+openLibrary("favorites");
+assert.equal($("#favoritesPage").hidden, false);
+closeLibrary();
+assert.equal(activeWorkspace, "download");
+assert.equal(currentDetailItem.id, "77");
+assert.equal(selection.size, 1);
+assert.equal($("#format").value, "gif");
+showBatchDetail();
+assert.equal($("#quality").value, "original");
+assert.equal($("#format").value, "gif");
+assert.equal($("#saveRoot").value, "C:\\pictures");
+openSelectionBasket();
+assert.equal(activeScrollSurface(), $("#basketPage"));
+openLibrary("favorites");
+assert.equal($("#basketPage").inert, true);
+closeLibrary();
+assert.equal(basketPageOpen(), true);
+assert.equal($("#basketPage").inert, false);
+closeBasketPage();
+navigatePrimary("#gallery");
+assert.equal(activeWorkspace, null);
+assert.equal(selection.size, 1);
+''')
+
+    def test_download_lock_blocks_context_navigation_but_history_can_open(self):
+        self.run_frontend(r'''
+openDownloadPage();
+singleDownloadPending = true;
+selection.setLocked(true);
+navigatePrimary("#gallery");
+assert.equal(activeWorkspace, "download");
+let calls = 0;
+fetchJson = async () => { calls++; return {items: [], total: 0, page: 1, pages: 0, limit: 5000}; };
+openLibrary("history");
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.equal(calls, 1);
+assert.equal(activeWorkspace, "history");
+assert.equal(activeScrollSurface(), $("#historyPage"));
+closeLibrary();
+assert.equal(activeWorkspace, "download");
+singleDownloadPending = false;
+selection.setLocked(false);
+navigatePrimary("#gallery");
+assert.equal(activeWorkspace, null);
+''')
+
+    def test_closing_history_discards_a_late_response(self):
+        self.run_frontend(r'''
+let release;
+fetchJson = () => new Promise(resolve => { release = resolve; });
+openLibrary("history");
+closeLibrary();
+const before = $("#historyList").innerHTML;
+release({items: [{title: "late", files: [], pages: []}], total: 1, page: 1, pages: 1, limit: 5000});
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.equal($("#historyList").innerHTML, before);
+''')
 
     def test_loading_a_new_work_removes_the_previous_selection_controls(self):
         self.run_frontend(r'''

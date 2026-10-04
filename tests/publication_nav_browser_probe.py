@@ -85,7 +85,8 @@ def main():
                 assert "2024-01-01 至 2024-01-07" in page.locator("#count").inner_text()
                 page.wait_for_function("() => document.querySelector('#backTop').classList.contains('is-visible')")
                 top = page.locator("#backTop").bounding_box()
-                assert top and top["y"] <= 16 and top["x"] > 1200, top
+                chrome = page.locator("body > header").bounding_box()
+                assert top and top["y"] <= chrome["height"] + 16 and top["x"] > 1200, top
                 page.locator("#backTop").click()
                 page.wait_for_function("() => scrollY === 0")
                 page.locator('.page-rail a[href="#detail"]').click()

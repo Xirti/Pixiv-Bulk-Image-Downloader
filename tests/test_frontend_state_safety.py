@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "app.js"))
+APP = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "app.js"))
 STYLE = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 
 
@@ -53,7 +53,9 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn("searchButton.disabled = selection.locked || searchPending || singleDownloadPending", controls)
         self.assertIn("selection.locked || searchPending", controls)
         open_basket = block("function openSelectionBasket", "function applyBasketArtworkSelection")
-        self.assertIn("if (selection.locked || searchPending) return", open_basket)
+        self.assertIn("if (contextNavigationLocked()) return", open_basket)
+        navigation_lock = block("function contextNavigationLocked", "function setWorkspace")
+        self.assertIn("selection.locked || singleDownloadPending || searchPending", navigation_lock)
 
         reconciliation = block("function reconcileSelectedArtworkPreviews", "function render()")
         self.assertIn("selection.remember(merged)", reconciliation)

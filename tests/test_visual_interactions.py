@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in ("artwork-detail-view.js", "app.js"))
+APP = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in ("artwork-detail-view.js", "download-history.js", "app.js"))
 STYLE = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 SERVER = (ROOT / "server.py").read_text(encoding="utf-8")
 
