@@ -134,7 +134,7 @@ class WorkspaceStore:
             connection.close()
 
     def load(self, scope: str) -> dict:
-        result = {"basket": [], "revision": 0, "tasks": [], "recent": []}
+        result = {"basket": [], "revision": 0, "tasks": [], "recent": [], "scope": scope}
         with self._lock:
             if not self.path.exists():
                 return result
@@ -207,9 +207,11 @@ class WorkspaceStore:
             raise ValueError("basket exceeds 1000 pages")
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            old = connection.execute("SELECT revision FROM basket WHERE singleton=1").fetchone()
+            old = connection.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
             if (old[0] if old else 0) != revision:
                 raise ValueError("stale basket revision")
+            if old:
+                normalized += [(owner, row) for owner, row in json.loads(old[1]) if owner not in {scope, "public"}]
             connection.execute("INSERT OR REPLACE INTO basket VALUES (1,?,?)", (revision + 1, json.dumps(normalized, ensure_ascii=False)))
         return revision + 1
 

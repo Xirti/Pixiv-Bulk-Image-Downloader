@@ -22,7 +22,11 @@ class MinimalClientTests(unittest.TestCase):
         scheduler = APP[APP.index("function schedulePaginationDockUpdate"):APP.index("async function select")]
         self.assertEqual(APP.count("requestAnimationFrame("), 1)
         self.assertIn("requestAnimationFrame(run)", scheduler)
-        self.assertNotIn("IntersectionObserver", APP)
+        # The only observer restores visible basket thumbnails, not decoration.
+        self.assertEqual(APP.count("new IntersectionObserver("), 1)
+        thumbnails = APP[APP.index("function loadBasketThumbnails"):APP.index("function selectedGroups")]
+        self.assertIn('root: $("#basketPage")', thumbnails)
+        self.assertIn("active < 3", thumbnails)
         self.assertNotIn("bindRipple", APP)
         self.assertNotIn("previewMode", HTML)
         self.assertNotIn("motion", HTML)

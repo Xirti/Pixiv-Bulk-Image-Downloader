@@ -98,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File .\make-release.ps1
 
 ## 本版更新
 
-`1.1.2 Lite` 主要让反复找图、下载更省心：翻页不再闪空，常用搜索可以找回，已下载图片自动跳过，采集篮和未完成任务重启后继续保留。完整更新见 [CHANGELOG](CHANGELOG.md)。
+当前源码版本是 `1.1.2 Lite`。这次主要让反复找图、下载更省心：翻页不再闪空，常用搜索可以找回，已下载图片自动跳过，采集篮和未完成任务重启后继续保留。完整更新见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可证与作品使用
 

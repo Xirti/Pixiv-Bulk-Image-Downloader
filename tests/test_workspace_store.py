@@ -50,6 +50,8 @@ class WorkspaceStoreTests(unittest.TestCase):
             store.save_task(task(), "account-A")
             self.assertEqual(store.load("account-B")["basket"], [])
             self.assertEqual(store.load("account-B")["tasks"], [])
+            store.save_basket([], "account-B", revision=1)
+            self.assertEqual(len(store.load("account-A")["basket"]), 1)
             with self.assertRaisesRegex(ValueError, "stale"):
                 store.save_basket([], "account-A", revision=0)
             invalid = task()

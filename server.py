@@ -3628,8 +3628,6 @@ class Handler(SimpleHTTPRequestHandler):
         }
         if is_download_task:
             def download_result() -> tuple[dict, int]:
-                if data.get("queueId") is not None and not WORKSPACE_STORE.has_task(data["queueId"], workspace_scope()):
-                    return {"error": "这项任务不属于当前账户，请重新确认下载"}, 403
                 if not DOWNLOAD_TASK_SLOTS.acquire(blocking=False):
                     return {
                         "error": "下载任务繁忙，请等待当前任务完成后重试",
@@ -3642,17 +3640,29 @@ class Handler(SimpleHTTPRequestHandler):
                     DOWNLOAD_TASK_SLOTS.release()
 
             try:
-                authorized, epoch = validated_authorization()
+                with SEARCH_SESSION_LOCKS_GUARD:
+                    authorized, epoch = validated_authorization()
+                    owner_scope = workspace_scope()
+                    if data.get("queueId") is not None:
+                        if data.get("scope") != owner_scope or not WORKSPACE_STORE.has_task(data["queueId"], owner_scope):
+                            return self.send_json({"error": "这项任务不属于当前账户，请重新确认下载"}, 403)
                 payload, status = DOWNLOAD_REQUESTS.run(
                     data.get("requestId"), path, data, download_result,
                     scope=str(epoch) if authorized else "public",
-                    durable_scope=workspace_scope(), output_root=DOWNLOADS,
+                    durable_scope=owner_scope, output_root=DOWNLOADS,
                 )
             except DownloadRequestError as exc:
                 payload, status = {"error": str(exc), "requestIdConflict": exc.status == 409}, exc.status
             except (TypeError, ValueError) as exc:
                 payload, status = {"error": "下载请求格式无效"}, 400
+            except (OSError, sqlite3.Error):
+                payload, status = {"error": "无法读取下载任务"}, 500
             return self.send_json(payload, status)
+        if path.startswith("/api/workspace/"):
+            with SEARCH_SESSION_LOCKS_GUARD:
+                if data.get("scope") != workspace_scope():
+                    return self.send_json({"error": "Pixiv 账户状态已变更，请重开窗口或刷新任务"}, 409)
+                return route[1](data)
         if path.startswith("/api/pixiv/"):
             ensure_network_opener_current()
         return route[1](data)

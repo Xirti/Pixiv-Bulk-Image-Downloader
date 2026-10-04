@@ -45,13 +45,16 @@ let downloadAuthorizationRevision = 0;
 let authStatusGeneration = 0;
 let workspaceReady = false;
 let workspaceLoading = true;
+let workspaceReloadPending = false;
+let workspaceRestoreGeneration = 0;
 let restoringWorkspace = false;
 let basketRevision = 0;
 let basketSaveChain = Promise.resolve();
 let basketDirty = false;
 let basketSaving = false;
 const pendingTasks = new Map();
-let savedRecentSearches = null;
+let savedRecentSearches = [];
+let workspaceScope = null;
 const batchCandidateContextByArtwork = new Map();
 const batchCandidateResultPageByArtwork = new Map();
 const MAX_SELECTED_PAGES = 1000;
@@ -118,21 +121,16 @@ $("#endDate").oninput = syncDateInputs;
 syncDateInputs();
 
 function readRecentSearches() {
-  if (savedRecentSearches !== null) return savedRecentSearches.slice(0, 8);
-  try {
-    const rows = JSON.parse(localStorage.getItem("moku.recentSearches") || "[]");
-    return Array.isArray(rows) ? rows.filter(row => typeof row?.tag === "string" && row.tag.length <= 500 && row.filters && typeof row.filters === "object").slice(0, 8) : [];
-  } catch { return []; }
+  return savedRecentSearches.slice(0, 8);
 }
 
 function rememberSearch(tag, filters) {
   const row = {tag, filters: {...filters}};
   const key = JSON.stringify(row);
   const rows = [row, ...readRecentSearches().filter(old => JSON.stringify(old) !== key)].slice(0, 8);
-  try { localStorage.setItem("moku.recentSearches", JSON.stringify(rows)); } catch { /* Search works without storage. */ }
+  savedRecentSearches = rows;
   if (workspaceReady) {
-    savedRecentSearches = rows;
-    void fetchJson("/api/workspace/recent", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({search: row})})
+    void fetchJson("/api/workspace/recent", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({search: row, scope: workspaceScope})})
       .catch(() => { $("#recentSearches").title = "最近搜索暂未保存，重开窗口后可能丢失"; });
   }
   renderRecentSearches();
@@ -177,15 +175,18 @@ function persistBasket() {
   basketSaveChain = basketSaveChain.then(async () => {
     try {
       while (workspaceReady && basketDirty) {
+        const authorization = downloadAuthorizationRevision;
         basketDirty = false;
         const basket = selection.snapshot().map(row => ({id: row.id, pages: [...row.pages], context: row.context,
           resultPage: row.resultPage, archived: row.archived, item: {id: row.id, title: row.item.title, artist: row.item.artist,
             pages: row.item.pages, workType: row.item.workType, restriction: row.item.restriction, tags: row.item.tags}}));
         const data = await fetchJson("/api/workspace/basket", {method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({basket, revision: basketRevision})});
+          body: JSON.stringify({basket, revision: basketRevision, scope: workspaceScope})});
+        if (authorization !== downloadAuthorizationRevision) continue;
         basketRevision = data.revision;
       }
     } catch (error) {
+      if (workspaceLoading) return;
       workspaceReady = false;
       announceToast(`采集篮暂未保存：${error.message}。请重开当前窗口后重试。`);
       showTaskDock("采集篮暂未保存", error.message, 8000);
@@ -194,16 +195,27 @@ function persistBasket() {
 }
 
 async function restoreWorkspace() {
+  if (selection.locked || singleDownloadPending) {
+    workspaceReloadPending = true;
+    workspaceLoading = true;
+    workspaceReady = false;
+    syncSearchScopedControls();
+    return;
+  }
+  const generation = ++workspaceRestoreGeneration;
   const authorization = downloadAuthorizationRevision;
+  workspaceReloadPending = false;
   workspaceLoading = true;
+  workspaceReady = false;
   syncSearchScopedControls();
   try {
     const data = await fetchJson("/api/workspace");
-    if (authorization !== downloadAuthorizationRevision) return;
+    if (generation !== workspaceRestoreGeneration || authorization !== downloadAuthorizationRevision) return;
     restoringWorkspace = true;
     const result = selection.restore(data.basket || []);
     if (!result.accepted) throw new Error("采集篮记录不完整");
     basketRevision = data.revision || 0;
+    workspaceScope = data.scope;
     savedRecentSearches = data.recent || [];
     renderRecentSearches();
     pendingTasks.clear();
@@ -217,13 +229,22 @@ async function restoreWorkspace() {
     renderPendingTasks();
     if (pendingTasks.size) showTaskDock("有未完成的下载", `${pendingTasks.size} 项任务已暂停，可在下载页继续。`, 8000);
   } catch (error) {
+    if (generation !== workspaceRestoreGeneration || authorization !== downloadAuthorizationRevision) return;
     workspaceReady = false;
     showTaskDock("采集篮恢复失败", `${error.message}；本次选择暂未保存，请重开窗口重试。`, 8000);
   } finally {
-    restoringWorkspace = false;
-    workspaceLoading = false;
-    syncSearchScopedControls();
+    if (generation === workspaceRestoreGeneration) {
+      restoringWorkspace = false;
+      workspaceLoading = false;
+      syncSearchScopedControls();
+    }
   }
+}
+
+async function restoreWorkspaceWhenUnlocked() {
+  if (!workspaceReloadPending || selection.locked || singleDownloadPending) return;
+  await basketSaveChain;
+  if (workspaceReloadPending && !selection.locked && !singleDownloadPending) await restoreWorkspace();
 }
 
 function renderPendingTasks() {
@@ -252,12 +273,12 @@ async function saveDownloadTask(task) {
   if (!task.remainingChunks.length) { await deleteSavedTask(task.id); return; }
   pendingTasks.set(task.id, task);
   renderPendingTasks();
-  await fetchJson("/api/workspace/task", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task})});
+  await fetchJson("/api/workspace/task", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task, scope: workspaceScope})});
 }
 
 async function deleteSavedTask(id) {
   if (!workspaceReady) return;
-  await fetchJson("/api/workspace/task/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id})});
+  await fetchJson("/api/workspace/task/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id, scope: workspaceScope})});
   pendingTasks.delete(id);
   renderPendingTasks();
 }
@@ -720,6 +741,8 @@ function handleAuthorizationLoss(reason = "Pixiv 已断开") {
   resumableBatchTask = null;
   ugoiraPreview.clear();
   pendingTasks.clear();
+  savedRecentSearches = [];
+  renderRecentSearches();
   renderPendingTasks();
   invalidateDetailView();
   cancelActiveSearch();
@@ -1781,7 +1804,7 @@ function nextDownloadRequestId() {
 
 async function fetchDownloadResult(request, chunk, task) {
   const body = JSON.stringify({ ...request.body, requestId: chunk.requestId,
-    ...(task.persisted ? {queueId: task.id} : {}) });
+    ...(task.persisted ? {queueId: task.id, scope: workspaceScope} : {}) });
   let timeoutRetries = 0;
   while (true) {
     if (task.authorizationRevision !== downloadAuthorizationRevision) {
@@ -1871,6 +1894,7 @@ function setBasketSelectionLocked(locked) {
   updateFloatingChrome();
   syncSearchScopedControls();
   updatePaginationDock();
+  if (!locked) void restoreWorkspaceWhenUnlocked();
 }
 
 function downloadPayload(item, sourceIndex) {
@@ -2240,6 +2264,7 @@ $("#download").onclick = async () => {
     singleDownloadPending = false;
     button.textContent = downloadButtonLabel(currentDetailItem);
     syncSearchScopedControls();
+    void restoreWorkspaceWhenUnlocked();
   }
 };
 
@@ -2253,6 +2278,14 @@ async function syncAuthStatus() {
     const accountGeneration = Number.isInteger(data.authorizationGeneration) ? data.authorizationGeneration : null;
     const accountChanged = lastKnownAuthorizationGeneration !== null
       && accountGeneration !== null && accountGeneration !== lastKnownAuthorizationGeneration;
+    const reloadWorkspace = (workspaceReady || workspaceLoading || workspaceReloadPending || workspaceScope !== null)
+      && (accountChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged));
+    if (reloadWorkspace) {
+      workspaceRestoreGeneration += 1;
+      workspaceReloadPending = true;
+      workspaceLoading = true;
+      workspaceReady = false;
+    }
     if (accountChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged)) {
       downloadAuthorizationRevision += 1;
       resumableSingleTask = null;
@@ -2268,6 +2301,10 @@ async function syncAuthStatus() {
     $("#safety").querySelectorAll('option[value="r18"],option[value="all"]').forEach((option) => { option.disabled = !logged; });
     if (authorizationLost) handleAuthorizationLoss();
     else if (accountChanged) handleAuthorizationLoss("Pixiv 账户状态已变更");
+    if (reloadWorkspace) {
+      syncSearchScopedControls();
+      await restoreWorkspaceWhenUnlocked();
+    }
   } catch (error) {
     if (generation !== authStatusGeneration) return;
     $("#mode").textContent = "PIXIV OFFLINE";

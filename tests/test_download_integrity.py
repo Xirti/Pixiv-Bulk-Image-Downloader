@@ -202,6 +202,7 @@ class BatchDownloadIntegrityTests(unittest.TestCase):
                 side_effect=lambda artwork_id, **_kwargs: {
                     "id": artwork_id,
                     "restriction": "safe",
+                    "pageImages": [{"regular": "/unused"}],
                 },
             ), patch.object(
                 server, "stage_artwork_pages", side_effect=stage_first_then_fail,

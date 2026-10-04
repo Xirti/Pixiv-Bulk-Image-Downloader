@@ -9,6 +9,71 @@ SOURCES = ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", 
 
 @unittest.skipUnless(shutil.which("node"), "Node required")
 class RoadmapFrontendTests(unittest.TestCase):
+    def test_account_change_waits_for_download_unlock_before_restoring(self):
+        self.run_js("""
+          workspaceReady = true;
+          workspaceScope = 'account-A';
+          lastKnownLoggedIn = true;
+          lastKnownAuthorizationGeneration = 1;
+          setBasketSelectionLocked(true);
+          let loads = 0;
+          fetchJson = async url => {
+            if(url === '/api/status') return {loggedIn:true,authorizationGeneration:2};
+            if(url === '/api/workspace') { loads++; return {scope:'account-B',revision:1,basket:[],recent:[],tasks:[]}; }
+            throw new Error('Unexpected '+url);
+          };
+          await syncAuthStatus();
+          assert.equal(loads, 0);
+          assert.equal(workspaceLoading, true);
+          setBasketSelectionLocked(false);
+          for(let i=0;i<10 && !workspaceReady;i++) await new Promise(resolve => setTimeout(resolve,0));
+          assert.equal(loads, 1);
+          assert.equal(workspaceReady, true);
+          assert.equal(workspaceScope, 'account-B');
+          clearTimeout(taskDockTimer);
+        """)
+
+    def test_account_change_during_initial_restore_ignores_late_old_response(self):
+        self.run_js("""
+          lastKnownLoggedIn = true;
+          lastKnownAuthorizationGeneration = 1;
+          let finishOldRestore;
+          let loads = 0;
+          fetchJson = async url => {
+            if(url === '/api/status') return {loggedIn:true,authorizationGeneration:2};
+            if(url === '/api/workspace' && ++loads === 1) return new Promise(resolve => { finishOldRestore = resolve; });
+            if(url === '/api/workspace') return {scope:'account-B',revision:2,basket:[],recent:[{tag:'B',filters:{mode:'safe'}}],tasks:[]};
+            throw new Error('Unexpected '+url);
+          };
+          const oldRestore = restoreWorkspace();
+          await syncAuthStatus();
+          assert.equal(workspaceScope, 'account-B');
+          finishOldRestore({scope:'account-A',revision:1,basket:[],recent:[{tag:'A',filters:{mode:'r18'}}],tasks:[]});
+          await oldRestore;
+          assert.equal(workspaceReady, true);
+          assert.equal(workspaceScope, 'account-B');
+          assert.equal(readRecentSearches()[0].tag, 'B');
+          clearTimeout(taskDockTimer);
+        """)
+
+    def test_account_change_clears_old_recent_searches_and_loads_current_tasks(self):
+        self.run_js("""
+          workspaceReady = true;
+          lastKnownLoggedIn = true;
+          lastKnownAuthorizationGeneration = 1;
+          savedRecentSearches = [{tag:'private-A',filters:{mode:'r18'}}];
+          let loads = 0;
+          fetchJson = async url => {
+            if(url === '/api/status') return {loggedIn:true,authorizationGeneration:2};
+            if(url === '/api/workspace') { loads++; return {scope:'account-B',revision:2,basket:[],recent:[{tag:'public-B',filters:{mode:'safe'}}],tasks:[]}; }
+            throw new Error('Unexpected '+url);
+          };
+          await syncAuthStatus();
+          assert.equal(loads, 1);
+          assert.equal(readRecentSearches()[0].tag, 'public-B');
+          clearTimeout(taskDockTimer);
+        """)
+
     def test_restored_basket_keeps_exact_selection_and_queue_waits_for_resume(self):
         self.run_js("""
           let downloads = 0;
@@ -114,6 +179,7 @@ class RoadmapFrontendTests(unittest.TestCase):
           assert.deepEqual(readSearchFilters(), filters);
           for(let i=0;i<20;i++) rememberSearch('tag'+i, filters);
           assert.equal(readRecentSearches().length, 8);
-          stored.set('moku.recentSearches', '{broken');
+          assert.equal(stored.size, 0);
+          savedRecentSearches = [];
           assert.deepEqual(readRecentSearches(), []);
         """)

@@ -53,15 +53,17 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
             p.stop()
         self.temp.cleanup()
 
-    def post(self, changes=None, endpoint="/api/pixiv/download"):
+    def post(self, changes=None, endpoint="/api/pixiv/download", *, expected=200):
         body = {"id": "77", "pages": [0, 2], "quality": "original", "createFolder": False,
                 "saveRoot": str(self.output), "requestId": uuid.uuid4().hex, **(changes or {})}
+        if endpoint.startswith("/api/workspace/") or body.get("queueId"):
+            body.setdefault("scope", "public")
         connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=5)
         try:
             connection.request("POST", endpoint, json.dumps(body), {"Content-Type": "application/json", "X-MOKU-Request-Token": server.REQUEST_TOKEN})
             response = connection.getresponse()
             data = json.loads(response.read())
-            self.assertEqual(response.status, 200, data)
+            self.assertEqual(response.status, expected, data)
             return data
         finally:
             connection.close()
@@ -106,6 +108,15 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             open_directory.assert_called_once_with(self.output)
 
+    def test_workspace_rejects_stale_account_writes(self):
+        basket = [{"id": "77", "pages": [0], "item": {"pages": 3, "restriction": "safe"}}]
+        self.post({"basket": basket, "revision": 0}, "/api/workspace/basket")
+        with patch.object(server, "workspace_scope", return_value="different-account"):
+            self.post({"basket": [], "revision": 1}, "/api/workspace/basket", expected=409)
+        restored = self.workspace.load("public")
+        self.assertEqual(restored["revision"], 1)
+        self.assertEqual(restored["basket"][0]["id"], "77")
+
     def test_queue_restart_replays_lost_response_without_repeating_download(self):
         request_id = uuid.uuid4().hex
         task_id = uuid.uuid4().hex
@@ -125,8 +136,6 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
             self.assertEqual(self.post(changes, "/api/pixiv/batch-download"), first)
             self.assertEqual(self.network.call_count, 1)
             with patch.object(server, "workspace_scope", return_value="different-account"):
-                body, status = server.Handler._post_pixiv_batch_download(object.__new__(server.Handler), {
-                    "groups": [{"id":"77","pages":[0]}], "saveRoot": str(self.output), "createFolder": False})
-                # Ordinary new downloads still use current policy; saved queue ownership is separate.
-                self.assertEqual(status, 200, body)
+                self.post(changes, "/api/pixiv/batch-download", expected=403)
                 self.assertFalse(server.WORKSPACE_STORE.has_task(task_id, "different-account"))
+                self.assertEqual(self.network.call_count, 1)
