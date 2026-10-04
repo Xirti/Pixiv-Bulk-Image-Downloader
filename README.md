@@ -14,6 +14,8 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU.exe.config` 也一起保留。
 
+![MOKU Lite v1.1.1 首页](assets/screenshots/v1.1.1-home.jpg)
+
 ## 搜索与筛选
 
 - 支持标签、画师和作品 ID 搜索。`pid:123456` 查作品，`uid:123456` 查画师，`author:画师名` 按名字查找；全角冒号也能用。
@@ -34,6 +36,8 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 输入框右键可剪切、复制、粘贴和全选，普通文字也能右键复制，键盘快捷键照常使用。
 
+![MOKU Lite v1.1.1 采集篮（示例作品）](assets/screenshots/v1.1.1-basket.jpg)
+
 ## 下载
 
 先选择保存文件夹，再决定是否为本次搜索创建文件夹、是否按作品分组。单作品和采集篮共用下载设置，多图作品只下载勾选的图片。
@@ -53,6 +57,8 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 历史页用一行展示作品、清晰度、格式、下载时间和文件路径，复制与删除按钮放在每条记录右侧。可以搜索记录、单条删除，也可以勾选多条一起删除；图片仍保留在原文件夹。
 
 记录从使用新版后的成功下载开始累积，重启后保留，最多保存最近 5,000 条。数据位于 `%LOCALAPPDATA%\MOKU\library\downloads.sqlite3`，属于当前 Windows 用户。
+
+![MOKU Lite v1.1.1 下载历史（示例记录）](assets/screenshots/v1.1.1-history.jpg)
 
 ## 登录与网络
 
