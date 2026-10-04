@@ -233,3 +233,12 @@ body.viewer-open #backTop{top:12px}
 #grid[aria-busy="true"] .card{cursor:wait}
 .downloaded-badge{position:absolute;bottom:12px;left:12px;padding:4px 8px;border-radius:6px;background:var(--surface);color:var(--ink);font-size:11px;box-shadow:0 2px 8px #0002}
 .downloaded-badge[hidden]{display:none}
+.pending-downloads{margin:16px 0;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.pending-downloads[hidden]{display:none}
+.pending-downloads h3{margin:0 0 10px;font-size:15px}
+.pending-task{display:flex;align-items:center;gap:8px;margin-top:10px}
+.pending-task>div{min-width:0;flex:1}
+.pending-task b,.pending-task small{display:block;font-size:12px;overflow-wrap:anywhere}
+.pending-task small{margin-top:4px;color:var(--muted)}
+.pending-task button{padding:6px 10px;flex-shrink:0}
+#pendingDownloadStatus{font-size:12px;color:var(--muted)}

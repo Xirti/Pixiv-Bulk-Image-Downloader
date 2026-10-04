@@ -11,6 +11,7 @@ import server
 from download_history import DownloadHistory
 from download_requests import DownloadRequests
 from local_catalog import LocalCatalog
+from workspace_store import WorkspaceStore
 
 
 class DownloadCatalogHTTPTests(unittest.TestCase):
@@ -21,10 +22,13 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
         self.output.mkdir()
         self.catalog = LocalCatalog(self.root / "catalog.db")
         self.history = DownloadHistory(self.root / "history.db")
+        self.workspace = WorkspaceStore(self.root / "workspace.db")
         self.patches = [
             patch.object(server, "LOCAL_CATALOG", self.catalog, create=True),
             patch.object(server, "DOWNLOAD_HISTORY", self.history),
             patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests()),
+            patch.object(server, "WORKSPACE_STORE", self.workspace),
+            patch.object(server, "session_cookie_header", return_value={}),
             patch.object(server, "ensure_network_opener_current"),
             patch.object(server, "validated_authorization", return_value=(False, None)),
             patch.object(server, "pixiv_item_for_download", side_effect=lambda id, **kw: {
@@ -101,3 +105,28 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
             result = self.post({"id": row["id"], "path": "C:/not-allowed"}, "/api/library/history/open")
             self.assertTrue(result["ok"])
             open_directory.assert_called_once_with(self.output)
+
+    def test_queue_restart_replays_lost_response_without_repeating_download(self):
+        request_id = uuid.uuid4().hex
+        task_id = uuid.uuid4().hex
+        queued = {"id": task_id, "kind": "batch", "taskOptions": {"quality": "original", "ugoiraFormat": "source",
+                  "saveRoot": str(self.output), "createFolder": False, "skipExisting": False},
+                  "remainingChunks": [{"groups": [{"id": "77", "pages": [0]}], "pageCount": 1,
+                                       "requestId": request_id, "context": {"kind": "tags", "value": "cat"}}],
+                  "completedBatches": 0, "totalBatches": 1}
+        self.post({"task": queued}, "/api/workspace/task")
+        journal = self.root / "requests.db"
+        changes = {"queueId": task_id, "groups": [{"id": "77", "pages": [0]}], "requestId": request_id, "skipExisting": False}
+        with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)):
+            first = self.post(changes, "/api/pixiv/batch-download")
+        with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)), patch.object(server, "WORKSPACE_STORE", WorkspaceStore(self.workspace.path)):
+            restored = server.WORKSPACE_STORE.load("public")
+            self.assertEqual(restored["tasks"][0]["status"], "paused")
+            self.assertEqual(self.post(changes, "/api/pixiv/batch-download"), first)
+            self.assertEqual(self.network.call_count, 1)
+            with patch.object(server, "workspace_scope", return_value="different-account"):
+                body, status = server.Handler._post_pixiv_batch_download(object.__new__(server.Handler), {
+                    "groups": [{"id":"77","pages":[0]}], "saveRoot": str(self.output), "createFolder": False})
+                # Ordinary new downloads still use current policy; saved queue ownership is separate.
+                self.assertEqual(status, 200, body)
+                self.assertFalse(server.WORKSPACE_STORE.has_task(task_id, "different-account"))

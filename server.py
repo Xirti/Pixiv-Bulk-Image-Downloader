@@ -42,6 +42,7 @@ from folder_picker import select_folder
 from download_requests import DownloadRequestError, DownloadRequests
 from download_history import DownloadHistory, history_path
 from local_catalog import LocalCatalog
+from workspace_store import WorkspaceStore
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from ugoira_export import export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
@@ -52,7 +53,7 @@ from version import __version__
 CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
-    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "download_history.py", "local_catalog.py", "preview_resources.py", "ugoira_export.py", "version.py",
+    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "download_history.py", "local_catalog.py", "workspace_store.py", "preview_resources.py", "ugoira_export.py", "version.py",
     "web/index.html", "web/app.js", "web/text-context-menu.js", "web/download-history.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
 )
 
@@ -140,9 +141,19 @@ FOLDER_PICKER_LOCK = threading.Lock()
 # server may create many request threads, but only a small bounded number may
 # consume Pixiv bandwidth and local staging/publish resources at once.
 DOWNLOAD_TASK_SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_DOWNLOAD_TASKS)
-DOWNLOAD_REQUESTS = DownloadRequests()
+DOWNLOAD_REQUESTS = DownloadRequests(path=history_path().with_name("requests.sqlite3"))
 DOWNLOAD_HISTORY = DownloadHistory(history_path())
 LOCAL_CATALOG = LocalCatalog(history_path().with_name("catalog.sqlite3"))
+WORKSPACE_STORE = WorkspaceStore(history_path().with_name("workspace.sqlite3"))
+
+
+def workspace_scope() -> str:
+    cookie = session_cookie_header().get("Cookie", "")
+    if not cookie:
+        return "public"
+    user = re.match(r"PHPSESSID=(\d+)_", cookie)
+    identity = user[1] if user else cookie
+    return "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 # Search requests run through a small process-wide pool. A cancelled HTTP
 # handler can stop waiting immediately even if urllib is still establishing a
 # connection, while the worker cap prevents abandoned connects from piling up.
@@ -3328,6 +3339,11 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({"pages": {id: sorted(LOCAL_CATALOG.downloaded_pages(id)) for id in ids}})
             except (OSError, ValueError, sqlite3.Error):
                 return self.send_json({"error": "无法检查已下载的文件"}, 500)
+        if request.path == "/api/workspace":
+            try:
+                return self.send_json(WORKSPACE_STORE.load(workspace_scope()))
+            except (OSError, ValueError, sqlite3.Error):
+                return self.send_json({"error": "无法读取采集篮和未完成任务"}, 500)
         if request.path == "/api/network/diagnose":
             state = windows_proxy_state()
             selected_proxy = refresh_network_opener()
@@ -3588,6 +3604,10 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/library/history/clear": (4096, self._post_clear_history),
             "/api/library/history/delete": (65536, self._post_delete_history),
             "/api/library/history/open": (4096, self._post_open_history),
+            "/api/workspace/basket": (8388608, self._post_save_basket),
+            "/api/workspace/task": (4194304, self._post_save_task),
+            "/api/workspace/task/delete": (4096, self._post_delete_task),
+            "/api/workspace/recent": (8192, self._post_recent_search),
             "/api/pixiv/search/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/ugoira/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
@@ -3608,6 +3628,8 @@ class Handler(SimpleHTTPRequestHandler):
         }
         if is_download_task:
             def download_result() -> tuple[dict, int]:
+                if data.get("queueId") is not None and not WORKSPACE_STORE.has_task(data["queueId"], workspace_scope()):
+                    return {"error": "这项任务不属于当前账户，请重新确认下载"}, 403
                 if not DOWNLOAD_TASK_SLOTS.acquire(blocking=False):
                     return {
                         "error": "下载任务繁忙，请等待当前任务完成后重试",
@@ -3624,6 +3646,7 @@ class Handler(SimpleHTTPRequestHandler):
                 payload, status = DOWNLOAD_REQUESTS.run(
                     data.get("requestId"), path, data, download_result,
                     scope=str(epoch) if authorized else "public",
+                    durable_scope=workspace_scope(), output_root=DOWNLOADS,
                 )
             except DownloadRequestError as exc:
                 payload, status = {"error": str(exc), "requestIdConflict": exc.status == 409}, exc.status
@@ -3676,6 +3699,42 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(result, 500 if result.get("error") else 200)
         finally:
             FOLDER_PICKER_LOCK.release()
+
+    def _post_save_basket(self, data: dict):
+        try:
+            revision = WORKSPACE_STORE.save_basket(data.get("basket"), workspace_scope(), revision=data.get("revision"))
+            return self.send_json({"ok": True, "revision": revision})
+        except ValueError as exc:
+            return self.send_json({"error": "采集篮已在另一个窗口更新，请重开当前窗口" if "stale" in str(exc) else "采集篮数据无效"}, 409 if "stale" in str(exc) else 400)
+        except (OSError, sqlite3.Error):
+            return self.send_json({"error": "无法保存采集篮"}, 500)
+
+    def _post_save_task(self, data: dict):
+        try:
+            task = WORKSPACE_STORE.save_task(data.get("task"), workspace_scope())
+            return self.send_json({"ok": True, "task": task})
+        except ValueError:
+            return self.send_json({"error": "任务数据无效或任务列表已满，请移除旧任务后重试"}, 400)
+        except (OSError, sqlite3.Error):
+            return self.send_json({"error": "无法保存未完成任务"}, 500)
+
+    def _post_recent_search(self, data: dict):
+        try:
+            WORKSPACE_STORE.remember_search(data.get("search"), workspace_scope())
+            return self.send_json({"ok": True})
+        except ValueError:
+            return self.send_json({"error": "搜索条件无效"}, 400)
+        except (OSError, sqlite3.Error):
+            return self.send_json({"error": "最近搜索未保存"}, 500)
+
+    def _post_delete_task(self, data: dict):
+        try:
+            deleted = WORKSPACE_STORE.delete_task(data.get("id"), workspace_scope())
+            return self.send_json({"ok": True, "deleted": deleted})
+        except ValueError:
+            return self.send_json({"error": "任务编号无效"}, 400)
+        except (OSError, sqlite3.Error):
+            return self.send_json({"error": "无法移除任务"}, 500)
 
     def _post_clear_history(self, data: dict):
         if data.get("confirm") is not True:

@@ -1,7 +1,7 @@
 "use strict";
 
 // Own each choice as one record. Callers receive snapshots, never writable Sets.
-globalThis.createSelectionStore = function ({maxPages = 1000} = {}) {
+globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {}} = {}) {
   if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error("Invalid selection limit");
   const records = new Map();
   let pageCount = 0;
@@ -33,6 +33,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000} = {}) {
       records.delete(id);
       count += 1;
     }
+    if (count) onChange();
     return {accepted: true, count};
   }
 
@@ -64,6 +65,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000} = {}) {
         const pages = !fill && old ? old.pages : new Set(Array.from({length: count}, (_, page) => page));
         commit(id, item, pages, origin);
       }
+      if (plan.size) onChange();
       return {accepted: true, count: plan.size};
     },
     setPage(item, page, checked, origin) {
@@ -75,6 +77,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000} = {}) {
       const pages = new Set(previous?.pages);
       if (checked) pages.add(page); else pages.delete(page);
       commit(id, item, pages, origin);
+      onChange();
       return {accepted: true};
     },
     remove(ids) { return remove(ids); },
@@ -88,13 +91,33 @@ globalThis.createSelectionStore = function ({maxPages = 1000} = {}) {
         const row = records.get(String(id));
         if (row && !row.archived) { row.archived = true; count += 1; }
       }
+      if (count) onChange();
       return {accepted: true, count};
     },
     remember(item) {
       const id = idOf(item), row = records.get(id), count = countOf(item);
       if (!row || count === null) return false;
       commit(id, item, new Set([...row.pages].filter(page => page < count)), row);
+      onChange();
       return true;
+    },
+    restore(rows) {
+      if (locked || !Array.isArray(rows)) return reject("locked");
+      const plan = new Map();
+      let total = 0;
+      for (const row of rows) {
+        const id = idOf(row.item), count = countOf(row.item);
+        const pages = new Set(row.pages);
+        if (!id || count === null || plan.has(id) || !pages.size || [...pages].some(page => !Number.isInteger(page) || page < 0 || page >= count)) return reject("pages");
+        total += pages.size;
+        plan.set(id, {...row, id, pages, context: {...row.context}});
+      }
+      if (total > maxPages) return reject("capacity");
+      records.clear();
+      for (const [id, row] of plan) records.set(id, row);
+      pageCount = total;
+      onChange();
+      return {accepted: true};
     },
   };
 };

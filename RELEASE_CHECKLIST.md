@@ -21,9 +21,9 @@
 
 - [ ] Run `powershell -ExecutionPolicy Bypass -File .\make-release.ps1`.
 - [ ] Use `-SkipBuild` only when the source, build inputs, license, and every file in `dist\MOKU` still match `BUILD_MANIFEST.json`.
-- [ ] Commit the source and tag the exact verified release commit as `v1.1.1`.
+- [ ] Commit the source and tag the exact verified release commit as `v1.1.2`.
 - [ ] Create a GitHub Release from that tag.
-- [ ] Upload the ZIP and `SHA256SUMS.txt` from `release\v1.1.1`.
+- [ ] Upload the ZIP and `SHA256SUMS.txt` from `release\v1.1.2`.
 - [ ] Verify the downloaded ZIP hash from another directory.
 
-> Publish `MOKU Lite v1.1.1` as the latest stable release. Use only the current version's Chinese notes from `CHANGELOG.md`; keep existing releases unchanged.
+> Publish `MOKU Lite v1.1.2` as the latest stable release. Use only the current version's Chinese notes from `CHANGELOG.md`; keep existing releases unchanged.

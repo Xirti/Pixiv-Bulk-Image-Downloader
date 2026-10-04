@@ -201,6 +201,8 @@ class PublicationDateFrontendTests(unittest.TestCase):
             "ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "app.js",
         ))
         assertions = r'''
+workspaceLoading = false;
+syncSearchScopedControls();
 const assert = require("node:assert/strict");
 assert.deepEqual(publicationDateBounds("1", "", "", new Date("2024-03-01T15:00:00Z")), {
   startDate: "2024-03-02", endDate: "2024-03-02",

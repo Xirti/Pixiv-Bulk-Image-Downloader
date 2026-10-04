@@ -123,6 +123,30 @@ class DownloadRequestRecoveryTests(unittest.TestCase):
 
 
 class DownloadRegistryTests(unittest.TestCase):
+    def test_durable_success_survives_registry_restart_and_checks_files(self):
+        from pathlib import Path
+        from download_requests import DownloadRequests
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            file = root / "saved.png"
+            file.write_bytes(b"saved")
+            path = root / "requests.db"
+            body = {"saveRoot": str(root), "requestId": "durable-request-000001"}
+            calls = []
+            def operation():
+                calls.append(1)
+                file.write_bytes(b"saved")
+                return {"saved": ["saved.png"], "pages": 1}, 200
+            first = DownloadRequests(path=path).run(body["requestId"], "/single", body, operation, scope="epoch-1", durable_scope="public")
+            second = DownloadRequests(path=path).run(body["requestId"], "/single", body, operation, scope="epoch-2", durable_scope="public")
+            self.assertEqual(second, first)
+            self.assertEqual(calls, [1])
+            file.unlink()
+            DownloadRequests(path=path).run(body["requestId"], "/single", body, operation, scope="epoch-3", durable_scope="public")
+            self.assertEqual(calls, [1, 1])
+            with self.assertRaises(ValueError):
+                DownloadRequests(path=path).run(body["requestId"], "/single", body, operation, durable_scope="other-account")
+
     def test_registry_eviction_expiration_and_active_records_are_bounded(self):
         from download_requests import DownloadRequests
 

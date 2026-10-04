@@ -5,6 +5,8 @@ import json
 import re
 import threading
 import time
+import sqlite3
+from pathlib import Path
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +40,7 @@ class DownloadRequests:
     def __init__(
         self, *, max_entries: int = 64, ttl_seconds: float = 1800,
         clock: Callable[[], float] = time.monotonic,
+        path: Path | None = None,
     ) -> None:
         if max_entries < 1 or ttl_seconds <= 0:
             raise ValueError("invalid download recovery limits")
@@ -46,10 +49,56 @@ class DownloadRequests:
         self._clock = clock
         self._entries: OrderedDict[str, _Request] = OrderedDict()
         self._lock = threading.Lock()
+        self._path = Path(path) if path is not None else None
+
+    def _journal_connection(self):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self._path, timeout=2)
+        connection.execute("CREATE TABLE IF NOT EXISTS completed (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, files TEXT NOT NULL)")
+        return connection
+
+    def _read_success(self, request_id: str, fingerprint: str) -> Response | None:
+        if self._path is None or not self._path.exists():
+            return None
+        connection = self._journal_connection()
+        try:
+            row = connection.execute("SELECT fingerprint,result,files FROM completed WHERE id=?", (request_id,)).fetchone()
+        finally:
+            connection.close()
+        if not row:
+            return None
+        if row[0] != fingerprint:
+            raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
+        for path, size, mtime in json.loads(row[2]):
+            try:
+                info = Path(path).stat()
+            except FileNotFoundError:
+                return None
+            if info.st_size != size or info.st_mtime_ns != mtime:
+                return None
+        return json.loads(row[1]), 200
+
+    def _write_success(self, request_id: str, fingerprint: str, result: Response, root: Path) -> None:
+        if self._path is None:
+            return
+        files = []
+        for relative in result[0].get("saved", []):
+            file = root / relative
+            info = file.stat()
+            files.append([str(file), info.st_size, info.st_mtime_ns])
+        connection = self._journal_connection()
+        try:
+            with connection:
+                connection.execute("INSERT OR REPLACE INTO completed VALUES (?,?,?,?)",
+                                   (request_id, fingerprint, json.dumps(result[0], ensure_ascii=False), json.dumps(files, ensure_ascii=False)))
+                connection.execute("DELETE FROM completed WHERE rowid NOT IN (SELECT rowid FROM completed ORDER BY rowid DESC LIMIT 2000)")
+        finally:
+            connection.close()
 
     def run(
         self, request_id: object, route: str, body: dict,
-        operation: Callable[[], Response], *, scope: str = "",
+        operation: Callable[[], Response], *, scope: str = "", durable_scope: str | None = None,
+        output_root: Path | None = None,
     ) -> Response:
         # Old clients without an ID retain the existing synchronous behaviour.
         if request_id is None and "requestId" not in body:
@@ -60,6 +109,10 @@ class DownloadRequests:
         fingerprint = hashlib.sha256(json.dumps(
             [route, scope, normalized], sort_keys=True, ensure_ascii=True,
             separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        durable_fingerprint = hashlib.sha256(json.dumps(
+            [route, durable_scope if durable_scope is not None else scope, normalized],
+            sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False,
         ).encode("utf-8")).hexdigest()
         now = self._clock()
         with self._lock:
@@ -77,6 +130,12 @@ class DownloadRequests:
                     return entry.result
                 entry.active = True
             else:
+                try:
+                    restored = self._read_success(request_id, durable_fingerprint)
+                except (OSError, sqlite3.Error):
+                    restored = None
+                if restored is not None:
+                    return restored
                 while len(self._entries) >= self._limit:
                     idle = next((key for key, row in self._entries.items() if not row.active), None)
                     if idle is None:
@@ -88,6 +147,12 @@ class DownloadRequests:
         result = None
         try:
             result = operation()
+            if result[1] == 200:
+                try:
+                    self._write_success(request_id, durable_fingerprint, result,
+                                        Path(body.get("saveRoot") or output_root or "."))
+                except (OSError, sqlite3.Error):
+                    result[0]["recoveryWarning"] = "文件已保存，但重启后可能需要重新检查这批下载"
             return result
         finally:
             # Record publication before the caller tries writing the response:

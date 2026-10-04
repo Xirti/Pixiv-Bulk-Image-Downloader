@@ -10,6 +10,9 @@ APP = "\n".join(
     for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "app.js")
 )
 FIXTURE = r'''
+// State scenarios start after the startup-only local restore has finished.
+workspaceLoading = false;
+syncSearchScopedControls();
 const assert = require("node:assert/strict");
 const artwork = (id, count = 3, token = "old") => ({
   id, pages: count, source: "pixiv", restriction: "safe", title: id, artist: "artist",

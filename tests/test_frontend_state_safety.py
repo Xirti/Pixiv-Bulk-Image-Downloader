@@ -203,6 +203,8 @@ class FrontendStateSafetyTests(unittest.TestCase):
         harness = (ROOT / "tests" / "frontend_harness.js").read_text(encoding="utf-8") + "\n"
         assertions = r'''
 (async () => {
+  workspaceLoading = false;
+  syncSearchScopedControls();
   const check = (condition, message) => { if (!condition) throw new Error(message); };
   const oldItem = {
     id: "10", restriction: "safe", source: "pixiv", title: "old", artist: "artist",
