@@ -100,7 +100,9 @@
     } else {
       const old = field.value;
       field.value = text.trim();
-      if (text && (!field.value || !field.validity.valid)) { field.value = old; throw new Error("invalid field value"); }
+      // Custom validation still describes the old value until input/change runs.
+      const invalid = !field.value || ["rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "valueMissing"].some(flag => field.validity[flag]);
+      if (text && invalid) { field.value = old; throw new Error("invalid field value"); }
     }
     field.dispatchEvent(new Event("input", {bubbles:true}));
     if (!current.ranged) field.dispatchEvent(new Event("change", {bubbles:true}));
