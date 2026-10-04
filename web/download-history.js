@@ -51,7 +51,7 @@ function createDownloadHistoryView({ fetchJson }) {
         return `<article class="history-record"><input type="checkbox" data-select-history="${row.id}" ${selected.has(row.id) ? "checked" : ""} aria-label="选择 ${escape(row.title || "未命名作品")}">
           <h3 title="${escape(work)}">${escape(work)}</h3><p class="history-info">${escape(info)}</p>
           <span class="history-paths" title="${escape(row.files.join("\n"))}">${escape(row.files[0] || "")}${row.files.length > 1 ? ` · +${row.files.length - 1}` : ""}</span>
-          <div class="history-record-actions"><button type="button" data-copy-history="${index}" title="复制全部保存路径">复制</button><button type="button" data-delete-history="${row.id}" title="只删除这条记录，不删除文件">删除</button></div></article>`;
+          <div class="history-record-actions"><button type="button" data-open-history="${row.id}" title="打开保存文件夹">位置</button><button type="button" data-copy-history="${index}" title="复制全部保存路径">复制</button><button type="button" data-delete-history="${row.id}" title="只删除这条记录，不删除文件">删除</button></div></article>`;
       }).join("") || `<p class="empty-state">${query ? "没有匹配记录。" : "还没有下载记录。之后成功下载的作品会显示在这里。"}</p>`;
       get("historyList").querySelectorAll("[data-select-history]").forEach(box => {
         box.onchange = () => {
@@ -63,6 +63,15 @@ function createDownloadHistoryView({ fetchJson }) {
       });
       get("historyList").querySelectorAll("[data-delete-history]").forEach(button => {
         button.onclick = () => confirmDelete([Number(button.dataset.deleteHistory)]);
+      });
+      get("historyList").querySelectorAll("[data-open-history]").forEach(button => {
+        button.onclick = async () => {
+          try {
+            await fetchJson("/api/library/history/open", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: Number(button.dataset.openHistory)})});
+          } catch (error) {
+            if (current === generation) get("historyStatus").textContent = error.message || "无法打开保存位置";
+          }
+        };
       });
       get("historyList").querySelectorAll("[data-copy-history]").forEach(button => {
         button.onclick = async () => {

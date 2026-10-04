@@ -231,3 +231,5 @@ body.viewer-open #backTop{top:12px}
 .recent-searches[hidden]{display:none}
 .recent-searches button{font-size:13px;padding:6px 12px;border-radius:18px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #grid[aria-busy="true"] .card{cursor:wait}
+.downloaded-badge{position:absolute;bottom:12px;left:12px;padding:4px 8px;border-radius:6px;background:var(--surface);color:var(--ink);font-size:11px;box-shadow:0 2px 8px #0002}
+.downloaded-badge[hidden]{display:none}

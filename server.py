@@ -41,6 +41,7 @@ from auth_store import (
 from folder_picker import select_folder
 from download_requests import DownloadRequestError, DownloadRequests
 from download_history import DownloadHistory, history_path
+from local_catalog import LocalCatalog
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from ugoira_export import export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
@@ -51,7 +52,7 @@ from version import __version__
 CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
-    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "download_history.py", "preview_resources.py", "ugoira_export.py", "version.py",
+    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "download_history.py", "local_catalog.py", "preview_resources.py", "ugoira_export.py", "version.py",
     "web/index.html", "web/app.js", "web/text-context-menu.js", "web/download-history.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
 )
 
@@ -141,6 +142,7 @@ FOLDER_PICKER_LOCK = threading.Lock()
 DOWNLOAD_TASK_SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_DOWNLOAD_TASKS)
 DOWNLOAD_REQUESTS = DownloadRequests()
 DOWNLOAD_HISTORY = DownloadHistory(history_path())
+LOCAL_CATALOG = LocalCatalog(history_path().with_name("catalog.sqlite3"))
 # Search requests run through a small process-wide pool. A cancelled HTTP
 # handler can stop waiting immediately even if urllib is still establishing a
 # connection, while the worker cap prevents abandoned connects from piling up.
@@ -3318,6 +3320,14 @@ class Handler(SimpleHTTPRequestHandler):
             except (OSError, ValueError, sqlite3.Error):
                 return self.send_json({"error": "无法读取本机下载历史，请检查资料目录"}, 500)
             return self.send_json(result)
+        if request.path == "/api/library/catalog":
+            ids = urllib.parse.parse_qs(request.query).get("ids", [""])[0].split(",")
+            if len(ids) > 100 or any(not id.isdigit() or len(id) > 30 for id in ids):
+                return self.send_json({"error": "作品 ID 无效"}, 400)
+            try:
+                return self.send_json({"pages": {id: sorted(LOCAL_CATALOG.downloaded_pages(id)) for id in ids}})
+            except (OSError, ValueError, sqlite3.Error):
+                return self.send_json({"error": "无法检查已下载的文件"}, 500)
         if request.path == "/api/network/diagnose":
             state = windows_proxy_state()
             selected_proxy = refresh_network_opener()
@@ -3577,6 +3587,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/system/select-folder": (4096, self._post_select_folder),
             "/api/library/history/clear": (4096, self._post_clear_history),
             "/api/library/history/delete": (65536, self._post_delete_history),
+            "/api/library/history/open": (4096, self._post_open_history),
             "/api/pixiv/search/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/ugoira/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
@@ -3686,6 +3697,60 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "无法删除下载历史"}, 500)
         return self.send_json({"ok": True, "deleted": deleted})
 
+    def _post_open_history(self, data: dict):
+        try:
+            file = DOWNLOAD_HISTORY.first_file(data.get("id"))
+            if file is None:
+                return self.send_json({"error": "这条记录已删除，请刷新历史"}, 404)
+            parent = _reject_reparse_components(Path(file).parent, "保存位置已变为链接")
+            if not parent.is_dir():
+                return self.send_json({"error": "保存文件夹已移动或删除"}, 404)
+            os.startfile(parent)
+            return self.send_json({"ok": True})
+        except (OSError, ValueError, sqlite3.Error):
+            return self.send_json({"error": "无法打开保存文件夹"}, 400)
+
+    @staticmethod
+    def _remaining_download_pages(item: dict, pages: list[int], quality: str, format: str,
+                                  save_root: Path, create_folder: bool, context: dict | None,
+                                  group_artworks: bool, skip_existing: bool) -> list[int]:
+        images = item.get("pageImages")
+        if not isinstance(images, list) or any(page >= len(images) for page in pages):
+            raise PixivPolicyError("图片页码超出范围")
+        if not skip_existing:
+            return pages
+        directory = resolve_download_target(save_root, str(item.get("title") or ""), str(item["id"]),
+                                            create_folder, context=context, group_artwork=group_artworks)
+        try:
+            present = LOCAL_CATALOG.existing(str(item["id"]), pages, quality,
+                                            format if item.get("workType") == "ugoira" else "source", directory)
+        except sqlite3.Error:
+            # A broken optional index must not make downloads unusable.
+            HTTP_LOG.warning("下载目录索引读取失败，将正常下载")
+            return pages
+        return [page for page in pages if page not in present]
+
+    @staticmethod
+    def _record_download_catalog(groups: list[tuple[dict, list[int], int]], saved: list[str],
+                                 save_root: Path, quality: str, format: str,
+                                 create_folder: bool, context: dict | None, group_artworks: bool) -> str:
+        try:
+            offset = 0
+            for item, pages, count in groups:
+                files = [save_root / file for file in saved[offset:offset + count]]
+                offset += count
+                directory = resolve_download_target(save_root, str(item.get("title") or ""), str(item["id"]),
+                                                    create_folder, context=context, group_artwork=group_artworks)
+                animation = item.get("workType") == "ugoira"
+                LOCAL_CATALOG.record(str(item["id"]), pages, quality, format if animation else "source",
+                                     directory, files, animation=animation)
+            if offset != len(saved):
+                raise ValueError("catalog publication mismatch")
+        except Exception:
+            HTTP_LOG.warning("文件已保存，但下载目录索引写入失败")
+            return "文件已保存，但下次可能无法跳过这些图片"
+        return ""
+
     @staticmethod
     def _record_download_history(
         groups: list[tuple[dict, list[int], int]], saved: list[str],
@@ -3737,6 +3802,8 @@ class Handler(SimpleHTTPRequestHandler):
             raise RequestInputError(400, "图片质量无效")
         if not isinstance(create_folder, bool):
             raise RequestInputError(400, "createFolder 必须是布尔值")
+        if not isinstance(data.get("skipExisting", True), bool):
+            raise RequestInputError(400, "skipExisting 必须是布尔值")
         return quality, create_folder
 
     @staticmethod
@@ -3821,11 +3888,13 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             restricted_epochs: set[int] = set()
             history_groups: list[tuple[dict, list[int], int]] = []
+            skipped_pages = 0
 
             def stage_batch(
                 staging_root: Path,
                 staged: list[PublishedFileOwnership],
             ) -> None:
+                nonlocal skipped_pages
                 for artwork_id, page_set in normalized.items():
                     authorized, authorization_epoch = validated_authorization()
                     item = pixiv_item_for_download(
@@ -3839,8 +3908,14 @@ class Handler(SimpleHTTPRequestHandler):
                         if authorization_epoch is None:
                             raise AuthorizationRevokedError("R-18 下载授权已失效")
                         restricted_epochs.add(authorization_epoch)
+                    pages = self._remaining_download_pages(item, sorted(page_set), quality, ugoira_format,
+                                                           save_root, create_folder, download_context, group_artworks,
+                                                           data.get("skipExisting", True))
+                    skipped_pages += len(page_set) - len(pages)
+                    if not pages:
+                        continue
                     artwork_files = stage_artwork_pages(
-                        item, sorted(page_set), quality, save_root,
+                        item, pages, quality, save_root,
                         create_folder, staging_root,
                         download_context=download_context,
                         group_artwork=group_artworks,
@@ -3848,7 +3923,7 @@ class Handler(SimpleHTTPRequestHandler):
                         ugoira_format=ugoira_format,
                     )
                     staged.extend(artwork_files)
-                    history_groups.append((item, sorted(page_set), len(artwork_files)))
+                    history_groups.append((item, pages, len(artwork_files)))
 
             public_saved, cleanup_pending = _stage_and_publish_download(
                 save_root,
@@ -3859,6 +3934,9 @@ class Handler(SimpleHTTPRequestHandler):
             response_payload = {
                 "ok": True, "saved": public_saved,
                 "artworks": len(normalized), "pages": total_pages,
+                "skippedPages": skipped_pages,
+                "catalogWarning": self._record_download_catalog(history_groups, public_saved, save_root, quality,
+                                                               ugoira_format, create_folder, download_context, group_artworks),
                 "cleanupPending": cleanup_pending,
                 "historyWarning": self._record_download_history(history_groups, public_saved, save_root, quality, ugoira_format),
             }
@@ -3915,12 +3993,17 @@ class Handler(SimpleHTTPRequestHandler):
                 and authorization_epoch is not None
                 else set()
             )
+            pages_to_save = self._remaining_download_pages(item, selected_pages, quality, ugoira_format,
+                                                          save_root, create_folder, download_context, group_artworks,
+                                                          data.get("skipExisting", True))
             def stage_single(
                 staging_root: Path,
                 staged: list[PublishedFileOwnership],
             ) -> None:
+                if not pages_to_save:
+                    return
                 staged.extend(stage_artwork_pages(
-                    item, selected_pages, quality, save_root,
+                    item, pages_to_save, quality, save_root,
                     create_folder, staging_root,
                     download_context=download_context,
                     group_artwork=group_artworks,
@@ -3938,8 +4021,12 @@ class Handler(SimpleHTTPRequestHandler):
                 "ok": True, "saved": public_saved,
                 "quality": quality, "source": "pixiv",
                 "pages": len(selected_pages),
+                "skippedPages": len(selected_pages) - len(pages_to_save),
+                "catalogWarning": self._record_download_catalog([(item, pages_to_save, len(public_saved))] if pages_to_save else [],
+                                                               public_saved, save_root, quality, ugoira_format,
+                                                               create_folder, download_context, group_artworks),
                 "cleanupPending": cleanup_pending,
-                "historyWarning": self._record_download_history([(item, selected_pages, len(public_saved))], public_saved, save_root, quality, ugoira_format),
+                "historyWarning": self._record_download_history([(item, pages_to_save, len(public_saved))] if pages_to_save else [], public_saved, save_root, quality, ugoira_format),
             }
             response_status = 200
         except AuthorizationRevokedError as exc:

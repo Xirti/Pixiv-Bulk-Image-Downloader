@@ -134,6 +134,16 @@ class DownloadHistory:
                 cursor = connection.executemany("DELETE FROM downloads WHERE id=?", ((row_id,) for row_id in set(ids)))
                 return cursor.rowcount
 
+    def first_file(self, row_id: int) -> str | None:
+        if type(row_id) is not int or not 1 <= row_id <= 2**63 - 1:
+            raise ValueError("invalid history ID")
+        with self._lock:
+            if not self.path.exists():
+                return None
+            with self._connection() as connection:
+                row = connection.execute("SELECT files FROM downloads WHERE id=?", (row_id,)).fetchone()
+                return json.loads(row[0])[0] if row else None
+
     def clear(self) -> None:
         with self._lock:
             if self.path.exists():

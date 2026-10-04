@@ -57,6 +57,7 @@ const selection = createSelectionStore({maxPages: MAX_SELECTED_PAGES});
 const detailRefreshes = new Map();
 const detailRefreshAttempts = new Map();
 const staleBasketPreviewIds = new Set();
+const downloadedPages = new Map();
 
 const $ = (selector) => document.querySelector(selector);
 const grid = $("#grid");
@@ -787,6 +788,7 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     render();
     renderPagination();
     clearDetail();
+    void refreshDownloadedIndicators();
     scheduleSearchPrefetch(cleanTag, currentPage, requestedFilters, generation);
   } catch (error) {
     if (controller.signal.aborted) {
@@ -871,7 +873,8 @@ function render() {
   grid.innerHTML = items.map((item, index) => {
     const image = `<img src="${item.thumb}" alt="${esc(item.title)}" loading="lazy" decoding="async">`;
     const checked = selection.has(item.id) ? "checked" : "";
-    const badges = `${item.workType === "ugoira" ? '<span class="series type-ugoira">动图</span>' : ""}${item.pages > 1 ? `<span class="series">叠图 ${item.pages}P</span>` : ""}`;
+    const downloaded = downloadedPages.get(String(item.id))?.length || 0;
+    const badges = `${item.workType === "ugoira" ? '<span class="series type-ugoira">动图</span>' : ""}${item.pages > 1 ? `<span class="series">叠图 ${item.pages}P</span>` : ""}<span class="downloaded-badge" data-downloaded="${esc(item.id)}" ${downloaded ? "" : "hidden"} title="本机文件仍在，含不同保存位置和清晰度">已下载 ${downloaded}P</span>`;
     const ugoiraHover = item.workType === "ugoira" ? ` data-ugoira-preview="${esc(String(item.id))}"` : "";
     return `<article class="card" tabindex="0" data-i="${index}"><label class="card-select"><input type="checkbox" data-select="${index}" ${checked}><span>选择</span></label><div class="poster"${ugoiraHover}>${image}${badges}</div><div class="meta"><div><h3>${esc(item.title)}</h3><p>${esc(item.artist)} · ${item.tags.map((tag) => `#${esc(tag)}`).join(" ")}</p></div><span>♡ ${item.bookmarks == null ? "—" : Number(item.bookmarks).toLocaleString()}</span></div></article>`;
   }).join("");
@@ -899,6 +902,22 @@ function render() {
       if (!accepted) box.checked = false;
     };
   });
+}
+
+async function refreshDownloadedIndicators() {
+  const generation = searchGeneration;
+  const ids = items.map(item => String(item.id)).filter(id => /^\d+$/.test(id));
+  if (!ids.length) return;
+  try {
+    const data = await fetchJson(`/api/library/catalog?${new URLSearchParams({ids: ids.join(",")})}`);
+    if (generation !== searchGeneration) return;
+    for (const id of ids) downloadedPages.set(id, data.pages?.[id] || []);
+    grid.querySelectorAll("[data-downloaded]").forEach(badge => {
+      const count = downloadedPages.get(badge.dataset.downloaded)?.length || 0;
+      badge.hidden = !count;
+      badge.textContent = `已下载 ${count}P`;
+    });
+  } catch { /* Download status is optional and must not hide search results. */ }
 }
 
 function renderPagination() {
@@ -1414,6 +1433,7 @@ function readDownloadOptions() {
     saveRoot: $("#saveRoot").value.trim(),
     createFolder: $("#createFolder").checked,
     groupArtworks: Boolean($("#groupArtworks")?.checked),
+    skipExisting: $("#skipExisting")?.checked ?? true,
   };
 }
 
@@ -1564,6 +1584,8 @@ function prepareDownloadTask(chunks, taskOptions, previousTask) {
     firstSaved: "",
     cleanupPending: false,
     historyWarning: false,
+    catalogWarning: false,
+    skippedCount: 0,
     completedBatches: 0,
     totalBatches: chunks.length,
   };
@@ -1612,15 +1634,18 @@ async function executeDownloadTask(task, requestForChunk, reportProgress) {
     task.firstSaved ||= data.saved?.[0] || "";
     task.cleanupPending ||= Boolean(data.cleanupPending);
     task.historyWarning ||= Boolean(data.historyWarning);
+    task.catalogWarning ||= Boolean(data.catalogWarning);
+    task.skippedCount += data.skippedPages || 0;
     historyView.refresh();
     task.completedBatches += 1;
     // Advance only after publication succeeds; failures retain this chunk.
     task.remainingChunks = chunks.slice(index + 1);
   }
+  void refreshDownloadedIndicators();
 }
 
 function downloadCompletionWarnings(task) {
-  return `${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}${task.historyWarning ? "；下载历史记录失败，文件已保存" : ""}`;
+  return `${task.skippedCount ? `；其中 ${task.skippedCount} 张已存在，已跳过` : ""}${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}${task.historyWarning ? "；下载历史记录失败，文件已保存" : ""}${task.catalogWarning ? "；目录记录失败，下次可能无法跳过这些图片" : ""}`;
 }
 
 function setDownloadButtonState(button, text, disabled) {
