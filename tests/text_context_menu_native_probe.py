@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ["PYTHONNET_RUNTIME"] = "netfx"
@@ -55,6 +56,8 @@ def main():
             if not window.events.loaded.wait(20):
                 raise TimeoutError("desktop page did not load")
             from System import Func, Object
+            from System.Collections.Generic import List
+            from Microsoft.Web.WebView2.Core import CoreWebView2ContextMenuItem, CoreWebView2ContextMenuItemKind
 
             control = window.native.webview
 
@@ -64,6 +67,16 @@ def main():
             settings = native_call(lambda core: [bool(core.Settings.AreDefaultContextMenusEnabled), bool(core.Settings.AreDevToolsEnabled)])
             assert settings == [True, False], ("native text menu / developer tools settings", settings)
             assert window.evaluate_js("getComputedStyle(document.body).userSelect") != "none"
+
+            def check_native_menu_collection(core):
+                items = List[CoreWebView2ContextMenuItem]()
+                items.Add(core.Environment.CreateContextMenuItem("test-navigation", None, CoreWebView2ContextMenuItemKind.Command))
+                args = SimpleNamespace(MenuItems=items, Handled=False)
+                desktop_client._filter_text_context_menu(None, args)
+                return args.Handled and not len(items)
+
+            assert native_call(check_native_menu_collection), "native .NET menu filtering failed"
+            result["nativeMenuCollection"] = True
             for selector in ("#input", "#textarea", "#readonly", "#text"):
                 selection = window.evaluate_js("""(() => {
                     const node = document.querySelector(%s);
