@@ -68,6 +68,20 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def queued_request(self, request_id, endpoint, *, scope="public"):
+        task_id = uuid.uuid4().hex
+        options = {"quality": "original", "ugoiraFormat": "source", "saveRoot": str(self.output),
+                   "createFolder": False, "skipExisting": False}
+        single = endpoint == "/api/pixiv/download"
+        queued = {"id": task_id, "kind": "single" if single else "batch",
+                  "taskOptions": {"endpoint": endpoint, "body": {"id": "77", "pages": [0], **options}} if single else options,
+                  "remainingChunks": [{"groups": [{"id": "77", "pages": [0]}], "pageCount": 1,
+                                       "requestId": request_id, "context": {"kind": "tags", "value": "cat"}}],
+                  "completedBatches": 0, "totalBatches": 1}
+        self.post({"task": queued, "scope": scope}, "/api/workspace/task")
+        return {"queueId": task_id, "scope": scope, "pages": [0], "groups": [{"id": "77", "pages": [0]}],
+                "requestId": request_id, **options}
+
     def test_skip_existing_and_redownload_missing_file_after_history_deletion(self):
         first = self.post()
         self.assertEqual(len(first["saved"]), 2)
@@ -117,17 +131,55 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
         self.assertEqual(restored["revision"], 1)
         self.assertEqual(restored["basket"][0]["id"], "77")
 
+    def test_workspace_reports_capacity_without_overwriting_other_accounts_choices(self):
+        private = {"id": "123", "pages": list(range(600)), "item": {"pages": 600, "restriction": "r18"}}
+        public = {"id": "456", "pages": list(range(400)), "item": {"pages": 900}}
+        self.workspace.save_basket([private, public], "account-A", revision=0)
+        with patch.object(server, "workspace_scope", return_value="account-B"):
+            result = self.post({"scope": "account-B", "revision": 1,
+                                "basket": [{**public, "pages": list(range(900))}]},
+                               "/api/workspace/basket", expected=409)
+        self.assertTrue(result["basketCapacity"])
+        self.assertEqual(self.workspace.load("account-A")["revision"], 1)
+
+    def test_lost_response_recovery_checks_skipped_files_and_only_replaces_missing_page(self):
+        for endpoint in ("/api/pixiv/download", "/api/pixiv/batch-download"):
+            for requested in ([0, 2], [0, 1, 2]):
+                with self.subTest(endpoint=endpoint, requested=requested):
+                    directory = self.root / uuid.uuid4().hex
+                    directory.mkdir()
+                    original = self.post({"saveRoot": str(directory)})
+                    request = {"saveRoot": str(directory), "requestId": uuid.uuid4().hex,
+                               "pages": requested, "groups": [{"id": "77", "pages": requested}]}
+                    journal = directory / "requests.db"
+                    with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)):
+                        completed = self.post(request, endpoint)
+                    before_retry = self.network.call_count
+                    with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)):
+                        self.assertEqual(self.post(request, endpoint), completed)
+                    self.assertEqual(self.network.call_count, before_retry)
+                    (directory / original["saved"][0]).unlink()
+                    with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)):
+                        resumed = self.post(request, endpoint)
+                    self.assertEqual(len(resumed["saved"]), 1)
+                    self.assertEqual(resumed["skippedPages"], len(requested) - 1)
+                    self.assertEqual(self.network.call_count, before_retry + 1)
+
+    def test_recovery_in_the_same_process_rechecks_deleted_skipped_file(self):
+        original = self.post()
+        request = {"requestId": uuid.uuid4().hex}
+        with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=self.root / "requests.db")):
+            self.assertEqual(self.post(request)["skippedPages"], 2)
+            (self.output / original["saved"][0]).unlink()
+            resumed = self.post(request)
+        self.assertEqual(len(resumed["saved"]), 1)
+        self.assertEqual(resumed["skippedPages"], 1)
+
     def test_queue_restart_replays_lost_response_without_repeating_download(self):
         request_id = uuid.uuid4().hex
-        task_id = uuid.uuid4().hex
-        queued = {"id": task_id, "kind": "batch", "taskOptions": {"quality": "original", "ugoiraFormat": "source",
-                  "saveRoot": str(self.output), "createFolder": False, "skipExisting": False},
-                  "remainingChunks": [{"groups": [{"id": "77", "pages": [0]}], "pageCount": 1,
-                                       "requestId": request_id, "context": {"kind": "tags", "value": "cat"}}],
-                  "completedBatches": 0, "totalBatches": 1}
-        self.post({"task": queued}, "/api/workspace/task")
+        changes = self.queued_request(request_id, "/api/pixiv/batch-download")
+        task_id = changes["queueId"]
         journal = self.root / "requests.db"
-        changes = {"queueId": task_id, "groups": [{"id": "77", "pages": [0]}], "requestId": request_id, "skipExisting": False}
         with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)):
             first = self.post(changes, "/api/pixiv/batch-download")
         with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)), patch.object(server, "WORKSPACE_STORE", WorkspaceStore(self.workspace.path)):
@@ -139,3 +191,34 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
                 self.post(changes, "/api/pixiv/batch-download", expected=403)
                 self.assertFalse(server.WORKSPACE_STORE.has_task(task_id, "different-account"))
                 self.assertEqual(self.network.call_count, 1)
+
+    def test_same_account_relogin_recovers_success_without_repeating_forced_download(self):
+        for endpoint in ("/api/pixiv/download", "/api/pixiv/batch-download"):
+            with self.subTest(endpoint=endpoint), patch.object(server, "workspace_scope", return_value="account-A"), \
+                    patch.object(server, "validated_authorization", return_value=(True, 1)) as authorization, \
+                    patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=self.root / uuid.uuid4().hex)):
+                changes = self.queued_request(uuid.uuid4().hex, endpoint, scope="account-A")
+                completed = self.post(changes, endpoint)
+                before_retry = self.network.call_count
+                authorization.return_value = (True, 2)
+                self.assertEqual(self.post(changes, endpoint), completed)
+                self.assertEqual(self.network.call_count, before_retry)
+                self.post({**changes, "quality": "regular"}, endpoint, expected=409)
+                with patch.object(server, "workspace_scope", return_value="account-B"):
+                    self.post(changes, endpoint, expected=403)
+
+    def test_queue_account_is_bound_before_network_and_through_publication(self):
+        for endpoint in ("/api/pixiv/download", "/api/pixiv/batch-download"):
+            for phase in ("before_network", "before_publish"):
+                with self.subTest(endpoint=endpoint, phase=phase):
+                    owner = ["public"]
+                    with patch.object(server, "workspace_scope", side_effect=lambda: owner[0]):
+                        changes = self.queued_request(uuid.uuid4().hex, endpoint)
+                        before_files = {file.name: file.read_bytes() for file in self.output.iterdir()}
+                        def switch_owner(*_args, **_kwargs):
+                            owner[0] = "account-B"
+                            return b"\x89PNG\r\n\x1a\nMOKU-CATALOG", "image/png"
+                        target = "ensure_network_opener_current" if phase == "before_network" else "pixiv_request"
+                        with patch.object(server, target, side_effect=switch_owner):
+                            self.post(changes, endpoint, expected=403)
+                        self.assertEqual({file.name: file.read_bytes() for file in self.output.iterdir()}, before_files)

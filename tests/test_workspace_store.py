@@ -14,6 +14,31 @@ def task():
 
 
 class WorkspaceStoreTests(unittest.TestCase):
+    def test_shared_basket_update_does_not_overfill_another_accounts_private_selection(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            private = {"id":"123", "pages":list(range(600)), "item":{"id":"123", "pages":600, "restriction":"r18"}}
+            public = {"id":"456", "pages":list(range(400)), "item":{"id":"456", "pages":900, "restriction":"safe"}}
+            store.save_basket([private, public], "account-A", revision=0)
+            enlarged = {**public, "pages":list(range(900))}
+            with self.assertRaisesRegex(ValueError, "容量"):
+                store.save_basket([enlarged], "account-B", revision=1)
+            restored = store.load("account-A")
+            self.assertEqual(restored["revision"], 1)
+            self.assertEqual(sum(len(row["pages"]) for row in restored["basket"]), 1000)
+
+    def test_capacity_counts_each_accounts_private_selection_separately(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            public = {"id": "456", "pages": list(range(300)), "item": {"pages": 300}}
+            for revision, account, artwork in ((0, "account-A", "123"), (1, "account-B", "789")):
+                private = {"id": artwork, "pages": list(range(700)), "item": {"pages": 700, "restriction": "r18"}}
+                store.save_basket([private, public], account, revision=revision)
+            for account in ("account-A", "account-B"):
+                self.assertEqual(sum(len(row["pages"]) for row in store.load(account)["basket"]), 1000)
+
     def test_recent_search_survives_temporary_browser_profile_removal(self):
         from workspace_store import WorkspaceStore
         with tempfile.TemporaryDirectory() as temporary:

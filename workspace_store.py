@@ -9,6 +9,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+class WorkspaceCapacityError(ValueError):
+    pass
+
+
 def _integer(value, low: int, high: int) -> int:
     if type(value) is not int or not low <= value <= high:
         raise ValueError("invalid queue number")
@@ -204,7 +208,7 @@ class WorkspaceStore:
                 "resultPage": _integer(row.get("resultPage", 1), 1, 100000), "archived": bool(row.get("archived", True))}))
             total += len(pages)
         if total > 1000:
-            raise ValueError("basket exceeds 1000 pages")
+            raise WorkspaceCapacityError("采集篮容量为 1000 张，请取消部分选择后重试")
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             old = connection.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
@@ -212,6 +216,12 @@ class WorkspaceStore:
                 raise ValueError("stale basket revision")
             if old:
                 normalized += [(owner, row) for owner, row in json.loads(old[1]) if owner not in {scope, "public"}]
+            owner_counts = {}
+            for owner, row in normalized:
+                owner_counts[owner] = owner_counts.get(owner, 0) + len(row["pages"])
+            public_count = owner_counts.pop("public", 0)
+            if public_count > 1000 or any(public_count + count > 1000 for count in owner_counts.values()):
+                raise WorkspaceCapacityError("共享采集篮容量不足，请减少公开作品的选择后重试")
             connection.execute("INSERT OR REPLACE INTO basket VALUES (1,?,?)", (revision + 1, json.dumps(normalized, ensure_ascii=False)))
         return revision + 1
 

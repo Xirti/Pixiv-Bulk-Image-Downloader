@@ -187,10 +187,18 @@ function persistBasket() {
       }
     } catch (error) {
       if (workspaceLoading) return;
+      if (error.basketCapacity) {
+        announceToast(`选择暂未保存：${error.message}`);
+        showTaskDock("请减少采集篮选择", error.message, 8000);
+        return;
+      }
       workspaceReady = false;
       announceToast(`采集篮暂未保存：${error.message}。请重开当前窗口后重试。`);
       showTaskDock("采集篮暂未保存", error.message, 8000);
-    } finally { basketSaving = false; }
+    } finally {
+      basketSaving = false;
+      if (workspaceReady && basketDirty) persistBasket();
+    }
   });
 }
 
@@ -212,7 +220,7 @@ async function restoreWorkspace() {
     const data = await fetchJson("/api/workspace");
     if (generation !== workspaceRestoreGeneration || authorization !== downloadAuthorizationRevision) return;
     restoringWorkspace = true;
-    const result = selection.restore(data.basket || []);
+    const result = selection.restore(data.basket || [], {allowOverflow: true});
     if (!result.accepted) throw new Error("采集篮记录不完整");
     basketRevision = data.revision || 0;
     workspaceScope = data.scope;
@@ -227,7 +235,9 @@ async function restoreWorkspace() {
     for (const row of selection.snapshot()) staleBasketPreviewIds.add(row.id);
     updateSelectionBar();
     renderPendingTasks();
-    if (pendingTasks.size) showTaskDock("有未完成的下载", `${pendingTasks.size} 项任务已暂停，可在下载页继续。`, 8000);
+    if (selectedPageCount() > MAX_SELECTED_PAGES) {
+      showTaskDock("采集篮选择已保留", `当前 ${selectedPageCount()} 张，请减少至 ${MAX_SELECTED_PAGES} 张以内再保存或批量下载。`, 8000);
+    } else if (pendingTasks.size) showTaskDock("有未完成的下载", `${pendingTasks.size} 项任务已暂停，可在下载页继续。`, 8000);
   } catch (error) {
     if (generation !== workspaceRestoreGeneration || authorization !== downloadAuthorizationRevision) return;
     workspaceReady = false;
@@ -411,6 +421,7 @@ async function fetchJson(url, options = {}, timeoutMs = 12000) {
     if (!response.ok) {
       const error = new Error(data.error || `请求失败（HTTP ${response.status}）`);
       error.requestIdConflict = Boolean(data.requestIdConflict);
+      error.basketCapacity = Boolean(data.basketCapacity);
       throw error;
     }
     return data;
@@ -2095,6 +2106,10 @@ $("#openBatch").onclick = openSelectionBasket;
 
 $("#batchDownload").onclick = async () => {
   if (selection.locked || searchPending || singleDownloadPending) return;
+  if (selectedPageCount() > MAX_SELECTED_PAGES) {
+    announceToast(`采集篮已超过 ${MAX_SELECTED_PAGES} 张，请取消部分选择后下载`);
+    return;
+  }
   const groups = selectedGroups();
   if (!groups.length) {
     announceToast("请至少选择一张图片");

@@ -78,17 +78,21 @@ class LocalCatalog:
 
     def existing(self, artwork: str, pages: list[int], quality: str, format: str,
                  directory: Path) -> set[int]:
+        return set(self.existing_files(artwork, pages, quality, format, directory))
+
+    def existing_files(self, artwork: str, pages: list[int], quality: str, format: str,
+                       directory: Path) -> dict[int, list[Path]]:
         if not self.path.exists():
-            return set()
+            return {}
         with self._lock, self._connection() as connection:
             rows = connection.execute("SELECT page,files FROM artifacts WHERE artwork=? AND quality=? AND format=? AND directory=?",
                                       (str(artwork), quality, format, self._directory(directory))).fetchall()
-        wanted, present = set(pages), set()
+        wanted, present = set(pages), {}
         for page, encoded in rows:
             if page not in wanted:
                 continue
             if self._present(encoded):
-                present.add(page)
+                present[page] = [Path(file["path"]) for file in json.loads(encoded)]
         return present
 
     def downloaded_pages(self, artwork: str) -> set[int]:

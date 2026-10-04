@@ -101,7 +101,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
       onChange();
       return true;
     },
-    restore(rows) {
+    restore(rows, {allowOverflow = false} = {}) {
       if (locked || !Array.isArray(rows)) return reject("locked");
       const plan = new Map();
       let total = 0;
@@ -112,7 +112,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
         total += pages.size;
         plan.set(id, {...row, id, pages, context: {...row.context}});
       }
-      if (total > maxPages) return reject("capacity");
+      if (total > maxPages && !allowOverflow) return reject("capacity");
       records.clear();
       for (const [id, row] of plan) records.set(id, row);
       pageCount = total;

@@ -69,6 +69,10 @@ class DownloadRequests:
             return None
         if row[0] != fingerprint:
             raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
+        payload = json.loads(row[1])
+        if payload.get("skippedPages") and not payload.get("skippedFiles"):
+            # Older receipts omitted skipped files; check the directory again.
+            return None
         for path, size, mtime in json.loads(row[2]):
             try:
                 info = Path(path).stat()
@@ -76,13 +80,13 @@ class DownloadRequests:
                 return None
             if info.st_size != size or info.st_mtime_ns != mtime:
                 return None
-        return json.loads(row[1]), 200
+        return payload, 200
 
     def _write_success(self, request_id: str, fingerprint: str, result: Response, root: Path) -> None:
         if self._path is None:
             return
         files = []
-        for relative in result[0].get("saved", []):
+        for relative in dict.fromkeys(result[0].get("saved", []) + result[0].get("skippedFiles", [])):
             file = root / relative
             info = file.stat()
             files.append([str(file), info.st_size, info.st_mtime_ns])
@@ -122,12 +126,29 @@ class DownloadRequests:
             entry = self._entries.get(request_id)
             if entry is not None:
                 if entry.fingerprint != fingerprint:
+                    # A completed receipt can outlive re-login to the same
+                    # account. Active/failed attempts still belong to their epoch.
+                    if not entry.active and entry.result is not None and durable_scope is not None:
+                        try:
+                            restored = self._read_success(request_id, durable_fingerprint)
+                        except (OSError, sqlite3.Error):
+                            restored = None
+                        if restored is not None:
+                            return restored
                     raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
                 self._entries.move_to_end(request_id)
                 if entry.active:
                     return {"pending": True, "retryAfterMs": 1000}, 202
                 if entry.result is not None:
-                    return entry.result
+                    if self._path is None or entry.result[0].get("recoveryWarning"):
+                        return entry.result
+                    try:
+                        restored = self._read_success(request_id, durable_fingerprint)
+                    except (OSError, sqlite3.Error):
+                        return entry.result
+                    if restored is not None:
+                        return restored
+                    entry.result = None
                 entry.active = True
             else:
                 try:
@@ -149,8 +170,9 @@ class DownloadRequests:
             result = operation()
             if result[1] == 200:
                 try:
+                    raw_root = str(body.get("saveRoot") or "").strip()
                     self._write_success(request_id, durable_fingerprint, result,
-                                        Path(body.get("saveRoot") or output_root or "."))
+                                        Path(raw_root).expanduser() if raw_root else Path(output_root or "."))
                 except (OSError, sqlite3.Error):
                     result[0]["recoveryWarning"] = "文件已保存，但重启后可能需要重新检查这批下载"
             return result

@@ -179,6 +179,7 @@ def launch(exe: Path, root: Path, port: int):
     env = os.environ.copy()
     env.update({
         "LOCALAPPDATA": str(local_app_data),
+        "MOKU_LIBRARY_DIR": str(root / "library"),
         "MOKU_RUNTIME_DIR": str(runtime_dir),
         "MOKU_MUTEX_NAME": "Local\\MOKU.NativeClick." + os.urandom(12).hex(),
         # LOCALAPPDATA does not isolate Windows Credential Manager. Prevent

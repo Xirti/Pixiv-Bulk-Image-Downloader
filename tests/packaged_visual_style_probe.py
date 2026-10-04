@@ -47,6 +47,11 @@ def main() -> None:
                 20,
                 "visual probe page",
             )
+            wait_until(
+                lambda: evaluate(ws, counter, "workspaceReady && !workspaceLoading"),
+                20,
+                "visual probe workspace restored",
+            )
             visual = evaluate(ws, counter, """(() => {
                 const button = getComputedStyle(document.querySelector('#browseFolder'));
                 const bodyStyle = getComputedStyle(document.body);
@@ -139,6 +144,21 @@ def main() -> None:
             result["galleryControlsAfterScroll"] = after_scroll
             result["viewport"] = visual["viewport"]
             batch_flow = evaluate(ws, counter, """(async () => {
+                // Synthetic artworks exercise the real UI; isolate only HTTP
+                // persistence and downloads, just like the detail fixtures below.
+                const originalFetchJson = fetchJson;
+                const taskEvents = [];
+                const fixtureFetchJson = async (url, options) => {
+                    if (url === '/api/workspace/basket') return {revision: JSON.parse(options.body).revision + 1};
+                    if (url === '/api/workspace/task' || url === '/api/workspace/task/delete') {
+                        taskEvents.push({url, body: JSON.parse(options.body)});
+                        return {ok: true};
+                    }
+                    if (url.startsWith('/api/library/downloaded')) return {items: []};
+                    if (url.startsWith('/api/library/history')) return {items: [], total: 0};
+                    throw new Error('Unexpected fixture request: ' + url);
+                };
+                fetchJson = fixtureFetchJson;
                 const pixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
                 const artwork = (id, title, pages) => ({
                     id,
@@ -172,6 +192,7 @@ def main() -> None:
                 items = [artwork("probe-single", "Single", 1), artwork("probe-multi", "Multi", 4)];
                 activeSearchContext = {kind: "tags", value: "probe"};
                 currentPage = 1;
+                resultSelectionEnabled = true;
                 render();
                 toggleArtworkSelection(items[0], true);
                 toggleArtworkSelection(items[1], true);
@@ -221,9 +242,10 @@ def main() -> None:
                 delete normalItem.pageImages;
                 items = [normalItem];
                 render();
-                const originalFetchJson = fetchJson;
                 let releaseNormal;
-                fetchJson = () => new Promise((resolve) => { releaseNormal = () => resolve(artwork("probe-normal", "Late normal detail", 2)); });
+                fetchJson = (url, options) => url.startsWith('/api/pixiv/artwork/')
+                    ? new Promise((resolve) => { releaseNormal = () => resolve(artwork("probe-normal", "Late normal detail", 2)); })
+                    : fixtureFetchJson(url, options);
                 select(0);
                 await Promise.resolve();
                 toggleArtworkSelection(normalItem, true);
@@ -242,11 +264,11 @@ def main() -> None:
                 render();
                 toggleArtworkSelection(clearRaceItem, true);
                 let releaseClearRace;
-                fetchJson = (_url, options) => new Promise((resolve, reject) => {
+                fetchJson = (url, options) => url.startsWith('/api/pixiv/artwork/') ? new Promise((resolve, reject) => {
                     releaseClearRace = () => options?.signal?.aborted
                         ? reject(new DOMException("Aborted", "AbortError"))
                         : resolve(artwork("probe-clear-race", "Resurrected", 5));
-                });
+                }) : fixtureFetchJson(url, options);
                 openSelectionBasket();
                 await Promise.resolve();
                 document.querySelector("#openBasketPicker").click();
@@ -298,7 +320,9 @@ def main() -> None:
                 openBasketArtworkPicker();
                 const staleButton = document.querySelector('[data-batch-artwork="probe-stale"] [data-open-collection]');
                 let releaseStale;
-                fetchJson = () => new Promise((resolve) => { releaseStale = () => resolve(artwork("probe-stale", "Stale detail", 2)); });
+                fetchJson = (url, options) => url.startsWith('/api/pixiv/artwork/')
+                    ? new Promise((resolve) => { releaseStale = () => resolve(artwork("probe-stale", "Stale detail", 2)); })
+                    : fixtureFetchJson(url, options);
                 staleButton.click();
                 viewGeneration += 1;
                 render();
@@ -321,7 +345,8 @@ def main() -> None:
                 document.querySelector("#createFolder").checked = true;
                 document.querySelector("#groupArtworks").checked = false;
                 const optionPayloads = [];
-                fetchJson = async (_url, options) => {
+                fetchJson = async (url, options) => {
+                    if (url !== '/api/pixiv/batch-download') return fixtureFetchJson(url, options);
                     optionPayloads.push(JSON.parse(options.body));
                     if (optionPayloads.length === 1) {
                         document.querySelector("#quality").value = "changed";
@@ -339,8 +364,11 @@ def main() -> None:
                         && payload.saveRoot === "C:\\fixed"
                         && payload.createFolder === true
                         && payload.groupArtworks === false),
-                    pages: optionPayloads.reduce((total, payload) => total + payload.groups.reduce((sum, group) => sum + group.pages.length, 0), 0)
+                    pages: optionPayloads.reduce((total, payload) => total + payload.groups.reduce((sum, group) => sum + group.pages.length, 0), 0),
+                    taskSaved: taskEvents.filter(event => event.url === '/api/workspace/task').length,
+                    taskDeleted: taskEvents.filter(event => event.url === '/api/workspace/task/delete').length,
                 };
+                await basketSaveChain;
                 fetchJson = originalFetchJson;
                 const geometry = {
                     separate: check.right + 8 <= badge.left,
@@ -411,6 +439,8 @@ def main() -> None:
                         && optionSnapshot.requests === 3
                         && optionSnapshot.allStable
                         && optionSnapshot.pages === 401
+                        && optionSnapshot.taskSaved === 3
+                        && optionSnapshot.taskDeleted === 1
                         && geometry.separate
                         && geometry.inside
                         && geometry.badgeTarget

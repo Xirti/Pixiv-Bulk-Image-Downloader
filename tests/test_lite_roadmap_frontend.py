@@ -9,6 +9,38 @@ SOURCES = ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", 
 
 @unittest.skipUnless(shutil.which("node"), "Node required")
 class RoadmapFrontendTests(unittest.TestCase):
+    def test_legacy_over_capacity_basket_can_be_restored_and_trimmed_without_losing_choices(self):
+        self.run_js("""
+          lastKnownLoggedIn = true;
+          const privateItem = {id:'123',pages:600,restriction:'r18',title:'A',artist:'artist',tags:[]};
+          const publicItem = {id:'456',pages:900,restriction:'safe',title:'B',artist:'artist',tags:[]};
+          let lastSaved = 0;
+          fetchJson = async (url, options) => {
+            if(url === '/api/workspace') return {scope:'account-A',revision:1,tasks:[],recent:[],basket:[
+              {id:'123',item:privateItem,pages:Array.from({length:600},(_,i)=>i)},
+              {id:'456',item:publicItem,pages:Array.from({length:900},(_,i)=>i)}]};
+            if(url === '/api/workspace/basket') {
+              const total = JSON.parse(options.body).basket.reduce((count,row)=>count+row.pages.length,0);
+              if(total>1000) { const error=new Error('采集篮超过容量'); error.basketCapacity=true; throw error; }
+              lastSaved=total; return {revision:2};
+            }
+            throw new Error('Unexpected '+url);
+          };
+          await restoreWorkspace();
+          assert.equal(workspaceReady, true);
+          assert.equal(selection.pageCount, 1500);
+          assert.equal(selection.setPage({...publicItem,pages:901},900,true).reason, 'capacity');
+          selection.setPage(publicItem,899,false);
+          await basketSaveChain;
+          assert.equal(workspaceReady, true);
+          assert.equal(selection.pageCount, 1499);
+          selection.remove(['123']);
+          await basketSaveChain;
+          assert.equal(lastSaved, 899);
+          assert.equal(selection.pageCount, 899);
+          clearTimeout(taskDockTimer);
+        """)
+
     def test_account_change_waits_for_download_unlock_before_restoring(self):
         self.run_js("""
           workspaceReady = true;

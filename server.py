@@ -42,7 +42,7 @@ from folder_picker import select_folder
 from download_requests import DownloadRequestError, DownloadRequests
 from download_history import DownloadHistory, history_path
 from local_catalog import LocalCatalog
-from workspace_store import WorkspaceStore
+from workspace_store import WorkspaceCapacityError, WorkspaceStore
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from ugoira_export import export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
@@ -3155,6 +3155,7 @@ def _stage_and_publish_download(
     prefix: str,
     stage: Callable[[Path, list[PublishedFileOwnership]], None],
     authorization_epochs: set[int] | None = None,
+    authorization_check: Callable[[], object] | None = None,
 ) -> tuple[list[str], bool]:
     """Stage a complete request, then transfer the whole batch to publication."""
     staging_context = secure_staging_directory(save_root, prefix=prefix)
@@ -3173,14 +3174,16 @@ def _stage_and_publish_download(
                 public_paths=True,
             )
 
-        if authorization_epochs:
+        if authorization_epochs or authorization_check:
             # Keep the generation guard from the final validation through the
             # local commit. Logout is linearized after a completed publish, or
             # wins first and causes every staged restricted byte to be removed.
             with SEARCH_SESSION_LOCKS_GUARD:
                 try:
-                    for epoch in authorization_epochs:
+                    for epoch in authorization_epochs or ():
                         assert_authorization_generation(epoch)
+                    if authorization_check:
+                        authorization_check()
                 except Exception as original:
                     failures = _discard_owned_staging(staged)
                     if failures:
@@ -3646,6 +3649,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if data.get("queueId") is not None:
                         if data.get("scope") != owner_scope or not WORKSPACE_STORE.has_task(data["queueId"], owner_scope):
                             return self.send_json({"error": "这项任务不属于当前账户，请重新确认下载"}, 403)
+                        self._queued_authorization = (owner_scope, authorized, epoch)
                 payload, status = DOWNLOAD_REQUESTS.run(
                     data.get("requestId"), path, data, download_result,
                     scope=str(epoch) if authorized else "public",
@@ -3714,6 +3718,8 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             revision = WORKSPACE_STORE.save_basket(data.get("basket"), workspace_scope(), revision=data.get("revision"))
             return self.send_json({"ok": True, "revision": revision})
+        except WorkspaceCapacityError as exc:
+            return self.send_json({"error": str(exc), "basketCapacity": True}, 409)
         except ValueError as exc:
             return self.send_json({"error": "采集篮已在另一个窗口更新，请重开当前窗口" if "stale" in str(exc) else "采集篮数据无效"}, 409 if "stale" in str(exc) else 400)
         except (OSError, sqlite3.Error):
@@ -3782,7 +3788,8 @@ class Handler(SimpleHTTPRequestHandler):
     @staticmethod
     def _remaining_download_pages(item: dict, pages: list[int], quality: str, format: str,
                                   save_root: Path, create_folder: bool, context: dict | None,
-                                  group_artworks: bool, skip_existing: bool) -> list[int]:
+                                  group_artworks: bool, skip_existing: bool,
+                                  skipped_files: list[str] | None = None) -> list[int]:
         images = item.get("pageImages")
         if not isinstance(images, list) or any(page >= len(images) for page in pages):
             raise PixivPolicyError("图片页码超出范围")
@@ -3791,12 +3798,14 @@ class Handler(SimpleHTTPRequestHandler):
         directory = resolve_download_target(save_root, str(item.get("title") or ""), str(item["id"]),
                                             create_folder, context=context, group_artwork=group_artworks)
         try:
-            present = LOCAL_CATALOG.existing(str(item["id"]), pages, quality,
-                                            format if item.get("workType") == "ugoira" else "source", directory)
+            present = LOCAL_CATALOG.existing_files(str(item["id"]), pages, quality,
+                                                  format if item.get("workType") == "ugoira" else "source", directory)
         except sqlite3.Error:
             # A broken optional index must not make downloads unusable.
             HTTP_LOG.warning("下载目录索引读取失败，将正常下载")
             return pages
+        if skipped_files is not None:
+            skipped_files.extend(str(file.relative_to(save_root)) for files in present.values() for file in files)
         return [page for page in pages if page not in present]
 
     @staticmethod
@@ -3919,6 +3928,14 @@ class Handler(SimpleHTTPRequestHandler):
             normalized.setdefault(artwork_id, set()).update(Handler._selected_download_pages(pages))
         return normalized
 
+    def _download_authorization_snapshot(self) -> tuple[bool, int | None]:
+        with SEARCH_SESSION_LOCKS_GUARD:
+            snapshot = validated_authorization()
+            expected = getattr(self, "_queued_authorization", None)
+            if expected is not None and expected != (workspace_scope(), *snapshot):
+                raise AuthorizationRevokedError("Pixiv 账户状态已变更，请重新确认下载")
+            return snapshot
+
     def _post_pixiv_batch_download(self, data: dict) -> tuple[dict, int]:
         try:
             quality, create_folder = self._download_options(data)
@@ -3958,6 +3975,7 @@ class Handler(SimpleHTTPRequestHandler):
             restricted_epochs: set[int] = set()
             history_groups: list[tuple[dict, list[int], int]] = []
             skipped_pages = 0
+            skipped_files: list[str] = []
 
             def stage_batch(
                 staging_root: Path,
@@ -3965,7 +3983,7 @@ class Handler(SimpleHTTPRequestHandler):
             ) -> None:
                 nonlocal skipped_pages
                 for artwork_id, page_set in normalized.items():
-                    authorized, authorization_epoch = validated_authorization()
+                    authorized, authorization_epoch = self._download_authorization_snapshot()
                     item = pixiv_item_for_download(
                         artwork_id,
                         allow_r18=authorized,
@@ -3979,7 +3997,7 @@ class Handler(SimpleHTTPRequestHandler):
                         restricted_epochs.add(authorization_epoch)
                     pages = self._remaining_download_pages(item, sorted(page_set), quality, ugoira_format,
                                                            save_root, create_folder, download_context, group_artworks,
-                                                           data.get("skipExisting", True))
+                                                           data.get("skipExisting", True), skipped_files)
                     skipped_pages += len(page_set) - len(pages)
                     if not pages:
                         continue
@@ -3999,11 +4017,14 @@ class Handler(SimpleHTTPRequestHandler):
                 prefix=".moku-batch-",
                 stage=stage_batch,
                 authorization_epochs=restricted_epochs,
+                **({"authorization_check": self._download_authorization_snapshot}
+                   if hasattr(self, "_queued_authorization") else {}),
             )
             response_payload = {
                 "ok": True, "saved": public_saved,
                 "artworks": len(normalized), "pages": total_pages,
                 "skippedPages": skipped_pages,
+                "skippedFiles": skipped_files,
                 "catalogWarning": self._record_download_catalog(history_groups, public_saved, save_root, quality,
                                                                ugoira_format, create_folder, download_context, group_artworks),
                 "cleanupPending": cleanup_pending,
@@ -4037,7 +4058,7 @@ class Handler(SimpleHTTPRequestHandler):
             return {"error": str(exc)}, exc.status
 
         try:
-            authorized, authorization_epoch = validated_authorization()
+            authorized, authorization_epoch = self._download_authorization_snapshot()
             item = pixiv_item_for_download(
                 artwork_id,
                 allow_r18=authorized,
@@ -4062,9 +4083,10 @@ class Handler(SimpleHTTPRequestHandler):
                 and authorization_epoch is not None
                 else set()
             )
+            skipped_files: list[str] = []
             pages_to_save = self._remaining_download_pages(item, selected_pages, quality, ugoira_format,
                                                           save_root, create_folder, download_context, group_artworks,
-                                                          data.get("skipExisting", True))
+                                                          data.get("skipExisting", True), skipped_files)
             def stage_single(
                 staging_root: Path,
                 staged: list[PublishedFileOwnership],
@@ -4085,12 +4107,15 @@ class Handler(SimpleHTTPRequestHandler):
                 prefix=".moku-single-",
                 stage=stage_single,
                 authorization_epochs=restricted_epochs,
+                **({"authorization_check": self._download_authorization_snapshot}
+                   if hasattr(self, "_queued_authorization") else {}),
             )
             response_payload = {
                 "ok": True, "saved": public_saved,
                 "quality": quality, "source": "pixiv",
                 "pages": len(selected_pages),
                 "skippedPages": len(selected_pages) - len(pages_to_save),
+                "skippedFiles": skipped_files,
                 "catalogWarning": self._record_download_catalog([(item, pages_to_save, len(public_saved))] if pages_to_save else [],
                                                                public_saved, save_root, quality, ugoira_format,
                                                                create_folder, download_context, group_artworks),
