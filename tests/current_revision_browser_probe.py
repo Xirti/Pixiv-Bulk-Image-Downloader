@@ -165,7 +165,8 @@ def main():
                             const eyebrow = document.createRange();
                             eyebrow.selectNodeContents(document.querySelector('.home-intro .eyebrow'));
                             const mark = eyebrow.getBoundingClientRect();
-                            return {title: (rect.left + rect.right) / 2, wordmark: (mark.left + mark.right) / 2, target: innerWidth / 2};
+                            const main = document.querySelector('main').getBoundingClientRect();
+                            return {title: (rect.left + rect.right) / 2, wordmark: (mark.left + mark.right) / 2, target: (main.left + main.right) / 2};
                         })()""")
                         assert abs(centers["title"] - centers["target"]) < 1, centers
                         assert abs(centers["wordmark"] - centers["target"]) < 1, centers

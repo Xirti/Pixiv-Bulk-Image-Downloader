@@ -21,7 +21,7 @@ let requestTokenController = null;
 let viewGeneration = 0;
 let pendingNavigationPage = null;
 let activeSearchContext = { kind: "tags", value: "猫耳" };
-let activeSearchFilters = { mode: "safe", workType: "all", includeAi: false, fuzzy: false };
+let activeSearchFilters = { mode: "safe", workType: "all", includeAi: false, fuzzy: false, startDate: "", endDate: "" };
 let currentDetailItem = null;
 let currentDetailContext = null;
 let collectionPageOffset = 0;
@@ -68,8 +68,39 @@ function readSearchFilters() {
     workType: $("#workType").value || "all",
     includeAi: Boolean($("#includeAi").checked),
     fuzzy: Boolean($("#fuzzySearch")?.checked),
+    ...publicationDateBounds($("#datePreset").value, $("#startDate").value, $("#endDate").value),
   };
 }
+
+function publicationDateBounds(preset, startDate = "", endDate = "", now = new Date()) {
+  if (preset === "custom") return { startDate, endDate };
+  if (preset !== "7" && preset !== "30") return { startDate: "", endDate: "" };
+  const day = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(now);
+  const part = (type) => day.find((row) => row.type === type).value;
+  const end = `${part("year")}-${part("month")}-${part("day")}`;
+  const start = new Date(`${end}T00:00:00Z`);
+  start.setUTCDate(start.getUTCDate() - Number(preset) + 1);
+  return { startDate: start.toISOString().slice(0, 10), endDate: end };
+}
+
+function syncDateInputs() {
+  const custom = $("#datePreset").value === "custom";
+  $("#customDates").hidden = !custom;
+  for (const input of [$("#startDate"), $("#endDate")]) {
+    input.disabled = !custom;
+    input.required = custom;
+  }
+  const start = $("#startDate").value;
+  const end = $("#endDate").value;
+  $("#endDate").setCustomValidity(custom && start && end && start > end ? "结束日期不能早于开始日期" : "");
+}
+
+$("#datePreset").onchange = syncDateInputs;
+$("#startDate").oninput = syncDateInputs;
+$("#endDate").oninput = syncDateInputs;
+syncDateInputs();
 
 const esc = (value) => String(value).replace(
   /[&<>"']/g,
@@ -255,6 +286,7 @@ function scheduleSearchPrefetch(tag, page, filters, generation) {
     const query = new URLSearchParams({
       tag, page: String(page), mode: filters.mode, workType: filters.workType,
       includeAi: String(filters.includeAi), fuzzy: String(filters.fuzzy), requestId, prefetch: "true",
+      startDate: filters.startDate || "", endDate: filters.endDate || "",
     });
     try {
       const data = await fetchJson(`/api/pixiv/search?${query}`, {signal: controller.signal}, 60000);
@@ -646,6 +678,8 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     workType: filters?.workType || "all",
     includeAi: Boolean(filters?.includeAi),
     fuzzy: Boolean(filters?.fuzzy),
+    startDate: filters?.startDate || "",
+    endDate: filters?.endDate || "",
   };
   const contextMatch = cleanTag.match(/^\s*(pid|uid|author)\s*[:：]\s*(.+)$/i);
   const requestedContext = contextMatch
@@ -672,6 +706,8 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
       workType: requestedFilters.workType,
       includeAi: String(requestedFilters.includeAi),
       fuzzy: String(requestedFilters.fuzzy),
+      startDate: requestedFilters.startDate,
+      endDate: requestedFilters.endDate,
       requestId,
     });
     const data = await fetchJson(`/api/pixiv/search?${query}`, { signal: controller.signal }, 90000);
@@ -693,7 +729,8 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
       ? " · 当前页尚未满，可继续加载本页"
       : (data.budgetExhausted ? " · 本次加载达到请求预算，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到历史末尾"));
     const fuzzyLabel = data.fuzzy ? " · 别名扩展已启用" : "";
-    $("#count").textContent = `已加载 ${data.total} 件 · 第 ${currentPage} 页 · 每页 ${data.perPage || 36} 件${fuzzyLabel}${preloadStatus}${historyStatus}${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 个高密度日期受平台截断` : ""}`;
+    const dateLabel = requestedFilters.startDate ? ` · ${requestedFilters.startDate} 至 ${requestedFilters.endDate}（日本时间）` : "";
+    $("#count").textContent = `已加载 ${data.total} 件 · 第 ${currentPage} 页 · 每页 ${data.perPage || 36} 件${dateLabel}${fuzzyLabel}${preloadStatus}${historyStatus}${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 个高密度日期受平台截断` : ""}`;
     resultSelectionEnabled = true;
     render();
     renderPagination();
@@ -1092,7 +1129,7 @@ $("#basketPageMore").onclick = () => {
   advanceCollectionWindow(basketDetailItem, () => renderBasketArtworkDetail(basketDetailItem));
 };
 $("#basketViewAll").onclick = openAllViewer;
-$("#backTop").onclick = () => activeScrollSurface().scrollTo({ top: 0, behavior: "smooth" });
+$("#backTop").onclick = () => activeScrollSurface().scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? "auto" : "smooth" });
 function openBatchHub() {
   if (selection.locked || searchPending) return;
   if (!selection.size) {

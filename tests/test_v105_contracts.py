@@ -351,7 +351,8 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("surface === window ? window.scrollY : surface.scrollTop", floating)
         self.assertIn('$("#basketPage").addEventListener("scroll", schedulePaginationDockUpdate, { passive: true })', floating)
         self.assertIn('$("#allViewer").addEventListener("scroll", schedulePaginationDockUpdate, { passive: true })', floating)
-        self.assertIn('$("#backTop").onclick = () => activeScrollSurface().scrollTo({ top: 0, behavior: "smooth" })', APP)
+        self.assertIn('$("#backTop").onclick = () => activeScrollSurface().scrollTo({ top: 0, behavior:', APP)
+        self.assertIn("matchMedia('(prefers-reduced-motion: reduce)').matches", APP)
         self.assertIn("#backTop{position:fixed", STYLE)
         self.assertIn("z-index:55", STYLE)
 

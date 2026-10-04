@@ -72,6 +72,7 @@ class FakeElement {
   setAttribute(name, value) { this[name] = String(value); }
   getAttribute(name) { return this[name]; }
   removeAttribute(name) { delete this[name]; }
+  setCustomValidity(message) { this.validationMessage = message; }
   closest() { return null; }
   showModal() { this.open = true; }
   close() { this.open = false; }

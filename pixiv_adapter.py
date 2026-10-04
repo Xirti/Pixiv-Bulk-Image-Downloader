@@ -5,11 +5,27 @@ import re
 import urllib.parse
 import unicodedata
 from pathlib import Path
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 
 class PixivPolicyError(ValueError):
     pass
+
+
+def publication_date(value: Any) -> str:
+    """Normalize publication timestamps to the calendar used by Pixiv filters."""
+    text = str(value or "")
+    try:
+        if len(text) == 10:
+            return date.fromisoformat(text).isoformat()
+        timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        japan = timezone(timedelta(hours=9))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=japan)
+        return timestamp.astimezone(japan).date().isoformat()
+    except (ValueError, OverflowError):
+        return ""
 
 
 def resolve_web_path(root: Path, request_path: str) -> Path:
@@ -109,7 +125,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
         "width": max(0, int(raw.get("width") or 0)),
         "height": max(0, int(raw.get("height") or 0)),
         "bookmarks": max(0, int(raw.get("bookmarkCount") or 0)),
-        "date": str(raw.get("createDate") or "")[:10],
+        "date": publication_date(raw.get("createDate")),
         "description": _plain_text(raw.get("description")),
         "workType": {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType", 0)), "illustration"),
         "aiGenerated": int(raw.get("aiType") or 1) == 2,
@@ -242,7 +258,7 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
             {"id": "regular", "label": "Pixiv 常规预览", "width": 0, "height": 0},
         ]
         formats = [{"id": "source", "label": "保留源格式（推荐）"}]
-    return {"id": artwork_id, "restriction": restriction, "source": "pixiv", "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"), "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""), "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30], "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0), "bookmarks": int(raw.get("bookmarkCount") or 0), "date": str(raw.get("createDate") or "")[:10], "description": _plain_text(raw.get("description") or raw.get("illustComment")), "workType": work_type, "aiGenerated": int(raw.get("aiType") or 1) == 2, "thumb": (page_images[0]["regular"] or page_images[0]["original"]) if page_images else "", "pageImages": page_images, "qualities": qualities, "formats": formats}
+    return {"id": artwork_id, "restriction": restriction, "source": "pixiv", "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"), "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""), "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30], "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0), "bookmarks": int(raw.get("bookmarkCount") or 0), "date": publication_date(raw.get("createDate")), "description": _plain_text(raw.get("description") or raw.get("illustComment")), "workType": work_type, "aiGenerated": int(raw.get("aiType") or 1) == 2, "thumb": (page_images[0]["regular"] or page_images[0]["original"]) if page_images else "", "pageImages": page_images, "qualities": qualities, "formats": formats}
 
 
 def should_retry_status(status: int) -> bool:

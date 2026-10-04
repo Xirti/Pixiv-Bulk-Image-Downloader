@@ -5,6 +5,7 @@ import threading
 import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Hashable, Iterable
 
 from search_aliases import aliases_for, normalize_alias_key
@@ -12,6 +13,32 @@ from search_aliases import aliases_for, normalize_alias_key
 
 class SearchInputError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class SearchDateRange:
+    start: date
+    end: date
+
+    def contains(self, publication_date: str) -> bool:
+        # Normalized artwork dates use Pixiv's Japan-time calendar day.
+        return self.start.isoformat() <= publication_date <= self.end.isoformat()
+
+
+def parse_search_date_range(start: str = "", end: str = "") -> SearchDateRange | None:
+    if not start and not end:
+        return None
+    if not start or not end:
+        raise SearchInputError("请同时填写开始和结束日期")
+    try:
+        if not all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) for value in (start, end)):
+            raise ValueError
+        bounds = SearchDateRange(date.fromisoformat(start), date.fromisoformat(end))
+    except ValueError:
+        raise SearchInputError("发布时间必须是有效的 YYYY-MM-DD 日期") from None
+    if bounds.start > bounds.end:
+        raise SearchInputError("开始日期不能晚于结束日期")
+    return bounds
 
 
 @dataclass(frozen=True)

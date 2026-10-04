@@ -74,7 +74,7 @@ class FrontendLayoutResilienceTests(unittest.TestCase):
         ):
             self.assertRegex(
                 HTML,
-                rf'<a href="#{target}"[^>]*aria-label="{label}"[^>]*></a>',
+                rf'<a href="#{target}"[^>]*aria-label="{label}"[^>]*><svg[^>]*aria-hidden="true"',
             )
         self.assertIn('@media(max-width:600px)', STYLE)
         self.assert_declarations(".page-rail", "display:flex")

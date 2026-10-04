@@ -27,7 +27,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
@@ -42,8 +42,8 @@ from download_requests import DownloadRequestError, DownloadRequests
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from ugoira_export import export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
-from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status
-from search_service import SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
+from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status
+from search_service import SearchDateRange, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
 
 CODE_GENERATION_FILES = (
@@ -1086,13 +1086,15 @@ def history_cache_key(tag: str, mode: str, namespace: tuple | None = None) -> tu
     return (tag, mode) if namespace is None else ("search", namespace, tag, mode)
 
 
-def _history_state(tag: str, mode: str, namespace: tuple | None = None) -> dict:
+def _history_state(tag: str, mode: str, namespace: tuple | None = None, date_range: SearchDateRange | None = None) -> dict:
     key = history_cache_key(tag, mode, namespace)
     with SEARCH_SESSION_LOCKS_GUARD:
         state = HISTORY_CACHE.get(key)
         if state is None:
             state = {
-                "items": [], "ids": set(), "queue": [], "nextEnd": date.today(),
+                "items": [], "ids": set(), "queue": [],
+                "nextEnd": date_range.end if date_range else datetime.now(timezone(timedelta(hours=9))).date(),
+                "minDate": max(date(2007, 9, 10), date_range.start) if date_range else date(2007, 9, 10),
                 "baseOffset": 0, "exhausted": False, "budgetExhausted": False,
                 "truncatedDates": [], "touched": time.monotonic(),
             }
@@ -1116,7 +1118,7 @@ def _history_state(tag: str, mode: str, namespace: tuple | None = None) -> dict:
 
 def _queue_older_window(state: dict) -> None:
     if state["exhausted"]: return
-    epoch = date(2007, 9, 10); end = state["nextEnd"]
+    epoch = state.get("minDate", date(2007, 9, 10)); end = state["nextEnd"]
     if end < epoch:
         state["exhausted"] = True; return
     start = max(epoch, end - timedelta(days=29))
@@ -1135,11 +1137,14 @@ def extend_history(
     max_seconds: float = MAX_HISTORY_SECONDS,
     budget: dict | None = None,
     namespace: tuple | None = None,
+    date_range: SearchDateRange | None = None,
     cancel_event: threading.Event | None = None,
 ) -> dict:
+    if date_range is not None and namespace is None:
+        namespace = ("dates", date_range)
     cache_key = history_cache_key(tag, mode, namespace)
     with history_lock_for(*cache_key):
-        state = _history_state(tag, mode, namespace)
+        state = _history_state(tag, mode, namespace, date_range)
         state["budgetExhausted"] = False
         if budget is None:
             budget = {"started": time.monotonic(), "requests": 0}
@@ -1198,12 +1203,16 @@ def extend_history(
             for raw in rows:
                 artwork_id = str(raw.get("id") or "")
                 if not artwork_id or artwork_id in state["ids"]: continue
+                if date_range and not date_range.contains(publication_date(raw.get("createDate"))): continue
                 if mode == "r18" and int(raw.get("xRestrict", -1)) != 1: continue
                 try: normalize_search_item(raw, allow_r18=allow_r18)
                 except PixivPolicyError: continue
                 state["ids"].add(artwork_id); state["items"].append(raw)
             window["page"] += 1
-            if window["page"] > window["pages"]: state["queue"].pop(0)
+            if window["page"] > window["pages"]:
+                state["queue"].pop(0)
+                if not state["queue"] and state["nextEnd"] < state["minDate"]:
+                    state["exhausted"] = True
         return state
 
 
@@ -1333,6 +1342,7 @@ def load_search_source(
     state = extend_history(
         tag, mode, need_count, allow_r18=allow_r18, budget=budget,
         namespace=session_key, cancel_event=cancel_event, work_type=session_key[3],
+        date_range=session_key[6] if len(session_key) > 6 else None,
     )
     source_key = (session_key, tag, mode)
     base = int(state.get("baseOffset", 0))
@@ -1519,6 +1529,7 @@ def search_user_results(
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
     prefetch: bool = False,
+    date_range: SearchDateRange | None = None,
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     resolve_source_modes(scope, authorized=authorized)
@@ -1535,6 +1546,8 @@ def search_user_results(
         "user", query_kind, target.casefold(), user_id,
         scope, work_type, bool(include_ai), bool(fuzzy),
     )
+    if date_range is not None:
+        session_key += (date_range,)
     desired_items = prefetch_item_count(
         page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD if prefetch else 0,
     )
@@ -1599,6 +1612,8 @@ def search_user_results(
                 if work_type != "all" and candidate["workType"] != work_type:
                     continue
                 if not include_ai and candidate["aiGenerated"]:
+                    continue
+                if date_range and not date_range.contains(candidate["date"]):
                     continue
                 incoming.append(candidate)
             incoming.sort(key=_search_sort_key, reverse=True)
@@ -1694,6 +1709,7 @@ def search_artwork_result(
     artwork_id: str, scope: str, page: int, work_type: str, include_ai: bool,
     *, authorized: bool, authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
+    date_range: SearchDateRange | None = None,
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     resolve_source_modes(scope, authorized=authorized)
@@ -1718,6 +1734,8 @@ def search_artwork_result(
     if matches and work_type != "all" and item.get("workType") != work_type:
         matches = False
     if matches and not include_ai and bool(item.get("aiGenerated")):
+        matches = False
+    if matches and date_range and not date_range.contains(item.get("date") or ""):
         matches = False
 
     requested_page = max(1, int(page))
@@ -1748,10 +1766,13 @@ def search_pixiv_results(
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
     prefetch: bool = False,
+    start_date: str = "",
+    end_date: str = "",
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     if work_type not in {"all", "illustration", "manga", "ugoira"}:
         raise SearchInputError("不支持的作品类型")
+    date_range = parse_search_date_range(start_date, end_date)
     query = parse_search_query(tag_query)
     if query.kind == "pid":
         return search_artwork_result(
@@ -1759,6 +1780,7 @@ def search_pixiv_results(
             authorized=authorized,
             authorization_epoch=authorization_epoch,
             cancel_event=cancel_event,
+            date_range=date_range,
         )
     if query.kind in {"uid", "author"}:
         kwargs = {
@@ -1770,6 +1792,8 @@ def search_pixiv_results(
             kwargs["cancel_event"] = cancel_event
         if prefetch:
             kwargs["prefetch"] = True
+        if date_range is not None:
+            kwargs["date_range"] = date_range
         return search_user_results(
             query.kind, query.value, scope, page, work_type, include_ai, **kwargs,
         )
@@ -1787,6 +1811,8 @@ def search_pixiv_results(
     )
     page = max(1, int(page))
     session_key = ("tags", tag_groups, scope, work_type, bool(include_ai), bool(fuzzy))
+    if date_range is not None:
+        session_key += (date_range,)
     desired_items = prefetch_item_count(
         page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD if prefetch else 0,
     )
@@ -3367,6 +3393,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "authorization_epoch": authorization_epoch,
                 }
                 kwargs["cancel_event"] = cancel_event
+                if query.get("startDate", [""])[0] or query.get("endDate", [""])[0]:
+                    kwargs["start_date"] = query.get("startDate", [""])[0]
+                    kwargs["end_date"] = query.get("endDate", [""])[0]
                 if query.get("prefetch", ["false"])[0].lower() == "true":
                     kwargs["prefetch"] = True
                 result = search_pixiv_results(
