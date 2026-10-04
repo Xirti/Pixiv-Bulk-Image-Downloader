@@ -39,6 +39,137 @@ class CurrentRevisionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_basket_actions_clear_confirm_and_download_only_navigates(self):
+        self.run_frontend(r'''
+const item = artwork("77");
+choose(item);
+let requests = 0;
+fetchJson = () => { requests++; throw new Error("unexpected download"); };
+openSelectionBasket();
+assert.equal($("#basketClear").disabled, false);
+$("#quality").value = "regular";
+$("#format").value = "gif";
+$("#saveRoot").value = "C:\\pictures";
+$("#basketClear").onclick();
+assert.equal($("#basketClearDialog").open, true);
+$("#basketClearCancel").onclick();
+assert.equal(selection.pageCount, 3);
+$("#basketDownload").onclick();
+assert.equal(activeWorkspace, "download");
+assert.equal(basketPageOpen(), false);
+assert.equal(selection.pageCount, 3);
+assert.equal($("#quality").value, "regular");
+assert.equal($("#format").value, "gif");
+assert.equal($("#saveRoot").value, "C:\\pictures");
+assert.equal(requests, 0);
+openSelectionBasket();
+selection.setLocked(true);
+syncSearchScopedControls();
+assert.equal($("#basketClear").disabled, true);
+assert.equal($("#basketDownload").disabled, true);
+$("#basketClear").onclick();
+assert.equal($("#basketClearDialog").open, false);
+selection.setLocked(false);
+syncSearchScopedControls();
+$("#basketClear").onclick();
+$("#basketClearConfirm").onclick();
+assert.equal(selection.pageCount, 0);
+assert.equal(batchCandidateItems.length, 0);
+assert.equal(basketPageOpen(), true);
+assert.match($("#batchCollections").innerHTML, /采集篮为空/);
+assert.equal($("#basketDownload").disabled, true);
+assert.equal($("#basketClear").disabled, true);
+assert.equal(requests, 0);
+''')
+
+    def test_clear_basket_aborts_detail_and_discards_late_result(self):
+        self.run_frontend(r'''
+const item = {...artwork("77"), pageImages: undefined};
+choose(item);
+openSelectionBasket();
+let release, signal;
+fetchJson = (_url, options) => { signal = options.signal; return new Promise(resolve => { release = resolve; }); };
+const pending = openBatchCollection(item.id);
+$("#basketClear").onclick();
+$("#basketClearConfirm").onclick();
+assert.equal(signal.aborted, true);
+release(item);
+await pending;
+assert.equal(selection.size, 0);
+assert.equal(basketDetailItem, null);
+assert.equal($("#basketArtworkDetail").hidden, true);
+assert.match($("#batchCollections").innerHTML, /采集篮为空/);
+''')
+
+    def test_original_quality_defaults_and_preview_remains_explicit(self):
+        self.run_frontend(r'''
+const item = {...artwork("77"), qualities: [{id: "regular", label: "regular"}, {id: "original", label: "original", width: 4000, height: 3000}]};
+activeArtworkId = item.id;
+renderDetail(item, 0);
+assert.equal($("#quality").value, "original");
+assert.match($("#quality").innerHTML, /4000 × 3000/);
+$("#quality").selectedOptions = [{textContent: "原图（原始分辨率）"}];
+updateFormatHint();
+assert.match($("#qualityText").textContent, /原始分辨率/);
+$("#quality").value = "";
+showBatchDetail();
+assert.equal($("#quality").value, "original");
+$("#quality").value = "regular";
+showBatchDetail();
+assert.equal($("#quality").value, "regular");
+$("#quality").value = "";
+assert.equal(readDownloadOptions().quality, "original");
+''')
+
+    def test_history_single_multiselect_confirmation_paging_and_errors(self):
+        self.run_frontend(r'''
+const record = id => ({id, title: `<b>${id}</b>`, artist: "画师", artworkId: String(id), completedAt: "2026-10-03T00:00:00Z", quality: "original", format: "source", workType: "illustration", files: [`C:\\art\\${id}.png`], pages: [0]});
+let rows = [record(1), record(2), record(3)], mutations = [], fail = false;
+fetchJson = async (url, options = {}) => {
+  if (options.method === "POST") {
+    const body = JSON.parse(options.body);
+    mutations.push(body);
+    if (fail) throw new Error("cannot delete");
+    rows = rows.filter(row => !body.ids?.includes(row.id));
+    return {ok: true};
+  }
+  const page = Math.min(Number(new URL(url, "http://localhost").searchParams.get("page")), Math.ceil(rows.length / 2)) || 1;
+  return {items: rows.slice((page-1)*2, page*2), total: rows.length, page, pages: Math.ceil(rows.length/2), limit: 5000};
+};
+$("#historyPage").hidden = false;
+await historyView.open();
+assert.match($("#historyList").innerHTML, /C:\\art\\1.png/);
+assert.match($("#historyList").innerHTML, /&lt;b&gt;/);
+assert.doesNotMatch($("#historyList").innerHTML, /<details>/);
+const one = $("#historyList").querySelectorAll("[data-select-history]")[0];
+one.checked = true; one.onchange();
+$("#historyPagination").querySelectorAll("[data-history-page]").find(button => button.dataset.historyPage === "2").onclick();
+await new Promise(resolve => setTimeout(resolve, 0));
+$("#historySelectAll").checked = true;
+$("#historySelectAll").onchange();
+assert.equal($("#historySelectedCount").textContent, "已选 2 条");
+$("#historyDeleteSelected").onclick();
+$("#historyClearCancel").onclick();
+assert.equal(mutations.length, 0);
+$("#historyDeleteSelected").onclick();
+await $("#historyClearConfirm").onclick();
+assert.deepEqual(mutations[0], {confirm: true, ids: [1, 3]});
+assert.equal(rows.length, 1);
+assert.match($("#historyList").innerHTML, /data-delete-history="2"/);
+fail = true;
+$("#historyList").querySelectorAll("[data-delete-history]")[0].onclick();
+await $("#historyClearConfirm").onclick();
+assert.equal(rows.length, 1);
+assert.equal($("#historyStatus").textContent, "cannot delete");
+assert.equal($("#historyDeleteSelected").disabled, true);
+assert.equal($("#historyClear").disabled, false);
+fail = false;
+$("#historyList").querySelectorAll("[data-delete-history]")[0].onclick();
+await $("#historyClearConfirm").onclick();
+assert.equal(rows.length, 0);
+assert.equal($("#historyClear").disabled, true);
+''')
+
     def test_independent_workspaces_preserve_context_and_download_options(self):
         self.run_frontend(r'''
 const item = {...artwork("77"), workType: "ugoira", formats: [{id: "source", label: "ZIP"}, {id: "gif", label: "GIF"}]};

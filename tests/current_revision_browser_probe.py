@@ -102,6 +102,7 @@ def check_theme(page, theme):
     if page.evaluate("document.documentElement.dataset.theme") != theme:
         page.locator("#themeToggle").click()
     assert page.evaluate("document.documentElement.dataset.theme") == theme
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
     return page.evaluate(r"""(() => {
         const rgb = value => (value.match(/[\d.]+/g) || []).map(Number);
         const lum = color => rgb(color).slice(0,3).map(x => {
@@ -111,6 +112,7 @@ def check_theme(page, theme):
         let minimum = 100, checked = 0;
         for (const node of document.querySelectorAll("body *")) {
             if (!node.getClientRects().length || node.disabled || (!node.matches("input:not([type=checkbox]),select,textarea") && ![...node.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()))) continue;
+            if (!node.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) continue;
             const style = getComputedStyle(node);
             let parent = node, background = "rgb(22,22,22)";
             while (parent) {
@@ -125,7 +127,7 @@ def check_theme(page, theme):
             const required = large ? 3 : 4.5;
             checked++;
             minimum = Math.min(minimum, ratio);
-            if (ratio < required) failures.push({node: node.id || node.className || node.tagName, text: node.textContent.slice(0,30), ratio});
+            if (ratio < required) failures.push({node: node.id || node.className || node.tagName, text: node.textContent.slice(0,30), color: style.color, background, theme: document.documentElement.dataset.theme, ratio});
         }
         if (failures.length) throw new Error(JSON.stringify(failures));
         return {theme: document.documentElement.dataset.theme, checked, minimum: Math.round(minimum * 100) / 100};

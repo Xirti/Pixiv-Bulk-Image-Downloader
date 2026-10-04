@@ -475,6 +475,8 @@ function syncSearchScopedControls() {
   $("#clearSelection").disabled = selectionActionsDisabled || selection.size === 0;
   $("#openBatch").disabled = selectionActionsDisabled || selection.size === 0;
   $("#batchDownload").disabled = selection.locked || searchPending || singleDownloadPending || selectedPageCount() === 0;
+  $("#basketClear").disabled = contextNavigationLocked() || batchCandidateItems.length === 0;
+  $("#basketDownload").disabled = contextNavigationLocked() || selectedPageCount() === 0;
   searchButton.disabled = selection.locked || searchPending || singleDownloadPending;
   const detailReady = Boolean(
     currentDetailItem
@@ -572,7 +574,7 @@ function updateSelectionBar() {
   const pages = selectedPageCount();
   $("#selectionBar").hidden = items.length === 0 && count === 0;
   $("#selectionCount").textContent = count
-    ? `采集篮 ${count} 个作品 · ${pages}/${MAX_SELECTED_PAGES} 张图片${selection.archivedCount ? ` · 已归档 ${selection.archivedCount}` : ""}`
+    ? `采集篮 ${count} 个作品 · ${pages}/${MAX_SELECTED_PAGES} 张图片`
     : `当前页 ${items.length} 个作品`;
   $("#clearSelection").disabled = count === 0;
   if (document.body.classList.contains("batch-mode")) updateBatchDetailSummary();
@@ -595,8 +597,7 @@ function showSelectionLimitDialog(attemptedPages = 1) {
 function renderCacheStatus() {
   const status = $("#cacheStatus");
   if (!status) return;
-  const retainedStart = Math.max(firstAvailablePage, currentPage - SEARCH_KEEP_BEHIND);
-  status.textContent = `搜索缓存：当前第 ${currentPage} 页，数据预加载至第 ${preloadedThrough} 页，保留第 ${retainedStart}–${currentPage} 页；缩略图仅加载当前打开页。采集篮缓存：${selection.size} 个作品、${selectedPageCount()}/${MAX_SELECTED_PAGES} 张已选；只保留元数据和下载链接，不缓存图片二进制。`;
+  status.textContent = `第 ${currentPage} 页 · 采集篮 ${selection.size} 个作品、${selectedPageCount()}/${MAX_SELECTED_PAGES} 张已选。旧页可以返回重新加载。`;
 }
 
 function unarchivedSelectionIds() {
@@ -731,7 +732,7 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     const preloadStatus = data.preloadedThrough > currentPage ? ` · 已预加载至第 ${data.preloadedThrough} 页` : "";
     const historyStatus = currentPageNeedsMoreResults()
       ? " · 当前页尚未满，可继续加载本页"
-      : (data.budgetExhausted ? " · 本次加载达到请求预算，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到历史末尾"));
+      : (data.budgetExhausted ? " · 本次结果尚未加载完，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到最后一页"));
     const fuzzyLabel = data.fuzzy ? " · 别名扩展已启用" : "";
     const dateLabel = requestedFilters.startDate ? ` · ${requestedFilters.startDate} 至 ${requestedFilters.endDate}（日本时间）` : "";
     $("#count").textContent = `已加载 ${data.total} 件 · 第 ${currentPage} 页 · 每页 ${data.perPage || 36} 件${dateLabel}${fuzzyLabel}${preloadStatus}${historyStatus}${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 个高密度日期受平台截断` : ""}`;
@@ -1080,7 +1081,8 @@ function renderDetail(item, index, detailContext = activeSearchContext) {
   const visible = normalDetailView.render(item, page => `/api/image/${(currentPage - 1) * 12 + index}/${page}?size=preview`);
   renderCollectionPageWindow(item);
   $("#viewAll").hidden = item.pages <= visible;
-  $("#quality").innerHTML = item.qualities.map((quality) => `<option value="${quality.id}">${esc(quality.label)}${quality.width > 0 && quality.height > 0 ? ` · ${quality.width} × ${quality.height}` : ""}</option>`).join("");
+  $("#quality").innerHTML = item.qualities.map((quality) => `<option value="${quality.id}">${esc(downloadQualityLabel(quality.id, item) || quality.label)}${quality.width > 0 && quality.height > 0 ? ` · ${quality.width} × ${quality.height}` : ""}</option>`).join("");
+  $("#quality").value = item.qualities.some(quality => quality.id === "original") ? "original" : item.qualities[0]?.id || "original";
   $("#format").innerHTML = downloadFormatOptions(item.formats);
   $("#download").textContent = downloadButtonLabel(item);
   syncSearchScopedControls();
@@ -1246,6 +1248,7 @@ function openBasketPage() {
   document.body.classList.add("basket-page-open");
   updatePaginationDock();
   updateFloatingChrome();
+  syncSearchScopedControls();
 }
 
 function updateBatchDetailSummary() {
@@ -1302,11 +1305,22 @@ function showBasketPane(mode) {
 
 function ensureDownloadOptionDefaults() {
   if (!$("#quality").options.length) {
-    $("#quality").innerHTML = '<option value="regular">预览清晰度</option><option value="original">原图</option>';
+    renderBatchQualityOptions();
   }
   if (!$("#format").options.length) {
     $("#format").innerHTML = '<option value="source">保留源格式</option>';
   }
+}
+
+function downloadQualityLabel(id, item = null) {
+  if (id === "original") return "原图（原始分辨率）";
+  if (id === "regular") return item?.workType === "ugoira" ? "标准（600px 帧包）" : "标准（Pixiv 缩小预览）";
+  return "";
+}
+
+function renderBatchQualityOptions(quality = "original") {
+  $("#quality").innerHTML = '<option value="original">原图（原始分辨率）</option><option value="regular">标准（缩小预览；动图 600px）</option>';
+  $("#quality").value = quality === "regular" ? "regular" : "original";
 }
 
 function downloadFormatOptions(formats) {
@@ -1318,8 +1332,7 @@ function downloadFormatOptions(formats) {
 }
 
 function renderBatchDownloadOptions(quality = $("#quality").value, format = $("#format").value) {
-  $("#quality").innerHTML = '<option value="regular">标准清晰度</option><option value="original">原始清晰度</option>';
-  $("#quality").value = quality === "original" ? "original" : "regular";
+  renderBatchQualityOptions(quality);
   $("#format").innerHTML = downloadFormatOptions([
     {id: "source", label: "保留源格式（动图为 ZIP + JSON）"},
     {id: "gif", label: "动图转 GIF，静态图保留源格式"},
@@ -1332,7 +1345,7 @@ function renderBatchDownloadOptions(quality = $("#quality").value, format = $("#
 
 function readDownloadOptions() {
   return {
-    quality: $("#quality").value || "regular",
+    quality: $("#quality").value || "original",
     ugoiraFormat: ["gif", "mp4"].includes($("#format").value) ? $("#format").value : "source",
     saveRoot: $("#saveRoot").value.trim(),
     createFolder: $("#createFolder").checked,
@@ -1396,7 +1409,15 @@ function applyBasketArtworkSelection(item, box) {
 
 function openBasketArtworkPicker() {
   const chosen = batchCandidateItems;
-  if (!chosen.length) return;
+  if (!chosen.length) {
+    showBasketPane("picker");
+    $("#basketTitle").textContent = "采集篮";
+    $("#basketModeHint").textContent = "在预览页勾选作品后，可来这里挑选图片。";
+    syncBasketHeader();
+    $("#batchCollections").innerHTML = '<p class="empty-state basket-empty">采集篮为空</p>';
+    syncSearchScopedControls();
+    return;
+  }
   const lastStart = Math.max(0, Math.floor(Math.max(0, chosen.length - 1) / BASKET_ARTWORK_WINDOW) * BASKET_ARTWORK_WINDOW);
   const start = Math.min(Math.max(0, basketArtworkOffset), lastStart);
   const end = Math.min(chosen.length, start + BASKET_ARTWORK_WINDOW);
@@ -1405,7 +1426,7 @@ function openBasketArtworkPicker() {
   showBasketPane("picker");
   const selectedCount = chosen.filter((item) => selection.get(item.id)?.pages?.size).length;
   $("#basketTitle").textContent = "采集篮 · 选择要下载的作品";
-  $("#basketModeHint").textContent = "点击作品进入详情并逐张选择图片；返回回到第三页下载选项。";
+  $("#basketModeHint").textContent = "点击作品挑选图片；选好后点下载，进入下载设置。";
   $("#batchSummary").textContent = `${selectedCount}/${chosen.length} 个作品已勾选 · ${selectedPageCount()}/${MAX_SELECTED_PAGES} 张`;
   const navigation = chosen.length > BASKET_ARTWORK_WINDOW
     ? `<div class="pagination basket-window-pagination" style="grid-column:1/-1" aria-label="采集篮作品分页"><button type="button" data-basket-window="${Math.max(0, start - BASKET_ARTWORK_WINDOW)}" ${start === 0 ? "disabled" : ""}>← 前 ${BASKET_ARTWORK_WINDOW} 件</button><span>${start + 1}–${end} / ${chosen.length}</span><button type="button" data-basket-window="${Math.min(lastStart, start + BASKET_ARTWORK_WINDOW)}" ${end >= chosen.length ? "disabled" : ""}>后 ${BASKET_ARTWORK_WINDOW} 件 →</button></div>`
@@ -1713,6 +1734,29 @@ async function openBatchCollection(id) {
 }
 
 $("#openBasketPicker").onclick = openSelectionBasket;
+$("#basketDownload").onclick = () => {
+  if (contextNavigationLocked() || selectedPageCount() === 0) return;
+  showBatchDetail();
+};
+$("#basketClear").onclick = () => {
+  if (contextNavigationLocked() || !batchCandidateItems.length) return;
+  $("#basketClearDialog").showModal();
+};
+$("#basketClearCancel").onclick = () => $("#basketClearDialog").close();
+$("#basketClearConfirm").onclick = () => {
+  $("#basketClearDialog").close();
+  if (contextNavigationLocked() || !basketPageOpen()) return;
+  invalidateDetailView();
+  if (!clearAllSelection()) return;
+  basketDetailItem = null;
+  basketDetailView.reset();
+  $("#basketDetailDeck").innerHTML = "";
+  $("#basketPages").innerHTML = "";
+  $("#basketToast").textContent = "已清空采集篮";
+  openBasketArtworkPicker();
+  syncResultSelectionControls();
+  $("#basketPage").scrollTop = 0;
+};
 $("#basketBack").onclick = () => {
   if (selection.locked) return;
   invalidateDetailView();
@@ -1801,7 +1845,9 @@ addEventListener("keydown", (event) => {
 function updateFormatHint() {
   const quality = $("#quality").selectedOptions[0]?.textContent || "";
   const format = $("#format").selectedOptions[0]?.textContent || "";
-  $("#qualityText").textContent = quality;
+  $("#qualityText").textContent = $("#quality").value === "regular"
+    ? "标准：使用 Pixiv 缩小预览；动图为 600px 帧包，文件较小。"
+    : quality ? "原图：使用原始分辨率，不缩小图片。" : "";
   $("#formatText").textContent = format;
   const animation = $("#format").value === "gif"
     ? "动图转为 GIF；色彩会量化，帧时长按 10ms 精度保存，保留透明背景。单帧小于 10ms 时请选 MP4 或原始帧 ZIP。"
@@ -1811,7 +1857,7 @@ function updateFormatHint() {
   if (document.body.classList.contains("batch-mode")) {
     $("#formatHint").textContent = `静态图片保留源格式；${animation}`;
   } else if (currentDetailItem?.workType === "ugoira") {
-    $("#formatHint").textContent = `${animation} ${quality}；超大文件或超出转换资源预算时，请选择标准清晰度或原始帧 ZIP。`;
+    $("#formatHint").textContent = `${animation} ${quality}；文件太大或无法转换时，可选择标准（缩小预览）或原始帧 ZIP。`;
     if (!singleDownloadPending) $("#download").textContent = downloadButtonLabel(currentDetailItem);
   } else {
     $("#formatHint").textContent = quality ? `将按 ${quality}，${format} 保存。源格式不可转换时会保留原扩展名。` : "";
@@ -1991,7 +2037,7 @@ $("#loginBtn").onclick = async () => {
 $("#authAction").onclick = async () => {
   const logged = $("#authAction").textContent.includes("退出");
   $("#authAction").disabled = true;
-  $("#authStateText").textContent = logged ? "正在退出…" : "请在 MOKU 桌面登录窗口完成登录、验证码或 2FA；应用会实时监控状态…";
+  $("#authStateText").textContent = logged ? "正在退出…" : "请在 MOKU 桌面登录窗口完成登录、验证码或两步验证，完成后会自动连接。";
   let actionError = "";
   try {
     const remember = Boolean($("#rememberLogin").checked);

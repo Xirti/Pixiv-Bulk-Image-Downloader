@@ -86,6 +86,11 @@ def main():
                     assert not any("/api/library/" in url for url in requests), "startup eagerly fetched history"
                     assert page.locator("main #detail").count() == 0
                     assert page.locator(".page-rail [title]").count() == 6
+                    assert page.locator(".page-rail").evaluate("node => [...node.children].map(button => button.title)") == ["搜索", "预览选图", "采集篮", "下载打包", "下载历史", "收藏（暂未开放）"]
+                    for theme in ("dark", "light"):
+                        themes.append(check_theme(page, theme))
+                        assert page.locator("#tag").evaluate("node => getComputedStyle(node).backgroundColor !== getComputedStyle(node.closest('.search-panel')).backgroundColor")
+                        page.screenshot(path=str(screenshots / f"search-{theme}.png"))
                     page.locator("#datePreset").select_option("1")
                     bounds = page.evaluate("readSearchFilters()")
                     assert bounds["startDate"] == bounds["endDate"] and bounds["startDate"]
@@ -97,7 +102,8 @@ def main():
                     assert page.locator("#downloadPage").is_visible()
                     assert page.locator("#gallery").evaluate("node => node.closest('main').inert")
                     page.locator("#saveRoot").fill(str(root))
-                    page.locator("#quality").select_option("original")
+                    assert page.locator("#quality").input_value() == "original"
+                    assert "原始分辨率" in page.locator("#qualityText").inner_text()
                     page.locator("#download").click()
                     page.wait_for_function("() => !singleDownloadPending && document.querySelector('#toast').textContent.includes('已保存')")
                     assert "已保存 3 页，3 个文件" in page.locator("#toast").inner_text(), page.locator("#toast").inner_text()
@@ -105,10 +111,21 @@ def main():
                     assert saved["pages"] == [0, 1, 2] and len(saved["files"]) == 3, saved
                     assert all(Path(file).is_file() for file in saved["files"]), saved
                     page.locator("#navFavorites").click()
-                    assert "规划中" in page.locator("#favoritesPage").inner_text()
+                    assert "暂未开放" in page.locator("#favoritesPage").inner_text()
+                    assert "先做" not in page.locator("#favoritesPage").inner_text()
                     page.locator("#favoritesBack").click()
                     assert page.locator("#quality").input_value() == "original"
                     assert page.locator("#saveRoot").input_value() == str(root)
+                    page.locator("#navBasket").click()
+                    page.locator('[data-open-collection="11"]').click()
+                    page.wait_for_function("() => basketDetailItem?.id === '11'")
+                    download_requests = sum("/api/pixiv/download" in url or "/api/pixiv/batch-download" in url for url in requests)
+                    page.locator("#basketDownload").click()
+                    assert page.locator("#downloadPage").is_visible()
+                    assert page.evaluate("selection.pageCount") == 3
+                    assert page.locator("#quality").input_value() == "original"
+                    assert page.locator("#saveRoot").input_value() == str(root)
+                    assert sum("/api/pixiv/download" in url or "/api/pixiv/batch-download" in url for url in requests) == download_requests
                     page.locator("#navBasket").click()
                     page.locator('[data-open-collection="11"]').click()
                     page.wait_for_function("() => basketDetailItem?.id === '11'")
@@ -122,6 +139,9 @@ def main():
                     page.locator('#historySearch button[type="submit"]').click()
                     page.wait_for_function("() => document.querySelectorAll('.history-record').length === 1")
                     assert page.locator(".history-record h3 b").count() == 0
+                    assert page.locator(".history-record details").count() == 0
+                    assert page.locator(".history-paths").is_visible()
+                    assert page.locator(".history-paths").input_value() == "\n".join(saved["files"])
                     page.locator('[data-copy-history="0"]').click()
                     page.wait_for_function("() => document.querySelector('#historyStatus').textContent === '路径已复制'")
                     assert page.evaluate("globalThis.probeCopiedPaths") == "\n".join(saved["files"])
@@ -164,6 +184,24 @@ def main():
                     page.locator("#historyClear").click()
                     page.locator("#historyClearCancel").click()
                     assert history.list()["total"] == 25
+                    page.locator('[data-delete-history]').first.click()
+                    page.locator("#historyClearCancel").click()
+                    assert history.list()["total"] == 25
+                    page.locator('[data-delete-history]').first.click()
+                    page.locator("#historyClearConfirm").click()
+                    page.wait_for_function("() => document.querySelector('#historyStatus').textContent.startsWith('24 条')")
+                    page.locator('[data-select-history]').first.check()
+                    page.locator('#historyPagination [data-history-page="2"]').click()
+                    page.wait_for_function("() => document.querySelectorAll('.history-record').length === 4")
+                    page.locator("#historySelectAll").check()
+                    assert page.locator("#historySelectedCount").inner_text() == "已选 5 条"
+                    page.locator("#historyDeleteSelected").click()
+                    assert "5 条" in page.locator("#historyDeleteTitle").inner_text()
+                    page.locator("#historyClearConfirm").click()
+                    page.wait_for_function("() => document.querySelector('#historyStatus').textContent.startsWith('19 条')")
+                    assert page.locator(".history-record").count() == 19
+                    assert page.locator("#historyPagination").inner_text() == ""
+                    assert all(Path(file).is_file() for file in saved["files"])
                     page.locator("#historyClear").click()
                     page.locator("#historyClearConfirm").click()
                     page.wait_for_function("() => document.querySelector('#historyStatus').textContent.startsWith('0 条')")
@@ -175,6 +213,28 @@ def main():
                     page.locator("#downloadBack").click()
                     assert page.locator("#downloadPage").is_hidden()
                     assert page.evaluate("selection.size") == 1
+                    page.locator("#navBasket").click()
+                    page.locator('[data-open-collection="11"]').click()
+                    page.wait_for_function("() => basketDetailItem?.id === '11'")
+                    page.locator("#basketClear").click()
+                    page.locator("#basketClearCancel").click()
+                    assert page.evaluate("selection.size") == 1
+                    page.locator("#basketClear").click()
+                    page.locator("#basketClearConfirm").click()
+                    assert page.locator("#basketPage").is_visible()
+                    assert page.evaluate("selection.size") == 0
+                    assert "采集篮为空" in page.locator("#batchCollections").inner_text()
+                    assert page.locator("#basketClear").is_disabled() and page.locator("#basketDownload").is_disabled()
+                    assert all(Path(file).is_file() for file in saved["files"])
+                    for width in (1280, 375, 320):
+                        page.set_viewport_size({"width": width, "height": 820})
+                        for theme in ("dark", "light"):
+                            themes.append(check_theme(page, theme))
+                            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), (width, "basket")
+                            for button in ("basketClear", "basketDownload"):
+                                box = page.locator("#" + button).bounding_box()
+                                assert box["x"] >= 0 and box["x"] + box["width"] <= width, (width, button, box)
+                            page.screenshot(path=str(screenshots / f"basket-{theme}-{width}.png"))
                     assert not errors, errors
                     print(json.dumps({"ok": True, "independentViews": True, "historyDuringDownload": True, "publishedFiles": len(list(root.rglob("*.png"))), "copyPaths": True, "clearKeptFiles": True, "themesChecked": len(themes), "viewports": [1280, 375, 320], "scriptErrors": errors, "screenshots": str(screenshots)}, ensure_ascii=False))
                 finally:

@@ -178,7 +178,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn(".home-intro", STYLE)
         self.assertIn("模糊", HTML)
         self.assertIn("采集篮", HTML + APP)
-        self.assertIn("旧页缓存即将清理", HTML + APP)
+        self.assertIn("保留旧页已选作品？", HTML + APP)
         self.assertIn("createFolder", APP)
         self.assertIn("batchDownload", HTML)
 
@@ -219,7 +219,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("selection.pageCount", count)
 
     def test_collection_basket_detaches_unarchived_selection_before_cache_eviction(self):
-        self.assertIn("selection.archivedCount", APP)
+        self.assertIn("selection.snapshot().filter(row => !row.archived)", APP)
         self.assertIn("function detachSelection(ids)", APP)
         self.assertIn("function clearSelection(ids)", APP)
         self.assertIn("selection.archive(ids)", APP)
@@ -417,7 +417,7 @@ class V105VisualContractTests(unittest.TestCase):
         snapshot = download[download.index("const taskOptions"):download.index("const task =")]
         self.assertIn("readDownloadOptions()", snapshot)
         snapshot = APP[APP.index("function readDownloadOptions"):APP.index("function syncBasketHeader")]
-        self.assertIn('quality: $("#quality").value || "regular"', snapshot)
+        self.assertIn('quality: $("#quality").value || "original"', snapshot)
         self.assertIn('saveRoot: $("#saveRoot").value.trim()', snapshot)
         self.assertIn('createFolder: $("#createFolder").checked', snapshot)
         self.assertIn('groupArtworks: Boolean($("#groupArtworks")?.checked)', snapshot)
@@ -439,8 +439,9 @@ class V105VisualContractTests(unittest.TestCase):
     def test_search_and_basket_cache_status_is_reported_without_binary_image_cache_claims(self):
         self.assertIn('id="cacheStatus"', HTML)
         self.assertIn("renderCacheStatus", APP)
-        self.assertIn("只保留元数据和下载链接", APP)
-        self.assertIn("缩略图仅加载当前打开页", APP)
+        self.assertIn("旧页可以返回重新加载", APP)
+        self.assertNotIn("图片二进制", APP)
+        self.assertIn("图片在打开对应页面时加载", HTML)
 
     def test_collection_downloads_are_grouped_by_their_original_search_context(self):
         self.assertIn("context: row.context", APP)

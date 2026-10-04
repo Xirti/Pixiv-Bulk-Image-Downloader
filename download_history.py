@@ -40,17 +40,25 @@ class DownloadHistory:
             with connection:
                 connection.execute("PRAGMA secure_delete=ON")
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in {0, 1}:
+                if version not in {0, 1, 2}:
                     raise ValueError("unsupported history schema")
+                # Non-reused IDs keep stale UI selections from deleting newer
+                # records after the last row is removed. Migrate atomically.
+                if version == 1:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute("ALTER TABLE downloads RENAME TO downloads_v1")
                 connection.execute("""CREATE TABLE IF NOT EXISTS downloads (
-                    id INTEGER PRIMARY KEY, operation TEXT NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL,
                     completed_at TEXT NOT NULL, artwork_id TEXT NOT NULL,
                     title TEXT NOT NULL, artist TEXT NOT NULL, work_type TEXT NOT NULL,
                     quality TEXT NOT NULL, format TEXT NOT NULL,
                     pages TEXT NOT NULL, files TEXT NOT NULL,
                     UNIQUE(operation, artwork_id)
                 )""")
-                connection.execute("PRAGMA user_version=1")
+                if version == 1:
+                    connection.execute("INSERT INTO downloads SELECT * FROM downloads_v1")
+                    connection.execute("DROP TABLE downloads_v1")
+                connection.execute("PRAGMA user_version=2")
                 yield connection
         finally:
             connection.close()
@@ -114,6 +122,17 @@ class DownloadHistory:
                     "pages": json.loads(row["pages"]), "files": json.loads(row["files"]),
                 } for row in rows]
         return result
+
+    def delete(self, ids: list[int]) -> int:
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= self.max_records
+                or any(type(row_id) is not int or not 1 <= row_id <= 2**63 - 1 for row_id in ids)):
+            raise ValueError("invalid history IDs")
+        with self._lock:
+            if not self.path.exists():
+                return 0
+            with self._connection() as connection:
+                cursor = connection.executemany("DELETE FROM downloads WHERE id=?", ((row_id,) for row_id in set(ids)))
+                return cursor.rowcount
 
     def clear(self) -> None:
         with self._lock:

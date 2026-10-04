@@ -30,6 +30,7 @@ class FakeElement {
   appendChild(child) { return child; }
   querySelectorAll(selector) {
     if (this.queryCache.has(selector)) return this.queryCache.get(selector);
+    if (selector.includes(", ")) return selector.split(", ").flatMap(part => this.querySelectorAll(part));
     const nodes = [];
     if (selector === "[data-collection-page]") {
       const inputs = /<input\b([^>]*\bdata-collection-page="([^"]+)"[^>]*)>/g;
@@ -53,6 +54,18 @@ class FakeElement {
         regex: /<button\b([^>]*\bdata-open-collection="([^"]+)"[^>]*)>/g,
         key: "openCollection",
       },
+      "[data-select-history]": {
+        regex: /<input\b([^>]*\bdata-select-history="([^"]+)"[^>]*)>/g,
+        key: "selectHistory",
+      },
+      "[data-delete-history]": {
+        regex: /<button\b([^>]*\bdata-delete-history="([^"]+)"[^>]*)>/g,
+        key: "deleteHistory",
+      },
+      "[data-history-page]": {
+        regex: /<button\b([^>]*\bdata-history-page="([^"]+)"[^>]*)>/g,
+        key: "historyPage",
+      },
     };
     const definition = patterns[selector];
     if (!definition) return nodes;
@@ -62,6 +75,7 @@ class FakeElement {
       if (/\bdisabled\b/.test(match[1])) continue;
       const node = new FakeElement();
       node.dataset[definition.key] = match[2];
+      node.checked = /\bchecked\b/.test(match[1]);
       nodes.push(node);
     }
     this.queryCache.set(selector, nodes);

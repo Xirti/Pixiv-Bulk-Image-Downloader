@@ -74,6 +74,48 @@ class DownloadHistoryTests(unittest.TestCase):
         self.history.record("second", [record()])
         self.assertEqual(self.history.list()["total"], 1)
 
+    def test_delete_single_multiple_and_nonexistent_ids_keeps_files(self):
+        image = Path(self.temp.name) / "existing.png"
+        image.write_bytes(b"keep")
+        self.history.record("first", [record(str(number), files=[str(image)]) for number in range(4)])
+        ids = [row["id"] for row in self.history.list()["items"]]
+        self.assertEqual(self.history.delete([ids[0]]), 1)
+        self.assertEqual(self.history.delete([ids[1], ids[2], ids[2], 99999]), 2)
+        self.assertEqual(self.history.list()["total"], 1)
+        self.assertEqual(image.read_bytes(), b"keep")
+        for invalid in (None, [], [True], [0], [-1], ["1"], [1.5], [2**63], [1] * 5001):
+            with self.assertRaises(ValueError):
+                self.history.delete(invalid)
+        self.assertEqual(self.history.list()["total"], 1)
+
+    def test_record_ids_are_not_reused_after_delete_or_clear(self):
+        self.history.record("first", [record()])
+        old = self.history.list()["items"][0]["id"]
+        self.history.delete([old])
+        self.history.record("second", [record()])
+        new = self.history.list()["items"][0]["id"]
+        self.assertGreater(new, old)
+        self.assertEqual(self.history.delete([old]), 0)
+        self.history.clear()
+        self.history.record("third", [record()])
+        self.assertGreater(self.history.list()["items"][0]["id"], new)
+
+    def test_v1_migration_preserves_records_and_makes_ids_stable(self):
+        self.history.record("first", [record()])
+        before = self.history.list()["items"]
+        with sqlite3.connect(self.path) as connection:
+            schema = connection.execute("SELECT sql FROM sqlite_master WHERE name='downloads'").fetchone()[0]
+            connection.execute("ALTER TABLE downloads RENAME TO newer")
+            connection.execute(schema.replace(" AUTOINCREMENT", ""))
+            connection.execute("INSERT INTO downloads SELECT * FROM newer")
+            connection.execute("DROP TABLE newer")
+            connection.execute("PRAGMA user_version=1")
+        connection.close()
+        self.assertEqual(self.history.list()["items"], before)
+        self.history.clear()
+        self.history.record("second", [record()])
+        self.assertGreater(self.history.list()["items"][0]["id"], before[0]["id"])
+
     def test_concurrent_atomic_requests(self):
         def write(number):
             self.history.record(str(number), [record(str(number * 2)), record(str(number * 2 + 1))])
@@ -92,13 +134,13 @@ class DownloadHistoryTests(unittest.TestCase):
     def test_future_schema_is_not_overwritten(self):
         self.history.record("first", [record()])
         with sqlite3.connect(self.path) as connection:
-            connection.execute("PRAGMA user_version=2")
+            connection.execute("PRAGMA user_version=3")
         connection.close()
         with self.assertRaises(ValueError):
             self.history.clear()
         with sqlite3.connect(self.path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM downloads").fetchone()[0], 1)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
         connection.close()
 
 
@@ -165,6 +207,24 @@ class DownloadHistoryHTTPTests(unittest.TestCase):
             self.assertEqual(rows[0]["pages"], [0, 2])
             self.assertEqual(self.request("/api/pixiv/download", {**self.payload, "requestId": "history-test-request-000002"})[0], 200)
             self.assertEqual(self.history.list()["total"], 2)
+
+    def test_delete_is_confirmed_protected_and_validated(self):
+        self.history.record("first", [record(), record("88")])
+        row_id = self.history.list()["items"][0]["id"]
+        payload = {"confirm": True, "ids": [row_id]}
+        route = "/api/library/history/delete"
+        with patch.object(server, "ensure_network_opener_current", side_effect=AssertionError("no network")):
+            self.assertEqual(self.request(route, payload, token=False)[0], 403)
+            self.assertEqual(self.request(route, payload, origin="https://evil.example")[0], 403)
+            for invalid in ({}, {"ids": [row_id]}, {"confirm": True, "ids": []}, {"confirm": True, "ids": [True]}):
+                self.assertEqual(self.request(route, invalid)[0], 400)
+            self.assertEqual(self.request(route, payload), (200, {"ok": True, "deleted": 1}))
+            self.assertEqual(self.request(route, payload)[1]["deleted"], 0)
+        self.assertEqual(self.history.list()["total"], 1)
+
+    def test_default_quality_is_original_but_explicit_preview_is_kept(self):
+        self.assertEqual(server.Handler._download_options({}), ("original", True))
+        self.assertEqual(server.Handler._download_options({"quality": "regular"}), ("regular", True))
 
     def test_failed_publication_never_records_success(self):
         handler = object.__new__(server.Handler)

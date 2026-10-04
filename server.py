@@ -3576,6 +3576,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/desktop/auth/logout": (4096, self._post_desktop_logout),
             "/api/system/select-folder": (4096, self._post_select_folder),
             "/api/library/history/clear": (4096, self._post_clear_history),
+            "/api/library/history/delete": (65536, self._post_delete_history),
             "/api/pixiv/search/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/ugoira/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
@@ -3674,6 +3675,17 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "无法清空下载历史"}, 500)
         return self.send_json({"ok": True})
 
+    def _post_delete_history(self, data: dict):
+        if data.get("confirm") is not True:
+            return self.send_json({"error": "请确认删除记录（不会删除文件）"}, 400)
+        try:
+            deleted = DOWNLOAD_HISTORY.delete(data.get("ids"))
+        except ValueError:
+            return self.send_json({"error": "请选择有效的历史记录"}, 400)
+        except (OSError, sqlite3.Error):
+            return self.send_json({"error": "无法删除下载历史"}, 500)
+        return self.send_json({"ok": True, "deleted": deleted})
+
     @staticmethod
     def _record_download_history(
         groups: list[tuple[dict, list[int], int]], saved: list[str],
@@ -3719,7 +3731,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _download_options(data: dict) -> tuple[str, bool]:
-        quality = str(data.get("quality") or "regular")
+        quality = str(data.get("quality") or "original")
         create_folder = data.get("createFolder", True)
         if quality not in {"original", "regular"}:
             raise RequestInputError(400, "图片质量无效")

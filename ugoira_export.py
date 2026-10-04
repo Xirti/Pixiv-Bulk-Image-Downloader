@@ -26,7 +26,7 @@ _CONVERSION_SLOT = threading.BoundedSemaphore(1)
 class _Output(io.BytesIO):
     def write(self, data):
         if self.tell() + len(data) > MAX_ARCHIVE_BYTES:
-            raise PixivPolicyError("转换文件超过 40MB，请选择标准清晰度或原始帧 ZIP")
+            raise PixivPolicyError("转换文件超过 40MB，请选择标准（缩小预览）或原始帧 ZIP")
         return super().write(data)
 
 
@@ -60,7 +60,7 @@ def _decoded_frames(raw: bytes, frames: list[dict]):
             # are checked before any output enters the download transaction.
             with Image.open(io.BytesIO(archive.read(frame["file"])), formats=("JPEG", "PNG")) as image:
                 if image.width * image.height > MAX_FRAME_PIXELS:
-                    raise PixivPolicyError("动图单帧分辨率过大，请选择标准清晰度")
+                    raise PixivPolicyError("动图单帧分辨率过大，请选择标准（缩小预览）")
                 if size is not None and image.size != size:
                     raise PixivPolicyError("动图帧尺寸不一致")
                 size = image.size
@@ -83,12 +83,12 @@ def _gif(raw, frames) -> bytes:
                 if delay < 10:
                     raise PixivPolicyError("GIF 无法准确保存小于 10ms 的帧时长，请选择 MP4 或原始帧 ZIP")
                 if time.monotonic() >= deadline:
-                    raise PixivPolicyError("GIF 转换超出处理预算，请选择标准清晰度或原始帧 ZIP")
+                    raise PixivPolicyError("GIF 动图过长，无法转换，请选择标准（缩小预览）或原始帧 ZIP")
                 frame_pixels = image.width * image.height
                 pixels += frame_pixels
                 largest = max(largest, frame_pixels)
                 if pixels * 3 + largest * 8 > MAX_GIF_MEMORY:
-                    raise PixivPolicyError("GIF 转换超出内存预算，请选择标准清晰度或原始帧 ZIP")
+                    raise PixivPolicyError("GIF 转换需要的内存过多，请选择标准（缩小预览）或原始帧 ZIP")
                 with Image.new("RGBA", image.size, "white") as background:
                     background.alpha_composite(image)
                     with background.convert("RGB") as rgb:
@@ -109,7 +109,7 @@ def _gif(raw, frames) -> bytes:
                            duration=durations, loop=0, disposal=2, transparency=255,
                            background=255, optimize=False)
             if time.monotonic() >= deadline:
-                raise PixivPolicyError("GIF 编码超时，请选择标准清晰度或原始帧 ZIP")
+                raise PixivPolicyError("GIF 编码超时，请选择标准（缩小预览）或原始帧 ZIP")
             return output.getvalue()
     finally:
         for image in images:
@@ -155,7 +155,7 @@ def _mp4(raw, frames, encoder) -> bytes:
             for index, (image, delay) in enumerate(decoded):
                 total_pixels += image.width * image.height
                 if total_pixels > 256_000_000 or time.monotonic() >= deadline:
-                    raise PixivPolicyError("MP4 转换超出处理预算，请选择标准清晰度或原始帧 ZIP")
+                    raise PixivPolicyError("MP4 动图过长，无法转换，请选择标准（缩小预览）或原始帧 ZIP")
                 name = f"frame{index:06d}.png"
                 with Image.new("RGBA", image.size, "white") as background:
                     background.alpha_composite(image)
@@ -163,7 +163,7 @@ def _mp4(raw, frames, encoder) -> bytes:
                         rgb.save(root / name, format="PNG", compress_level=1)
                 total_bytes += (root / name).stat().st_size
                 if total_bytes > 256 * 1024 * 1024:
-                    raise PixivPolicyError("MP4 转换暂存超出预算，请选择标准清晰度或原始帧 ZIP")
+                    raise PixivPolicyError("MP4 转换需要的临时空间过多，请选择标准（缩小预览）或原始帧 ZIP")
                 lines.extend([f"file '{name}'", "option framerate 1000", f"duration {delay / 1000:.3f}"])
         # The final repeated image gives the last original frame its complete
         # duration. Input timestamps use milliseconds, not an assumed 25 fps.
@@ -183,7 +183,7 @@ def _mp4(raw, frames, encoder) -> bytes:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise PixivPolicyError("MP4 编码超时，请选择标准清晰度或原始帧 ZIP") from exc
+            raise PixivPolicyError("MP4 编码超时，请选择标准（缩小预览）或原始帧 ZIP") from exc
         if result.returncode != 0:
             raise PixivPolicyError("MP4 编码失败，请使用支持 H.264（libx264）的 FFmpeg，或选择 GIF／原始帧 ZIP")
         output = root / "animation.mp4"
@@ -192,7 +192,7 @@ def _mp4(raw, frames, encoder) -> bytes:
         with output.open("rb") as stream:
             encoded = stream.read(MAX_ARCHIVE_BYTES + 1)
         if len(encoded) > MAX_ARCHIVE_BYTES:
-            raise PixivPolicyError("转换文件超过 40MB，请选择标准清晰度或原始帧 ZIP")
+            raise PixivPolicyError("转换文件超过 40MB，请选择标准（缩小预览）或原始帧 ZIP")
         if encoded[4:8] != b"ftyp":
             raise PixivPolicyError("MP4 编码未生成有效文件")
         return encoded
