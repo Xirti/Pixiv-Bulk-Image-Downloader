@@ -100,7 +100,7 @@
     } else {
       const old = field.value;
       field.value = text.trim();
-      if (text && !field.value) { field.value = old; throw new Error("invalid field value"); }
+      if (text && (!field.value || !field.validity.valid)) { field.value = old; throw new Error("invalid field value"); }
     }
     field.dispatchEvent(new Event("input", {bubbles:true}));
     if (!current.ranged) field.dispatchEvent(new Event("change", {bubbles:true}));
@@ -121,6 +121,7 @@
       const text = command === "paste" ? await clipboard("read") : "";
       if (command === "copy") return;
       if (token !== generation || !current.field.isConnected || current.field.closest("[hidden],[inert]") || current.field.disabled || current.field.readOnly || current.field.value !== current.value || document.activeElement !== current.field) return;
+      if (current.ranged && (current.field.selectionStart !== current.start || current.field.selectionEnd !== current.end)) return;
       if (command === "paste" && !text) return;
       replace(current, text, command === "cut");
     } catch {
@@ -142,8 +143,8 @@
     open(current, event.clientX, event.clientY);
   }, true);
   document.addEventListener("pointerdown", event => { if (!menu.contains(event.target)) close(); }, true);
-  window.addEventListener("scroll", () => close(), true);
-  window.addEventListener("resize", () => close());
+  window.addEventListener("scroll", () => close(true), true);
+  window.addEventListener("resize", () => close(true));
   window.addEventListener("blur", () => close());
   window.addEventListener("keydown", event => {
     if (menu.hidden) {

@@ -107,6 +107,11 @@ def main():
                     open_menu("#startDate")
                     action("paste")
                     page.wait_for_function("document.querySelector('#startDate').value === '2026-10-02'")
+                    page.evaluate("clipboardProbe.text = '2000-01-01'")
+                    open_menu("#startDate")
+                    action("paste")
+                    page.wait_for_timeout(80)
+                    assert page.locator("#startDate").input_value() == "2026-10-02", "paste bypassed the date minimum"
                     page.locator("#navHistory").click()
                     page.evaluate("clipboardProbe.text = 'x'.repeat(200)")
                     open_menu("#historyQuery")
@@ -118,6 +123,15 @@ def main():
                     page.keyboard.press("ArrowDown")
                     page.keyboard.press("Escape")
                     assert page.locator("#historyPage").is_visible(), "closing the menu exited history"
+                    for event in ("scroll", "resize"):
+                        page.locator("#historyQuery").fill("abcdef")
+                        page.locator("#historyQuery").evaluate("node => { node.focus(); node.setSelectionRange(0, 2); }")
+                        open_menu("#historyQuery")
+                        page.evaluate("event => window.dispatchEvent(new Event(event))", event)
+                        assert not menu.is_visible(), f"{event} did not dismiss the menu"
+                        assert page.locator("#historyQuery").evaluate("node => document.activeElement === node && node.selectionStart === 0 && node.selectionEnd === 2"), f"{event} dismissal lost focus or selection"
+                        page.keyboard.type("X")
+                        assert page.locator("#historyQuery").input_value() == "Xcdef", f"typing after {event} dismissal did not reach the field"
                     for width in (1280, 375, 320):
                         page.set_viewport_size({"width":width,"height":820})
                         for theme in ("dark", "light"):
@@ -135,8 +149,17 @@ def main():
                     page.evaluate("releasePaste()")
                     page.wait_for_timeout(80)
                     assert page.locator("#historyQuery").input_value() == "新文字", "stale paste overwrote a new edit"
+                    page.locator("#historyQuery").fill("abcd")
+                    page.locator("#historyQuery").evaluate("node => { node.focus(); node.setSelectionRange(0, 2); }")
+                    open_menu("#historyQuery")
+                    action("paste")
+                    page.keyboard.press("End")
+                    assert page.locator("#historyQuery").evaluate("node => node.selectionStart === 4 && node.selectionEnd === 4")
+                    page.evaluate("releasePaste()")
+                    page.wait_for_timeout(80)
+                    assert page.locator("#historyQuery").input_value() == "abcd", "pending paste overwrote the old selection after the caret moved"
                     assert not errors, errors
-                    print(json.dumps({"ok": True, "popupVisible": True, "cutCopyPasteSelectAll":True,"undo":True,"readonly":True,"modal":True,"date":True,"maxLength":True,"stalePaste":True,"themeViewports":6,"scriptErrors": errors}, ensure_ascii=False))
+                    print(json.dumps({"ok": True, "popupVisible": True, "cutCopyPasteSelectAll":True,"undo":True,"readonly":True,"modal":True,"date":True,"dateMinimum":True,"maxLength":True,"stalePaste":True,"caretMovedPaste":True,"dismissalFocus":True,"themeViewports":6,"scriptErrors": errors}, ensure_ascii=False))
                 finally:
                     browser.close()
         finally:
