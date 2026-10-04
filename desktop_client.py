@@ -20,29 +20,6 @@ from pixiv_login import LOGIN, select_session_cookie, session_cookie_metadata
 LOG = logging.getLogger("moku.desktop")
 
 
-_TEXT_MENU_COMMANDS = frozenset({
-    "undo", "redo", "cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll",
-})
-
-
-def _filter_text_context_menu(_sender, args) -> None:
-    for index in range(len(args.MenuItems) - 1, -1, -1):
-        if str(args.MenuItems[index].Name) not in _TEXT_MENU_COMMANDS:
-            args.MenuItems.RemoveAt(index)
-    if not len(args.MenuItems):
-        args.Handled = True
-
-
-def _enable_text_context_menu(window) -> None:
-    # before_load runs on the WebView2 UI thread, after pywebview disables
-    # native menus in non-debug mode. Keep clipboard commands, not navigation.
-    core = window.native.webview.CoreWebView2
-    core.Settings.AreDefaultContextMenusEnabled = True
-    if not getattr(window, "_moku_text_menu_configured", False):
-        core.ContextMenuRequested += _filter_text_context_menu
-        window._moku_text_menu_configured = True
-
-
 class DesktopLoginCancelled(RuntimeError):
     pass
 
@@ -289,6 +266,42 @@ class DesktopApi:
         selected = str(result[0]) if result else ""
         return {"selected": selected, "cancelled": not bool(selected)}
 
+    def _clipboard_transfer(self, text: str | None = None) -> dict:
+        if self._window is None:
+            return {"ok": False, "error": "桌面窗口尚未准备好"}
+        try:
+            current = urlsplit(self._window.get_current_url() or "")
+            backend = urlsplit(self._backend_url)
+            if (
+                backend.scheme != "http" or backend.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or current.scheme != backend.scheme or current.netloc != backend.netloc
+            ):
+                return {"ok": False, "error": "剪贴板仅供 MOKU 页面使用"}
+            return self._native_clipboard_transfer(text)
+        except Exception:
+            return {"ok": False, "error": "剪贴板暂时不可用，请重试"}
+
+    def _native_clipboard_transfer(self, text: str | None) -> dict:
+        from System import Func, Object
+        from System.Windows.Forms import Clipboard
+
+        def transfer():
+            if text is None:
+                return {"ok": True, "text": str(Clipboard.GetText())}
+            Clipboard.SetText(text)
+            return {"ok": True}
+
+        # Windows clipboard access requires the native UI (STA) thread.
+        return self._window.native.Invoke(Func[Object](transfer))
+
+    def read_clipboard(self) -> dict:
+        return self._clipboard_transfer()
+
+    def write_clipboard(self, text: str) -> dict:
+        if not isinstance(text, str) or not text or len(text) > 2 * 1024 * 1024:
+            return {"ok": False, "error": "没有可复制的文字或文字过长"}
+        return self._clipboard_transfer(text)
+
 
 def start_desktop(
     url: str,
@@ -315,7 +328,6 @@ def start_desktop(
         text_select=True,
     )
     api._window = window
-    window.events.before_load += _enable_text_context_menu
     storage_path.mkdir(parents=True, exist_ok=True)
     if startup is None:
         webview.start(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)

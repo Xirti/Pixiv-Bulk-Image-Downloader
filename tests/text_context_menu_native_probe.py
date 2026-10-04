@@ -1,7 +1,7 @@
-"""Verify real WebView2 text-menu configuration in a hidden desktop window.
+"""Actual desktop JS bridge + UI-thread clipboard path, with fixture clipboard.
 
-No clipboard commands are executed; menu state is checked without reading or
-changing the user's clipboard. No external requests or account login are used.
+The test window is hidden. Its DOM context event is synthetic; real right clicks
+are covered by text_context_menu_browser_probe.py. No OS clipboard is changed.
 """
 from __future__ import annotations
 
@@ -11,22 +11,21 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ["PYTHONNET_RUNTIME"] = "netfx"
 os.environ.pop("WEBVIEW2_USER_DATA_FOLDER", None)
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 import desktop_client
 
-
-HTML = """<!doctype html><meta charset="utf-8"><title>MOKU text menu test</title>
-<input id="input" value="猫耳 fox"><textarea id="textarea">多行文字</textarea>
-<input id="readonly" readonly value="只读文字"><p id="text">普通文字，可以选择复制。</p>
-<style>body{padding:40px}input,textarea{display:block;width:300px;margin:12px}p{margin:30px}</style>
-""".encode("utf-8")
+HTML = b'''<!doctype html><meta charset="utf-8"><title>MOKU text-menu test</title>
+<link rel="stylesheet" href="/style.css"><input id="input" value="cat fox">
+<input id="readonly" readonly value="readonly"><p id="text">plain text</p>
+<script src="/text-context-menu.js"></script>'''
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -34,84 +33,82 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        asset = self.path.split("?", 1)[0]
+        body = (ROOT / "web" / asset.lstrip("/")).read_bytes() if asset in {"/style.css", "/text-context-menu.js"} else HTML
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(HTML)))
+        self.send_header("Content-Type", "text/html; charset=utf-8" if body == HTML else "text/css" if asset == "/style.css" else "application/javascript")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(HTML)
+        self.wfile.write(body)
 
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
-    result = {"ok": False, "cases": [], "error": ""}
-    create_window = desktop_client.webview.create_window
+    result = {"ok":False,"error":""}
+    create = desktop_client.webview.create_window
 
     def hidden_window(*args, **kwargs):
-        return create_window(*args, **kwargs, hidden=True, focus=False)
+        return create(*args, **kwargs, hidden=True, focus=False)
 
     def probe(window):
         try:
-            if not window.events.loaded.wait(20):
-                raise TimeoutError("desktop page did not load")
+            assert window.events.loaded.wait(20), "desktop did not load"
             from System import Func, Object
-            from System.Collections.Generic import List
-            from Microsoft.Web.WebView2.Core import CoreWebView2ContextMenuItem, CoreWebView2ContextMenuItemKind
-
+            from System.Threading import Thread
             control = window.native.webview
-
-            def native_call(callback):
-                return control.Invoke(Func[Object](lambda: callback(control.CoreWebView2)))
-
-            settings = native_call(lambda core: [bool(core.Settings.AreDefaultContextMenusEnabled), bool(core.Settings.AreDevToolsEnabled)])
-            assert settings == [True, False], ("native text menu / developer tools settings", settings)
+            settings = control.Invoke(Func[Object](lambda: [bool(control.CoreWebView2.Settings.AreDefaultContextMenusEnabled), bool(control.CoreWebView2.Settings.AreDevToolsEnabled)]))
+            assert settings == [False, False], settings
             assert window.evaluate_js("getComputedStyle(document.body).userSelect") != "none"
+            clipboard = {"text":"paste fixture", "sta":False}
 
-            def check_native_menu_collection(core):
-                items = List[CoreWebView2ContextMenuItem]()
-                items.Add(core.Environment.CreateContextMenuItem("test-navigation", None, CoreWebView2ContextMenuItemKind.Command))
-                args = SimpleNamespace(MenuItems=items, Handled=False)
-                desktop_client._filter_text_context_menu(None, args)
-                return args.Handled and not len(items)
+            class FixtureClipboard:
+                @staticmethod
+                def GetText():
+                    clipboard["sta"] = str(Thread.CurrentThread.GetApartmentState()) == "STA"
+                    return clipboard["text"]
 
-            assert native_call(check_native_menu_collection), "native .NET menu filtering failed"
-            result["nativeMenuCollection"] = True
-            for selector in ("#input", "#textarea", "#readonly", "#text"):
-                selection = window.evaluate_js("""(() => {
-                    const node = document.querySelector(%s);
-                    if (node.matches('input,textarea')) {
-                        node.focus(); node.setSelectionRange(0, 2);
-                        return node.value.slice(node.selectionStart, node.selectionEnd);
-                    } else {
-                        const selection = getSelection(); selection.removeAllRanges();
-                        const range = document.createRange(); range.selectNodeContents(node); selection.addRange(range);
-                        return selection.toString();
-                    }
-                })()""" % json.dumps(selector))
-                assert selection, selector
-                result["cases"].append({"target": selector, "selectedText": selection})
-            window.load_url(f"http://127.0.0.1:{server.server_port}/?reload=1")
-            assert window.events.loaded.wait(20), "desktop page did not reload"
-            assert native_call(lambda core: bool(core.Settings.AreDefaultContextMenusEnabled))
-            assert window.evaluate_js("getComputedStyle(document.body).userSelect") != "none"
-            result["menusEnabled"] = settings[0]
-            result["devToolsEnabled"] = settings[1]
-            result["reload"] = True
-            result["ok"] = True
+                @staticmethod
+                def SetText(text):
+                    clipboard["sta"] = str(Thread.CurrentThread.GetApartmentState()) == "STA"
+                    clipboard["text"] = text
+
+            def wait_js(script):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if window.evaluate_js(script):
+                        return
+                    time.sleep(0.05)
+                raise AssertionError(script)
+
+            # Patch only the external clipboard provider, not our native Invoke,
+            # origin guard, public bridge, menu or editor code.
+            with patch.dict(sys.modules, {"System.Windows.Forms":SimpleNamespace(Clipboard=FixtureClipboard)}):
+                window.evaluate_js("document.querySelector('#input').focus(); document.querySelector('#input').setSelectionRange(0,3); document.querySelector('#input').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:30,clientY:30}))")
+                assert window.evaluate_js("!document.querySelector('#textContextMenu').hidden")
+                window.evaluate_js("document.querySelector('[data-text-command=cut]').click()")
+                wait_js("document.querySelector('#input').value === ' fox'")
+                assert clipboard["text"] == "cat" and clipboard["sta"]
+                window.evaluate_js("document.querySelector('#input').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true})); document.querySelector('[data-text-command=paste]').click()")
+                wait_js("document.querySelector('#input').value === 'cat fox'")
+                assert clipboard["sta"]
+            window.load_url(f"http://127.0.0.1:{httpd.server_port}/?reload=1")
+            assert window.events.loaded.wait(20)
+            window.evaluate_js("document.querySelector('#readonly').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))")
+            assert window.evaluate_js("!document.querySelector('#textContextMenu').hidden && document.querySelector('[data-text-command=cut]').disabled && document.querySelector('[data-text-command=paste]').disabled")
+            result.update(ok=True, desktopBridgeCutPaste=True, clipboardSTA=True, readonlyAfterReload=True, syntheticContextEvent=True, osClipboardUntouched=True)
         except Exception as exc:
             result["error"] = f"{type(exc).__name__}: {exc}"
         finally:
             window.destroy()
 
     try:
-        with tempfile.TemporaryDirectory(prefix="moku-text-menu-", ignore_cleanup_errors=True) as directory, patch.object(
-            desktop_client.webview, "create_window", side_effect=hidden_window
-        ):
-            desktop_client.start_desktop(f"http://127.0.0.1:{server.server_port}/", Path(directory), startup=probe)
+        with tempfile.TemporaryDirectory(prefix="moku-text-native-", ignore_cleanup_errors=True) as directory, patch.object(desktop_client.webview, "create_window", side_effect=hidden_window):
+            desktop_client.start_desktop(f"http://127.0.0.1:{httpd.server_port}/", Path(directory), startup=probe)
     finally:
-        server.shutdown()
-        server.server_close()
+        httpd.shutdown()
+        httpd.server_close()
         thread.join(timeout=5)
     print(json.dumps(result, ensure_ascii=False))
     if not result["ok"]:

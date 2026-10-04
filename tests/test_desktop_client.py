@@ -2,38 +2,23 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from webview.event import Event
 from webview.util import create_cookie
 
 import desktop_client
 
 
 def desktop_window():
-    core = SimpleNamespace(
-        Settings=SimpleNamespace(AreDefaultContextMenusEnabled=False, AreDevToolsEnabled=False),
-        ContextMenuRequested=Event(None),
-    )
-    window = SimpleNamespace(native=SimpleNamespace(webview=SimpleNamespace(CoreWebView2=core)))
-    window.events = SimpleNamespace(before_load=Event(window, True))
-    return window
-
-
-class MenuItems(list):
-    def RemoveAt(self, index):
-        self.pop(index)
+    return Mock()
 
 
 class DesktopClientTests(unittest.TestCase):
-    def test_desktop_enables_native_text_context_menu_without_debug_mode(self):
+    def test_text_menu_does_not_enable_debug_mode(self):
         observed = {}
         main = desktop_window()
 
         def capture_start(*_args, **kwargs):
-            main.events.before_load.set()
-            observed["menus"] = main.native.webview.CoreWebView2.Settings.AreDefaultContextMenusEnabled
             observed["debug"] = kwargs["debug"]
 
         with patch.object(
@@ -41,9 +26,7 @@ class DesktopClientTests(unittest.TestCase):
         ), patch.object(desktop_client.webview, "start", side_effect=capture_start):
             desktop_client.start_desktop("http://127.0.0.1:45678/", Path("C:/tmp/moku-profile"))
 
-        self.assertTrue(observed["menus"], "native context menus are disabled in the desktop host")
         self.assertFalse(observed["debug"])
-        self.assertFalse(main.native.webview.CoreWebView2.Settings.AreDevToolsEnabled)
 
     def test_desktop_allows_selecting_display_text_for_copying(self):
         with patch.object(desktop_client.webview, "create_window", return_value=desktop_window()) as create, patch.object(
@@ -53,34 +36,39 @@ class DesktopClientTests(unittest.TestCase):
 
         self.assertTrue(create.call_args.kwargs.get("text_select", False), "display text cannot be selected")
 
-    def test_native_menu_keeps_clipboard_commands_and_their_enabled_states(self):
-        names = ["back", "cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll", "undo", "redo", "reload", "print", "inspect", "searchWeb", "separator"]
-        args = SimpleNamespace(
-            MenuItems=MenuItems(SimpleNamespace(Name=name, IsEnabled=name != "cut") for name in names),
-            Handled=False,
-        )
+    def test_clipboard_is_only_available_to_its_local_backend_origin(self):
+        api = desktop_client.DesktopApi(backend_url="http://127.0.0.1:45678/")
+        api._window = Mock()
+        api._window.get_current_url.return_value = "https://www.pixiv.net/"
+        with patch.object(api, "_native_clipboard_transfer") as transfer:
+            self.assertFalse(api.read_clipboard()["ok"])
+            self.assertFalse(api.write_clipboard("fixture")["ok"])
+        transfer.assert_not_called()
 
-        desktop_client._filter_text_context_menu(None, args)
+    def test_clipboard_read_and_write_are_explicit_and_forward_only_text(self):
+        api = desktop_client.DesktopApi(backend_url="http://127.0.0.1:45678/")
+        api._window = Mock()
+        api._window.get_current_url.return_value = "http://127.0.0.1:45678/#home"
+        with patch.object(api, "_native_clipboard_transfer", side_effect=[{"ok":True,"text":"猫耳"},{"ok":True}]) as transfer:
+            self.assertEqual(api.read_clipboard(), {"ok":True,"text":"猫耳"})
+            self.assertEqual(api.write_clipboard("文字"), {"ok":True})
+        self.assertEqual([call.args for call in transfer.call_args_list], [(None,), ("文字",)])
 
-        self.assertEqual([item.Name for item in args.MenuItems], ["cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll", "undo", "redo"])
-        self.assertFalse(args.MenuItems[0].IsEnabled)
-        self.assertFalse(args.Handled)
+    def test_clipboard_failure_returns_no_native_trace_or_contents(self):
+        api = desktop_client.DesktopApi(backend_url="http://127.0.0.1:45678/")
+        api._window = Mock()
+        api._window.get_current_url.return_value = "http://127.0.0.1:45678/"
+        with patch.object(api, "_native_clipboard_transfer", side_effect=RuntimeError("private content")):
+            result = api.read_clipboard()
+        self.assertFalse(result["ok"])
+        self.assertNotIn("private", str(result))
 
-    def test_native_menu_does_not_show_a_navigation_menu_on_blank_space(self):
-        args = SimpleNamespace(MenuItems=MenuItems([SimpleNamespace(Name="reload")]), Handled=False)
-
-        desktop_client._filter_text_context_menu(None, args)
-
-        self.assertEqual(args.MenuItems, [])
-        self.assertTrue(args.Handled)
-
-    def test_native_menu_setup_is_idempotent_after_navigation(self):
-        main = desktop_window()
-
-        desktop_client._enable_text_context_menu(main)
-        desktop_client._enable_text_context_menu(main)
-
-        self.assertEqual(len(main.native.webview.CoreWebView2.ContextMenuRequested), 1)
+    def test_clipboard_rejects_invalid_write_without_touching_native_clipboard(self):
+        api = desktop_client.DesktopApi()
+        with patch.object(api, "_native_clipboard_transfer") as transfer:
+            for text in (None, 1, "", "x" * (2 * 1024 * 1024 + 1)):
+                self.assertFalse(api.write_clipboard(text)["ok"])
+        transfer.assert_not_called()
 
     def test_desktop_api_keeps_native_windows_and_factories_private(self):
         api = desktop_client.DesktopApi(window_factory=Mock())

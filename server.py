@@ -52,7 +52,7 @@ CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
     "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "download_history.py", "preview_resources.py", "ugoira_export.py", "version.py",
-    "web/index.html", "web/app.js", "web/download-history.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
+    "web/index.html", "web/app.js", "web/text-context-menu.js", "web/download-history.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
 )
 
 
