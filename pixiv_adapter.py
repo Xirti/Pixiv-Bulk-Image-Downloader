@@ -77,6 +77,16 @@ def _plain_text(value: Any) -> str:
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
+def bookmark_count(raw: dict[str, Any]) -> int | None:
+    value = raw.get("bookmarkCount")
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[str, Any]:
     restriction = int(raw.get("xRestrict", -1))
     if restriction == 0:
@@ -124,7 +134,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
         "pages": max(1, int(raw.get("pageCount") or 1)),
         "width": max(0, int(raw.get("width") or 0)),
         "height": max(0, int(raw.get("height") or 0)),
-        "bookmarks": max(0, int(raw.get("bookmarkCount") or 0)),
+        "bookmarks": bookmark_count(raw),
         "date": publication_date(raw.get("createDate")),
         "description": _plain_text(raw.get("description")),
         "workType": {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType", 0)), "illustration"),
@@ -258,7 +268,18 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
             {"id": "regular", "label": "Pixiv 常规预览", "width": 0, "height": 0},
         ]
         formats = [{"id": "source", "label": "保留源格式（推荐）"}]
-    return {"id": artwork_id, "restriction": restriction, "source": "pixiv", "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"), "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""), "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30], "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0), "bookmarks": int(raw.get("bookmarkCount") or 0), "date": publication_date(raw.get("createDate")), "description": _plain_text(raw.get("description") or raw.get("illustComment")), "workType": work_type, "aiGenerated": int(raw.get("aiType") or 1) == 2, "thumb": (page_images[0]["regular"] or page_images[0]["original"]) if page_images else "", "pageImages": page_images, "qualities": qualities, "formats": formats}
+    return {
+        "id": artwork_id, "restriction": restriction, "source": "pixiv",
+        "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"),
+        "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""),
+        "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30],
+        "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0),
+        "bookmarks": bookmark_count(raw), "date": publication_date(raw.get("createDate")),
+        "description": _plain_text(raw.get("description") or raw.get("illustComment")),
+        "workType": work_type, "aiGenerated": int(raw.get("aiType") or 1) == 2,
+        "thumb": (page_images[0]["regular"] or page_images[0]["original"]) if page_images else "",
+        "pageImages": page_images, "qualities": qualities, "formats": formats,
+    }
 
 
 def should_retry_status(status: int) -> bool:

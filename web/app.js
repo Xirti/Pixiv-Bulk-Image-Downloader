@@ -105,6 +105,46 @@ $("#startDate").oninput = syncDateInputs;
 $("#endDate").oninput = syncDateInputs;
 syncDateInputs();
 
+function readRecentSearches() {
+  try {
+    const rows = JSON.parse(localStorage.getItem("moku.recentSearches") || "[]");
+    return Array.isArray(rows) ? rows.filter(row => typeof row?.tag === "string" && row.tag.length <= 500 && row.filters && typeof row.filters === "object").slice(0, 8) : [];
+  } catch { return []; }
+}
+
+function rememberSearch(tag, filters) {
+  const row = {tag, filters: {...filters}};
+  const key = JSON.stringify(row);
+  const rows = [row, ...readRecentSearches().filter(old => JSON.stringify(old) !== key)].slice(0, 8);
+  try { localStorage.setItem("moku.recentSearches", JSON.stringify(rows)); } catch { /* Search works without storage. */ }
+  renderRecentSearches();
+}
+
+function restoreSearch(row) {
+  if (contextNavigationLocked()) return;
+  const filters = row.filters;
+  $("#tag").value = row.tag;
+  $("#safety").value = lastKnownLoggedIn === true ? filters.mode : "safe";
+  $("#workType").value = filters.workType;
+  $("#includeAi").checked = Boolean(filters.includeAi);
+  $("#fuzzySearch").checked = Boolean(filters.fuzzy);
+  $("#datePreset").value = filters.startDate ? "custom" : "all";
+  $("#startDate").value = filters.startDate || "";
+  $("#endDate").value = filters.endDate || "";
+  syncDateInputs();
+}
+
+function renderRecentSearches() {
+  const holder = $("#recentSearches");
+  if (!holder) return;
+  const rows = readRecentSearches();
+  holder.hidden = !rows.length;
+  holder.innerHTML = '<span>最近搜索</span>' + rows.map((row, index) => `<button type="button" data-recent-search="${index}" title="恢复这次搜索的标签和筛选条件">${esc(row.tag)}</button>`).join("");
+  holder.querySelectorAll("[data-recent-search]").forEach(button => {
+    button.onclick = () => restoreSearch(rows[Number(button.dataset.recentSearch)]);
+  });
+}
+
 const esc = (value) => String(value).replace(
   /[&<>"']/g,
   (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char],
@@ -691,6 +731,8 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
   const requestedContext = contextMatch
     ? { kind: contextMatch[1].toLowerCase(), value: contextMatch[2].trim() }
     : { kind: "tags", value: cleanTag };
+  const keepGrid = previousView.hadCommittedResults && cleanTag === activeTagQuery
+    && JSON.stringify(requestedFilters) === JSON.stringify(activeSearchFilters);
 
   searchPending = true;
   resultSelectionEnabled = false;
@@ -700,9 +742,12 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
   cancelSearchButton.disabled = false;
   $("#download").disabled = true;
   syncSearchScopedControls();
-  grid.innerHTML = '<p class="loading-state">正在连接 Pixiv，可随时继续操作页面…</p>';
-  $("#pagination").innerHTML = "";
-  $("#count").textContent = "正在加载当前页";
+  grid.setAttribute("aria-busy", "true");
+  if (!keepGrid) {
+    grid.innerHTML = '<p class="loading-state">正在连接 Pixiv，可随时继续操作页面…</p>';
+    $("#pagination").innerHTML = "";
+  }
+  $("#count").textContent = `正在加载第 ${page} 页${keepGrid ? " · 当前仍显示上一页" : ""}`;
 
   try {
     const query = new URLSearchParams({
@@ -722,6 +767,7 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
     activeTagQuery = cleanTag;
     activeSearchContext = requestedContext;
     activeSearchFilters = requestedFilters;
+    rememberSearch(cleanTag, requestedFilters);
     items = Array.isArray(data.items) ? data.items : [];
     reconcileSelectedArtworkPreviews(items);
     currentPage = Number(data.page) || 1;
@@ -758,14 +804,22 @@ async function search(tag, page = 1, filters = readSearchFilters()) {
       }
       return;
     }
-    grid.innerHTML = `<div class="error-state"><b>加载失败</b><p>${esc(error.message || "Pixiv 搜索失败")}</p><button id="retrySearch" type="button">重试当前搜索</button></div>`;
-    $("#count").textContent = "连接未完成";
+    if (controller !== searchController) return;
+    if (keepGrid) {
+      resultSelectionEnabled = previousView.hadCommittedResults;
+      renderPagination();
+      $("#count").textContent = `第 ${page} 页加载失败：${error.message || "连接未完成"} · 仍显示第 ${currentPage} 页，可再次翻页重试`;
+    } else {
+      grid.innerHTML = `<div class="error-state"><b>加载失败</b><p>${esc(error.message || "Pixiv 搜索失败")}</p><button id="retrySearch" type="button">重试当前搜索</button></div>`;
+      $("#count").textContent = "连接未完成";
+    }
     $("#retrySearch")?.addEventListener("click", () => search(cleanTag, page, requestedFilters));
   } finally {
     if (controller === searchController) {
       searchController = null;
       activeSearchRequestId = null;
       searchPending = false;
+      grid.setAttribute("aria-busy", "false");
       searchButton.disabled = false;
       searchButton.innerHTML = "开始寻找 <span>↗</span>";
       cancelSearchButton.disabled = false;
@@ -788,6 +842,7 @@ function reconcileSelectedArtworkPreviews(freshItems) {
     const fresh = freshById.get(String(existing.id));
     if (!fresh) return existing;
     const merged = { ...existing, ...fresh };
+    if (fresh.bookmarks == null) merged.bookmarks = existing.bookmarks ?? null;
     if (Array.isArray(existing.pageImages) && existing.pageImages.length) {
       merged.pageImages = existing.pageImages;
       merged.thumb = fresh.thumb || existing.thumb;
@@ -818,7 +873,7 @@ function render() {
     const checked = selection.has(item.id) ? "checked" : "";
     const badges = `${item.workType === "ugoira" ? '<span class="series type-ugoira">动图</span>' : ""}${item.pages > 1 ? `<span class="series">叠图 ${item.pages}P</span>` : ""}`;
     const ugoiraHover = item.workType === "ugoira" ? ` data-ugoira-preview="${esc(String(item.id))}"` : "";
-    return `<article class="card" tabindex="0" data-i="${index}"><label class="card-select"><input type="checkbox" data-select="${index}" ${checked}><span>选择</span></label><div class="poster"${ugoiraHover}>${image}${badges}</div><div class="meta"><div><h3>${esc(item.title)}</h3><p>${esc(item.artist)} · ${item.tags.map((tag) => `#${esc(tag)}`).join(" ")}</p></div><span>♡ ${Number(item.bookmarks || 0).toLocaleString()}</span></div></article>`;
+    return `<article class="card" tabindex="0" data-i="${index}"><label class="card-select"><input type="checkbox" data-select="${index}" ${checked}><span>选择</span></label><div class="poster"${ugoiraHover}>${image}${badges}</div><div class="meta"><div><h3>${esc(item.title)}</h3><p>${esc(item.artist)} · ${item.tags.map((tag) => `#${esc(tag)}`).join(" ")}</p></div><span>♡ ${item.bookmarks == null ? "—" : Number(item.bookmarks).toLocaleString()}</span></div></article>`;
   }).join("");
   installImageFallbacks(grid);
   attachUgoiraHoverTargets(grid);
@@ -2076,6 +2131,7 @@ document.querySelectorAll("dialog").forEach((modal) => {
 });
 
 clearDetail();
+renderRecentSearches();
 grid.innerHTML = '<div class="empty-state"><b>准备就绪</b><p>输入标签后点击“开始寻找”。首屏不再自动连接 Pixiv。</p></div>';
 $("#count").textContent = "等待搜索";
 syncSearchScopedControls();

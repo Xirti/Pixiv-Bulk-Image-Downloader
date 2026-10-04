@@ -12,6 +12,14 @@ from pixiv_adapter import (
 
 
 class PixivAdapterTests(unittest.TestCase):
+    def test_missing_bookmark_count_is_unknown_not_zero(self):
+        raw = {"id": "123", "url": "https://i.pximg.net/a.jpg", "xRestrict": 0, "isUnlisted": False}
+        self.assertIsNone(normalize_search_item(raw)["bookmarks"])
+        raw["bookmarkCount"] = 0
+        self.assertEqual(normalize_search_item(raw)["bookmarks"], 0)
+        raw["bookmarkCount"] = 25
+        self.assertEqual(normalize_search_item(raw)["bookmarks"], 25)
+
     def test_allows_only_https_pixiv_api_and_image_hosts(self):
         self.assertTrue(is_allowed_pixiv_url("https://www.pixiv.net/ajax/illust/93172108"))
         self.assertTrue(is_allowed_pixiv_url("https://i.pximg.net/img-original/a.jpg", image_only=True))

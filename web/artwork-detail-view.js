@@ -36,7 +36,7 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
     fields.Desc.textContent = item.description;
     fields.Artist.textContent = item.artist;
     fields.Size.textContent = `${item.width} × ${item.height} px`;
-    fields.Bookmarks.textContent = Number(item.bookmarks || 0).toLocaleString();
+    fields.Bookmarks.textContent = item.bookmarks == null ? "暂未获取" : Number(item.bookmarks).toLocaleString();
     fields.Date.textContent = item.date;
     fields.Tags.innerHTML = (item.tags || []).map(tag => `<span>#${escape(tag)}</span>`).join("");
     const visible = Math.min(item.pages, 4), middle = (visible - 1) / 2;

@@ -226,3 +226,8 @@ body.viewer-open #backTop{top:12px}
 @media(max-width:400px){.custom-dates{flex-direction:column;align-items:stretch;gap:10px}.custom-dates span{display:none}}
 @media(max-width:900px){.hero{min-height:calc(100svh - 68px);gap:30px;padding-top:48px;padding-bottom:56px}}
 @media(max-width:600px){.hero{padding:36px 16px 52px;gap:25px}.search-panel{padding:20px 16px;border-radius:16px}.search-row{flex-wrap:wrap;gap:10px}.search-row input{flex-basis:100%;min-height:58px;font-size:18px}.search-row button[type=submit]{flex:1}.filters{grid-template-columns:1fr 1fr}.head-actions{gap:6px}.theme-toggle{padding:8px}.home-intro h1{font-size:30px}.date-filter>label,.custom-dates{width:100%}.custom-dates input{padding:8px 4px}.date-filter small{width:100%}}
+/* Small saved-search chips; no extra panel or network request on entry. */
+.recent-searches{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:18px;color:var(--muted)}
+.recent-searches[hidden]{display:none}
+.recent-searches button{font-size:13px;padding:6px 12px;border-radius:18px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#grid[aria-busy="true"] .card{cursor:wait}
