@@ -119,6 +119,12 @@ def main():
                     action("paste")
                     page.wait_for_function("() => document.querySelector('#endDate').value === '2026-10-03'")
                     assert page.locator("#endDate").evaluate("node => node.validity.valid"), "pasting a valid date did not clear the previous date-order error"
+                    page.locator('.page-rail a[href="#detail"]').click()
+                    page.evaluate("text => { clipboardProbe.text = text; }", r"D:\MOKU Downloads")
+                    open_menu("#saveRoot")
+                    action("paste")
+                    page.wait_for_function("() => document.querySelector('#saveRoot').value === clipboardProbe.text")
+                    assert page.locator("#saveRoot").input_value() == r"D:\MOKU Downloads"
                     page.locator("#navHistory").click()
                     page.evaluate("clipboardProbe.text = 'x'.repeat(200)")
                     open_menu("#historyQuery")
