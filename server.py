@@ -1338,11 +1338,12 @@ def load_search_source(
     budget: dict,
     *,
     cancel_event: threading.Event | None = None,
+    date_range: SearchDateRange | None = None,
 ) -> dict:
     state = extend_history(
         tag, mode, need_count, allow_r18=allow_r18, budget=budget,
         namespace=session_key, cancel_event=cancel_event, work_type=session_key[3],
-        date_range=session_key[6] if len(session_key) > 6 else None,
+        date_range=date_range,
     )
     source_key = (session_key, tag, mode)
     base = int(state.get("baseOffset", 0))
@@ -1828,6 +1829,7 @@ def search_pixiv_results(
         budget = {"started": time.monotonic(), "requests": 0}
         source_tags = tuple(dict.fromkeys(alias for group in tag_groups for alias in group))
         sources = [(tag, mode) for tag in source_tags for mode in modes]
+        source_options = {"date_range": date_range} if date_range is not None else {}
         rounds = 0
         while absolute_loaded < desired_items and rounds < 8:
             raise_if_search_cancelled(cancel_event)
@@ -1864,12 +1866,12 @@ def search_pixiv_results(
                     if cancel_event is None:
                         source = load_search_source(
                             session_key, tag, mode, absolute_offset + per_source,
-                            mode == "r18", budget,
+                            mode == "r18", budget, **source_options,
                         )
                     else:
                         source = load_search_source(
                             session_key, tag, mode, absolute_offset + per_source,
-                            mode == "r18", budget, cancel_event=cancel_event,
+                            mode == "r18", budget, cancel_event=cancel_event, **source_options,
                         )
                 if budget["requests"] > requests_before:
                     next_source_cursor = (source_index + 1) % len(sources)
