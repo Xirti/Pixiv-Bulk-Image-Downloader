@@ -24,12 +24,13 @@ class LocalCatalog:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
                 if version not in {0, 1}:
                     raise ValueError("unsupported catalog schema")
-                connection.execute("""CREATE TABLE IF NOT EXISTS artifacts (
-                    artwork TEXT NOT NULL, page INTEGER NOT NULL, quality TEXT NOT NULL,
-                    format TEXT NOT NULL, directory TEXT NOT NULL, files TEXT NOT NULL,
-                    PRIMARY KEY(artwork, page, quality, format, directory)
-                )""")
-                connection.execute("PRAGMA user_version=1")
+                if version == 0:
+                    connection.execute("""CREATE TABLE IF NOT EXISTS artifacts (
+                        artwork TEXT NOT NULL, page INTEGER NOT NULL, quality TEXT NOT NULL,
+                        format TEXT NOT NULL, directory TEXT NOT NULL, files TEXT NOT NULL,
+                        PRIMARY KEY(artwork, page, quality, format, directory)
+                    )""")
+                    connection.execute("PRAGMA user_version=1")
                 yield connection
         finally:
             connection.close()
@@ -97,12 +98,17 @@ class LocalCatalog:
 
     def downloaded_pages(self, artwork: str) -> set[int]:
         """A lightweight artwork indicator across directories and qualities."""
-        if not self.path.exists():
-            return set()
+        return self.downloaded_pages_many([artwork])[str(artwork)]
+
+    def downloaded_pages_many(self, artworks: list[str]) -> dict[str, set[int]]:
+        ids = list(dict.fromkeys(str(artwork) for artwork in artworks))
+        present = {artwork: set() for artwork in ids}
+        if not ids or not self.path.exists():
+            return present
         with self._lock, self._connection() as connection:
-            rows = connection.execute("SELECT page,files FROM artifacts WHERE artwork=?", (str(artwork),)).fetchall()
-        present = set()
-        for page, encoded in rows:
-            if page not in present and self._present(encoded):
-                present.add(page)
+            placeholders = ",".join("?" for _ in ids)
+            rows = connection.execute(f"SELECT artwork,page,files FROM artifacts WHERE artwork IN ({placeholders})", ids).fetchall()
+        for artwork, page, encoded in rows:
+            if page not in present[artwork] and self._present(encoded):
+                present[artwork].add(page)
         return present

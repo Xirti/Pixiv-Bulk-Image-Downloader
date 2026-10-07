@@ -115,6 +115,25 @@ def normalize_task(value: dict) -> dict:
             "firstSaved": str(value.get("firstSaved") or "")[:32768], "status": "paused"}
 
 
+def _visible_basket(rows: list, scope: str) -> list[dict]:
+    public = {row["id"]: row for owner, row in rows if owner == "public"}
+    visible = {}
+    for owner, row in rows:
+        if owner not in {scope, "public"}:
+            continue
+        shared = public.get(row["id"])
+        if owner == "public" or shared is None:
+            visible.setdefault(row["id"], row)
+            continue
+        # A formerly restricted work may now be in the shared basket.
+        # Keep this account's choices and origin, using its newer public metadata.
+        pages = sorted(set(row["pages"]) | set(shared["pages"]))
+        visible[row["id"]] = {**row, "item": shared["item"],
+                              "pages": [page for page in pages if page < shared["item"]["pages"]],
+                              "archived": row.get("archived", True) or shared.get("archived", True)}
+    return list(visible.values())
+
+
 class WorkspaceStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -129,10 +148,11 @@ class WorkspaceStore:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
                 if version not in {0, 1}:
                     raise ValueError("unsupported workspace schema")
-                connection.execute("CREATE TABLE IF NOT EXISTS basket (singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL)")
-                connection.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, scope TEXT NOT NULL, payload TEXT NOT NULL)")
-                connection.execute("CREATE TABLE IF NOT EXISTS recent (singleton INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
-                connection.execute("PRAGMA user_version=1")
+                if version == 0:
+                    connection.execute("CREATE TABLE IF NOT EXISTS basket (singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL)")
+                    connection.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, scope TEXT NOT NULL, payload TEXT NOT NULL)")
+                    connection.execute("CREATE TABLE IF NOT EXISTS recent (singleton INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+                    connection.execute("PRAGMA user_version=1")
                 yield connection
         finally:
             connection.close()
@@ -146,7 +166,7 @@ class WorkspaceStore:
                 row = connection.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
                 if row:
                     result["revision"] = row[0]
-                    result["basket"] = [item for owner, item in json.loads(row[1]) if owner in {scope, "public"}]
+                    result["basket"] = _visible_basket(json.loads(row[1]), scope)
                 result["tasks"] = [json.loads(row[0]) for row in connection.execute("SELECT payload FROM tasks WHERE scope=? ORDER BY rowid", (scope,))]
                 row = connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
                 if row:
@@ -216,11 +236,8 @@ class WorkspaceStore:
                 raise ValueError("stale basket revision")
             if old:
                 normalized += [(owner, row) for owner, row in json.loads(old[1]) if owner not in {scope, "public"}]
-            owner_counts = {}
-            for owner, row in normalized:
-                owner_counts[owner] = owner_counts.get(owner, 0) + len(row["pages"])
-            public_count = owner_counts.pop("public", 0)
-            if public_count > 1000 or any(public_count + count > 1000 for count in owner_counts.values()):
+            scopes = {"public", *(owner for owner, _row in normalized)}
+            if any(sum(len(row["pages"]) for row in _visible_basket(normalized, owner)) > 1000 for owner in scopes):
                 raise WorkspaceCapacityError("共享采集篮容量不足，请减少公开作品的选择后重试")
             connection.execute("INSERT OR REPLACE INTO basket VALUES (1,?,?)", (revision + 1, json.dumps(normalized, ensure_ascii=False)))
         return revision + 1

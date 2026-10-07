@@ -9,6 +9,29 @@ SOURCES = ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", 
 
 @unittest.skipUnless(shutil.which("node"), "Node required")
 class RoadmapFrontendTests(unittest.TestCase):
+    def test_preview_refresh_does_not_rewrite_unchanged_basket_choices(self):
+        self.run_js("""
+          workspaceReady = true;
+          workspaceScope = 'public';
+          const item = {id:'123',source:'pixiv',pages:3,restriction:'safe',title:'Cat',artist:'Artist',tags:['cat'],workType:'illustration',thumb:'/old'};
+          let writes = 0;
+          fetchJson = async (url, options) => {
+            assert.equal(url, '/api/workspace/basket');
+            writes++;
+            return {revision:writes};
+          };
+          selection.choose([item], {context:{kind:'tags',value:'cat'},resultPage:1});
+          await basketSaveChain;
+          assert.equal(writes, 1);
+          for(let i=0;i<5;i++) rememberArtworkDetail({...item,thumb:'/fresh-'+i,bookmarks:10+i,pageImages:[{regular:'/image-'+i}]});
+          await basketSaveChain;
+          assert.equal(writes, 1, 'refreshing only image URLs and metrics changed the saved basket');
+          selection.setPage(item, 1, false);
+          await basketSaveChain;
+          assert.equal(writes, 2);
+          assert.deepEqual([...selection.get('123').pages], [0,2]);
+        """)
+
     def test_legacy_over_capacity_basket_can_be_restored_and_trimmed_without_losing_choices(self):
         self.run_js("""
           lastKnownLoggedIn = true;

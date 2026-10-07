@@ -52,6 +52,7 @@ let basketRevision = 0;
 let basketSaveChain = Promise.resolve();
 let basketDirty = false;
 let basketSaving = false;
+let savedBasketSignature = null;
 const pendingTasks = new Map();
 let savedRecentSearches = [];
 let workspaceScope = null;
@@ -167,6 +168,12 @@ const esc = (value) => String(value).replace(
 );
 const historyView = createDownloadHistoryView({ fetchJson: (url, options) => fetchJson(url, options) });
 
+function basketForStorage() {
+  return selection.snapshot().map(row => ({id: row.id, pages: [...row.pages].sort((a, b) => a - b), context: row.context,
+    resultPage: row.resultPage, archived: row.archived, item: {id: row.id, title: row.item.title, artist: row.item.artist,
+      pages: row.item.pages, workType: row.item.workType, restriction: row.item.restriction, tags: row.item.tags}}));
+}
+
 function persistBasket() {
   if (!workspaceReady || restoringWorkspace) return;
   basketDirty = true;
@@ -177,13 +184,14 @@ function persistBasket() {
       while (workspaceReady && basketDirty) {
         const authorization = downloadAuthorizationRevision;
         basketDirty = false;
-        const basket = selection.snapshot().map(row => ({id: row.id, pages: [...row.pages], context: row.context,
-          resultPage: row.resultPage, archived: row.archived, item: {id: row.id, title: row.item.title, artist: row.item.artist,
-            pages: row.item.pages, workType: row.item.workType, restriction: row.item.restriction, tags: row.item.tags}}));
+        const basket = basketForStorage();
+        const signature = JSON.stringify(basket);
+        if (signature === savedBasketSignature) continue;
         const data = await fetchJson("/api/workspace/basket", {method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({basket, revision: basketRevision, scope: workspaceScope})});
         if (authorization !== downloadAuthorizationRevision) continue;
         basketRevision = data.revision;
+        savedBasketSignature = signature;
       }
     } catch (error) {
       if (workspaceLoading) return;
@@ -223,6 +231,7 @@ async function restoreWorkspace() {
     const result = selection.restore(data.basket || [], {allowOverflow: true});
     if (!result.accepted) throw new Error("采集篮记录不完整");
     basketRevision = data.revision || 0;
+    savedBasketSignature = JSON.stringify(basketForStorage());
     workspaceScope = data.scope;
     savedRecentSearches = data.recent || [];
     renderRecentSearches();

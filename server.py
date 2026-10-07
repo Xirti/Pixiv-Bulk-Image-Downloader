@@ -3339,14 +3339,21 @@ class Handler(SimpleHTTPRequestHandler):
             if len(ids) > 100 or any(not id.isdigit() or len(id) > 30 for id in ids):
                 return self.send_json({"error": "作品 ID 无效"}, 400)
             try:
-                return self.send_json({"pages": {id: sorted(LOCAL_CATALOG.downloaded_pages(id)) for id in ids}})
+                pages = LOCAL_CATALOG.downloaded_pages_many(ids)
+                return self.send_json({"pages": {id: sorted(found) for id, found in pages.items()}})
             except (OSError, ValueError, sqlite3.Error):
                 return self.send_json({"error": "无法检查已下载的文件"}, 500)
         if request.path == "/api/workspace":
+            with SEARCH_SESSION_LOCKS_GUARD:
+                scope = workspace_scope()
             try:
-                return self.send_json(WORKSPACE_STORE.load(workspace_scope()))
+                result = WORKSPACE_STORE.load(scope)
             except (OSError, ValueError, sqlite3.Error):
                 return self.send_json({"error": "无法读取采集篮和未完成任务"}, 500)
+            with SEARCH_SESSION_LOCKS_GUARD:
+                if scope != workspace_scope():
+                    return self.send_json({"error": "Pixiv 账户状态已变更，请重新读取采集篮"}, 409)
+                return self.send_json(result)
         if request.path == "/api/network/diagnose":
             state = windows_proxy_state()
             selected_proxy = refresh_network_opener()

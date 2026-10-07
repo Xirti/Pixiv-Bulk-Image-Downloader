@@ -1,5 +1,6 @@
 import http.client
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -97,6 +98,27 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
         self.assertEqual(third["skippedPages"], 1)
         self.assertEqual(self.network.call_count, 3)
 
+    def test_catalog_checks_a_full_result_page_with_one_database_read(self):
+        ids = [str(100 + index) for index in range(36)]
+        for artwork_id in ids:
+            file = self.output / f"{artwork_id}.png"
+            file.write_bytes(b"image")
+            self.catalog.record(artwork_id, [0], "original", "source", self.output, [file])
+        (self.output / f"{ids[0]}.png").unlink()
+        connect = sqlite3.connect
+        connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=5)
+        try:
+            with patch("local_catalog.sqlite3.connect", wraps=connect) as reads:
+                connection.request("GET", "/api/library/catalog?ids=" + ",".join(ids),
+                                   headers={"X-MOKU-Request-Token": server.REQUEST_TOKEN})
+                response = connection.getresponse()
+                result = json.loads(response.read())
+                self.assertEqual(response.status, 200, result)
+                self.assertEqual(result["pages"], {id: [] if id == ids[0] else [0] for id in ids})
+                self.assertEqual(reads.call_count, 1, "one preview page reopened the catalog for every work")
+        finally:
+            connection.close()
+
     def test_different_quality_directory_and_force_download_are_not_skipped(self):
         self.post()
         self.assertEqual(self.post({"quality": "regular"})["skippedPages"], 0)
@@ -130,6 +152,49 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
         restored = self.workspace.load("public")
         self.assertEqual(restored["revision"], 1)
         self.assertEqual(restored["basket"][0]["id"], "77")
+
+    def test_account_switch_during_workspace_read_does_not_return_old_private_basket(self):
+        cookie = [{"Cookie": "PHPSESSID=111_original_session"}]
+        started = threading.Event()
+        result = []
+        connect = sqlite3.connect
+        with patch.object(server, "session_cookie_header", side_effect=lambda: cookie[0]):
+            owner = server.workspace_scope()
+            private = {"id": "123", "pages": [0], "item": {"pages": 1, "restriction": "r18"}}
+            self.workspace.save_basket([private], owner, revision=0)
+
+            def read_workspace():
+                connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=5)
+                try:
+                    connection.request("GET", "/api/workspace", headers={"X-MOKU-Request-Token": server.REQUEST_TOKEN})
+                    response = connection.getresponse()
+                    result.append((response.status, json.loads(response.read())))
+                finally:
+                    connection.close()
+
+            def signal_read(*args, **kwargs):
+                if Path(args[0]) == self.workspace.path and threading.current_thread() is not threading.main_thread():
+                    started.set()
+                return connect(*args, **kwargs)
+
+            database = connect(self.workspace.path)
+            try:
+                database.execute("BEGIN EXCLUSIVE")
+                with patch("workspace_store.sqlite3.connect", side_effect=signal_read):
+                    reader = threading.Thread(target=read_workspace)
+                    reader.start()
+                    self.assertTrue(started.wait(2), "workspace read did not reach SQLite")
+                    with server.SEARCH_SESSION_LOCKS_GUARD:
+                        cookie[0] = {"Cookie": "PHPSESSID=222_new_session"}
+                    database.rollback()
+                    reader.join(5)
+                    self.assertFalse(reader.is_alive())
+            finally:
+                database.close()
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0][0], 409, result[0])
+            self.assertNotIn("basket", result[0][1])
+            self.assertEqual(len(self.workspace.load(owner)["basket"]), 1)
 
     def test_workspace_reports_capacity_without_overwriting_other_accounts_choices(self):
         private = {"id": "123", "pages": list(range(600)), "item": {"pages": 600, "restriction": "r18"}}

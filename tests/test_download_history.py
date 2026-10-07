@@ -33,6 +33,18 @@ class DownloadHistoryTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_history_can_be_read_without_database_writes(self):
+        self.history.record("first", [record()])
+        connect = sqlite3.connect
+        def read_only(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            connection.execute("PRAGMA query_only=ON")
+            return connection
+        with patch("download_history.sqlite3.connect", side_effect=read_only):
+            self.assertEqual(self.history.list()["total"], 1)
+            row = self.history.list()["items"][0]
+            self.assertEqual(self.history.first_file(row["id"]), record()["files"][0])
+
     def test_lazy_open_and_persistence(self):
         self.assertEqual(self.history.list()["total"], 0)
         self.history.clear()

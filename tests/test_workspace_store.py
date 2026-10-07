@@ -1,6 +1,8 @@
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 def task():
@@ -14,6 +16,66 @@ def task():
 
 
 class WorkspaceStoreTests(unittest.TestCase):
+    def test_mixed_basket_keeps_saved_artwork_order(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            rows = [{"id": id, "pages": [0], "item": {"pages": 1, "restriction": restriction}}
+                    for id, restriction in (("123", "r18"), ("456", "safe"), ("789", "r18"))]
+            store.save_basket(rows, "account-A", revision=0)
+            self.assertEqual([row["id"] for row in store.load("account-A")["basket"]], ["123", "456", "789"])
+
+    def test_saved_workspace_can_be_read_without_database_writes(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            basket = [{"id": "123", "pages": [0, 2], "item": {"pages": 3}}]
+            store.save_basket(basket, "public", revision=0)
+            store.save_task(task(), "public")
+            connect = sqlite3.connect
+            def read_only(*args, **kwargs):
+                connection = connect(*args, **kwargs)
+                connection.execute("PRAGMA query_only=ON")
+                return connection
+            with patch("workspace_store.sqlite3.connect", side_effect=read_only):
+                restored = store.load("public")
+                self.assertEqual(restored["basket"][0]["pages"], [0, 2])
+                self.assertEqual(len(restored["tasks"]), 1)
+                self.assertTrue(store.has_task(task()["id"], "public"))
+
+    def test_capacity_counts_merged_public_and_private_choices_once(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            private = {"id": "123", "pages": list(range(600)), "item": {"pages": 1000, "restriction": "r18"}}
+            public = {"id": "123", "pages": list(range(400, 1000)), "item": {"pages": 1000, "restriction": "safe"}}
+            store.save_basket([private], "account-A", revision=0)
+            store.save_basket([public], "public", revision=1)
+            restored = store.load("account-A")
+            self.assertEqual(len(restored["basket"]), 1)
+            self.assertEqual(restored["basket"][0]["pages"], list(range(1000)))
+            additional = {"id": "456", "pages": [0], "item": {"pages": 1}}
+            with self.assertRaisesRegex(ValueError, "容量"):
+                store.save_basket([public, additional], "public", revision=2)
+            self.assertEqual(store.load("account-A")["revision"], 2)
+
+    def test_work_changing_to_public_does_not_duplicate_restored_basket_entry(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            private = {"id": "123", "pages": [0, 2], "item": {"pages": 3, "restriction": "r18"},
+                       "context": {"kind": "author", "value": "artist"}}
+            public = {"id": "123", "pages": [1], "item": {"pages": 3, "restriction": "safe"},
+                      "context": {"kind": "tags", "value": "cat"}}
+            store.save_basket([private], "account-A", revision=0)
+            store.save_basket([public], "public", revision=1)
+            restored = WorkspaceStore(store.path).load("account-A")["basket"]
+            self.assertEqual(len(restored), 1, "one work appeared twice and cannot be restored by the UI")
+            self.assertEqual(restored[0]["pages"], [0, 1, 2])
+            self.assertEqual(restored[0]["item"]["restriction"], "safe")
+            self.assertEqual(restored[0]["context"], private["context"])
+            self.assertEqual(store.load("public")["basket"][0]["pages"], [1])
+
     def test_shared_basket_update_does_not_overfill_another_accounts_private_selection(self):
         from workspace_store import WorkspaceStore
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,10 +1,28 @@
 import tempfile
+import sqlite3
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
 
 class LocalCatalogTests(unittest.TestCase):
+    def test_existing_catalog_can_be_read_without_database_writes(self):
+        from local_catalog import LocalCatalog
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            file = root / "image.png"
+            file.write_bytes(b"image")
+            catalog = LocalCatalog(root / "catalog.db")
+            catalog.record("123", [0], "original", "source", root, [file])
+            connect = sqlite3.connect
+            def read_only(*args, **kwargs):
+                connection = connect(*args, **kwargs)
+                connection.execute("PRAGMA query_only=ON")
+                return connection
+            with patch("local_catalog.sqlite3.connect", side_effect=read_only):
+                self.assertEqual(catalog.downloaded_pages_many(["123", "456"]), {"123": {0}, "456": set()})
+                self.assertEqual(catalog.existing("123", [0], "original", "source", root), {0})
+
     def test_unreadable_files_are_not_silently_treated_as_missing(self):
         from local_catalog import LocalCatalog
         with tempfile.TemporaryDirectory() as temporary:

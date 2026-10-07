@@ -44,21 +44,22 @@ class DownloadHistory:
                     raise ValueError("unsupported history schema")
                 # Non-reused IDs keep stale UI selections from deleting newer
                 # records after the last row is removed. Migrate atomically.
-                if version == 1:
-                    connection.execute("BEGIN IMMEDIATE")
-                    connection.execute("ALTER TABLE downloads RENAME TO downloads_v1")
-                connection.execute("""CREATE TABLE IF NOT EXISTS downloads (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL,
-                    completed_at TEXT NOT NULL, artwork_id TEXT NOT NULL,
-                    title TEXT NOT NULL, artist TEXT NOT NULL, work_type TEXT NOT NULL,
-                    quality TEXT NOT NULL, format TEXT NOT NULL,
-                    pages TEXT NOT NULL, files TEXT NOT NULL,
-                    UNIQUE(operation, artwork_id)
-                )""")
-                if version == 1:
-                    connection.execute("INSERT INTO downloads SELECT * FROM downloads_v1")
-                    connection.execute("DROP TABLE downloads_v1")
-                connection.execute("PRAGMA user_version=2")
+                if version != 2:
+                    if version == 1:
+                        connection.execute("BEGIN IMMEDIATE")
+                        connection.execute("ALTER TABLE downloads RENAME TO downloads_v1")
+                    connection.execute("""CREATE TABLE IF NOT EXISTS downloads (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL,
+                        completed_at TEXT NOT NULL, artwork_id TEXT NOT NULL,
+                        title TEXT NOT NULL, artist TEXT NOT NULL, work_type TEXT NOT NULL,
+                        quality TEXT NOT NULL, format TEXT NOT NULL,
+                        pages TEXT NOT NULL, files TEXT NOT NULL,
+                        UNIQUE(operation, artwork_id)
+                    )""")
+                    if version == 1:
+                        connection.execute("INSERT INTO downloads SELECT * FROM downloads_v1")
+                        connection.execute("DROP TABLE downloads_v1")
+                    connection.execute("PRAGMA user_version=2")
                 yield connection
         finally:
             connection.close()
