@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "app.js"))
+APP = "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "workspace-sync.js", "app.js"))
 STYLE = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 
 
@@ -14,79 +14,78 @@ def block(start: str, end: str) -> str:
 
 
 class FrontendStateSafetyTests(unittest.TestCase):
+    def run_js(self, assertions):
+        harness = (ROOT / "tests/frontend_harness.js").read_text(encoding="utf-8")
+        script = harness + "\n" + APP + "\nconst assert = require('node:assert/strict');\n"
+        script += "(async()=>{" + assertions + "\n})().catch(error=>{console.error(error);process.exitCode=1;})"
+        script += ".finally(()=>{if(taskDockTimer)clearTimeout(taskDockTimer);});"
+        result = subprocess.run([shutil.which("node")], input=script, text=True, encoding="utf-8",
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
     def test_authorization_loss_aborts_requests_and_removes_restricted_views(self):
-        cleanup = block("function handleAuthorizationLoss", "function updateSelectionBar")
-        self.assertIn("invalidateDetailView()", cleanup)
-        self.assertIn("cancelActiveSearch()", cleanup)
-        invalidation = block("function invalidateDetailView", "function rememberArtworkDetail")
-        self.assertIn("viewGeneration += 1", invalidation)
-        self.assertIn("detailController.abort()", invalidation)
-        self.assertIn('$("#safety").value = "safe"', cleanup)
-        self.assertIn("closeAllViewer()", cleanup)
-        self.assertIn("discardPreviousAccountSelections()", cleanup)
-        self.assertIn("ugoiraPreview.clear()", cleanup)
-        self.assertIn("clearDetail(", cleanup)
-        self.assertIn('grid.innerHTML =', cleanup)
+        self.run_js(r'''
+const item = {id:"123",pages:1,restriction:"r18",title:"Private",artist:"Artist",tags:[]};
+selection.choose([item],{context:{kind:"tags",value:"private"},resultPage:1});
+items = [item];
+currentDetailItem = item;
+activeArtworkId = item.id;
+resultSelectionEnabled = true;
+$("#safety").value = "r18";
+for(const selector of ["#grid","#deck","#viewerGrid","#batchCollections"]) {
+  $(selector).innerHTML = '<img src="/private-image">';
+}
+searchController = new AbortController();
+detailController = new AbortController();
+const searchSignal = searchController.signal, detailSignal = detailController.signal;
+lastKnownLoggedIn = true;
+lastKnownAuthorizationGeneration = 1;
+fetchJson = async url => {
+  if(url === "/api/status") return {loggedIn:false,authorizationGeneration:2};
+  assert.equal(url,"/api/workspace");
+  return {scope:"public",authorizationGeneration:2,revision:0,basket:[],tasks:[],recent:[]};
+};
+await syncAuthStatus();
+assert.equal(searchSignal.aborted,true);
+assert.equal(detailSignal.aborted,true);
+assert.equal($("#safety").value,"safe");
+assert.equal(selection.size,0);
+assert.equal(currentDetailItem,null);
+assert.equal(activeArtworkId,null);
+assert.equal($("#download").disabled,true);
+for(const selector of ["#grid","#deck","#collectionPages","#viewerGrid","#batchCollections"]) {
+  assert.ok(!$(selector).innerHTML.includes("/private-image"));
+}
+assert.equal(workspaceSync.scope,"public");
+''')
 
-        status = block("async function syncAuthStatus", "const helpDialog")
-        self.assertIn("lastKnownLoggedIn === true && !logged", status)
-        self.assertIn("handleAuthorizationLoss()", status)
-
+    @unittest.skipUnless(shutil.which("node"), "Node required")
     def test_search_commits_context_only_after_the_matching_response(self):
-        search = block("async function search", "function syncResultSelectionControls")
-        self.assertIn("(pid|uid|author)", search)
-        request = search.index("await fetchJson")
-        identity_check = search.index("controller !== searchController")
-        context_commit = search.index("activeSearchContext = requestedContext")
-        filter_commit = search.index("activeSearchFilters = requestedFilters")
-        self.assertLess(request, identity_check)
-        self.assertLess(identity_check, context_commit)
-        self.assertLess(identity_check, filter_commit)
-        self.assertLess(search.index("items = Array.isArray(data.items)"), search.index("reconcileSelectedArtworkPreviews(items)"))
-        self.assertIn("resultSelectionEnabled = false", search[:request])
-        self.assertIn('$("#download").disabled = true', search[:request])
-
-        controls = block("function syncSearchScopedControls", "function clearDetail")
-        self.assertIn('$("#openBatch").disabled', controls)
-        self.assertIn('$("#clearSelection").disabled', controls)
-        self.assertIn('$("#batchDownload").disabled', controls)
-        self.assertIn("searchButton.disabled = selection.locked || searchPending || singleDownloadPending", controls)
-        self.assertIn("selection.locked || searchPending", controls)
-        open_basket = block("function openSelectionBasket", "function applyBasketArtworkSelection")
-        self.assertIn("if (contextNavigationLocked()) return", open_basket)
-        navigation_lock = block("function contextNavigationLocked", "function setWorkspace")
-        self.assertIn("selection.locked || singleDownloadPending || searchPending", navigation_lock)
-
-        reconciliation = block("function reconcileSelectedArtworkPreviews", "function render()")
-        self.assertIn("selection.remember(merged)", reconciliation)
-        self.assertIn("batchCandidateItems = batchCandidateItems.map(mergePreview)", reconciliation)
-        self.assertIn("merged.pageImages = existing.pageImages", reconciliation)
-        self.assertIn("merged.thumb = fresh.thumb || existing.thumb", reconciliation)
-
-        select_all = block("function selectAllCurrentPage", "function clearAllCurrentPage")
-        clear_page = block("function clearAllCurrentPage", "async function search")
-        self.assertIn("searchPending || !resultSelectionEnabled", select_all)
-        self.assertIn("searchPending || !resultSelectionEnabled", clear_page)
-
-        token_wait = block("function waitForPromiseOrAbort", "function nextSearchRequestId")
-        self.assertIn('signal.addEventListener("abort"', token_wait)
-        self.assertIn("waitForPromiseOrAbort(getRequestToken(), controller.signal)", token_wait)
-        cancellation = block("function cancelActiveSearch", "function abortDetailRefreshes")
-        self.assertIn("searchController.abort()", cancellation)
-        self.assertNotIn("requestTokenController", cancellation)
-        self.assertNotIn("requestTokenPromise", cancellation)
-
-        basket_download = block('$("#batchDownload").onclick', 'addEventListener("keydown"')
-        self.assertIn("if (selection.locked || searchPending || singleDownloadPending) return", basket_download)
-        basket_lock = block("function setBasketSelectionLocked", "function downloadPayload")
-        self.assertIn("#searchSubmit", basket_lock)
-        self.assertNotIn("#searchForm button", basket_lock)
-        single_download = block('$("#download").onclick', "async function syncAuthStatus")
-        self.assertIn("selection.locked || searchPending || singleDownloadPending", single_download)
-        self.assertLess(
-            single_download.index("singleDownloadPending = true"),
-            single_download.index("syncSearchScopedControls()"),
-        )
+        self.run_js(r'''
+const pending = [];
+fetchJson = (url,options) => new Promise(resolve=>pending.push({url,options,resolve}));
+const first = search("cat",1,{mode:"safe",workType:"ugoira",includeAi:false,fuzzy:false});
+assert.equal(resultSelectionEnabled,false);
+assert.equal($("#openBatch").disabled,true);
+assert.equal($("#download").disabled,true);
+const second = search("dog",1,{mode:"safe",workType:"manga",includeAi:true,fuzzy:false});
+assert.equal(pending[0].options.signal.aborted,true);
+const reply = id => ({items:[{id,pages:1,restriction:"safe",title:id,artist:"Artist",tags:[]}],
+  page:1,total:1,perPage:36,availablePages:[1],hasMore:false});
+pending[1].resolve(reply("222"));
+await second;
+assert.equal(activeSearchContext.value,"dog");
+assert.equal(activeSearchFilters.workType,"manga");
+assert.equal(items[0].id,"222");
+const committedGrid = grid.innerHTML;
+pending[0].resolve(reply("111"));
+await first;
+assert.equal(activeSearchContext.value,"dog");
+assert.equal(activeSearchFilters.workType,"manga");
+assert.equal(grid.innerHTML,committedGrid);
+assert.equal(resultSelectionEnabled,true);
+''')
 
     def test_pagination_uses_committed_filters_and_filter_changes_wait_for_submit(self):
         navigation = block("function navigateToPage", "function archiveAndContinue")
@@ -203,7 +202,6 @@ class FrontendStateSafetyTests(unittest.TestCase):
         harness = (ROOT / "tests" / "frontend_harness.js").read_text(encoding="utf-8") + "\n"
         assertions = r'''
 (async () => {
-  workspaceLoading = false;
   syncSearchScopedControls();
   const check = (condition, message) => { if (!condition) throw new Error(message); };
   const oldItem = {
@@ -405,7 +403,10 @@ class FrontendStateSafetyTests(unittest.TestCase):
   const detailSignal = detailController.signal;
   lastKnownLoggedIn = true;
   document.querySelector("#safety").value = "r18";
-  fetchJson = async () => ({loggedIn: false});
+  fetchJson = async url => {
+    if (url === "/api/status") return {loggedIn: false};
+    throw new Error("workspace unavailable");
+  };
   await syncAuthStatus();
   check(searchSignal.aborted && detailSignal.aborted, "authorization loss did not abort requests");
   check(document.querySelector("#safety").value === "safe", "authorization loss did not restore safe mode");
@@ -431,8 +432,8 @@ class FrontendStateSafetyTests(unittest.TestCase):
     pixiv_login: async () => ({ok: false}),
   }};
   fetchJson = async (url) => {
-    if (url === "/api/status") failedLogoutStatusChecks += 1;
-    return {loggedIn: false};
+    if (url === "/api/status") { failedLogoutStatusChecks += 1; return {loggedIn: false}; }
+    throw new Error("workspace unavailable");
   };
   await document.querySelector("#authAction").onclick();
   check(failedLogoutStatusChecks === 1, "failed logout did not reconcile server authorization state");
@@ -488,7 +489,10 @@ class FrontendStateSafetyTests(unittest.TestCase):
   items = [detailSummary];
   selection.choose([detailSummary], {context: activeSearchContext, resultPage: currentPage});
   batchCandidateItems = [detailSummary];
-  fetchJson = async () => loadedDetail;
+  fetchJson = async url => {
+    if (url.startsWith("/api/pixiv/artwork/")) return loadedDetail;
+    throw new Error("workspace unavailable");
+  };
   await select(0);
   check(items[0] === loadedDetail, "normal detail load did not replace the search summary");
   check(selection.get(detailSummary.id)?.item === loadedDetail, "normal detail load left a stale selected artwork");
@@ -528,7 +532,8 @@ class FrontendStateSafetyTests(unittest.TestCase):
   installImageFallbacks({querySelectorAll: () => [detailImage]});
   let releaseRefresh;
   let refreshFetches = 0;
-  fetchJson = () => {
+  fetchJson = url => {
+    if (!url.startsWith("/api/pixiv/artwork/")) return Promise.reject(new Error("workspace unavailable"));
     refreshFetches += 1;
     return new Promise((resolve) => { releaseRefresh = resolve; });
   };
@@ -551,7 +556,10 @@ class FrontendStateSafetyTests(unittest.TestCase):
   const realDateNow = Date.now;
   const previousAttemptAt = detailRefreshAttempts.get(staleItem.id);
   Date.now = () => previousAttemptAt + DETAIL_REFRESH_COOLDOWN_MS + 1;
-  fetchJson = async () => { refreshFetches += 1; return secondFreshItem; };
+  fetchJson = async url => {
+    if (!url.startsWith("/api/pixiv/artwork/")) throw new Error("workspace unavailable");
+    refreshFetches += 1; return secondFreshItem;
+  };
   await detailImage.listeners.get("error")();
   Date.now = realDateNow;
   check(refreshFetches === 2, "post-cooldown refresh did not perform exactly one request");
@@ -661,12 +669,14 @@ class FrontendStateSafetyTests(unittest.TestCase):
   check(document.querySelector("#batchDetailSummary").textContent.includes("2/1000 张已选"), "basket selection did not persist into third-page batch mode");
   const addedBasketItem = {...oldItem, id: "basket-added", title: "basket-added"};
   toggleArtworkSelection(addedBasketItem, true);
+  await workspaceSync.settled();
   document.querySelector("#openBasketPicker").onclick();
   check(document.querySelector("#batchCollections").innerHTML.includes('data-open-collection="basket-added"'), "reopened basket omitted a newly selected artwork");
   check(batchCandidateItems.length === 2, "reopened basket did not refresh its candidate list");
   check(selection.get(basketFlowItem.id)?.pages.size === 2, "reopening basket reset partial page selection");
   document.querySelector("#basketBack").onclick();
   toggleArtworkSelection(addedBasketItem, false);
+  await workspaceSync.settled();
   document.querySelector("#openBasketPicker").onclick();
   check(batchCandidateItems.length === 1 && batchCandidateItems[0].id === basketFlowItem.id, "reopened basket retained an externally deselected artwork");
   document.querySelector("#basketBack").onclick();

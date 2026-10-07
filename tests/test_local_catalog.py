@@ -1,4 +1,5 @@
 import tempfile
+from collections import Counter
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -6,6 +7,37 @@ from pathlib import Path
 
 
 class LocalCatalogTests(unittest.TestCase):
+    def test_indicators_check_shared_directories_once_but_files_on_every_read(self):
+        from local_catalog import LocalCatalog
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder = root / "pictures" / "123"
+            folder.mkdir(parents=True)
+            files = [folder / f"123_p{page}.png" for page in range(200)]
+            for file in files:
+                file.write_bytes(b"image")
+            catalog = LocalCatalog(root / "catalog.db")
+            catalog.record("123", list(range(200)), "original", "source", root, files)
+            calls = Counter()
+            original = Path.lstat
+
+            def counted(path, *args, **kwargs):
+                calls[path] += 1
+                return original(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", counted):
+                self.assertEqual(catalog.downloaded_pages("123"), set(range(200)))
+            self.assertEqual(calls[folder], 1)
+            self.assertTrue(all(calls[file] == 1 for file in files))
+            files[10].unlink()
+            files[20].write_bytes(b"changed size")
+            self.assertEqual(catalog.downloaded_pages("123"), set(range(200)) - {10, 20})
+            # Actual download deduplication retains its full path checks.
+            calls.clear()
+            with patch.object(Path, "lstat", counted):
+                self.assertEqual(catalog.existing("123", [0, 1], "original", "source", root), {0, 1})
+            self.assertEqual(calls[folder], 2)
+
     def test_existing_catalog_can_be_read_without_database_writes(self):
         from local_catalog import LocalCatalog
         with tempfile.TemporaryDirectory() as temporary:

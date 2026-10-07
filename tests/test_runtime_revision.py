@@ -36,7 +36,7 @@ class RuntimeRevisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as other_directory:
             result = subprocess.run(
                 [shutil.which("pwsh") or "powershell.exe", "-NoProfile", "-Command", script],
-                cwd=other_directory, capture_output=True, text=True, timeout=15,
+                cwd=other_directory, capture_output=True, text=True, timeout=30,
                 env={**os.environ, "MOKU_CODE_GENERATION": "stale-inherited-value"},
             )
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -4,30 +4,278 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "app.js")
+SOURCES = ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "workspace-sync.js", "app.js")
 
 
 @unittest.skipUnless(shutil.which("node"), "Node required")
 class RoadmapFrontendTests(unittest.TestCase):
+    def test_retry_shows_new_remote_works_in_the_open_basket_and_preserves_their_origin(self):
+        self.run_js("""
+          const item = {id:'123',source:'pixiv',pages:2,restriction:'safe',title:'Cat',artist:'Artist',tags:[]};
+          const other = {...item,id:'456',title:'Dog'};
+          let stored = [{id:item.id,item,pages:[0],context:{kind:'tags',value:'cat'},resultPage:2}];
+          let revision = 1, fail = false;
+          fetchJson = async (url,options) => {
+            if(url === '/api/workspace') return {scope:'public',revision,basket:stored,tasks:[],recent:[]};
+            if(url === '/api/pixiv/artwork/456') return {...other,pageImages:[{regular:'/dog-0'},{regular:'/dog-1'}]};
+            if(url === '/api/workspace/basket') {
+              if(fail) throw new Error('offline');
+              const body = JSON.parse(options.body);
+              assert.equal(body.revision,revision);
+              stored = body.basket;
+              return {revision:++revision};
+            }
+            throw new Error('Unexpected '+url);
+          };
+          await restoreWorkspace();
+          fakeElement('#openBatch').onclick();
+          fail = true;
+          selection.setPage(item,1,true);
+          await workspaceSync.settled();
+          stored.push({id:other.id,item:other,pages:[0],context:{kind:'author',value:'789'},resultPage:7});
+          revision++;
+          fail = false;
+          await fakeElement('#workspaceRetry').onclick();
+          const buttons = fakeElement('#batchCollections').querySelectorAll('[data-open-collection]');
+          assert.deepEqual(buttons.map(button=>button.dataset.openCollection),['123','456']);
+          assert.match(fakeElement('#batchSummary').textContent,/2\\/2 个作品已勾选/);
+          await buttons[1].onclick();
+          const box = fakeElement('#basketPages').querySelectorAll('[data-collection-page]')[1];
+          box.checked = true;
+          box.onchange();
+          await workspaceSync.settled();
+          const saved = stored.find(row=>row.id === '456');
+          assert.deepEqual(saved.pages,[0,1]);
+          assert.deepEqual(saved.context,{kind:'author',value:'789'});
+          assert.equal(saved.resultPage,7);
+          clearTimeout(taskDockTimer);
+        """)
+
+    def test_retry_updates_normal_detail_checkboxes_on_the_current_page_window(self):
+        self.run_js("""
+          const item = {id:'123',source:'pixiv',pages:80,restriction:'safe',title:'Cat',artist:'Artist',tags:[],
+            pageImages:Array.from({length:80},(_,i)=>({regular:'/preview-'+i})),
+            qualities:[{id:'original',label:'Original'},{id:'regular',label:'Regular'}],
+            formats:[{id:'source',label:'Source'}]};
+          let stored = [{id:item.id,item,pages:[48],context:{kind:'tags',value:'cat'},resultPage:2}];
+          let revision = 1, fail = false;
+          fetchJson = async (url,options) => {
+            if(url === '/api/workspace') return {scope:'public',revision,basket:stored,tasks:[],recent:[]};
+            if(url === '/api/workspace/basket') {
+              if(fail) throw new Error('offline');
+              const body = JSON.parse(options.body);
+              assert.equal(body.revision,revision);
+              stored = body.basket;
+              return {revision:++revision};
+            }
+            throw new Error('Unexpected '+url);
+          };
+          await restoreWorkspace();
+          activeArtworkId = item.id;
+          renderDetail(item,0);
+          fakeElement('#collectionPageMore').onclick();
+          fail = true;
+          const box = fakeElement('#collectionPages').querySelectorAll('[data-collection-page]')[0];
+          box.checked = false;
+          box.onchange();
+          await workspaceSync.settled();
+          stored = [{id:item.id,item,pages:[48,49],context:{kind:'tags',value:'cat'},resultPage:2}];
+          revision++;
+          fakeElement('#quality').value = 'regular';
+          const deck = fakeElement('#deck').innerHTML;
+          fail = false;
+          await fakeElement('#workspaceRetry').onclick();
+          const boxes = fakeElement('#collectionPages').querySelectorAll('[data-collection-page]');
+          assert.deepEqual(boxes.filter(box=>box.checked).map(box=>Number(box.dataset.collectionPage)),[49]);
+          assert.equal(collectionPageOffset,48);
+          assert.equal(fakeElement('#quality').value,'regular');
+          assert.equal(fakeElement('#deck').innerHTML,deck);
+          assert.deepEqual(currentDownloadPages(currentDetailItem),[49]);
+          assert.match(fakeElement('#download').textContent,/下载已选 1 张/);
+          clearTimeout(taskDockTimer);
+        """)
+
+    def test_save_retry_updates_open_basket_checkboxes_without_resetting_the_view(self):
+        self.run_js("""
+          const item = {id:'123',source:'pixiv',pages:3,restriction:'safe',title:'Cat',artist:'Artist',tags:[],
+            pageImages:[0,1,2].map(i=>({regular:'/preview-'+i})),
+            qualities:[{id:'original',label:'Original'}],formats:[{id:'source',label:'Source'}]};
+          let stored = [{id:item.id,item,pages:[0],context:{kind:'tags',value:'cat'},resultPage:2}];
+          let revision = 1, fail = false;
+          fetchJson = async (url,options) => {
+            if(url === '/api/workspace') return {scope:'public',revision,basket:stored,tasks:[],recent:[]};
+            if(url === '/api/pixiv/artwork/123') return item;
+            if(url === '/api/workspace/basket') {
+              if(fail) throw new Error('offline');
+              const body = JSON.parse(options.body);
+              assert.equal(body.revision,revision);
+              stored = body.basket;
+              return {revision:++revision};
+            }
+            throw new Error('Unexpected '+url);
+          };
+          await restoreWorkspace();
+          fakeElement('#openBatch').onclick();
+          await fakeElement('#batchCollections').querySelectorAll('[data-open-collection]')[0].onclick();
+          await workspaceSync.settled();
+          const boxes = fakeElement('#basketPages').querySelectorAll('[data-collection-page]');
+          fail = true;
+          boxes[0].checked = false;
+          boxes[0].onchange();
+          await workspaceSync.settled();
+          stored = [{id:item.id,item,pages:[0,1],context:{kind:'tags',value:'cat'},resultPage:2}];
+          revision++;
+          fakeElement('#quality').options = [{value:'regular'}];
+          fakeElement('#quality').value = 'regular';
+          fakeElement('#format').options = [{value:'gif'}];
+          fakeElement('#format').value = 'gif';
+          fakeElement('#basketPage').scrollTop = 137;
+          const deck = fakeElement('#basketDetailDeck').innerHTML;
+          fail = false;
+          await fakeElement('#workspaceRetry').onclick();
+          const visible = fakeElement('#basketPages').querySelectorAll('[data-collection-page]');
+          assert.deepEqual(visible.filter(box=>box.checked).map(box=>Number(box.dataset.collectionPage)),[1]);
+          assert.match(fakeElement('#batchSummary').textContent,/已选 1\\/3 张/);
+          assert.deepEqual(stored[0].pages,[1]);
+          assert.deepEqual(currentDownloadPages(currentDetailItem),[1]);
+          assert.equal(fakeElement('#quality').value,'regular');
+          assert.equal(fakeElement('#format').value,'gif');
+          assert.equal(fakeElement('#basketPage').scrollTop,137);
+          assert.equal(fakeElement('#basketDetailDeck').innerHTML,deck);
+          assert.equal(selection.get(item.id).item.pageImages[1].regular,'/preview-1');
+          clearTimeout(taskDockTimer);
+        """)
+
+    def test_save_recovery_detects_account_switch_before_merging_local_choices(self):
+        self.run_js("""
+          lastKnownLoggedIn = true;
+          lastKnownAuthorizationGeneration = 1;
+          const item = {id:'123',pages:3,restriction:'safe',title:'A',artist:'Artist',tags:[]};
+          const other = {...item,id:'456',title:'B'};
+          let loads = 0;
+          fetchJson = async url => {
+            if(url === '/api/workspace/basket') throw new Error('save unavailable');
+            if(url === '/api/status') return {loggedIn:true,authorizationGeneration:2};
+            if(url === '/api/workspace' && ++loads === 1) return {
+              scope:'account-A',authorizationGeneration:1,revision:1,tasks:[],recent:[],
+              basket:[{id:'123',item,pages:[0],context:{kind:'author',value:'private-A'}}]};
+            if(url === '/api/workspace') return {
+              scope:'account-B',authorizationGeneration:2,revision:10,tasks:[],recent:[],
+              basket:[{id:'456',item:other,pages:[2],context:{kind:'tags',value:'B'}}]};
+            throw new Error('Unexpected '+url);
+          };
+          await restoreWorkspace();
+          selection.setPage(item,1,true);
+          await workspaceSync.settled();
+          await workspaceSync.retry();
+          assert.equal(workspaceSync.ready, true);
+          assert.equal(workspaceSync.loading, false);
+          assert.equal(workspaceSync.scope, 'account-B');
+          assert.equal(selection.has('123'), false);
+          assert.deepEqual([...selection.get('456').pages], [2]);
+          assert.equal(lastKnownAuthorizationGeneration, 2);
+          clearTimeout(taskDockTimer);
+        """)
+
+    def test_account_recheck_failure_does_not_loop_or_leave_the_interface_locked(self):
+        self.run_js("""
+          lastKnownLoggedIn = true;
+          lastKnownAuthorizationGeneration = 1;
+          let loads = 0;
+          let statusChecks = 0;
+          fetchJson = async url => {
+            if(url === '/api/status') { statusChecks++; throw new Error('status unavailable'); }
+            if(url === '/api/workspace' && ++loads === 1) return {
+              scope:'account-A',authorizationGeneration:1,revision:0,basket:[],tasks:[],recent:[]};
+            if(url === '/api/workspace' && loads <= 3) return {
+              scope:'account-B',authorizationGeneration:2,revision:1,basket:[],tasks:[],recent:[]};
+            throw new Error('workspace unavailable');
+          };
+          await restoreWorkspace();
+          await restoreWorkspace();
+          for(let i=0;i<10;i++) await new Promise(resolve=>setTimeout(resolve,0));
+          assert.equal(statusChecks, 1);
+          assert.equal(loads, 2);
+          assert.equal(workspaceSync.ready, false);
+          assert.equal(workspaceSync.loading, false);
+          assert.equal(fakeElement('#workspaceNotice').hidden, false);
+          assert.equal(fakeElement('#workspaceRetry').disabled, false);
+          clearTimeout(taskDockTimer);
+        """)
+
+    def test_lost_save_reply_retries_with_current_revision_without_restoring_cancelled_pages(self):
+        self.run_js("""
+          const item = {id:'123',source:'pixiv',pages:2,restriction:'safe',title:'Cat',artist:'Artist',tags:[]};
+          let stored = [];
+          let revision = 0;
+          let writes = 0;
+          fetchJson = async (url, options) => {
+            if(url === '/api/workspace') return {scope:'public',revision,basket:stored,tasks:[],recent:[]};
+            if(url === '/api/workspace/basket') {
+              writes++;
+              const body = JSON.parse(options.body);
+              if(body.revision !== revision) throw new Error('stale basket revision');
+              stored = body.basket;
+              revision++;
+              if(writes === 1) throw new Error('reply lost after commit');
+              return {revision};
+            }
+            throw new Error('Unexpected '+url);
+          };
+          await restoreWorkspace();
+          selection.choose([item], {context:{kind:'tags',value:'cat'},resultPage:1});
+          await workspaceSync.settled();
+          selection.setPage(item,1,false);
+          await workspaceSync.settled();
+          clearTimeout(taskDockTimer);
+          assert.equal(revision, 2);
+          assert.deepEqual(stored[0].pages, [0]);
+          assert.deepEqual([...selection.get('123').pages], [0]);
+        """)
+
+    def test_next_edit_recovers_after_a_temporary_basket_save_failure(self):
+        self.run_js("""
+          const item = {id:'123',source:'pixiv',pages:2,restriction:'safe',title:'Cat',artist:'Artist',tags:[]};
+          let writes = 0;
+          let lastSaved;
+          fetchJson = async (url, options) => {
+            if(url === '/api/workspace') return {scope:'public',revision:0,basket:[],tasks:[],recent:[]};
+            if(url === '/api/workspace/basket') {
+              if(++writes === 1) throw new Error('temporary library failure');
+              lastSaved = JSON.parse(options.body).basket;
+              return {revision:1};
+            }
+            throw new Error('Unexpected '+url);
+          };
+          await restoreWorkspace();
+          selection.choose([item], {context:{kind:'tags',value:'cat'},resultPage:1});
+          await workspaceSync.settled();
+          selection.setPage(item,1,false);
+          await workspaceSync.settled();
+          clearTimeout(taskDockTimer);
+          assert.equal(writes, 2);
+          assert.deepEqual(lastSaved[0].pages, [0]);
+        """)
+
     def test_preview_refresh_does_not_rewrite_unchanged_basket_choices(self):
         self.run_js("""
-          workspaceReady = true;
-          workspaceScope = 'public';
           const item = {id:'123',source:'pixiv',pages:3,restriction:'safe',title:'Cat',artist:'Artist',tags:['cat'],workType:'illustration',thumb:'/old'};
           let writes = 0;
           fetchJson = async (url, options) => {
+            if(url === '/api/workspace') return {scope:'public',revision:0,basket:[],tasks:[],recent:[]};
             assert.equal(url, '/api/workspace/basket');
             writes++;
             return {revision:writes};
           };
+          await restoreWorkspace();
           selection.choose([item], {context:{kind:'tags',value:'cat'},resultPage:1});
-          await basketSaveChain;
+          await workspaceSync.settled();
           assert.equal(writes, 1);
           for(let i=0;i<5;i++) rememberArtworkDetail({...item,thumb:'/fresh-'+i,bookmarks:10+i,pageImages:[{regular:'/image-'+i}]});
-          await basketSaveChain;
+          await workspaceSync.settled();
           assert.equal(writes, 1, 'refreshing only image URLs and metrics changed the saved basket');
           selection.setPage(item, 1, false);
-          await basketSaveChain;
+          await workspaceSync.settled();
           assert.equal(writes, 2);
           assert.deepEqual([...selection.get('123').pages], [0,2]);
         """)
@@ -50,15 +298,15 @@ class RoadmapFrontendTests(unittest.TestCase):
             throw new Error('Unexpected '+url);
           };
           await restoreWorkspace();
-          assert.equal(workspaceReady, true);
+          assert.equal(workspaceSync.ready, true);
           assert.equal(selection.pageCount, 1500);
           assert.equal(selection.setPage({...publicItem,pages:901},900,true).reason, 'capacity');
           selection.setPage(publicItem,899,false);
-          await basketSaveChain;
-          assert.equal(workspaceReady, true);
+          await workspaceSync.settled();
+          assert.equal(workspaceSync.ready, true);
           assert.equal(selection.pageCount, 1499);
           selection.remove(['123']);
-          await basketSaveChain;
+          await workspaceSync.settled();
           assert.equal(lastSaved, 899);
           assert.equal(selection.pageCount, 899);
           clearTimeout(taskDockTimer);
@@ -67,9 +315,9 @@ class RoadmapFrontendTests(unittest.TestCase):
     def test_account_change_waits_for_download_unlock_before_restoring(self):
         self.run_js("""
           const item = {id:'123',pages:3,restriction:'safe',title:'Cat',artist:'Artist',tags:[]};
-          selection.restore([{id:'123',item,pages:[0,1,2],context:{kind:'author',value:'private-origin'}}]);
-          workspaceReady = true;
-          workspaceScope = 'account-A';
+          fetchJson = async () => ({scope:'account-A',revision:0,tasks:[],recent:[],
+            basket:[{id:'123',item,pages:[0,1,2],context:{kind:'author',value:'private-origin'}}]});
+          await restoreWorkspace();
           lastKnownLoggedIn = true;
           lastKnownAuthorizationGeneration = 1;
           setBasketSelectionLocked(true);
@@ -82,14 +330,14 @@ class RoadmapFrontendTests(unittest.TestCase):
           };
           await syncAuthStatus();
           assert.equal(loads, 0);
-          assert.equal(workspaceLoading, true);
+          assert.equal(workspaceSync.loading, true);
           assert.equal(selection.size, 0, 'download locking must not retain the previous account choices');
-          assert.equal(workspaceScope, null);
+          assert.equal(workspaceSync.scope, null);
           setBasketSelectionLocked(false);
-          for(let i=0;i<10 && !workspaceReady;i++) await new Promise(resolve => setTimeout(resolve,0));
+          await workspaceSync.settled();
           assert.equal(loads, 1);
-          assert.equal(workspaceReady, true);
-          assert.equal(workspaceScope, 'account-B');
+          assert.equal(workspaceSync.ready, true);
+          assert.equal(workspaceSync.scope, 'account-B');
           assert.deepEqual([...selection.get('123').pages], [1]);
           assert.equal(selection.get('123').context.value, 'cat');
           clearTimeout(taskDockTimer);
@@ -114,10 +362,10 @@ class RoadmapFrontendTests(unittest.TestCase):
           assert.equal(selection.pageCount, 3);
           await syncAuthStatus();
           assert.equal(loads, 2);
-          assert.equal(workspaceReady, false);
-          assert.equal(workspaceLoading, false);
+          assert.equal(workspaceSync.ready, false);
+          assert.equal(workspaceSync.loading, false);
           assert.equal(selection.size, 0, 'the old account choices remain visible after failed restore');
-          assert.equal(workspaceScope, null);
+          assert.equal(workspaceSync.scope, null);
           assert.equal(fakeElement('#openBatch').disabled, true);
           assert.equal(fakeElement('#batchDownload').disabled, true);
           clearTimeout(taskDockTimer);
@@ -137,21 +385,22 @@ class RoadmapFrontendTests(unittest.TestCase):
           };
           const oldRestore = restoreWorkspace();
           await syncAuthStatus();
-          assert.equal(workspaceScope, 'account-B');
+          assert.equal(workspaceSync.scope, 'account-B');
           finishOldRestore({scope:'account-A',revision:1,basket:[],recent:[{tag:'A',filters:{mode:'r18'}}],tasks:[]});
           await oldRestore;
-          assert.equal(workspaceReady, true);
-          assert.equal(workspaceScope, 'account-B');
+          assert.equal(workspaceSync.ready, true);
+          assert.equal(workspaceSync.scope, 'account-B');
           assert.equal(readRecentSearches()[0].tag, 'B');
           clearTimeout(taskDockTimer);
         """)
 
     def test_account_change_clears_old_recent_searches_and_loads_current_tasks(self):
         self.run_js("""
-          workspaceReady = true;
           lastKnownLoggedIn = true;
           lastKnownAuthorizationGeneration = 1;
-          savedRecentSearches = [{tag:'private-A',filters:{mode:'r18'}}];
+          fetchJson = async () => ({scope:'account-A',revision:0,basket:[],tasks:[],
+            recent:[{tag:'private-A',filters:{mode:'r18'}}]});
+          await restoreWorkspace();
           let loads = 0;
           fetchJson = async url => {
             if(url === '/api/status') return {loggedIn:true,authorizationGeneration:2};
@@ -171,7 +420,7 @@ class RoadmapFrontendTests(unittest.TestCase):
             remainingChunks:[{requestId:'saved-chunk-000001',groups:[{id:'123',pages:[2]}],pageCount:1,context:{kind:'tags',value:'cat'}}],
             savedCount:2,fileCount:2,skippedCount:0,firstSaved:'cat.png',completedBatches:1,totalBatches:2};
           fetchJson = async (url, options) => {
-            if(url === '/api/workspace') return {revision:4,basket:[{id:'123',pages:[2,8],item:{id:'123',pages:100,title:'Cat',artist:'artist',restriction:'safe',tags:[]},context:{kind:'tags',value:'cat'},resultPage:8,archived:true}],tasks:[saved]};
+            if(url === '/api/workspace') return {scope:'public',revision:4,basket:[{id:'123',pages:[2,8],item:{id:'123',pages:100,title:'Cat',artist:'artist',restriction:'safe',tags:[]},context:{kind:'tags',value:'cat'},resultPage:8,archived:true}],tasks:[saved]};
             if(url === '/api/workspace/task') return {ok:true};
             if(url === '/api/workspace/task/delete') return {ok:true};
             if(url.startsWith('/api/library/catalog')) return {pages:{}};
@@ -200,15 +449,16 @@ class RoadmapFrontendTests(unittest.TestCase):
 
     def test_failed_chunk_retains_its_identity_and_saved_progress(self):
         self.run_js("""
-          workspaceReady = true;
           let storedTask;
           let calls = 0;
           fetchJson = async (url, options) => {
+            if(url === '/api/workspace') return {scope:'public',revision:0,basket:[],tasks:[],recent:[]};
             if(url === '/api/workspace/task') { storedTask = JSON.parse(options.body).task; return {ok:true}; }
             if(url === '/api/workspace/task/delete') return {ok:true};
             if(url === '/api/pixiv/batch-download') { if(++calls === 2) throw new Error('offline'); return {pages:1,saved:['saved.png']}; }
             throw new Error('Unexpected '+url);
           };
+          await restoreWorkspace();
           const task = prepareDownloadTask([{groups:[{id:'123',pages:[0]}],pageCount:1,context:{kind:'tags',value:'cat'}},{groups:[{id:'123',pages:[1]}],pageCount:1,context:{kind:'tags',value:'cat'}}], readDownloadOptions(), null);
           const secondId = task.remainingChunks[1].requestId;
           await assert.rejects(executeDownloadTask(task, chunk => savedTaskRequest(task, chunk), () => {}), /offline/);
@@ -225,7 +475,7 @@ class RoadmapFrontendTests(unittest.TestCase):
     def run_js(self, code):
         script = (ROOT / "tests/frontend_harness.js").read_text(encoding="utf-8")
         script += "\n" + "\n".join((ROOT / "web" / name).read_text(encoding="utf-8") for name in SOURCES)
-        script += "\nworkspaceLoading = false; syncSearchScopedControls(); const assert = require('node:assert/strict');\n"
+        script += "\nsyncSearchScopedControls(); const assert = require('node:assert/strict');\n"
         script += "\n(async () => {" + code + "\n})().catch(error => { console.error(error); process.exitCode = 1; });"
         result = subprocess.run([shutil.which("node")], input=script, text=True, encoding="utf-8", capture_output=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

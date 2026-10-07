@@ -153,6 +153,39 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
         self.assertEqual(restored["revision"], 1)
         self.assertEqual(restored["basket"][0]["id"], "77")
 
+    def test_workspace_read_reports_the_account_generation(self):
+        with patch.object(server, "AUTHORIZATION_GENERATION", 27):
+            connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=5)
+            try:
+                connection.request("GET", "/api/workspace", headers={"X-MOKU-Request-Token": server.REQUEST_TOKEN})
+                response = connection.getresponse()
+                data = json.loads(response.read())
+                self.assertEqual(response.status, 200, data)
+                self.assertEqual(data["authorizationGeneration"], 27)
+                self.assertEqual(data["scope"], "public")
+            finally:
+                connection.close()
+
+    def test_workspace_read_rejects_session_changes_even_with_the_same_account_scope(self):
+        load = self.workspace.load
+
+        def session_changed(scope):
+            data = load(scope)
+            with server.SEARCH_SESSION_LOCKS_GUARD:
+                server.AUTHORIZATION_GENERATION += 1
+            return data
+
+        with patch.object(server, "AUTHORIZATION_GENERATION", 27), patch.object(self.workspace, "load", side_effect=session_changed):
+            connection = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=5)
+            try:
+                connection.request("GET", "/api/workspace", headers={"X-MOKU-Request-Token": server.REQUEST_TOKEN})
+                response = connection.getresponse()
+                data = json.loads(response.read())
+                self.assertEqual(response.status, 409, data)
+                self.assertNotIn("basket", data)
+            finally:
+                connection.close()
+
     def test_account_switch_during_workspace_read_does_not_return_old_private_basket(self):
         cookie = [{"Cookie": "PHPSESSID=111_original_session"}]
         started = threading.Event()

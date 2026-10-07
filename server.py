@@ -54,7 +54,7 @@ CODE_GENERATION_FILES = (
     "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
     "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "download_history.py", "local_catalog.py", "workspace_store.py", "preview_resources.py", "ugoira_export.py", "version.py",
-    "web/index.html", "web/app.js", "web/text-context-menu.js", "web/download-history.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
+    "web/index.html", "web/app.js", "web/text-context-menu.js", "web/download-history.js", "web/workspace-sync.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
 )
 
 
@@ -3346,13 +3346,15 @@ class Handler(SimpleHTTPRequestHandler):
         if request.path == "/api/workspace":
             with SEARCH_SESSION_LOCKS_GUARD:
                 scope = workspace_scope()
+                generation = AUTHORIZATION_GENERATION
             try:
                 result = WORKSPACE_STORE.load(scope)
             except (OSError, ValueError, sqlite3.Error):
                 return self.send_json({"error": "无法读取采集篮和未完成任务"}, 500)
             with SEARCH_SESSION_LOCKS_GUARD:
-                if scope != workspace_scope():
+                if scope != workspace_scope() or generation != AUTHORIZATION_GENERATION:
                     return self.send_json({"error": "Pixiv 账户状态已变更，请重新读取采集篮"}, 409)
+                result["authorizationGeneration"] = generation
                 return self.send_json(result)
         if request.path == "/api/network/diagnose":
             state = windows_proxy_state()
@@ -3728,7 +3730,7 @@ class Handler(SimpleHTTPRequestHandler):
         except WorkspaceCapacityError as exc:
             return self.send_json({"error": str(exc), "basketCapacity": True}, 409)
         except ValueError as exc:
-            return self.send_json({"error": "采集篮已在另一个窗口更新，请重开当前窗口" if "stale" in str(exc) else "采集篮数据无效"}, 409 if "stale" in str(exc) else 400)
+            return self.send_json({"error": "采集篮已在另一个窗口更新，请重试保存" if "stale" in str(exc) else "采集篮数据无效"}, 409 if "stale" in str(exc) else 400)
         except (OSError, sqlite3.Error):
             return self.send_json({"error": "无法保存采集篮"}, 500)
 

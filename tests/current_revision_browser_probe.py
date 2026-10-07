@@ -21,6 +21,7 @@ class ProbeHandler(server.Handler):
     requests = []
     detail_revision = 0
     fail_once = True
+    fail_basket_once = False
     partial_pages = []
     back_pages = []
     back_floor = 1
@@ -87,6 +88,12 @@ class ProbeHandler(server.Handler):
             type(self).fail_once = False
             return {"error": "offline interruption"}, 502
         return {"pages": len(pages), "saved": ["offline.jpg"]}, 200
+
+    def _post_save_basket(self, data):
+        if type(self).fail_basket_once:
+            type(self).fail_basket_once = False
+            return self.send_json({"error": "采集篮暂时无法保存"}, 503)
+        return super()._post_save_basket(data)
 
 
 def wait_for(page, expression):
@@ -206,7 +213,19 @@ def main():
                 page.locator("#tag").fill("cat")
                 page.locator("#searchSubmit").click()
                 page.locator("[data-select='0']").wait_for()
+                ProbeHandler.fail_basket_once = True
                 page.locator("[data-select='0']").check()
+                wait_for(page, "!document.querySelector('#workspaceNotice').hidden && !workspaceSync.loading")
+                assert page.evaluate("selection.pageCount") == 401
+                for theme in ("dark", "light"):
+                    themes.append(check_theme(page, theme))
+                page.set_viewport_size({"width": 375, "height": 812})
+                assert page.locator("#workspaceRetry").is_visible()
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+                page.locator("#workspaceRetry").click()
+                wait_for(page, "workspaceSync.ready && document.querySelector('#workspaceNotice').hidden")
+                assert server.WORKSPACE_STORE.load("public")["basket"][0]["pages"] == list(range(401))
+                page.set_viewport_size({"width": 1280, "height": 820})
                 page.locator(".card .poster").click()
                 wait_for(page, "currentDetailItem?.id === '50'")
                 for theme in ("dark", "light"):
@@ -230,6 +249,31 @@ def main():
                 assert page.evaluate("refreshArtworkPreview('50')") is True
                 page.locator("#basketPageMore").click()
                 assert "revision-2-48" in page.locator("#basketPages img").first.get_attribute("src")
+                page.locator('#basketDetailDeck [data-page="1"]').click()
+                assert page.locator('#basketDetailDeck [data-page="1"]').get_attribute("aria-pressed") == "true"
+                page.evaluate("workspaceSync.settled()")
+                ProbeHandler.fail_basket_once = True
+                page.locator('#basketPages [data-collection-page="48"]').uncheck()
+                wait_for(page, "!document.querySelector('#workspaceNotice').hidden && !workspaceSync.loading")
+                # Another window changes the saved basket while this one is
+                # offline. Retry must update both the download choice and DOM.
+                page.evaluate("""async () => {
+                    const data = await fetchJson('/api/workspace');
+                    data.basket[0].pages = data.basket[0].pages.filter(page => page !== 50);
+                    await fetchJson('/api/workspace/basket', {method:'POST',
+                        headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({basket:data.basket,revision:data.revision,scope:data.scope})});
+                }""")
+                page.locator("#workspaceRetry").click()
+                wait_for(page, "workspaceSync.ready && document.querySelector('#workspaceNotice').hidden")
+                assert not page.locator('#basketPages [data-collection-page="48"]').is_checked()
+                assert page.locator('#basketPages [data-collection-page="49"]').is_checked()
+                assert not page.locator('#basketPages [data-collection-page="50"]').is_checked()
+                assert page.locator("#batchSummary").inner_text() == "已选 399/401 张"
+                assert page.evaluate("collectionPageOffset") == 48
+                assert page.evaluate("currentDownloadPages(currentDetailItem).length") == 399
+                assert page.locator('#basketDetailDeck [data-page="1"]').get_attribute("aria-pressed") == "true"
+                assert page.locator("#quality").input_value() == "original"
                 page.locator("#basketBack").click()
                 page.locator("#basketBack").click()
                 assert page.locator("#quality").input_value() == "original"
@@ -249,7 +293,8 @@ def main():
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
                 assert not errors, errors
                 print(json.dumps({"ok": True, "downloadChunks": [len(row) for row in ProbeHandler.requests],
-                                  "basketFreshPages": True, "qualityPreserved": True,
+                                  "basketFreshPages": True, "basketSaveRetry": True, "basketRetryViewReconciled": True,
+                                  "qualityPreserved": True,
                                   "viewports": [1280, 375], "scriptErrors": errors,
                                   "themes": themes, "partialPageRequests": ProbeHandler.partial_pages,
                                   "evictedPageBackNavigation": ProbeHandler.back_pages, "screenshots": str(screenshots)}))

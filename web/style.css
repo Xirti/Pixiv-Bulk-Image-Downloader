@@ -72,6 +72,9 @@ body.batch-mode #detail .batch-only{display:block}
 #backTop{position:fixed;right:10px;top:12px;z-index:55;width:44px;height:44px;border-radius:12px;padding:0;font-size:21px;line-height:1}
 .floating-stack{position:fixed;right:16px;bottom:calc(18px + env(safe-area-inset-bottom));z-index:45;display:flex;flex-direction:column;align-items:flex-end;gap:10px;pointer-events:none}
 .floating-stack>*{pointer-events:auto}
+.workspace-notice{max-width:min(360px,80vw);display:grid;gap:9px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);color:var(--ink);font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.16)}
+.workspace-notice[hidden]{display:none}
+.workspace-notice button{justify-self:end;padding:7px 12px;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px}
 .floating-chip{border:1px solid var(--line);border-radius:999px;padding:10px 16px;background:var(--surface-2);box-shadow:inset 0 1px 0 transparent,0 8px 22px rgba(0,0,0,.24);color:var(--ink);font-weight:800;opacity:0;visibility:hidden;transform:translateY(10px);transition:opacity .25s ease,transform .25s ease,visibility .25s}
 .floating-chip:hover{background:var(--surface-2)}
 .floating-chip.is-visible{opacity:1;visibility:visible;transform:none}

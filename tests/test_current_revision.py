@@ -7,11 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS = (ROOT / "tests" / "frontend_harness.js").read_text(encoding="utf-8")
 APP = "\n".join(
     (ROOT / "web" / name).read_text(encoding="utf-8")
-    for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "app.js")
+    for name in ("ugoira-preview.js", "selection-store.js", "artwork-detail-view.js", "download-history.js", "workspace-sync.js", "app.js")
 )
 FIXTURE = r'''
 // State scenarios start after the startup-only local restore has finished.
-workspaceLoading = false;
 syncSearchScopedControls();
 const assert = require("node:assert/strict");
 const artwork = (id, count = 3, token = "old") => ({

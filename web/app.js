@@ -43,19 +43,8 @@ let lastKnownLoggedIn = null;
 let lastKnownAuthorizationGeneration = null;
 let downloadAuthorizationRevision = 0;
 let authStatusGeneration = 0;
-let workspaceReady = false;
-let workspaceLoading = true;
-let workspaceReloadPending = false;
-let workspaceRestoreGeneration = 0;
-let restoringWorkspace = false;
-let basketRevision = 0;
-let basketSaveChain = Promise.resolve();
-let basketDirty = false;
-let basketSaving = false;
-let savedBasketSignature = null;
 const pendingTasks = new Map();
 let savedRecentSearches = [];
-let workspaceScope = null;
 const batchCandidateContextByArtwork = new Map();
 const batchCandidateResultPageByArtwork = new Map();
 const MAX_SELECTED_PAGES = 1000;
@@ -66,7 +55,7 @@ const DETAIL_REFRESH_COOLDOWN_MS = 30000;
 const BASKET_ARTWORK_WINDOW = 120;
 const VIEWER_PAGE_WINDOW = 80;
 const SEARCH_KEEP_BEHIND = 6;
-const selection = createSelectionStore({maxPages: MAX_SELECTED_PAGES, onChange: () => persistBasket()});
+const selection = createSelectionStore({maxPages: MAX_SELECTED_PAGES, onChange: () => workspaceSync.changed()});
 const detailRefreshes = new Map();
 const detailRefreshAttempts = new Map();
 const staleBasketPreviewIds = new Set();
@@ -130,8 +119,8 @@ function rememberSearch(tag, filters) {
   const key = JSON.stringify(row);
   const rows = [row, ...readRecentSearches().filter(old => JSON.stringify(old) !== key)].slice(0, 8);
   savedRecentSearches = rows;
-  if (workspaceReady) {
-    void fetchJson("/api/workspace/recent", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({search: row, scope: workspaceScope})})
+  if (workspaceSync.ready) {
+    void fetchJson("/api/workspace/recent", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({search: row, scope: workspaceSync.scope})})
       .catch(() => { $("#recentSearches").title = "最近搜索暂未保存，重开窗口后可能丢失"; });
   }
   renderRecentSearches();
@@ -168,71 +157,13 @@ const esc = (value) => String(value).replace(
 );
 const historyView = createDownloadHistoryView({ fetchJson: (url, options) => fetchJson(url, options) });
 
-function basketForStorage() {
-  return selection.snapshot().map(row => ({id: row.id, pages: [...row.pages].sort((a, b) => a - b), context: row.context,
-    resultPage: row.resultPage, archived: row.archived, item: {id: row.id, title: row.item.title, artist: row.item.artist,
-      pages: row.item.pages, workType: row.item.workType, restriction: row.item.restriction, tags: row.item.tags}}));
-}
-
-function persistBasket() {
-  if (!workspaceReady || restoringWorkspace) return;
-  basketDirty = true;
-  if (basketSaving) return;
-  basketSaving = true;
-  basketSaveChain = basketSaveChain.then(async () => {
-    try {
-      while (workspaceReady && basketDirty) {
-        const authorization = downloadAuthorizationRevision;
-        basketDirty = false;
-        const basket = basketForStorage();
-        const signature = JSON.stringify(basket);
-        if (signature === savedBasketSignature) continue;
-        const data = await fetchJson("/api/workspace/basket", {method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({basket, revision: basketRevision, scope: workspaceScope})});
-        if (authorization !== downloadAuthorizationRevision) continue;
-        basketRevision = data.revision;
-        savedBasketSignature = signature;
-      }
-    } catch (error) {
-      if (workspaceLoading) return;
-      if (error.basketCapacity) {
-        announceToast(`选择暂未保存：${error.message}`);
-        showTaskDock("请减少采集篮选择", error.message, 8000);
-        return;
-      }
-      workspaceReady = false;
-      announceToast(`采集篮暂未保存：${error.message}。请重开当前窗口后重试。`);
-      showTaskDock("采集篮暂未保存", error.message, 8000);
-    } finally {
-      basketSaving = false;
-      if (workspaceReady && basketDirty) persistBasket();
-    }
-  });
-}
-
-async function restoreWorkspace() {
-  if (selection.locked || singleDownloadPending) {
-    workspaceReloadPending = true;
-    workspaceLoading = true;
-    workspaceReady = false;
-    syncSearchScopedControls();
-    return;
-  }
-  const generation = ++workspaceRestoreGeneration;
-  const authorization = downloadAuthorizationRevision;
-  workspaceReloadPending = false;
-  workspaceLoading = true;
-  workspaceReady = false;
-  syncSearchScopedControls();
-  try {
-    const data = await fetchJson("/api/workspace");
-    if (generation !== workspaceRestoreGeneration || authorization !== downloadAuthorizationRevision) return;
-    restoringWorkspace = true;
-    const result = selection.restore(data.basket || [], {allowOverflow: true});
-    if (!result.accepted) throw new Error("采集篮记录不完整");
-    basketRevision = data.revision || 0;
-    savedBasketSignature = JSON.stringify(basketForStorage());
-    workspaceScope = data.scope;
+const workspaceSync = createWorkspaceSync({
+  request: (url, options) => fetchJson(url, options),
+  getAuthorizationGeneration: () => lastKnownAuthorizationGeneration,
+  readBasket: () => selection.snapshot(),
+  canRestore: () => !selection.locked && !singleDownloadPending,
+  applyWorkspace: data => {
+    restoreBasketView(data.basket);
     savedRecentSearches = data.recent || [];
     renderRecentSearches();
     pendingTasks.clear();
@@ -240,30 +171,77 @@ async function restoreWorkspace() {
       const task = {...saved, persisted: true, authorizationRevision: downloadAuthorizationRevision};
       pendingTasks.set(task.id, task);
     }
-    workspaceReady = true;
-    for (const row of selection.snapshot()) staleBasketPreviewIds.add(row.id);
     updateSelectionBar();
     renderPendingTasks();
     if (selectedPageCount() > MAX_SELECTED_PAGES) {
       showTaskDock("采集篮选择已保留", `当前 ${selectedPageCount()} 张，请减少至 ${MAX_SELECTED_PAGES} 张以内再保存或批量下载。`, 8000);
     } else if (pendingTasks.size) showTaskDock("有未完成的下载", `${pendingTasks.size} 项任务已暂停，可在下载页继续。`, 8000);
-  } catch (error) {
-    if (generation !== workspaceRestoreGeneration || authorization !== downloadAuthorizationRevision) return;
-    workspaceReady = false;
-    showTaskDock("采集篮恢复失败", `${error.message}；本次选择暂未保存，请重开窗口重试。`, 8000);
-  } finally {
-    if (generation === workspaceRestoreGeneration) {
-      restoringWorkspace = false;
-      workspaceLoading = false;
-      syncSearchScopedControls();
+  },
+  onStatus: state => {
+    $("#workspaceNotice").hidden = !state.error;
+    $("#workspaceNoticeText").textContent = state.error
+      ? (state.error.basketCapacity ? `选择尚未保存：${state.error.message}` : `本机记录暂未同步：${state.error.message}。当前选择已保留。`) : "";
+    $("#workspaceRetry").disabled = state.loading || selection.locked || singleDownloadPending;
+    syncSearchScopedControls();
+  },
+  onScopeChanged: () => {
+    downloadAuthorizationRevision++;
+    handleAuthorizationLoss("Pixiv 账户状态已变更");
+    return syncAuthStatus();
+  },
+});
+
+$("#workspaceRetry").onclick = () => workspaceSync.retry();
+
+function restoreWorkspace() { return workspaceSync.restore(); }
+
+function restoreBasketView(rows) {
+  // Disk records contain durable metadata, not preview URLs. Keep previews
+  // already loaded by this account, and reconcile controls without navigating
+  // or rebuilding the detail deck (which would lose its pinned card).
+  const previewItems = new Map([...items, ...batchCandidateItems, ...selection.snapshot().map(row => row.item),
+    basketDownloadSnapshot?.item, currentDetailItem, basketDetailItem].filter(Boolean).map(item => [String(item.id), item]));
+  const restored = rows.map(row => ({...row, item: {...previewItems.get(String(row.id)), ...row.item}}));
+  if (!selection.restore(restored, {allowOverflow: true}).accepted) throw new Error("采集篮记录不完整");
+  const records = new Map(selection.snapshot().map(row => [row.id, row]));
+  const latestItem = item => item ? records.get(String(item.id))?.item || item : null;
+  for (const row of records.values()) {
+    const preview = previewItems.get(row.id);
+    if (!preview?.pageImages || preview.pages !== row.item.pages || preview.workType !== row.item.workType
+      || preview.restriction !== row.item.restriction) staleBasketPreviewIds.add(row.id);
+  }
+  currentDetailItem = latestItem(currentDetailItem);
+  basketDetailItem = latestItem(basketDetailItem);
+  if (basketDownloadSnapshot) basketDownloadSnapshot.item = latestItem(basketDownloadSnapshot.item);
+  syncResultSelectionControls();
+  const syncPages = (root, item) => {
+    root.querySelectorAll("[data-collection-page]").forEach(box => {
+      box.checked = Boolean(selection.get(item?.id)?.pages.has(Number(box.dataset.collectionPage)));
+    });
+    if (item) bindCollectionPageInputs(root, item);
+  };
+  syncPages($("#collectionPages"), basketDownloadSnapshot?.item || currentDetailItem);
+  if (!basketPageOpen()) return;
+  const candidates = new Map(batchCandidateItems.map(item => [String(item.id), item]));
+  for (const row of records.values()) {
+    candidates.set(row.id, row.item);
+    batchCandidateContextByArtwork.set(row.id, {...row.context});
+    batchCandidateResultPageByArtwork.set(row.id, row.resultPage);
+  }
+  batchCandidateItems = [...candidates.values()];
+  if (basketReturnMode === "picker") openBasketArtworkPicker();
+  else {
+    syncPages($("#basketPages"), basketDetailItem);
+    if (basketDetailItem && records.has(String(basketDetailItem.id))) {
+      currentDetailContext = {...records.get(String(basketDetailItem.id)).context};
     }
+    syncBasketHeader();
+    syncBasketArtworkMeta();
   }
 }
 
 async function restoreWorkspaceWhenUnlocked() {
-  if (!workspaceReloadPending || selection.locked || singleDownloadPending) return;
-  await basketSaveChain;
-  if (workspaceReloadPending && !selection.locked && !singleDownloadPending) await restoreWorkspace();
+  if (workspaceSync.needsRestore && !selection.locked && !singleDownloadPending) await workspaceSync.restore();
 }
 
 function renderPendingTasks() {
@@ -288,16 +266,16 @@ function renderPendingTasks() {
 }
 
 async function saveDownloadTask(task) {
-  if ((!workspaceReady && !task.persisted) || task.taskOptions?.endpoint === "/api/download") return;
+  if ((!workspaceSync.ready && !task.persisted) || task.taskOptions?.endpoint === "/api/download") return;
   if (!task.remainingChunks.length) { await deleteSavedTask(task.id); return; }
   pendingTasks.set(task.id, task);
   renderPendingTasks();
-  await fetchJson("/api/workspace/task", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task, scope: workspaceScope})});
+  await fetchJson("/api/workspace/task", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task, scope: workspaceSync.scope})});
 }
 
 async function deleteSavedTask(id) {
-  if (!workspaceReady) return;
-  await fetchJson("/api/workspace/task/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id, scope: workspaceScope})});
+  if (!workspaceSync.ready) return;
+  await fetchJson("/api/workspace/task/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id, scope: workspaceSync.scope})});
   pendingTasks.delete(id);
   renderPendingTasks();
 }
@@ -309,7 +287,7 @@ function savedTaskRequest(task, chunk) {
 }
 
 async function resumeSavedTask(task) {
-  if (!task || contextNavigationLocked() || !workspaceReady) return;
+  if (!task || contextNavigationLocked() || !workspaceSync.ready) return;
   task.authorizationRevision = downloadAuthorizationRevision;
   setBasketSelectionLocked(true);
   $("#pendingDownloadStatus").textContent = "正在继续保存的任务…";
@@ -687,22 +665,23 @@ function attachUgoiraHoverTargets(root) {
 }
 
 function syncSearchScopedControls() {
-  const resultActionsDisabled = selection.locked || searchPending || workspaceLoading || !resultSelectionEnabled || items.length === 0;
+  const resultActionsDisabled = selection.locked || searchPending || workspaceSync.loading || !resultSelectionEnabled || items.length === 0;
   $("#selectAllPage").disabled = resultActionsDisabled;
   $("#clearPageSelection").disabled = resultActionsDisabled;
-  const selectionActionsDisabled = selection.locked || searchPending || workspaceLoading;
+  const selectionActionsDisabled = selection.locked || searchPending || workspaceSync.loading;
   $("#clearSelection").disabled = selectionActionsDisabled || selection.size === 0;
   $("#openBatch").disabled = selectionActionsDisabled || selection.size === 0;
-  $("#batchDownload").disabled = selection.locked || searchPending || singleDownloadPending || workspaceLoading || selectedPageCount() === 0;
+  $("#batchDownload").disabled = selection.locked || searchPending || singleDownloadPending || workspaceSync.loading || selectedPageCount() === 0;
+  $("#workspaceRetry").disabled = workspaceSync.loading || selection.locked || singleDownloadPending;
   $("#basketClear").disabled = contextNavigationLocked() || batchCandidateItems.length === 0;
   $("#basketDownload").disabled = contextNavigationLocked() || selectedPageCount() === 0;
-  searchButton.disabled = selection.locked || searchPending || singleDownloadPending || workspaceLoading;
+  searchButton.disabled = selection.locked || searchPending || singleDownloadPending || workspaceSync.loading;
   const detailReady = Boolean(
     currentDetailItem
     && activeArtworkId !== null
     && String(currentDetailItem.id) === String(activeArtworkId),
   );
-  $("#download").disabled = selection.locked || searchPending || singleDownloadPending || workspaceLoading || !detailReady;
+  $("#download").disabled = selection.locked || searchPending || singleDownloadPending || workspaceSync.loading || !detailReady;
   if (detailReady && !singleDownloadPending) {
     $("#download").disabled ||= currentDownloadPages(currentDetailItem).length === 0;
     $("#download").textContent = downloadButtonLabel(currentDetailItem);
@@ -741,10 +720,6 @@ function clearDetail(message = "选择一件作品查看详情") {
 
 function discardPreviousAccountSelections() {
   // A public-looking work can still contain this account's private choices.
-  workspaceScope = null;
-  basketRevision = 0;
-  savedBasketSignature = null;
-  basketDirty = false;
   selection.revoke(selection.snapshot().map(row => row.id));
   batchCandidateItems = [];
   batchCandidateContextByArtwork.clear();
@@ -883,7 +858,7 @@ function clearAllCurrentPage() {
 }
 
 async function search(tag, page = 1, filters = readSearchFilters()) {
-  if (selection.locked || singleDownloadPending || workspaceLoading) return;
+  if (selection.locked || singleDownloadPending || workspaceSync.loading) return;
   ugoiraPreview.stop();
   const previousView = searchController?._mokuRestoreView || {
     count: $("#count").textContent,
@@ -1194,7 +1169,7 @@ for (const id of ["basketPage", "allViewer", "downloadPage", "historyPage", "fav
 }
 
 function contextNavigationLocked() {
-  return selection.locked || singleDownloadPending || searchPending || workspaceLoading;
+  return selection.locked || singleDownloadPending || searchPending || workspaceSync.loading;
 }
 
 function syncNavigationAvailability() {
@@ -1820,7 +1795,7 @@ function nextDownloadRequestId() {
 
 async function fetchDownloadResult(request, chunk, task) {
   const body = JSON.stringify({ ...request.body, requestId: chunk.requestId,
-    ...(task.persisted ? {queueId: task.id, scope: workspaceScope} : {}) });
+    ...(task.persisted ? {queueId: task.id, scope: workspaceSync.scope} : {}) });
   let timeoutRetries = 0;
   while (true) {
     if (task.authorizationRevision !== downloadAuthorizationRevision) {
@@ -1847,7 +1822,7 @@ async function fetchDownloadResult(request, chunk, task) {
 }
 
 async function executeDownloadTask(task, requestForChunk, reportProgress) {
-  if (workspaceReady || task.persisted) {
+  if (workspaceSync.ready || task.persisted) {
     await saveDownloadTask(task);
     task.persisted = task.taskOptions?.endpoint !== "/api/download";
   }
@@ -2298,14 +2273,9 @@ async function syncAuthStatus() {
     const accountGeneration = Number.isInteger(data.authorizationGeneration) ? data.authorizationGeneration : null;
     const accountChanged = lastKnownAuthorizationGeneration !== null
       && accountGeneration !== null && accountGeneration !== lastKnownAuthorizationGeneration;
-    const reloadWorkspace = (workspaceReady || workspaceLoading || workspaceReloadPending || workspaceScope !== null)
+    const reloadWorkspace = workspaceSync.active
       && (accountChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged));
-    if (reloadWorkspace) {
-      workspaceRestoreGeneration += 1;
-      workspaceReloadPending = true;
-      workspaceLoading = true;
-      workspaceReady = false;
-    }
+    if (reloadWorkspace) workspaceSync.reset();
     if (accountChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged)) {
       downloadAuthorizationRevision += 1;
       resumableSingleTask = null;
@@ -2325,10 +2295,12 @@ async function syncAuthStatus() {
       syncSearchScopedControls();
       await restoreWorkspaceWhenUnlocked();
     }
+    return true;
   } catch (error) {
     if (generation !== authStatusGeneration) return;
     $("#mode").textContent = "PIXIV OFFLINE";
     $("#authStateText").textContent = error.message || "暂时无法读取本机会话状态";
+    return false;
   }
 }
 

@@ -48,7 +48,7 @@ def main() -> None:
                 "visual probe page",
             )
             wait_until(
-                lambda: evaluate(ws, counter, "workspaceReady && !workspaceLoading"),
+                lambda: evaluate(ws, counter, "workspaceSync.ready && !workspaceSync.loading"),
                 20,
                 "visual probe workspace restored",
             )
@@ -368,7 +368,7 @@ def main() -> None:
                     taskSaved: taskEvents.filter(event => event.url === '/api/workspace/task').length,
                     taskDeleted: taskEvents.filter(event => event.url === '/api/workspace/task/delete').length,
                 };
-                await basketSaveChain;
+                await workspaceSync.settled();
                 fetchJson = originalFetchJson;
                 const geometry = {
                     separate: check.right + 8 <= badge.left,

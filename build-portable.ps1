@@ -35,7 +35,7 @@ if (-not $SkipTests) {
   & $Python -I -B (Join-Path $Root 'run_tests.py') --app-only
   if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed' }
 }
-foreach ($script in @('app.js', 'ugoira-preview.js', 'theme.js', 'selection-store.js', 'artwork-detail-view.js')) {
+foreach ($script in @('app.js', 'ugoira-preview.js', 'theme.js', 'selection-store.js', 'artwork-detail-view.js', 'workspace-sync.js', 'download-history.js', 'text-context-menu.js')) {
   node --check (Join-Path (Join-Path $Root 'web') $script)
   if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $script" }
 }

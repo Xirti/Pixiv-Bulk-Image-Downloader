@@ -40,23 +40,27 @@ class LocalCatalog:
         return os.path.normcase(os.path.abspath(directory))
 
     @staticmethod
-    def _file_state(path: Path) -> dict:
+    def _file_state(path: Path, checked_directories: set[Path] | None = None) -> dict:
         path = Path(os.path.abspath(path))
         # Never turn an unreadable directory into an apparent missing file.
         current = Path(path.anchor)
         for part in path.parts[1:]:
             current /= part
+            if current != path and checked_directories is not None and current in checked_directories:
+                continue
             info = current.lstat()
             if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                 raise OSError("下载目录包含链接，请重新选择保存位置")
+            if current != path and checked_directories is not None and stat.S_ISDIR(info.st_mode):
+                checked_directories.add(current)
         if not stat.S_ISREG(info.st_mode):
             raise OSError("下载文件已变为非普通文件")
         return {"path": str(path), "size": info.st_size, "mtime": info.st_mtime_ns}
 
-    def _present(self, encoded: str) -> bool:
+    def _present(self, encoded: str, checked_directories: set[Path] | None = None) -> bool:
         files = json.loads(encoded)
         try:
-            return bool(files) and all(self._file_state(Path(file["path"])) == file for file in files)
+            return bool(files) and all(self._file_state(Path(file["path"]), checked_directories) == file for file in files)
         except (FileNotFoundError, NotADirectoryError):
             return False
 
@@ -108,7 +112,10 @@ class LocalCatalog:
         with self._lock, self._connection() as connection:
             placeholders = ",".join("?" for _ in ids)
             rows = connection.execute(f"SELECT artwork,page,files FROM artifacts WHERE artwork IN ({placeholders})", ids).fetchall()
+        # Only share parent checks within this indicator query. File metadata is
+        # always read again; download deduplication uses the strict uncached path.
+        checked_directories: set[Path] = set()
         for artwork, page, encoded in rows:
-            if page not in present[artwork] and self._present(encoded):
+            if page not in present[artwork] and self._present(encoded, checked_directories):
                 present[artwork].add(page)
         return present

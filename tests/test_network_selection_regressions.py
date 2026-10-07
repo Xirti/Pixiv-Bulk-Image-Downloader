@@ -1,7 +1,6 @@
 import json
 import os
 import socket
-import time
 import threading
 import urllib.request
 import urllib.parse
@@ -244,18 +243,17 @@ class NetworkSelectionRegressionTests(unittest.TestCase):
 
     def test_network_diagnosis_probes_are_anonymous_single_attempt_and_parallel(self):
         calls = []
+        probes_started = threading.Barrier(2, timeout=3)
 
         def slow_probe(url, image_only=False, **kwargs):
             calls.append({"url": url, "image_only": image_only, **kwargs})
-            time.sleep(0.2)
+            # Each probe must start before the other can finish. This checks
+            # concurrency directly instead of timing Windows scheduling.
+            probes_started.wait()
             return b"ok", "image/jpeg" if image_only else "text/html"
 
-        started = time.monotonic()
         with patch.object(server, "pixiv_request", side_effect=slow_probe):
             checks = server.run_network_diagnostic_checks()
-        elapsed = time.monotonic() - started
-
-        self.assertLess(elapsed, 0.34, f"probes ran serially in {elapsed:.3f}s")
         self.assertEqual([row["name"] for row in checks], ["pixiv", "cdn"])
         self.assertTrue(all(row["ok"] for row in checks))
         self.assertEqual(len(calls), 2)

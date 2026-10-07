@@ -20,6 +20,11 @@ from version import __version__
 
 
 class BuildManifestTests(unittest.TestCase):
+    def test_workspace_sync_module_is_loaded_and_included_in_build_inputs(self):
+        html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+        self.assertLess(html.index('src="/workspace-sync.js"'), html.index('src="/app.js"'))
+        self.assertIn("web/workspace-sync.js", build_manifest.BUILD_INPUT_FILES)
+
     def test_portable_runtime_config_is_fingerprinted_and_copied_beside_exe(self):
         self.assertIn("MOKU.exe.config", build_manifest.BUILD_INPUT_FILES)
         config = ET.parse(ROOT / "MOKU.exe.config").getroot()
@@ -335,7 +340,7 @@ class BuildManifestTests(unittest.TestCase):
             "hiddenPastResults",
             "visibleAfterReturn",
             "optionSnapshot",
-            "workspaceReady && !workspaceLoading",
+            "workspaceSync.ready && !workspaceSync.loading",
             "optionSnapshot.taskSaved === 3",
             "optionSnapshot.taskDeleted === 1",
             "geometry.separate",
