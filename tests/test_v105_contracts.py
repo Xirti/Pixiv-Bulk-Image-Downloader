@@ -280,7 +280,7 @@ class V105VisualContractTests(unittest.TestCase):
         self.assertIn("showBatchDetail()", back)
         select_block = APP[APP.index("async function select(index)"):APP.index("function renderDetail")]
         self.assertIn('clearDetail(', select_block)
-        clear = APP[APP.index("function clearDetail"):APP.index("function discardRestrictedSelections")]
+        clear = APP[APP.index("function clearDetail"):APP.index("function discardPreviousAccountSelections")]
         self.assertIn('document.body.classList.remove("batch-mode")', clear)
 
     def test_multi_artwork_picker_and_page_badge_open_images(self):

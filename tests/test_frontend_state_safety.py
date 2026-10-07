@@ -23,7 +23,7 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertIn("detailController.abort()", invalidation)
         self.assertIn('$("#safety").value = "safe"', cleanup)
         self.assertIn("closeAllViewer()", cleanup)
-        self.assertIn("discardRestrictedSelections()", cleanup)
+        self.assertIn("discardPreviousAccountSelections()", cleanup)
         self.assertIn("ugoiraPreview.clear()", cleanup)
         self.assertIn("clearDetail(", cleanup)
         self.assertIn('grid.innerHTML =', cleanup)

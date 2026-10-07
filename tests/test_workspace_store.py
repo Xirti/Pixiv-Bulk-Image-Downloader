@@ -54,10 +54,12 @@ class WorkspaceStoreTests(unittest.TestCase):
             restored = store.load("account-A")
             self.assertEqual(len(restored["basket"]), 1)
             self.assertEqual(restored["basket"][0]["pages"], list(range(1000)))
+            store.save_basket(restored["basket"], "account-A", revision=restored["revision"])
+            self.assertEqual(store.load("public")["basket"][0]["pages"], public["pages"])
             additional = {"id": "456", "pages": [0], "item": {"pages": 1}}
             with self.assertRaisesRegex(ValueError, "容量"):
-                store.save_basket([public, additional], "public", revision=2)
-            self.assertEqual(store.load("account-A")["revision"], 2)
+                store.save_basket([public, additional], "public", revision=3)
+            self.assertEqual(store.load("account-A")["revision"], 3)
 
     def test_work_changing_to_public_does_not_duplicate_restored_basket_entry(self):
         from workspace_store import WorkspaceStore
@@ -75,6 +77,80 @@ class WorkspaceStoreTests(unittest.TestCase):
             self.assertEqual(restored[0]["item"]["restriction"], "safe")
             self.assertEqual(restored[0]["context"], private["context"])
             self.assertEqual(store.load("public")["basket"][0]["pages"], [1])
+
+    def test_saving_restored_basket_does_not_share_old_private_choices_or_origin(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            private = {"id": "123", "pages": [0, 2], "item": {"pages": 3, "restriction": "r18"},
+                       "context": {"kind": "author", "value": "private-origin"}, "resultPage": 8}
+            public = {"id": "123", "pages": [1], "item": {"pages": 3, "restriction": "safe"},
+                      "context": {"kind": "tags", "value": "cat"}, "resultPage": 3}
+            store.save_basket([private], "account-A", revision=0)
+            store.save_basket([public], "public", revision=1)
+            restored = store.load("account-A")
+            restored["basket"].append({"id": "456", "pages": [0], "item": {"pages": 1}})
+            store.save_basket(restored["basket"], "account-A", revision=restored["revision"])
+            shared = store.load("account-B")["basket"][0]
+            self.assertEqual(shared["pages"], [1])
+            self.assertEqual(shared["context"], public["context"])
+            self.assertEqual(shared["resultPage"], public["resultPage"])
+            own = store.load("account-A")["basket"][0]
+            self.assertEqual(own["pages"], [0, 1, 2])
+            self.assertEqual(own["context"], private["context"])
+            self.assertEqual(own["resultPage"], private["resultPage"])
+
+    def test_merged_basket_edits_keep_shared_overlap_and_other_account_choices(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            private = {"id": "123", "pages": [0, 2], "item": {"pages": 4, "restriction": "r18"},
+                       "context": {"kind": "author", "value": "private-origin"}}
+            public = {"id": "123", "pages": [1, 2], "item": {"pages": 4, "restriction": "safe"},
+                      "context": {"kind": "tags", "value": "cat"}}
+            other = {"id": "789", "pages": [0], "item": {"pages": 1, "restriction": "r18"}}
+            store.save_basket([private], "account-A", revision=0)
+            store.save_basket([public, other], "account-B", revision=1)
+            restored = store.load("account-A")
+            restored["basket"][0]["pages"] = [0, 2, 3]
+            store.save_basket(restored["basket"], "account-A", revision=restored["revision"])
+            shared = store.load("public")["basket"][0]
+            self.assertEqual(shared["pages"], [2, 3], "the existing shared overlap must remain shared")
+            self.assertEqual(shared["context"], public["context"])
+            other_basket = store.load("account-B")["basket"]
+            self.assertEqual([row["id"] for row in other_basket], ["123", "789"])
+            self.assertEqual(other_basket[1]["pages"], [0])
+            restored = store.load("account-A")
+            restored["basket"][0]["pages"] = [3]
+            store.save_basket(restored["basket"], "account-A", revision=restored["revision"])
+            own = store.load("account-A")["basket"][0]
+            self.assertEqual(own["pages"], [3])
+            self.assertEqual(own["context"], public["context"])
+            self.assertEqual(store.load("public")["basket"][0]["pages"], [3])
+
+    def test_safe_metadata_without_shared_pages_keeps_private_origin_on_later_saves(self):
+        from workspace_store import WorkspaceStore
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            private = {"id": "123", "pages": [0], "item": {"pages": 3, "restriction": "r18"},
+                       "context": {"kind": "author", "value": "private-origin"}}
+            public = {"id": "123", "pages": [1], "item": {"pages": 3, "restriction": "safe"}}
+            store.save_basket([private], "account-A", revision=0)
+            store.save_basket([public], "public", revision=1)
+            restored = store.load("account-A")
+            restored["basket"][0]["pages"] = [0]
+            store.save_basket(restored["basket"], "account-A", revision=restored["revision"])
+            restored = store.load("account-A")
+            self.assertEqual(restored["basket"][0]["item"]["restriction"], "safe")
+            store.save_basket(restored["basket"], "account-A", revision=restored["revision"])
+            self.assertEqual(store.load("public")["basket"], [])
+            restored = store.load("account-A")
+            restored["basket"][0]["pages"].append(2)
+            store.save_basket(restored["basket"], "account-A", revision=restored["revision"])
+            shared = store.load("public")["basket"][0]
+            self.assertEqual(shared["pages"], [2])
+            self.assertEqual(shared["context"], {"kind": "pid", "value": "123"})
+            self.assertEqual(store.load("account-A")["basket"][0]["context"], private["context"])
 
     def test_shared_basket_update_does_not_overfill_another_accounts_private_selection(self):
         from workspace_store import WorkspaceStore

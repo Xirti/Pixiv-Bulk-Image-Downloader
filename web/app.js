@@ -739,17 +739,13 @@ function clearDetail(message = "选择一件作品查看详情") {
   syncSearchScopedControls();
 }
 
-function discardRestrictedSelections() {
-  const restrictedIds = new Set();
-  const rememberRestricted = (item) => {
-    if (item?.restriction === "r18" && item.id !== undefined) restrictedIds.add(item.id);
-  };
-  items.forEach(rememberRestricted);
-  batchCandidateItems.forEach(rememberRestricted);
-  selection.snapshot().forEach(({item}) => rememberRestricted(item));
-  rememberRestricted(currentDetailItem);
-  selection.revoke(restrictedIds);
-  restrictedIds.forEach((id) => staleBasketPreviewIds.delete(id));
+function discardPreviousAccountSelections() {
+  // A public-looking work can still contain this account's private choices.
+  workspaceScope = null;
+  basketRevision = 0;
+  savedBasketSignature = null;
+  basketDirty = false;
+  selection.revoke(selection.snapshot().map(row => row.id));
   batchCandidateItems = [];
   batchCandidateContextByArtwork.clear();
   batchCandidateResultPageByArtwork.clear();
@@ -773,7 +769,7 @@ function handleAuthorizationLoss(reason = "Pixiv 已断开") {
   $("#safety").value = "safe";
   activeSearchFilters = { ...activeSearchFilters, mode: "safe" };
   closeAllViewer();
-  discardRestrictedSelections();
+  discardPreviousAccountSelections();
   items = [];
   currentPage = 1;
   pageNumbers = [1];

@@ -134,6 +134,31 @@ def _visible_basket(rows: list, scope: str) -> list[dict]:
     return list(visible.values())
 
 
+def _preserve_basket_ownership(rows: list, previous: list, scope: str) -> list:
+    owned = {row["id"]: row for owner, row in previous if owner == scope and scope != "public"}
+    public = {row["id"]: row for owner, row in previous if owner == "public"}
+    result = []
+    for owner, row in rows:
+        private = owned.get(row["id"])
+        if owner != "public" or private is None:
+            result.append((owner, row))
+            continue
+        # Public metadata must not promote this account's existing private choices.
+        selected, private_pages = set(row["pages"]), set(private["pages"])
+        kept_private = sorted(selected & private_pages)
+        if kept_private:
+            result.append((scope, {**row, "pages": kept_private, "context": private["context"],
+                                   "resultPage": private["resultPage"]}))
+        shared = public.get(row["id"])
+        shared_pages = set(shared["pages"]) if shared else set()
+        kept_public = sorted((selected - private_pages) | (selected & shared_pages))
+        if kept_public:
+            origin = shared or {"context": {"kind": "pid", "value": row["id"]}, "resultPage": 1}
+            result.append(("public", {**row, "pages": kept_public, "context": origin["context"],
+                                      "resultPage": origin["resultPage"]}))
+    return result + [(owner, row) for owner, row in previous if owner not in {scope, "public"}]
+
+
 class WorkspaceStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -234,8 +259,7 @@ class WorkspaceStore:
             old = connection.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
             if (old[0] if old else 0) != revision:
                 raise ValueError("stale basket revision")
-            if old:
-                normalized += [(owner, row) for owner, row in json.loads(old[1]) if owner not in {scope, "public"}]
+            normalized = _preserve_basket_ownership(normalized, json.loads(old[1]) if old else [], scope)
             scopes = {"public", *(owner for owner, _row in normalized)}
             if any(sum(len(row["pages"]) for row in _visible_basket(normalized, owner)) > 1000 for owner in scopes):
                 raise WorkspaceCapacityError("共享采集篮容量不足，请减少公开作品的选择后重试")

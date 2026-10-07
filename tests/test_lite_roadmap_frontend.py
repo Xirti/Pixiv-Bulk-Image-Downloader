@@ -66,6 +66,8 @@ class RoadmapFrontendTests(unittest.TestCase):
 
     def test_account_change_waits_for_download_unlock_before_restoring(self):
         self.run_js("""
+          const item = {id:'123',pages:3,restriction:'safe',title:'Cat',artist:'Artist',tags:[]};
+          selection.restore([{id:'123',item,pages:[0,1,2],context:{kind:'author',value:'private-origin'}}]);
           workspaceReady = true;
           workspaceScope = 'account-A';
           lastKnownLoggedIn = true;
@@ -74,17 +76,50 @@ class RoadmapFrontendTests(unittest.TestCase):
           let loads = 0;
           fetchJson = async url => {
             if(url === '/api/status') return {loggedIn:true,authorizationGeneration:2};
-            if(url === '/api/workspace') { loads++; return {scope:'account-B',revision:1,basket:[],recent:[],tasks:[]}; }
+            if(url === '/api/workspace') { loads++; return {scope:'account-B',revision:1,
+              basket:[{id:'123',item,pages:[1],context:{kind:'tags',value:'cat'}}],recent:[],tasks:[]}; }
             throw new Error('Unexpected '+url);
           };
           await syncAuthStatus();
           assert.equal(loads, 0);
           assert.equal(workspaceLoading, true);
+          assert.equal(selection.size, 0, 'download locking must not retain the previous account choices');
+          assert.equal(workspaceScope, null);
           setBasketSelectionLocked(false);
           for(let i=0;i<10 && !workspaceReady;i++) await new Promise(resolve => setTimeout(resolve,0));
           assert.equal(loads, 1);
           assert.equal(workspaceReady, true);
           assert.equal(workspaceScope, 'account-B');
+          assert.deepEqual([...selection.get('123').pages], [1]);
+          assert.equal(selection.get('123').context.value, 'cat');
+          clearTimeout(taskDockTimer);
+        """)
+
+    def test_failed_new_account_restore_does_not_leave_old_safe_private_choices_visible(self):
+        self.run_js("""
+          lastKnownLoggedIn = true;
+          lastKnownAuthorizationGeneration = 1;
+          let loads = 0;
+          fetchJson = async url => {
+            if(url === '/api/status') return {loggedIn:true,authorizationGeneration:2};
+            if(url === '/api/workspace' && ++loads === 1) return {
+              scope:'account-A',revision:2,tasks:[],recent:[],basket:[{
+                id:'123',pages:[0,1,2],item:{id:'123',pages:3,restriction:'safe',title:'Cat',artist:'Artist',tags:[]},
+                context:{kind:'author',value:'private-origin'},resultPage:8,archived:true
+              }]
+            };
+            throw new Error('workspace unavailable');
+          };
+          await restoreWorkspace();
+          assert.equal(selection.pageCount, 3);
+          await syncAuthStatus();
+          assert.equal(loads, 2);
+          assert.equal(workspaceReady, false);
+          assert.equal(workspaceLoading, false);
+          assert.equal(selection.size, 0, 'the old account choices remain visible after failed restore');
+          assert.equal(workspaceScope, null);
+          assert.equal(fakeElement('#openBatch').disabled, true);
+          assert.equal(fakeElement('#batchDownload').disabled, true);
           clearTimeout(taskDockTimer);
         """)
 
