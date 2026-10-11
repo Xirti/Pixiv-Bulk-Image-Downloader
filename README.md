@@ -83,8 +83,6 @@ python -m pip install -r requirements.lock
 python moku_app.py
 ```
 
-也可以双击 `MOKU启动.vbs` 或 `MOKU启动.bat`。
-
 ## 开发与测试
 
 `tests/` 保留搜索、选图、下载等功能的回归测试，以及发布时使用的检查脚本。安装开发依赖后，运行 `python -I -B run_tests.py` 即可检查源码。这些脚本不会放进便携包。

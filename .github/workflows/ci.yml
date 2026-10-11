@@ -47,7 +47,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $files = @(
-            'launch-moku.ps1',
             'build-portable.ps1',
             'make-release.ps1',
             'tests/packaged_exe_end_to_end_probe.ps1',

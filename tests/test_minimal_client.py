@@ -37,25 +37,5 @@ class MinimalClientTests(unittest.TestCase):
         self.assertFalse(list((ROOT / "web" / "brand-logos").glob("*.svg")))
         self.assertLess(HTML.index('src="/theme.js"'), HTML.index('href="/style.css"'))
 
-    def test_browser_launcher_waits_for_http_and_keeps_diagnostics(self):
-        launcher = (ROOT / "launch-moku.ps1").read_text(encoding="utf-8-sig")
-        wrapper = (ROOT / "启动MOKU.cmd").read_text(encoding="utf-8-sig")
-        self.assertIn("/api/health", launcher)
-        self.assertIn("Invoke-WebRequest", launcher)
-        self.assertIn("Start-Process", launcher)
-        self.assertIn("launcher.log", launcher)
-        self.assertIn("launch-moku.ps1", wrapper)
-
-    def test_vbs_launcher_starts_the_desktop_host_directly_without_shell_quoting(self):
-        vbs = (ROOT / "MOKU启动.vbs").read_text(encoding="utf-8")
-        self.assertIn('CreateObject("WScript.Shell")', vbs)
-        self.assertIn('app = projectDir & "\\moku_app.py"', vbs)
-        self.assertIn('"%LocalAppData%"', vbs)
-        self.assertIn('\\Programs\\Python\\Python312\\pythonw.exe', vbs)
-        self.assertIn('("PYTHONNET_RUNTIME") = "netfx"', vbs)
-        self.assertIn("shell.Run command, 1, False", vbs)
-        self.assertNotIn("launch-moku.ps1", vbs)
-
-
 if __name__ == "__main__":
     unittest.main()

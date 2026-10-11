@@ -10,7 +10,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
-LAUNCHER = (ROOT / "launch-moku.ps1").read_text(encoding="utf-8-sig")
 PYTHON = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python312" / "python.exe"
 
 
@@ -47,26 +46,6 @@ class WorkflowRegressionTests(unittest.TestCase):
         clear_block = APP[APP.index("function clearDetail"):APP.index("function updateSelectionBar")]
         self.assertIn('$("#collectionPages").innerHTML = ""', clear_block)
         self.assertIn("closeBasketPage()", clear_block)
-
-    def test_launcher_uses_runtime_descriptor_instead_of_commandline_path_match(self):
-        self.assertIn("backend.json", LAUNCHER)
-        self.assertIn("instanceId", LAUNCHER)
-        self.assertIn("System.Threading.Mutex", LAUNCHER)
-        self.assertIn("$ready = $false", LAUNCHER)
-        self.assertIn("ReleaseMutex", LAUNCHER)
-        self.assertIn("'Prompt','Desktop','Browser','Cancel'", LAUNCHER)
-        self.assertNotIn("MOKU_TEST_CDP_PORT", LAUNCHER)
-        self.assertNotIn("--remote-debugging-port=", LAUNCHER)
-        self.assertIn("moku_app.py", LAUNCHER)
-        self.assertIn("server.compute_code_generation", LAUNCHER)
-        self.assertIn('"search_service.py"', (ROOT / "server.py").read_text(encoding="utf-8"))
-        self.assertNotIn("Microsoft Edge not found", LAUNCHER)
-        self.assertIn("$runtimeDir = Join-Path $env:LocalAppData 'MOKU/runtime'", LAUNCHER)
-        self.assertNotIn("CommandLine -match [regex]::Escape($root)", LAUNCHER)
-        self.assertNotIn("Get-NetTCPConnection", LAUNCHER)
-        self.assertNotIn("$port++", LAUNCHER)
-        self.assertIn("TcpListener", LAUNCHER)
-        self.assertIn("[Net.IPAddress]::Loopback, 0", LAUNCHER)
 
     def test_server_health_identifies_instance_and_protocol(self):
         port = free_port()

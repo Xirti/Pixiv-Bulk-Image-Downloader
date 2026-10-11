@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
-import sys
 import tempfile
 import threading
 import unittest
@@ -19,29 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeRevisionTests(unittest.TestCase):
-    def test_source_launcher_uses_the_backend_generation_algorithm(self):
-        launcher = (ROOT / "launch-moku.ps1").read_text(encoding="utf-8-sig")
-        start = launcher.index("$generationScript =")
-        end = launcher.index("$runtimeDir =", start)
-        source = launcher[start:end]
-        # Exercise the launcher's real fingerprint code without starting a
-        # persistent backend or touching the user's runtime descriptor.
-        script = (
-            "$ErrorActionPreference = 'Stop'; "
-            + "$root = '" + str(ROOT).replace("'", "''") + "'; "
-            + "$python = '" + sys.executable.replace("'", "''") + "'; "
-            + source.replace("$python = Join-Path $env:LocalAppData 'Programs\\Python\\Python312\\python.exe'", "")
-            + "\nWrite-Output $codeGeneration"
-        )
-        with tempfile.TemporaryDirectory() as other_directory:
-            result = subprocess.run(
-                [shutil.which("pwsh") or "powershell.exe", "-NoProfile", "-Command", script],
-                cwd=other_directory, capture_output=True, text=True, timeout=30,
-                env={**os.environ, "MOKU_CODE_GENERATION": "stale-inherited-value"},
-            )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), server.compute_code_generation(frozen=False))
-
     def test_closing_first_embedded_window_keeps_second_window_backend_alive(self):
         second_ready = threading.Event()
         close_second = threading.Event()

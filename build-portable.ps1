@@ -32,7 +32,7 @@ if ($LASTEXITCODE -ne 0 -or $SourceBefore -notmatch '^source-sha256:[0-9a-f]{64}
   throw 'Could not fingerprint build inputs'
 }
 if (-not $SkipTests) {
-  & $Python -I -B (Join-Path $Root 'run_tests.py') --app-only
+  & $Python -I -B (Join-Path $Root 'run_tests.py')
   if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed' }
 }
 foreach ($script in @('app.js', 'ugoira-preview.js', 'theme.js', 'selection-store.js', 'artwork-detail-view.js', 'workspace-sync.js', 'download-history.js', 'text-context-menu.js')) {

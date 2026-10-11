@@ -8,7 +8,6 @@ HTML = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 APP = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "web" / "style.css").read_text(encoding="utf-8")
 SERVER = (ROOT / "server.py").read_text(encoding="utf-8")
-LAUNCHER = (ROOT / "launch-moku.ps1").read_text(encoding="utf-8-sig")
 DESKTOP = (ROOT / "desktop_client.py").read_text(encoding="utf-8")
 
 
@@ -72,12 +71,6 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertNotIn("run_login", SERVER)
         self.assertNotIn("/api/auth/login", APP)
 
-    def test_launcher_offers_desktop_and_browser_after_readiness(self):
-        self.assertIn("Desktop", LAUNCHER)
-        self.assertIn("Browser", LAUNCHER)
-        prompt_position = LAUNCHER.index("MessageBox]::Show")
-        self.assertLess(LAUNCHER.index("/api/health"), prompt_position)
-        self.assertLess(LAUNCHER.index("app.js"), prompt_position)
 
     def test_desktop_mode_uses_webview2_main_and_pixiv_login_windows(self):
         self.assertIn("webview.create_window", DESKTOP)
@@ -91,24 +84,7 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertNotIn("from auth_store import", DESKTOP)
         self.assertNotIn("verify_session_status", DESKTOP)
 
-    def test_desktop_launcher_starts_webview_host_not_edge_app(self):
-        self.assertIn("moku_app.py", LAUNCHER)
-        desktop_block = LAUNCHER[LAUNCHER.index("if($desktopChosen)"):LAUNCHER.index("elseif($browserChosen)")]
-        self.assertNotIn("--app=$url", desktop_block)
-        self.assertNotIn("EdgeAppProfile", desktop_block)
-        self.assertIn("Start-Process -FilePath $python", desktop_block)
-        self.assertIn("$env:MOKU_CODE_GENERATION=$codeGeneration", desktop_block)
-    def test_launcher_supports_noninteractive_verification_mode(self):
-        self.assertIn("ValidateSet('Prompt','Desktop','Browser','Cancel')", LAUNCHER)
-        self.assertIn("$Mode = 'Prompt'", LAUNCHER)
 
-    def test_launcher_rejects_backends_without_current_request_token_protocol(self):
-        self.assertIn("$protocolVersion = 5", LAUNCHER)
-        self.assertIn("requestToken", LAUNCHER)
-        self.assertIn("codeGeneration", LAUNCHER)
-        self.assertIn("MOKU_CODE_GENERATION", LAUNCHER)
-        self.assertIn("server.compute_code_generation", LAUNCHER)
-        self.assertNotIn("protocolVersion -eq 1", LAUNCHER)
 
     def test_browser_mode_never_attempts_pixiv_login(self):
         self.assertIn("账户授权只在 MOKU 桌面版提供", APP)

@@ -4,7 +4,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "web" / "app.js"
 STYLE = ROOT / "web" / "style.css"
-LAUNCHER = ROOT / "launch-moku.ps1"
 MOKU_APP = ROOT / "moku_app.py"
 
 

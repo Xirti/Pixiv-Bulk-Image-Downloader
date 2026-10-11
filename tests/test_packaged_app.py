@@ -258,16 +258,6 @@ class PackagedAppTests(unittest.TestCase):
         self.assertIn("$env:MOKU_ENABLE_TEST_FIXTURES = $null", build)
         self.assertIn("^exe-sha256:[0-9a-f]{64}$", build)
 
-    def test_powershell_launcher_keeps_desktop_capability_out_of_child_environment(self):
-        launcher = (ROOT / "launch-moku.ps1").read_text(encoding="utf-8-sig")
-        self.assertIn("RandomNumberGenerator", launcher)
-        self.assertIn("desktopAuthToken=$desktopAuthToken", launcher)
-        self.assertIn("$env:MOKU_DESKTOP_AUTH_TOKEN = $desktopAuthToken", launcher)
-        self.assertIn("Remove-Item Env:MOKU_DESKTOP_AUTH_TOKEN", launcher)
-        self.assertLess(
-            launcher.index("Remove-Item Env:MOKU_DESKTOP_AUTH_TOKEN"),
-            launcher.index("if($desktopChosen)"),
-        )
 
     def test_spec_excludes_non_windows_x64_backends_and_debug_artifacts(self):
         spec = (ROOT / "MOKU.spec").read_text(encoding="utf-8-sig")
