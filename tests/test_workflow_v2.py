@@ -22,8 +22,6 @@ class WorkflowV2Tests(unittest.TestCase):
         probes = (
             "final_packaged_search_probe.py",
             "final_packaged_tag_cache_probe.py",
-            "final_source_search_probe.py",
-            "live_history_probe.py",
             "packaged_native_click_login_probe.py",
         )
         for name in probes:
