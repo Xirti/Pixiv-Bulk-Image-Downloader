@@ -28,6 +28,27 @@ def publication_date(value: Any) -> str:
         return ""
 
 
+def publication_timestamp(value: Any) -> str:
+    """Canonical chronological key; a calendar-day-only value has no precision."""
+    text = str(value or "")
+    if len(text) == 10:
+        return ""
+    try:
+        timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        japan = timezone(timedelta(hours=9))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=japan)
+        return timestamp.astimezone(japan).isoformat(timespec="microseconds")
+    except (ValueError, OverflowError):
+        return ""
+
+
+def publication_day_upper_bound(day: date | str) -> str:
+    """An unknown time may be anywhere in this JST day, including its last instant."""
+    calendar_day = day.isoformat() if isinstance(day, date) else str(day)
+    return calendar_day + "T23:59:59.999999+09:00"
+
+
 def resolve_web_path(root: Path, request_path: str) -> Path:
     decoded = urllib.parse.unquote(urllib.parse.urlsplit(request_path).path)
     relative = decoded.lstrip("/") or "index.html"
@@ -136,6 +157,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
         "height": max(0, int(raw.get("height") or 0)),
         "bookmarks": bookmark_count(raw),
         "date": publication_date(raw.get("createDate")),
+        "sortDate": publication_timestamp(raw.get("createDate")),
         "description": _plain_text(raw.get("description")),
         "workType": {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType", 0)), "illustration"),
         "aiGenerated": int(raw.get("aiType") or 1) == 2,

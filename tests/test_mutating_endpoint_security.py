@@ -11,6 +11,27 @@ import server
 
 
 class MutatingEndpointSecurityTests(unittest.TestCase):
+    def test_full_task_queue_returns_a_specific_capacity_response(self):
+        import tempfile
+        from pathlib import Path
+        from workspace_store import WorkspaceStore
+        from tests.test_workspace_store import task
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            for index in range(20):
+                row = task()
+                row["id"] = f"old-task-{index:016d}"
+                store.save_task(row, "account-A")
+            with patch.object(server, "WORKSPACE_STORE", store), patch.object(
+                server, "workspace_scope", return_value="account-B",
+            ):
+                status, body = self.post("/api/workspace/task", {"task":task(), "scope":"account-B"},
+                                         origin=self.base, token=server.REQUEST_TOKEN)
+            self.assertEqual(status, 409)
+            self.assertEqual((body["taskCapacity"], body["ownTaskCount"], body["otherTaskCount"]), (True, 0, 20))
+            self.assertNotIn("task", body)
+
     def setUp(self):
         self.httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)

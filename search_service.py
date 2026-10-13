@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
+import sqlite3
+import tempfile
 import threading
 import unicodedata
 from collections import OrderedDict
@@ -13,6 +17,132 @@ from search_aliases import aliases_for, normalize_alias_key
 
 class SearchInputError(ValueError):
     pass
+
+
+class SearchResultIndex:
+    """Snapshot-owned identities and an ordered pending queue on disk.
+
+    Normalized rows and their committed positions remain on disk so revisiting
+    an evicted display page cannot turn into a new remote search. These rows
+    never contain image capabilities or account credentials.
+    One connection and transaction serve each incoming/output batch.
+    Its owner must close it when the snapshot is dropped or evicted.
+    """
+
+    def __init__(self) -> None:
+        self._directory = None
+        self._connection = None
+        self._pending = 0
+        self._emitted = 0
+        self._last_output = None
+
+    def _open(self):
+        if self._connection is None:
+            self._directory = tempfile.TemporaryDirectory(prefix="moku-search-", ignore_cleanup_errors=True)
+            try:
+                self._connection = sqlite3.connect(
+                    self._directory.name + "/identities.sqlite3", check_same_thread=False,
+                )
+                self._connection.execute("PRAGMA journal_mode=MEMORY")
+                self._connection.execute("PRAGMA synchronous=OFF")
+                self._connection.execute("""CREATE TABLE identities (
+                    id TEXT PRIMARY KEY, date TEXT NOT NULL,
+                    sort_length INTEGER NOT NULL, sort_id TEXT NOT NULL,
+                    payload TEXT NOT NULL, position INTEGER
+                )""")
+                self._connection.execute("""CREATE INDEX pending_order ON identities
+                    (date DESC, sort_length DESC, sort_id DESC) WHERE position IS NULL""")
+                self._connection.execute("CREATE UNIQUE INDEX output_order ON identities(position)")
+            except Exception:
+                self.close()
+                raise
+        return self._connection
+
+    @property
+    def pending_count(self) -> int:
+        return self._pending
+
+    @property
+    def emitted_count(self) -> int:
+        return self._emitted
+
+    def add(self, items: Iterable[dict]) -> None:
+        connection = self._open()
+        added = 0
+        with self._connection:
+            for item in items:
+                artwork_id = str(item["id"])
+                sort_id = str(int(artwork_id))
+                key = (str(item.get("sortDate") or item.get("date") or ""), int(sort_id))
+                # New uploads observed on a later remote page do not enter an
+                # already displayed snapshot ahead of its committed prefix.
+                if self._last_output is not None and key > self._last_output:
+                    continue
+                inserted = connection.execute(
+                    "INSERT OR IGNORE INTO identities VALUES (?, ?, ?, ?, ?, NULL)",
+                    (artwork_id, key[0], len(sort_id), sort_id,
+                     json.dumps(item, ensure_ascii=False, separators=(",", ":"))),
+                )
+                if inserted.rowcount:
+                    added += 1
+        self._pending += added
+
+    def take_ready(self, upper_bound: tuple[str, int | None] | None, limit: int) -> list[dict]:
+        if not self._pending or limit <= 0:
+            return []
+        condition, args = "", []
+        if upper_bound is not None:
+            day, number = upper_bound
+            if number is None:
+                condition = " AND date > ?"
+                args = [day]
+            else:
+                number_text = str(number)
+                condition = """ AND (date > ? OR (date = ? AND
+                    (sort_length > ? OR (sort_length = ? AND sort_id >= ?))))"""
+                args = [day, day, len(number_text), len(number_text), number_text]
+        rows = self._connection.execute(
+            "SELECT id,payload FROM identities WHERE position IS NULL" + condition
+            + " ORDER BY date DESC,sort_length DESC,sort_id DESC LIMIT ?",
+            [*args, int(limit)],
+        ).fetchall()
+        values = [json.loads(payload) for _id, payload in rows]
+        with self._connection:
+            self._connection.executemany(
+                "UPDATE identities SET position=? WHERE id=?",
+                [(self._emitted + index, id) for index, (id, _payload) in enumerate(rows)],
+            )
+        self._pending -= len(rows)
+        self._emitted += len(rows)
+        if values:
+            last = values[-1]
+            self._last_output = (str(last.get("sortDate") or last.get("date") or ""), int(last["id"]))
+        return values
+
+    def read_results(self, start: int, end: int) -> list[dict]:
+        if self._connection is None or end <= start:
+            return []
+        rows = self._connection.execute(
+            "SELECT payload FROM identities WHERE position >= ? AND position < ? ORDER BY position",
+            (max(0, start), min(end, self._emitted)),
+        ).fetchall()
+        return [json.loads(payload) for (payload,) in rows]
+
+    def close(self) -> None:
+        if self._connection is not None:
+            try:
+                self._connection.close()
+            except sqlite3.Error:
+                logging.getLogger("moku.search").warning("Temporary search index close failed")
+            self._connection = None
+        if self._directory is not None:
+            try:
+                self._directory.cleanup()
+            except OSError:
+                # A scanner may retain a Windows handle. Best-effort temporary
+                # cleanup must not prevent logout or another search.
+                logging.getLogger("moku.search").warning("Temporary search index cleanup failed")
+            self._directory = None
 
 
 @dataclass(frozen=True)

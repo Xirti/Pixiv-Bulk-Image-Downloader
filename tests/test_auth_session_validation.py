@@ -62,6 +62,7 @@ class AuthSessionValidationTests(unittest.TestCase):
         self.assertIsNotNone(server.SEARCH_PAGE_CACHE.get_page(safe_key, 1))
 
     def test_logout_generation_blocks_inflight_restricted_search_commit(self):
+        server.mark_authorized_session()
         started = threading.Event()
         released = threading.Event()
         errors = []

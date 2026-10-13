@@ -324,11 +324,13 @@ class FinalArchitectureRegressionTests(unittest.TestCase):
         with patch.object(server, "validated_authorization", return_value=(False, None)), patch.object(
             server, "pixiv_item_for_download", return_value=cached,
         ) as cached_lookup, patch.object(server, "pixiv_detail") as remote_detail:
-            status, payload = server.Handler._get_pixiv_detail(Sink(), "9")
+            request = urllib.parse.urlparse("/api/pixiv/artwork/9?requestId=cached-detail-test")
+            status, payload = server.Handler._get_pixiv_detail(Sink(), request, "9")
 
         self.assertEqual((status, payload), (200, cached))
         cached_lookup.assert_called_once_with(
             "9", allow_r18=False, authorization_epoch=None, require_thumb=True,
+            cancel_event=unittest.mock.ANY,
         )
         remote_detail.assert_not_called()
 

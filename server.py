@@ -42,12 +42,12 @@ from folder_picker import select_folder
 from download_requests import DownloadRequestError, DownloadRequests
 from download_history import DownloadHistory, history_path
 from local_catalog import LocalCatalog
-from workspace_store import WorkspaceCapacityError, WorkspaceStore
+from workspace_store import TaskCapacityError, WorkspaceCapacityError, WorkspaceStore
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from ugoira_export import export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
-from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status
-from search_service import SearchDateRange, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
+from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status
+from search_service import SearchDateRange, SearchResultIndex, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
 
 CODE_GENERATION_FILES = (
@@ -101,6 +101,7 @@ SEARCH_PER_PAGE = 36
 SEARCH_PREFETCH_AHEAD = 3
 SEARCH_KEEP_BEHIND = 6
 MAX_SEARCH_SESSIONS = 12
+SEARCH_SESSION_IDLE_SECONDS = 30 * 60.0
 MAX_HISTORY_SOURCES = 32
 MAX_AUTHOR_RESOLUTION_CACHE = 64
 AUTHOR_RESOLUTION_TTL_SECONDS = 5 * 60.0
@@ -297,6 +298,13 @@ def parse_search_request_id(value: object, *, required: bool = False) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", request_id):
         raise SearchInputError("搜索请求标识无效")
     return request_id
+
+
+def parse_search_snapshot_id(value: object) -> str:
+    snapshot_id = str(value or "").strip()
+    if snapshot_id and not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", snapshot_id):
+        raise SearchInputError("搜索快照标识无效")
+    return snapshot_id
 
 
 def _prune_search_requests_locked(now: float) -> None:
@@ -1224,6 +1232,15 @@ def extend_history(
                 try: normalize_search_item(raw, allow_r18=allow_r18)
                 except PixivPolicyError: continue
                 state["ids"].add(artwork_id); state["items"].append(raw)
+            # date_d bounds publication time, not ID order within one timestamp.
+            # Real timestamps let the first batch confirm a useful prefix;
+            # day-only values conservatively keep that day's tie pending.
+            if rows:
+                last = rows[-1]
+                last_day = publication_date(last.get("createDate"))
+                last_id = str(last.get("id") or "")
+                if last_day and last_id.isascii() and last_id.isdigit():
+                    window["unreadBound"] = (publication_timestamp(last.get("createDate")) or publication_day_upper_bound(last_day), None)
             window["page"] += 1
             if window["page"] > window["pages"]:
                 state["queue"].pop(0)
@@ -1240,6 +1257,9 @@ def reset_search_caches() -> None:
                 IMAGE_TOKENS.pop(token, None)
         HISTORY_CACHE.clear()
         SEARCH_PAGE_CACHE.clear()
+        for session in SEARCH_SESSIONS.values():
+            if session.get("identityIndex") is not None:
+                session["identityIndex"].close()
         SEARCH_SESSIONS.clear()
         SEARCH_SOURCE_OFFSETS.clear()
     with AUTHOR_RESOLUTION_CACHE_LOCK:
@@ -1249,7 +1269,9 @@ def reset_search_caches() -> None:
 def _drop_search_session(session_key: tuple) -> None:
     with SEARCH_SESSION_LOCKS_GUARD:
         prune_search_image_tokens(session_key)
-        SEARCH_SESSIONS.pop(session_key, None)
+        session = SEARCH_SESSIONS.pop(session_key, None)
+        if session is not None and session.get("identityIndex") is not None:
+            session["identityIndex"].close()
         SEARCH_PAGE_CACHE.drop(session_key)
         for source_key in [key for key in SEARCH_SOURCE_OFFSETS if key[0] == session_key]:
             SEARCH_SOURCE_OFFSETS.pop(source_key, None)
@@ -1286,12 +1308,18 @@ def locked_search_session(
 
 def _touch_search_session(session_key: tuple) -> dict:
     with SEARCH_SESSION_LOCKS_GUARD:
+        now = time.monotonic()
+        active_keys = set(SEARCH_SESSION_LOCKS)
+        for stale_key, old in list(SEARCH_SESSIONS.items()):
+            if stale_key != session_key and stale_key not in active_keys and now - old.get("touched", now) >= SEARCH_SESSION_IDLE_SECONDS:
+                _drop_search_session(stale_key)
         session = SEARCH_SESSIONS.pop(session_key, None)
         if session is None:
             session = {
                 "items": [], "seen": set(), "baseIndex": 0,
                 "sourceDone": {}, "budgetExhausted": False, "truncatedDates": set(),
             }
+        session["touched"] = now
         SEARCH_SESSIONS[session_key] = session
         while len(SEARCH_SESSIONS) > MAX_SEARCH_SESSIONS:
             active_keys = set(SEARCH_SESSION_LOCKS)
@@ -1374,8 +1402,31 @@ def load_search_source(
         "hasMore": has_more,
         "budgetExhausted": bool(state.get("budgetExhausted")),
         "truncatedDates": list(state.get("truncatedDates") or []),
+        "upperBound": _history_unread_bound(state),
     }
     return result
+
+
+def _history_unread_bound(state: dict) -> tuple[str, int | None] | None:
+    if state["exhausted"]:
+        return None
+    if state["queue"]:
+        window = state["queue"][0]
+        return window.get("unreadBound", (publication_day_upper_bound(window["end"]), None))
+    next_end = state["nextEnd"]
+    return (publication_day_upper_bound(next_end), None) if next_end >= state["minDate"] else None
+
+
+def _unread_bound_key(bound: tuple[str, int | None]) -> tuple[str, int | float]:
+    return bound[0], float("inf") if bound[1] is None else bound[1]
+
+
+def _newest_unread_bound(session: dict, sources: list, initial_day: str):
+    bounds = [
+        session.get("sourceBounds", {}).get(source, (publication_day_upper_bound(initial_day), None))
+        for source in sources if not session["sourceDone"].get(source)
+    ]
+    return max((bound for bound in bounds if bound is not None), key=_unread_bound_key, default=None)
 
 
 @contextmanager
@@ -1401,7 +1452,7 @@ def _search_sort_key(item: dict) -> tuple[str, int]:
         artwork_number = int(item.get("id") or 0)
     except (TypeError, ValueError):
         artwork_number = 0
-    return str(item.get("date") or ""), artwork_number
+    return str(item.get("sortDate") or item.get("date") or ""), artwork_number
 
 
 def _user_rows(payload: object) -> list[dict]:
@@ -1547,6 +1598,7 @@ def search_user_results(
     cancel_event: threading.Event | None = None,
     prefetch: bool = False,
     date_range: SearchDateRange | None = None,
+    snapshot_id: str = "",
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     resolve_source_modes(scope, authorized=authorized)
@@ -1565,6 +1617,8 @@ def search_user_results(
     )
     if date_range is not None:
         session_key += (date_range,)
+    if snapshot_id:
+        session_key += (("snapshot", snapshot_id),)
     desired_items = prefetch_item_count(
         page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD if prefetch else 0,
     )
@@ -1719,6 +1773,7 @@ def search_user_results(
             "budgetExhausted": budget_exhausted, "truncatedDates": [],
             "workType": work_type, "includeAi": bool(include_ai),
             "mode": "pixiv-user-search",
+            "snapshotId": snapshot_id,
         }
 
 
@@ -1785,20 +1840,24 @@ def search_pixiv_results(
     prefetch: bool = False,
     start_date: str = "",
     end_date: str = "",
+    snapshot_id: str = "",
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
+    snapshot_id = parse_search_snapshot_id(snapshot_id)
     if work_type not in {"all", "illustration", "manga", "ugoira"}:
         raise SearchInputError("不支持的作品类型")
     date_range = parse_search_date_range(start_date, end_date)
     query = parse_search_query(tag_query)
     if query.kind == "pid":
-        return search_artwork_result(
+        result = search_artwork_result(
             query.value, scope, page, work_type, include_ai,
             authorized=authorized,
             authorization_epoch=authorization_epoch,
             cancel_event=cancel_event,
             date_range=date_range,
         )
+        result["snapshotId"] = snapshot_id
+        return result
     if query.kind in {"uid", "author"}:
         kwargs = {
             "authorized": authorized,
@@ -1811,6 +1870,8 @@ def search_pixiv_results(
             kwargs["prefetch"] = True
         if date_range is not None:
             kwargs["date_range"] = date_range
+        if snapshot_id:
+            kwargs["snapshot_id"] = snapshot_id
         return search_user_results(
             query.kind, query.value, scope, page, work_type, include_ai, **kwargs,
         )
@@ -1830,6 +1891,8 @@ def search_pixiv_results(
     session_key = ("tags", tag_groups, scope, work_type, bool(include_ai), bool(fuzzy))
     if date_range is not None:
         session_key += (date_range,)
+    if snapshot_id:
+        session_key += (("snapshot", snapshot_id),)
     desired_items = prefetch_item_count(
         page, per_page=SEARCH_PER_PAGE, ahead=SEARCH_PREFETCH_AHEAD if prefetch else 0,
     )
@@ -1838,17 +1901,45 @@ def search_pixiv_results(
         raise_if_search_cancelled(cancel_event)
         session = _touch_search_session(session_key)
         first_retained_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
-        if page < first_retained_page:
+        result_index = session.get("identityIndex")
+        if result_index is not None and result_index.emitted_count and (
+            page < first_retained_page
+            or min(desired_items, result_index.emitted_count) > int(session["baseIndex"]) + len(session["items"])
+        ):
+            start = min(result_index.emitted_count, (max(1, page - SEARCH_KEEP_BEHIND) - 1) * SEARCH_PER_PAGE)
+            end = min(result_index.emitted_count, (page + SEARCH_PREFETCH_AHEAD) * SEARCH_PER_PAGE)
+            session["items"] = result_index.read_results(start, end)
+            session["baseIndex"] = start
+            session["seen"] = {item["id"] for item in session["items"]}
+        elif page < first_retained_page:
             _drop_search_session(session_key)
             session = _touch_search_session(session_key)
-        absolute_loaded = int(session["baseIndex"]) + len(session["items"])
+        absolute_loaded = result_index.emitted_count if result_index is not None else 0
         budget = {"started": time.monotonic(), "requests": 0}
         source_tags = tuple(dict.fromkeys(alias for group in tag_groups for alias in group))
         sources = [(tag, mode) for tag in source_tags for mode in modes]
         source_options = {"date_range": date_range} if date_range is not None else {}
+        initial_day = (date_range.end if date_range else datetime.now(timezone(timedelta(hours=9))).date()).isoformat()
+        literal_and = not fuzzy and len(tag_groups) > 1
+        session.setdefault("sourceBounds", {})
+        session.setdefault("sourceAnchors", {})
+        session["budgetExhausted"] = False
+        if session.get("identityIndex") is None:
+            session["identityIndex"] = SearchResultIndex()
         rounds = 0
-        while absolute_loaded < desired_items and rounds < 8:
+        while absolute_loaded < desired_items and rounds < MAX_HISTORY_REQUESTS:
             raise_if_search_cancelled(cancel_event)
+            with SEARCH_SESSION_LOCKS_GUARD:
+                assert_search_commit_allowed(session_key, session, scope, authorization_epoch, cancel_event)
+                ready = session["identityIndex"].take_ready(
+                    _newest_unread_bound(session, sources, initial_day),
+                    max(60, desired_items - absolute_loaded),
+                )
+                session["items"].extend(ready)
+                session["seen"].update(item["id"] for item in ready)
+            absolute_loaded = session["identityIndex"].emitted_count
+            if absolute_loaded >= desired_items:
+                break
             missing = desired_items - absolute_loaded
             # Foreground reads only the useful page target. Background prefetch
             # may over-read to absorb filtered rows without delaying first paint.
@@ -1858,9 +1949,9 @@ def search_pixiv_results(
             )
             incoming: list[dict] = []
             source_commits: list[tuple[str, str, int]] = []
-            qualified_ids: set[str] = set()
-            can_finish_foreground = not prefetch and not fuzzy and len(modes) == 1
             source_done: dict[tuple[str, str], bool] = {}
+            source_bounds: dict[tuple[str, str], tuple[str, int | None] | None] = {}
+            source_anchors = dict(session["sourceAnchors"])
             round_budget_exhausted = False
             round_truncated_dates: set[str] = set()
             any_more = False
@@ -1868,13 +1959,22 @@ def search_pixiv_results(
             cursor = int(session.get("sourceCursor", 0)) % len(sources)
             ordered_sources = list(enumerate(sources))
             ordered_sources = ordered_sources[cursor:] + ordered_sources[:cursor]
+            newest_bound = _newest_unread_bound(session, sources, initial_day)
             pending_sources = [
-                entry for entry in ordered_sources if not session["sourceDone"].get(entry[1])
+                entry for entry in ordered_sources
+                if not session["sourceDone"].get(entry[1])
+                and (newest_bound is None or _unread_bound_key(
+                    session["sourceBounds"].get(entry[1], (publication_day_upper_bound(initial_day), None))
+                ) == _unread_bound_key(newest_bound))
             ]
             next_source_cursor = cursor
             for index, (source_index, (tag, mode)) in enumerate(pending_sources):
                 raise_if_search_cancelled(cancel_event)
                 source_key = (tag, mode)
+                if literal_and and mode in source_anchors and source_anchors[mode] != tag:
+                    source_done[source_key] = True
+                    source_bounds[source_key] = None
+                    continue
                 with SEARCH_SESSION_LOCKS_GUARD:
                     absolute_offset = int(SEARCH_SOURCE_OFFSETS.get((session_key, tag, mode), 0))
                 requests_before = budget["requests"]
@@ -1900,23 +2000,37 @@ def search_pixiv_results(
                 source_commits.append((tag, mode, max(absolute_offset, int(next_offset))))
                 any_more = any_more or source["hasMore"]
                 any_rows = any_rows or bool(source["rows"])
+                normalized_rows = []
                 for raw in source["rows"]:
                     try:
                         candidate = normalize_search_item(raw, allow_r18=mode == "r18")
                     except PixivPolicyError:
                         continue
+                    normalized_rows.append(candidate)
                     if work_type != "all" and candidate["workType"] != work_type:
                         continue
                     if not include_ai and candidate["aiGenerated"]:
                         continue
-                    incoming.append(candidate)
-                    if matches_tag_groups(candidate.get("tags") or [], tag_groups) and candidate["id"] not in session["seen"]:
-                        qualified_ids.add(candidate["id"])
-                # Literal tags within one safety scope cover the same AND
-                # intersection. Do not wait for redundant sources once this
-                # page is full; aliases/mixed safety scopes still merge fairly.
-                if can_finish_foreground and absolute_loaded + len(qualified_ids) >= desired_items:
-                    break
+                    if matches_tag_groups(candidate.get("tags") or [], tag_groups):
+                        incoming.append(candidate)
+                        if literal_and and mode not in source_anchors:
+                            # Every strict-AND match occurs in each literal tag
+                            # stream. Once one confirms the intersection, the
+                            # other streams in this scope are redundant.
+                            source_anchors[mode] = tag
+                if "upperBound" in source:
+                    source_bounds[source_key] = source["upperBound"]
+                elif not source["hasMore"]:
+                    source_bounds[source_key] = None
+                elif normalized_rows:
+                    source_bounds[source_key] = min(map(_search_sort_key, normalized_rows))
+                else:
+                    source_bounds[source_key] = session["sourceBounds"].get(source_key, (publication_day_upper_bound(initial_day), None))
+                if literal_and and mode in source_anchors:
+                    for other_tag, other_mode in sources:
+                        if other_mode == mode and other_tag != source_anchors[mode]:
+                            source_done[(other_tag, other_mode)] = True
+                            source_bounds[(other_tag, other_mode)] = None
             incoming.sort(key=_search_sort_key, reverse=True)
             with SEARCH_SESSION_LOCKS_GUARD:
                 assert_search_commit_allowed(
@@ -1927,20 +2041,21 @@ def search_pixiv_results(
                 )
                 session["truncatedDates"].update(round_truncated_dates)
                 session["sourceDone"].update(source_done)
+                session["sourceBounds"].update(source_bounds)
+                session["sourceAnchors"] = source_anchors
                 session["sourceCursor"] = next_source_cursor
-                for candidate in incoming:
-                    if not matches_tag_groups(candidate.get("tags") or [], tag_groups):
-                        continue
-                    artwork_id = candidate["id"]
-                    if artwork_id in session["seen"]:
-                        continue
-                    session["seen"].add(artwork_id)
-                    session["items"].append(candidate)
+                session["identityIndex"].add(incoming)
+                ready = session["identityIndex"].take_ready(
+                    _newest_unread_bound(session, sources, initial_day),
+                    max(60, desired_items - absolute_loaded),
+                )
+                session["items"].extend(ready)
+                session["seen"].update(item["id"] for item in ready)
                 for source_tag, source_mode, next_offset in source_commits:
                     SEARCH_SOURCE_OFFSETS[(session_key, source_tag, source_mode)] = next_offset
             for source_tag, source_mode, _next_offset in source_commits:
                 _trim_history_source(session_key, source_tag, source_mode)
-            absolute_loaded = int(session["baseIndex"]) + len(session["items"])
+            absolute_loaded = session["identityIndex"].emitted_count
             rounds += 1
             if not any_rows or (not any_more and not incoming):
                 break
@@ -1948,15 +2063,17 @@ def search_pixiv_results(
                 session["budgetExhausted"] = True
                 break
 
-        absolute_result_count = int(session["baseIndex"]) + len(session["items"])
+        has_more = any(not session["sourceDone"].get(source) for source in sources) or bool(session["identityIndex"].pending_count)
+        session["budgetExhausted"] = bool(has_more and absolute_loaded < desired_items)
+        ordering_pending = bool(absolute_loaded < desired_items and session["identityIndex"].pending_count
+                                and _newest_unread_bound(session, sources, initial_day) is not None)
+
+        absolute_result_count = session["identityIndex"].emitted_count
         complete_through = absolute_result_count // SEARCH_PER_PAGE
         requested_page_start = (page - 1) * SEARCH_PER_PAGE
         if absolute_result_count > requested_page_start:
             complete_through = max(complete_through, page)
-        elif (
-            (session["budgetExhausted"] or not any(not done for done in session["sourceDone"].values()))
-            and session["items"]
-        ):
+        if (session["budgetExhausted"] or not has_more) and absolute_result_count:
             complete_through = max(
                 complete_through,
                 (absolute_result_count + SEARCH_PER_PAGE - 1) // SEARCH_PER_PAGE,
@@ -1988,7 +2105,7 @@ def search_pixiv_results(
                 del session["items"][:remove_count]
                 session["baseIndex"] += remove_count
                 session["seen"] = {str(item["id"]) for item in session["items"]}
-            has_more = any(not done for done in session["sourceDone"].values())
+            has_more = any(not session["sourceDone"].get(source) for source in sources) or bool(session["identityIndex"].pending_count)
             prune_search_image_tokens(
                 session_key, retained_pages=set(available_pages), replace_page=None if prefetch else page,
             )
@@ -2011,14 +2128,16 @@ def search_pixiv_results(
                 raise
         return {
             "tag": "；".join(tags), "tags": list(tags), "tagGroups": [list(group) for group in tag_groups], "fuzzy": bool(fuzzy), "scope": scope,
-            "total": int(session["baseIndex"]) + len(session["items"]), "reportedTotal": None,
+            "total": session["identityIndex"].emitted_count, "reportedTotal": None,
             "page": page, "pages": available_pages[-1] if available_pages else 1,
             "pageNumbers": available_pages, "availablePages": available_pages,
             "preloadedThrough": preloaded_through,
             "items": authorized_items, "perPage": SEARCH_PER_PAGE, "hasMore": has_more,
             "budgetExhausted": bool(session["budgetExhausted"]),
+            "orderingPending": ordering_pending,
             "truncatedDates": sorted(session["truncatedDates"], reverse=True),
             "workType": work_type, "includeAi": bool(include_ai), "fuzzy": bool(fuzzy),
+            "snapshotId": snapshot_id,
             "mode": "pixiv-authorized-all" if scope == "all" else (
                 "pixiv-authorized-r18" if scope == "r18" else "pixiv-public-history"
             ),
@@ -3372,7 +3491,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._get_pixiv_search(request)
         artwork_match = re.fullmatch(r"/api/pixiv/artwork/(\d+)", request.path)
         if artwork_match:
-            return self._get_pixiv_detail(artwork_match.group(1))
+            return self._get_pixiv_detail(request, artwork_match.group(1))
         ugoira_match = re.fullmatch(r"/api/pixiv/ugoira/(\d+)", request.path)
         if ugoira_match:
             return self._get_pixiv_ugoira(request, ugoira_match.group(1))
@@ -3418,10 +3537,13 @@ class Handler(SimpleHTTPRequestHandler):
         tag_query = query.get("tag", ["原创"])[0]
         try:
             request_id = parse_search_request_id(query.get("requestId", [""])[0])
+            snapshot_id = parse_search_snapshot_id(query.get("snapshotId", [""])[0])
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         if not request_id:
             request_id = secrets.token_urlsafe(24)
+        if not snapshot_id:
+            snapshot_id = secrets.token_urlsafe(24)
         search_scope = query.get("mode", ["safe"])[0]
         session_authorized, session_epoch = validated_authorization()
         if search_scope in {"r18", "all"} and not session_authorized:
@@ -3450,6 +3572,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "authorization_epoch": authorization_epoch,
                 }
                 kwargs["cancel_event"] = cancel_event
+                kwargs["snapshot_id"] = snapshot_id
                 if query.get("startDate", [""])[0] or query.get("endDate", [""])[0]:
                     kwargs["start_date"] = query.get("startDate", [""])[0]
                     kwargs["end_date"] = query.get("endDate", [""])[0]
@@ -3466,12 +3589,24 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({"error": str(exc)}, status)
             except AuthorizationRevokedError as exc:
                 return self.send_json({"error": str(exc)}, 403)
+            except sqlite3.Error:
+                return self.send_json({"error": "搜索临时索引不可用，请检查临时目录或磁盘空间后重试"}, 502)
             except PIXIV_OPERATION_ERRORS as exc:
                 return self.send_json({"error": public_pixiv_error("Pixiv 搜索", exc)}, 502)
         finally:
             release_search_request(request_id, cancel_event)
 
-    def _get_pixiv_detail(self, artwork_id: str):
+    def _get_pixiv_detail(self, request, artwork_id: str):
+        try:
+            query = urllib.parse.parse_qs(request.query)
+            request_id = parse_search_request_id(query.get("requestId", [""])[0]) or secrets.token_urlsafe(24)
+            cancel_event = register_search_request(request_id)
+        except SearchInputError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except SearchRequestConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
+        except SearchRequestLimitError as exc:
+            return self.send_json({"error": str(exc)}, 429)
         try:
             authorized, authorization_epoch = validated_authorization()
             return self.send_json(
@@ -3480,12 +3615,17 @@ class Handler(SimpleHTTPRequestHandler):
                     allow_r18=authorized,
                     authorization_epoch=authorization_epoch,
                     require_thumb=True,
+                    cancel_event=cancel_event,
                 ),
             )
+        except SearchCancelledError:
+            return self.send_json({"error": "作品详情读取已取消", "cancelled": True}, 409)
         except AuthorizationRevokedError as exc:
             return self.send_json({"error": str(exc)}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json({"error": public_pixiv_error("作品详情", exc)}, 502)
+        finally:
+            release_search_request(request_id, cancel_event)
 
     def _get_pixiv_ugoira(self, request, artwork_id: str):
         """Serve ugoira hover previews: frame manifest JSON or the frame zip."""
@@ -3738,8 +3878,11 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             task = WORKSPACE_STORE.save_task(data.get("task"), workspace_scope())
             return self.send_json({"ok": True, "task": task})
+        except TaskCapacityError as exc:
+            return self.send_json({"error": str(exc), "taskCapacity": True,
+                                   "ownTaskCount": exc.own_count, "otherTaskCount": exc.other_count}, 409)
         except ValueError:
-            return self.send_json({"error": "任务数据无效或任务列表已满，请移除旧任务后重试"}, 400)
+            return self.send_json({"error": "未完成任务数据无效，请重新发起下载"}, 400)
         except (OSError, sqlite3.Error):
             return self.send_json({"error": "无法保存未完成任务"}, 500)
 

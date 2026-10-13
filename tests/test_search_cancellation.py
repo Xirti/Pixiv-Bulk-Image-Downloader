@@ -11,6 +11,47 @@ import server
 
 
 class SearchCancellationTests(unittest.TestCase):
+    def test_detail_http_cancellation_stops_before_loading_old_pages(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import urllib.error
+
+        started, finish = threading.Event(), threading.Event()
+        calls = []
+        def remote(url, **kwargs):
+            calls.append(url)
+            started.set()
+            finish.wait(3)
+            return {"body": {}}
+
+        httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{httpd.server_port}"
+        def read():
+            try:
+                request = urllib.request.Request(base + "/api/pixiv/artwork/777777?requestId=detail-cancel-test",
+                                                 headers={"X-MOKU-Request-Token": server.REQUEST_TOKEN})
+                with urllib.request.urlopen(request, timeout=5) as reply:
+                    return reply.status
+            except urllib.error.HTTPError as exc:
+                exc.read()
+                return exc.code
+        try:
+            with patch.object(server, "ensure_network_opener_current"), patch.object(server, "validated_authorization", return_value=(False, None)), patch.object(
+                server, "pixiv_json", side_effect=remote,
+            ), ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(read)
+                self.assertTrue(started.wait(2))
+                self.assertTrue(server.cancel_search_request("detail-cancel-test"))
+                finish.set()
+                self.assertEqual(pending.result(3), 409)
+                self.assertEqual(len(calls), 1, "cancelled detail fetched old page metadata")
+        finally:
+            finish.set()
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(3)
+
     def setUp(self):
         server.reset_search_caches()
 
