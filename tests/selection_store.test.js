@@ -57,3 +57,6 @@ assert.equal(refreshed.get('fresh').item.thumb, '/new');
 const recovered = createSelectionStore();
 recovered.restore(refreshed.snapshot());
 assert.equal(recovered.setPage('fresh', 2, true, origin).accepted, false);
+recovered.choose([item('other', 1)], origin);
+recovered.revoke(['other']);
+assert.equal(recovered.setPage('fresh', 0, true, origin).accepted, true);

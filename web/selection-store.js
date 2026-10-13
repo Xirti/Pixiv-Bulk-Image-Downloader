@@ -90,7 +90,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
     },
     setPage(item, page, checked, origin) {
       if (locked) return reject("locked");
-      const latest = typeof item === "object" ? rememberMetadata(item) : metadata.get(String(item));
+      const latest = typeof item === "object" ? rememberMetadata(item) : metadata.get(String(item)) || records.get(String(item))?.item;
       const id = idOf(latest), count = countOf(latest);
       if (!id || count === null || !Number.isInteger(page) || page < 0 || page >= count) return reject("pages");
       const previous = records.get(id);
