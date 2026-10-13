@@ -13,6 +13,13 @@ class WorkspaceCapacityError(ValueError):
     pass
 
 
+class TaskCapacityError(ValueError):
+    def __init__(self, own_count: int, other_count: int):
+        super().__init__("未完成任务已满（最多 20 项）")
+        self.own_count = own_count
+        self.other_count = other_count
+
+
 def _integer(value, low: int, high: int) -> int:
     if type(value) is not int or not low <= value <= high:
         raise ValueError("invalid queue number")
@@ -273,8 +280,11 @@ class WorkspaceStore:
             old = connection.execute("SELECT scope FROM tasks WHERE id=?", (task["id"],)).fetchone()
             if old and old[0] != scope:
                 raise ValueError("task belongs to another account")
-            if not old and connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] >= 20:
-                raise ValueError("最多保留 20 个未完成任务，请先移除旧任务")
+            total, own = connection.execute(
+                "SELECT COUNT(*),COALESCE(SUM(scope=?),0) FROM tasks", (scope,),
+            ).fetchone()
+            if not old and total >= 20:
+                raise TaskCapacityError(own, total - own)
             connection.execute("INSERT OR REPLACE INTO tasks VALUES (?,?,?)", (task["id"], scope, json.dumps(task, ensure_ascii=False)))
         return task
 

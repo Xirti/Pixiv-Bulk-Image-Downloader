@@ -16,6 +16,21 @@ def task():
 
 
 class WorkspaceStoreTests(unittest.TestCase):
+    def test_full_queue_reports_own_and_other_counts_without_exposing_tasks(self):
+        from workspace_store import WorkspaceStore, TaskCapacityError
+        with tempfile.TemporaryDirectory() as temporary:
+            store = WorkspaceStore(Path(temporary) / "workspace.db")
+            for index in range(20):
+                row = task()
+                row["id"] = f"task-{index:016d}"
+                store.save_task(row, "account-A")
+            self.assertEqual(store.load("account-B")["tasks"], [])
+            with self.assertRaises(TaskCapacityError) as raised:
+                store.save_task(task(), "account-B")
+            self.assertEqual(raised.exception.own_count, 0)
+            self.assertEqual(raised.exception.other_count, 20)
+            self.assertEqual(len(store.load("account-A")["tasks"]), 20)
+
     def test_mixed_basket_keeps_saved_artwork_order(self):
         from workspace_store import WorkspaceStore
         with tempfile.TemporaryDirectory() as temporary:
