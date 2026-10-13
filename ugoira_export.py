@@ -30,7 +30,7 @@ class _Output(io.BytesIO):
         return super().write(data)
 
 
-def _decoded_frames(raw: bytes, frames: list[dict]):
+def _decoded_frames(raw: bytes, frames: list[dict], *, preflight=None):
     from PIL import Image
 
     if len(raw) > MAX_ARCHIVE_BYTES or not isinstance(frames, list) or not 1 <= len(frames) <= 1500:
@@ -64,6 +64,8 @@ def _decoded_frames(raw: bytes, frames: list[dict]):
                 if size is not None and image.size != size:
                     raise PixivPolicyError("动图帧尺寸不一致")
                 size = image.size
+                if preflight is not None:
+                    preflight(size)
                 rgba = image.convert("RGBA")
             try:
                 yield rgba, frame["delay"]
@@ -77,20 +79,21 @@ def _gif(raw, frames) -> bytes:
     images, durations = [], []
     elapsed = rounded = 0
     deadline = time.monotonic() + MAX_CONVERSION_SECONDS
+    def check_memory(size):
+        frame_pixels = size[0] * size[1]
+        # Pillow's work buffers, retained palettes, encoder copies and bounded
+        # input/output buffers. Check headers before allocating decoded pixels.
+        estimated_peak = frame_pixels * (len(frames) * 4 + 28) + len(raw) * 2 + MAX_ARCHIVE_BYTES * 2
+        if estimated_peak > MAX_GIF_MEMORY:
+            raise PixivPolicyError("GIF 转换需要的内存过多，请选择标准（缩小预览）或原始帧 ZIP")
+
     try:
-        with closing(_decoded_frames(raw, frames)) as decoded:
+        with closing(_decoded_frames(raw, frames, preflight=check_memory)) as decoded:
             for image, delay in decoded:
                 if delay < 10:
                     raise PixivPolicyError("GIF 无法准确保存小于 10ms 的帧时长，请选择 MP4 或原始帧 ZIP")
                 if time.monotonic() >= deadline:
                     raise PixivPolicyError("GIF 动图过长，无法转换，请选择标准（缩小预览）或原始帧 ZIP")
-                frame_pixels = image.width * image.height
-                # Include Pillow's decoded/quantizer work buffers, retained
-                # palettes, encoder copies and bounded input/output buffers.
-                # Use the complete frame count so rejection happens on frame 1.
-                estimated_peak = frame_pixels * (len(frames) * 4 + 28) + len(raw) * 2 + MAX_ARCHIVE_BYTES * 2
-                if estimated_peak > MAX_GIF_MEMORY:
-                    raise PixivPolicyError("GIF 转换需要的内存过多，请选择标准（缩小预览）或原始帧 ZIP")
                 with Image.new("RGBA", image.size, "white") as background:
                     background.alpha_composite(image)
                     rgb = background.convert("RGB")
