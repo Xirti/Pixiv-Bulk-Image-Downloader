@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from contextlib import contextmanager
 import threading
 import time
 import urllib.error
@@ -15,6 +17,7 @@ from urllib.parse import urlsplit
 import webview
 
 from pixiv_login import LOGIN, select_session_cookie, session_cookie_metadata
+from network_config import normalize_loopback_proxy
 
 
 LOG = logging.getLogger("moku.desktop")
@@ -130,7 +133,6 @@ def desktop_cookie_rows(cookie_containers: list[SimpleCookie]) -> list[dict]:
 class DesktopApi:
     def __init__(
         self,
-        proxy: str = "",
         *,
         window_factory: Callable = webview.create_window,
         poll_interval: float = 0.6,
@@ -140,7 +142,6 @@ class DesktopApi:
         auth_request: Callable | None = None,
     ) -> None:
         self._window = None
-        self.proxy = proxy
         self._window_factory = window_factory
         self.poll_interval = max(0.0, float(poll_interval))
         self.timeout = max(0.01, float(timeout))
@@ -303,6 +304,30 @@ class DesktopApi:
         return self._clipboard_transfer(text)
 
 
+@contextmanager
+def selected_webview_proxy(proxy: str):
+    """Use the backend's selected local proxy for every window in this host."""
+    if not proxy:
+        yield
+        return
+    clean = normalize_loopback_proxy(proxy)
+    if not clean:
+        raise ValueError("桌面代理地址无效")
+    name = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+    inherited = os.environ.get(name)
+    os.environ[name] = (
+        f"{inherited or ''} --proxy-server={clean} "
+        "--proxy-bypass-list=127.0.0.1;localhost;[::1]"
+    ).strip()
+    try:
+        yield
+    finally:
+        if inherited is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = inherited
+
+
 def start_desktop(
     url: str,
     storage_path: Path,
@@ -312,7 +337,6 @@ def start_desktop(
     desktop_auth_token: str = "",
 ) -> None:
     api = DesktopApi(
-        proxy,
         backend_url=url,
         desktop_auth_token=desktop_auth_token,
     )
@@ -329,7 +353,12 @@ def start_desktop(
     )
     api._window = window
     storage_path.mkdir(parents=True, exist_ok=True)
-    if startup is None:
-        webview.start(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
-    else:
-        webview.start(startup, args=[window], gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
+    # Windows proxy selection remains dynamic in the native browser. Only an
+    # explicit environment proxy needs bridging: WebView2 ignores HTTPS_PROXY.
+    environment_proxy = normalize_loopback_proxy(os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or "")
+    native_override = environment_proxy if environment_proxy == normalize_loopback_proxy(proxy) else ""
+    with selected_webview_proxy(native_override):
+        if startup is None:
+            webview.start(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
+        else:
+            webview.start(startup, args=[window], gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)

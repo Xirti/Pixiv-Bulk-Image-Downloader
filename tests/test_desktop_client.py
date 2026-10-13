@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -14,6 +15,34 @@ def desktop_window():
 
 
 class DesktopClientTests(unittest.TestCase):
+    def test_selected_proxy_reaches_webview_and_environment_is_restored(self):
+        import os
+        observed = []
+        inherited = "--disable-features=example"
+        def start(*_args, **_kwargs):
+            observed.append(os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"))
+        with patch.dict(os.environ, {"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": inherited,
+                                    "HTTPS_PROXY": "http://127.0.0.1:7890"}), patch.object(
+            desktop_client.webview, "create_window", return_value=desktop_window(),
+        ), patch.object(desktop_client.webview, "start", side_effect=start):
+            with tempfile.TemporaryDirectory() as temporary:
+                desktop_client.start_desktop("http://127.0.0.1:45678/", Path(temporary), "http://127.0.0.1:7890")
+            self.assertEqual(os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"], inherited)
+        self.assertIn("--proxy-server=http://127.0.0.1:7890", observed[0])
+        self.assertIn("--proxy-bypass-list=127.0.0.1;localhost;[::1]", observed[0])
+        self.assertNotIn("ignore-certificate", observed[0])
+
+    def test_system_proxy_keeps_native_dynamic_route_selection(self):
+        import os
+        observed = []
+        with patch.dict(os.environ, {"HTTPS_PROXY":"", "https_proxy":"", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS":""}), patch.object(
+            desktop_client.webview, "create_window", return_value=desktop_window(),
+        ), patch.object(desktop_client.webview, "start", side_effect=lambda **_kwargs:
+                      observed.append(os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"))):
+            with tempfile.TemporaryDirectory() as temporary:
+                desktop_client.start_desktop("http://127.0.0.1:45678/", Path(temporary), "http://127.0.0.1:7890")
+        self.assertEqual(observed, [""])
+
     def test_text_menu_does_not_enable_debug_mode(self):
         observed = {}
         main = desktop_window()
