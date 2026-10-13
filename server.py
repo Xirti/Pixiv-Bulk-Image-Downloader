@@ -1626,10 +1626,19 @@ def search_user_results(
     with locked_search_session(session_key, cancel_event):
         raise_if_search_cancelled(cancel_event)
         session = _touch_search_session(session_key)
-        first_retained_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
-        if page < first_retained_page:
-            _drop_search_session(session_key)
-            session = _touch_search_session(session_key)
+        with SEARCH_SESSION_LOCKS_GUARD:
+            assert_search_commit_allowed(session_key, session, scope, authorization_epoch, cancel_event)
+            result_index = session.get("identityIndex")
+            if result_index is None:
+                result_index = session["identityIndex"] = SearchResultIndex()
+            window_end = int(session["baseIndex"]) + len(session["items"])
+            if ((page - 1) * SEARCH_PER_PAGE < int(session["baseIndex"])
+                    or min(desired_items, result_index.emitted_count) > window_end):
+                start = min(result_index.emitted_count, (max(1, page - SEARCH_KEEP_BEHIND) - 1) * SEARCH_PER_PAGE)
+                end = min(result_index.emitted_count, (page + SEARCH_PREFETCH_AHEAD) * SEARCH_PER_PAGE)
+                session["items"] = result_index.read_results(start, end)
+                session["baseIndex"] = start
+                session["seen"] = {item["id"] for item in session["items"]}
         if "profileIds" not in session or session.get("targetUserId") != user_id:
             profile_ids = (
                 load_user_profile_ids(user_id, work_type=work_type)
@@ -1648,7 +1657,7 @@ def search_user_results(
         request_started = time.monotonic()
         request_count = 0
         while (
-            int(session["baseIndex"]) + len(session["items"]) < desired_items
+            result_index.emitted_count < desired_items
             and int(session["profileOffset"]) < len(ids)
             and request_count < MAX_USER_SEARCH_REQUESTS
             and time.monotonic() - request_started < MAX_USER_SEARCH_SECONDS
@@ -1692,15 +1701,14 @@ def search_user_results(
                 assert_search_commit_allowed(
                     session_key, session, scope, authorization_epoch, cancel_event,
                 )
-                for candidate in incoming:
-                    if candidate["id"] not in session["seen"]:
-                        session["seen"].add(candidate["id"])
-                        session["items"].append(candidate)
+                committed = result_index.append_results(incoming)
+                session["items"].extend(committed)
+                session["seen"].update(candidate["id"] for candidate in committed)
                 # Row conversion is part of consuming this batch. Do not skip the
                 # IDs if an unexpected malformed field aborts conversion midway.
                 session["profileOffset"] = start + len(batch_ids)
 
-        loaded = int(session["baseIndex"]) + len(session["items"])
+        loaded = result_index.emitted_count
         exhausted = int(session["profileOffset"]) >= len(ids)
         budget_exhausted = not exhausted and (
             request_count >= MAX_USER_SEARCH_REQUESTS
@@ -1900,21 +1908,23 @@ def search_pixiv_results(
     with locked_search_session(session_key, cancel_event):
         raise_if_search_cancelled(cancel_event)
         session = _touch_search_session(session_key)
-        first_retained_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
-        result_index = session.get("identityIndex")
-        if result_index is not None and result_index.emitted_count and (
-            page < first_retained_page
-            or min(desired_items, result_index.emitted_count) > int(session["baseIndex"]) + len(session["items"])
-        ):
-            start = min(result_index.emitted_count, (max(1, page - SEARCH_KEEP_BEHIND) - 1) * SEARCH_PER_PAGE)
-            end = min(result_index.emitted_count, (page + SEARCH_PREFETCH_AHEAD) * SEARCH_PER_PAGE)
-            session["items"] = result_index.read_results(start, end)
-            session["baseIndex"] = start
-            session["seen"] = {item["id"] for item in session["items"]}
-        elif page < first_retained_page:
-            _drop_search_session(session_key)
-            session = _touch_search_session(session_key)
-        absolute_loaded = result_index.emitted_count if result_index is not None else 0
+        with SEARCH_SESSION_LOCKS_GUARD:
+            assert_search_commit_allowed(session_key, session, scope, authorization_epoch, cancel_event)
+            first_retained_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
+            result_index = session.get("identityIndex")
+            if result_index is not None and result_index.emitted_count and (
+                page < first_retained_page
+                or min(desired_items, result_index.emitted_count) > int(session["baseIndex"]) + len(session["items"])
+            ):
+                start = min(result_index.emitted_count, (max(1, page - SEARCH_KEEP_BEHIND) - 1) * SEARCH_PER_PAGE)
+                end = min(result_index.emitted_count, (page + SEARCH_PREFETCH_AHEAD) * SEARCH_PER_PAGE)
+                session["items"] = result_index.read_results(start, end)
+                session["baseIndex"] = start
+                session["seen"] = {item["id"] for item in session["items"]}
+            elif page < first_retained_page:
+                _drop_search_session(session_key)
+                session = _touch_search_session(session_key)
+            absolute_loaded = result_index.emitted_count if result_index is not None else 0
         budget = {"started": time.monotonic(), "requests": 0}
         source_tags = tuple(dict.fromkeys(alias for group in tag_groups for alias in group))
         sources = [(tag, mode) for tag in source_tags for mode in modes]

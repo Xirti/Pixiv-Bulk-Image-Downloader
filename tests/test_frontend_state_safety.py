@@ -24,6 +24,21 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_detail_page_checkbox_enrolls_an_unselected_work_in_the_basket(self):
+        self.run_js(r'''
+const item = {id:"985",pages:2,title:"test",artist:"Artist",tags:[],
+  qualities:[{id:"original"}],formats:[{id:"source",label:"源格式"}],
+  pageImages:[{regular:"/page-0"},{regular:"/page-1"}]};
+renderDetail(item,0);
+const box = $("#collectionPages").querySelectorAll("[data-collection-page]")[1];
+box.checked = true;
+box.onchange();
+assert.deepEqual([...selection.get(item.id).pages],[1]);
+assert.equal(selection.pageCount,1);
+assert.equal(selection.get(item.id).item.title,"test");
+''')
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
     def test_old_page_checkbox_cannot_restore_invalid_pages_after_refresh(self):
         self.run_js(r'''
 const old = {id:"987",source:"pixiv",pages:3,title:"test",artist:"Artist",tags:[],
@@ -67,6 +82,38 @@ assert.equal(currentDetailItem.pages,2);
 assert.equal($("#collectionPages").querySelectorAll("[data-collection-page]").length,2);
 assert.ok($("#deck").innerHTML.includes("/new-0"));
 assert.ok(!$("#deck").innerHTML.includes("/old-2"));
+''')
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_inactive_artwork_image_error_does_not_start_a_detail_refresh(self):
+        self.run_js(r'''
+activeArtworkId = "123";
+fetchJson = async () => { throw new Error("inactive image must not start a request"); };
+assert.equal(await refreshArtworkPreview("456"), false);
+assert.equal(detailRefreshAttempts.has("456"), false);
+''')
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_old_search_summary_does_not_replace_a_loaded_detail(self):
+        self.run_js(r'''
+const full = {id:"123",pages:2,title:"updated",artist:"Artist",tags:[],bookmarks:12,
+  thumb:"/detail",pageImages:[{regular:"/detail-0"},{regular:"/detail-1"}]};
+selection.choose([full],{context:activeSearchContext,resultPage:1});
+batchCandidateItems = [full];
+const summary = {...full,pages:3,title:"old",thumb:"/fresh-summary",pageImages:undefined,bookmarks:null};
+items = [summary];
+reconcileSelectedArtworkPreviews(items);
+assert.equal(selection.get(full.id).item.pages,2);
+assert.equal(selection.get(full.id).item.title,"updated");
+assert.equal(selection.get(full.id).item.bookmarks,12);
+assert.equal(batchCandidateItems[0].pages,2);
+assert.equal(items[0].pages,2);
+selection.choose([summary],{context:activeSearchContext,resultPage:1},{fill:true});
+assert.deepEqual([...selection.get(full.id).pages],[0,1]);
+const refreshedFull = {...full,pages:1,thumb:"/new-detail",pageImages:[{regular:"/new-detail-0"}]};
+reconcileSelectedArtworkPreviews([refreshedFull]);
+assert.equal(selection.get(full.id).item.pageImages[0].regular,"/new-detail-0");
+assert.deepEqual([...selection.get(full.id).pages],[0]);
 ''')
 
     @unittest.skipUnless(shutil.which("node"), "Node required")

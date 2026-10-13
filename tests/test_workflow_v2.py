@@ -180,9 +180,5 @@ class WorkflowV2Tests(unittest.TestCase):
         self.assertIn("{ signal: controller.signal }", detail_block)
         self.assertIn("generation !== viewGeneration", detail_block)
 
-    def test_page_selection_enrolls_collection_in_cross_collection_batch(self):
-        self.assertIn("selection.setPage(item, page, box.checked, detailSelectionOrigin(item))", APP)
-        self.assertIn("selection.choose([item], origin)", APP)
-
 
 if __name__ == "__main__": unittest.main()

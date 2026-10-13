@@ -573,7 +573,7 @@ function refreshDetailControls(item, inBasket = basketPageOpen()) {
 
 async function refreshArtworkPreview(rawArtworkId) {
   const artworkId = String(rawArtworkId || "");
-  if (!/^\d+$/.test(artworkId)) return false;
+  if (!/^\d+$/.test(artworkId) || String(activeArtworkId || "") !== artworkId) return false;
   const existing = detailRefreshes.get(artworkId);
   if (existing) return existing.promise;
   const now = Date.now();
@@ -1037,12 +1037,13 @@ function reconcileSelectedArtworkPreviews(freshItems) {
   const mergePreview = (existing) => {
     const fresh = freshById.get(String(existing.id));
     if (!fresh) return existing;
+    // Result pages are summaries, possibly from an older search snapshot.
+    // Only another full detail may replace the authoritative page count/type.
+    if (Array.isArray(existing.pageImages) && existing.pageImages.length && !Array.isArray(fresh.pageImages)) {
+      return {...existing, thumb: fresh.thumb || existing.thumb};
+    }
     const merged = { ...existing, ...fresh };
     if (fresh.bookmarks == null) merged.bookmarks = existing.bookmarks ?? null;
-    if (Array.isArray(existing.pageImages) && existing.pageImages.length) {
-      merged.pageImages = existing.pageImages;
-      merged.thumb = fresh.thumb || existing.thumb;
-    }
     return merged;
   };
   selection.snapshot().forEach(({item}) => {
@@ -1050,6 +1051,10 @@ function reconcileSelectedArtworkPreviews(freshItems) {
     if (merged !== item) selection.remember(merged);
   });
   batchCandidateItems = batchCandidateItems.map(mergePreview);
+  freshItems.forEach((item, index) => {
+    const detail = selection.get(item.id)?.item;
+    if (detail?.pageImages?.length) freshItems[index] = detail;
+  });
 }
 
 function render() {

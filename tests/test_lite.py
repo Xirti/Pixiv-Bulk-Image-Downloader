@@ -79,7 +79,14 @@ class LiteSearchTests(unittest.TestCase):
                 parse_qs(urlsplit(url).query)["p"], ["1"],
                 "usable first-page results were delayed by fetching the next source page",
             )
-            return self.source(url, cancel)
+            # Pixiv date_d returns newest first with publication timestamps.
+            # A day-only, ascending fixture cannot establish this ordering.
+            return {"body": {"illustManga": {
+                "total": 144, "lastPage": 4,
+                "data": [{**self.row(10000 - i),
+                          "createDate": f"2026-09-29T12:00:{59 - i:02d}+09:00"}
+                         for i in range(60)],
+            }}}
 
         with patch.object(server, "search_pixiv_json", side_effect=only_first_page):
             result = server.search_pixiv_results("cat", "safe", 1, "all", True, authorized=False)
@@ -160,7 +167,7 @@ class LiteSearchTests(unittest.TestCase):
             budget["requests"] += 1
             if tag == "night":
                 raise RuntimeError("redundant source unavailable")
-            rows = [{**self.row(i), "tags": ["cat", "night"]} for i in range(36)]
+            rows = [{**self.row(10000 - i), "tags": ["cat", "night"]} for i in range(36)]
             return {"rows": rows, "hasMore": True, "budgetExhausted": False, "truncatedDates": [], "nextOffset": 36}
         with patch.object(server, "load_search_source", side_effect=load):
             result = server.search_pixiv_results("cat;night", "safe", 1, "all", True, authorized=False)
@@ -169,12 +176,13 @@ class LiteSearchTests(unittest.TestCase):
         def warm_load(_key, tag, _mode, _target, _allow_r18, budget):
             calls.append(tag)
             budget["requests"] += 1
-            rows = [{**self.row(len(calls) * 36 + i), "tags": ["cat", "night"]} for i in range(36)]
+            rows = [{**self.row(10000 - (len(calls) - 1) * 36 - i), "tags": ["cat", "night"]} for i in range(36)]
             return {"rows": rows, "hasMore": True, "budgetExhausted": False, "truncatedDates": [], "nextOffset": len(calls) * 36}
         with patch.object(server, "load_search_source", side_effect=warm_load):
             warmed = server.search_pixiv_results("cat;night", "safe", 1, "all", True, authorized=False, prefetch=True)
-        self.assertEqual(calls[1], "night", "warm-up starved the next source after fast foreground delivery")
-        self.assertIn("cat", calls[2:])
+        self.assertTrue(len(calls) > 1, "warm-up did not load the later result pages")
+        self.assertEqual(set(calls), {"cat"}, "strict AND warm-up requested a redundant source")
+        self.assertGreaterEqual(warmed["preloadedThrough"], 4)
         self.assertEqual(warmed["items"], [])
 
 

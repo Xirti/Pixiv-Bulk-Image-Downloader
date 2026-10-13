@@ -178,6 +178,59 @@ class SearchSnapshotStreamTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in revisited["items"]],
                          [row["id"] for row in first["items"]])
 
+    def test_user_search_replays_evicted_metadata_without_refreshing_its_profile_snapshot(self):
+        for query in ("uid:9", "author:artist"):
+            with self.subTest(query=query):
+                server.reset_search_caches()
+                ids = [str(10000 - index) for index in range(600)]
+                changed = False
+                requests = []
+
+                def remote(url, _cancel):
+                    requests.append(url)
+                    path = urlsplit(url).path
+                    if path == "/ajax/search/users":
+                        return {"body": {"page": {"userIds": ["9"]},
+                                         "users": [{"id": "9", "name": "artist"}]}}
+                    if path.endswith("/profile/all"):
+                        return {"body": {"illusts": {}, "manga": {id: None for id in ids}}}
+                    batch = parse_qs(urlsplit(url).query)["ids[]"]
+                    self.assertLessEqual(len(batch), 48)
+                    # Preserve the author's existing per-batch order, even if a
+                    # later ID batch contains newer publication dates.
+                    works = {id: self.row(int(id), ["cat"],
+                        "2026-10-01" if int(id) > 9952 else "2026-10-06", kind=1) for id in batch}
+                    if changed:
+                        works = {id: {**row, "title": "updated upstream"} for id, row in works.items()}
+                    return {"body": {"works": works}}
+
+                def search(page=1, snapshot="snapshot-user-original"):
+                    return server.search_pixiv_results(
+                        query, "safe", page, "manga", False, authorized=False,
+                        start_date="2026-10-01", end_date="2026-10-07", snapshot_id=snapshot,
+                    )
+
+                with patch.object(server, "search_pixiv_json", side_effect=remote):
+                    first = search()
+                    tenth = search(10)
+                    changed = True
+                    ids.insert(0, "20000")
+                    before_replay = len(requests)
+                    revisited = search()
+                    forward_again = search(10)
+                    self.assertEqual(len(requests), before_replay,
+                                     "Replaying committed user rows must not request new metadata or profile IDs")
+                    fresh = search(snapshot="snapshot-user-refreshed")
+                fields = lambda result: [(row["id"], row["title"], row["date"]) for row in result["items"]]
+                self.assertEqual(fields(revisited), fields(first))
+                self.assertEqual(fields(forward_again), fields(tenth))
+                self.assertEqual([row["id"] for row in tenth["items"]],
+                                 [str(10000 - index) for index in range(324, 360)])
+                self.assertEqual(revisited["reportedTotal"], 600)
+                self.assertEqual(fresh["reportedTotal"], 601)
+                self.assertEqual(fresh["items"][0]["id"], "20000")
+                self.assertEqual(fresh["items"][0]["title"], "updated upstream")
+
     def test_temporary_snapshot_indexes_are_cleaned_on_lru_idle_and_reset(self):
         with tempfile.TemporaryDirectory(prefix="moku-index-test-") as directory, patch.object(
             tempfile, "tempdir", directory,

@@ -128,6 +128,26 @@ class SearchResultIndex:
         ).fetchall()
         return [json.loads(payload) for (payload,) in rows]
 
+    def append_results(self, items: Iterable[dict]) -> list[dict]:
+        """Commit author-search batches in their existing order, without a watermark."""
+        connection = self._open()
+        values = []
+        with connection:
+            for item in items:
+                artwork_id = str(item["id"])
+                sort_id = str(int(artwork_id))
+                inserted = connection.execute(
+                    "INSERT OR IGNORE INTO identities VALUES (?, ?, ?, ?, ?, ?)",
+                    (artwork_id, str(item.get("sortDate") or item.get("date") or ""),
+                     len(sort_id), sort_id,
+                     json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                     self._emitted + len(values)),
+                )
+                if inserted.rowcount:
+                    values.append(item)
+        self._emitted += len(values)
+        return values
+
     def close(self) -> None:
         if self._connection is not None:
             try:

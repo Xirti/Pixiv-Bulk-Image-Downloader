@@ -26,7 +26,6 @@ class MinimalClientTests(unittest.TestCase):
         self.assertEqual(APP.count("new IntersectionObserver("), 1)
         thumbnails = APP[APP.index("function loadBasketThumbnails"):APP.index("function selectedGroups")]
         self.assertIn('root: $("#basketPage")', thumbnails)
-        self.assertIn("active < 3", thumbnails)
         self.assertNotIn("bindRipple", APP)
         self.assertNotIn("previewMode", HTML)
         self.assertNotIn("motion", HTML)

@@ -300,7 +300,8 @@ class RoadmapFrontendTests(unittest.TestCase):
           await restoreWorkspace();
           assert.equal(workspaceSync.ready, true);
           assert.equal(selection.pageCount, 1500);
-          assert.equal(selection.setPage({...publicItem,pages:901},900,true).reason, 'capacity');
+          selection.remember({...publicItem,pages:901});
+          assert.equal(selection.setPage(publicItem.id,900,true).reason, 'capacity');
           selection.setPage(publicItem,899,false);
           await workspaceSync.settled();
           assert.equal(workspaceSync.ready, true);
