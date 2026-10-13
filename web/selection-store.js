@@ -4,12 +4,28 @@
 globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {}} = {}) {
   if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error("Invalid selection limit");
   const records = new Map();
+  const metadata = new Map();
   let pageCount = 0;
   let locked = false;
   const idOf = (item) => item?.id == null ? "" : String(item.id);
   const countOf = (item) => Number.isSafeInteger(Number(item?.pages)) && Number(item.pages) > 0 ? Number(item.pages) : null;
   const reject = (reason, additional = 0) => ({accepted: false, reason, additional});
   const snapshot = (row) => row ? {...row, pages: new Set(row.pages), context: {...row.context}} : null;
+
+  function rememberMetadata(item, fresh = false) {
+    const id = idOf(item);
+    if (!id || countOf(item) === null) return null;
+    const previous = metadata.get(id) || records.get(id)?.item;
+    // Explicit detail refreshes win; result summaries and captured callbacks don't.
+    const latest = fresh || !previous || (!previous.pageImages && item.pageImages) ? item : previous;
+    metadata.delete(id);
+    metadata.set(id, latest);
+    for (const key of metadata.keys()) {
+      if (metadata.size <= maxPages + 32) break;
+      if (!records.has(key)) metadata.delete(key);
+    }
+    return latest;
+  }
 
   function commit(id, item, pages, origin) {
     const previous = records.get(id);
@@ -31,6 +47,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
       if (!row) continue;
       pageCount -= row.pages.size;
       records.delete(id);
+      if (forced) metadata.delete(id);
       count += 1;
     }
     if (count) onChange();
@@ -52,37 +69,45 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
       for (const item of items) {
         const id = idOf(item), count = countOf(item);
         if (!id || count === null) return reject("pages");
-        plan.set(id, {item, count});
+        const latest = metadata.get(id) || records.get(id)?.item;
+        const chosen = latest?.pageImages ? latest : item;
+        plan.set(id, {item: chosen, count: countOf(chosen)});
       }
       let additional = 0;
       for (const [id, {count}] of plan) {
-        const old = records.get(id)?.pages.size || 0;
-        additional += (fill || !old ? count : old) - old;
+        const old = records.get(id);
+        const validCount = old ? [...old.pages].filter(page => page < count).length : 0;
+        additional += (fill || !old ? count : validCount) - (old?.pages.size || 0);
       }
       if (pageCount + additional > maxPages) return reject("capacity", additional);
       for (const [id, {item, count}] of plan) {
         const old = records.get(id);
-        const pages = !fill && old ? old.pages : new Set(Array.from({length: count}, (_, page) => page));
-        commit(id, item, pages, origin);
+        const pages = !fill && old ? new Set([...old.pages].filter(page => page < count)) : new Set(Array.from({length: count}, (_, page) => page));
+        commit(id, rememberMetadata(item, true), pages, origin);
       }
       if (plan.size) onChange();
       return {accepted: true, count: plan.size};
     },
     setPage(item, page, checked, origin) {
       if (locked) return reject("locked");
-      const id = idOf(item), count = countOf(item);
+      const latest = typeof item === "object" ? rememberMetadata(item) : metadata.get(String(item));
+      const id = idOf(latest), count = countOf(latest);
       if (!id || count === null || !Number.isInteger(page) || page < 0 || page >= count) return reject("pages");
       const previous = records.get(id);
       if (checked && !previous?.pages.has(page) && pageCount >= maxPages) return reject("capacity", 1);
-      const pages = new Set(previous?.pages);
+      const pages = new Set([...(previous?.pages || [])].filter(value => value < count));
       if (checked) pages.add(page); else pages.delete(page);
-      commit(id, item, pages, origin);
+      commit(id, latest, pages, origin);
       onChange();
       return {accepted: true};
     },
     remove(ids) { return remove(ids); },
     // Revocation must clear old-account choices even while a download is locked.
-    revoke(ids) { return remove(ids, true); },
+    revoke(ids) {
+      const result = remove(ids, true);
+      metadata.clear();
+      return result;
+    },
     clear() { return remove([...records.keys()]); },
     archive(ids) {
       if (locked) return reject("locked");
@@ -96,7 +121,9 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
     },
     remember(item) {
       const id = idOf(item), row = records.get(id), count = countOf(item);
-      if (!row || count === null) return false;
+      if (count === null) return false;
+      rememberMetadata(item, true);
+      if (!row) return false;
       commit(id, item, new Set([...row.pages].filter(page => page < count)), row);
       onChange();
       return true;
@@ -114,7 +141,9 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
       }
       if (total > maxPages && !allowOverflow) return reject("capacity");
       records.clear();
+      metadata.clear();
       for (const [id, row] of plan) records.set(id, row);
+      for (const row of plan.values()) rememberMetadata(row.item, true);
       pageCount = total;
       onChange();
       return {accepted: true};

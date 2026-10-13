@@ -29,7 +29,8 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
     });
     hint.textContent = `已固定第 ${page + 1} 张；其他牌保持不动，再点当前牌取消`;
   }
-  function render(item, fallback = () => "") {
+  function render(item, fallback = () => "", {preserve = false} = {}) {
+    const pinned = preserve ? lockedPage : null;
     reset();
     fields.Title.textContent = item.title;
     fields.WorkType.hidden = item.workType !== "ugoira";
@@ -58,6 +59,8 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
     hint.textContent = item.pages > visible
       ? `预览前 ${visible} 张，共 ${item.pages} 张；点击一张固定，再点一次取消`
       : "轻移鼠标预览；点击一张固定，再点一次取消";
+    const pinnedCard = cards().find(card => Number(card.dataset.page) === pinned);
+    if (pinnedCard) toggle(pinnedCard);
     return visible;
   }
   return {render, reset};

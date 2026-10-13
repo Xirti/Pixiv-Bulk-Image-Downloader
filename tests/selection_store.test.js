@@ -36,3 +36,24 @@ selection.revoke(['a']);
 assert.equal(selection.size, 0);
 assert.equal(selection.pageCount, 0);
 assert.equal(selection.archivedCount, 0);
+
+// An old checkbox is an intent, not a replacement for refreshed metadata.
+const refreshed = createSelectionStore();
+const stale = {...item('fresh', 3), thumb: '/old', pageImages: [{}, {}, {}]};
+const fresh = {...stale, pages: 2, thumb: '/new', pageImages: [{}, {}]};
+refreshed.choose([stale], origin);
+refreshed.remember(fresh);
+assert.equal(refreshed.setPage(stale, 2, true, origin).accepted, false);
+assert.equal(refreshed.pageCount, 2);
+assert.equal(refreshed.get('fresh').item.thumb, '/new');
+refreshed.setPage('fresh', 1, false, origin);
+assert.deepEqual([...refreshed.get('fresh').pages], [0]);
+refreshed.choose([{...item('fresh', 3), thumb: '/summary'}], origin);
+assert.equal(refreshed.get('fresh').item.thumb, '/new');
+assert.deepEqual([...refreshed.get('fresh').pages], [0]);
+refreshed.remove(['fresh']);
+refreshed.setPage('fresh', 1, true, origin);
+assert.equal(refreshed.get('fresh').item.thumb, '/new');
+const recovered = createSelectionStore();
+recovered.restore(refreshed.snapshot());
+assert.equal(recovered.setPage('fresh', 2, true, origin).accepted, false);
