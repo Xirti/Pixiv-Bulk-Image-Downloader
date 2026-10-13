@@ -24,6 +24,126 @@ class FrontendStateSafetyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_old_page_checkbox_cannot_restore_invalid_pages_after_refresh(self):
+        self.run_js(r'''
+const old = {id:"987",source:"pixiv",pages:3,title:"test",artist:"Artist",tags:[],
+  qualities:[{id:"original"}],formats:[{id:"source",label:"源格式"}],
+  thumb:"/old",pageImages:[{regular:"/old-0"},{regular:"/old-1"},{regular:"/old-2"}]};
+items = [old];
+selection.choose([old], {context:activeSearchContext,resultPage:1});
+activeArtworkId = old.id;
+renderDetail(old, 0);
+const boxes = $("#collectionPages").querySelectorAll("[data-collection-page]");
+const fresh = {...old,pages:2,thumb:"/fresh",pageImages:[{regular:"/fresh-0"},{regular:"/fresh-1"}]};
+fetchJson = async () => fresh;
+$("#quality").value = "regular";
+assert.equal(await refreshArtworkPreview(old.id), true);
+boxes[2].checked = true;
+boxes[2].onchange();
+assert.equal(selection.get(old.id).item.thumb,"/fresh");
+assert.deepEqual(currentDownloadPages(currentDetailItem),[0,1]);
+assert.equal($("#collectionPages").querySelectorAll("[data-collection-page]").length,2);
+assert.equal($("#quality").value,"regular");
+assert.ok(!$("#deck").innerHTML.includes("/old-2"));
+''')
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_returning_from_refreshed_basket_detail_keeps_the_normal_detail_fresh(self):
+        self.run_js(r'''
+const old = {id:"986",source:"pixiv",pages:3,title:"test",artist:"Artist",tags:[],
+  qualities:[{id:"original"}],formats:[{id:"source",label:"源格式"}],
+  thumb:"/old",pageImages:[{regular:"/old-0"},{regular:"/old-1"},{regular:"/old-2"}]};
+items = [old]; activeArtworkId = old.id;
+selection.choose([old],{context:activeSearchContext,resultPage:1});
+renderDetail(old,0);
+openBasketPage();
+renderBasketArtworkDetail(old);
+const fresh = {...old,pages:2,thumb:"/new",pageImages:[{regular:"/new-0"},{regular:"/new-1"}]};
+fetchJson = async () => fresh;
+assert.equal(await refreshArtworkPreview(old.id),true);
+closeBasketPage();
+assert.equal(currentDetailItem.thumb,"/new");
+assert.equal(currentDetailItem.pages,2);
+assert.equal($("#collectionPages").querySelectorAll("[data-collection-page]").length,2);
+assert.ok($("#deck").innerHTML.includes("/new-0"));
+assert.ok(!$("#deck").innerHTML.includes("/old-2"));
+''')
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_basket_page_changes_share_request_limit_and_drop_old_queue(self):
+        self.run_js(r'''
+const requests = [], observers = [];
+globalThis.IntersectionObserver = class {
+  constructor(callback) { this.callback = callback; this.images = []; observers.push(this); }
+  observe(image) { this.images.push(image); }
+  unobserve() {}
+  disconnect() {}
+};
+let images = Array.from({length:6},(_,index)=>{
+  const image = new FakeElement(); image.dataset.restoreArtwork = String(100+index); return image;
+});
+$("#basketPage").hidden = false;
+$("#batchCollections").querySelectorAll = () => images;
+fetchJson = (url,options) => new Promise(resolve=>requests.push({url,options,resolve}));
+loadBasketThumbnails();
+observers[0].callback(images.map(target=>({target,isIntersecting:true})));
+assert.equal(requests.length,3);
+images = [200,201,202].map(id=>{const image=new FakeElement();image.dataset.restoreArtwork=String(id);return image;});
+loadBasketThumbnails();
+observers[1].callback(images.map(target=>({target,isIntersecting:true})));
+assert.equal(requests.length,3,"old in-flight slots must be released before new requests start");
+assert.ok(requests.every(row=>row.options.signal.aborted));
+requests.slice(0,3).forEach(row=>row.resolve({id:"obsolete"}));
+for(let index=0;index<5;index++) await Promise.resolve();
+assert.equal(requests.length,6);
+assert.ok(requests.slice(3).every(row=>/\/(200|201|202)(?:\?|$)/.test(row.url)));
+abortDetailRefreshes();
+requests.slice(3).forEach(row=>row.resolve({id:"obsolete"}));
+''')
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_queue_capacity_requires_explicit_choice_before_direct_download(self):
+        self.run_js(r'''
+fetchJson = async url => {
+  assert.equal(url,"/api/workspace");
+  return {scope:"public",revision:0,basket:[],tasks:[],recent:[]};
+};
+await restoreWorkspace();
+const task = prepareDownloadTask([{groups:[{id:"123",pages:[0]}],pageCount:1}],readDownloadOptions());
+let downloads = 0;
+fetchJson = async url => {
+  if(url === "/api/workspace/task") {
+    const error = new Error("full"); error.taskCapacity=true;error.ownTaskCount=0;error.otherTaskCount=20;throw error;
+  }
+  downloads++;
+  return {saved:["image.png"],pages:1};
+};
+const execution = executeDownloadTask(task,()=>({endpoint:"/download",body:{},timeout:1000}),()=>{});
+for(let index=0;index<5;index++) await Promise.resolve();
+assert.equal(downloads,0);
+assert.equal($("#taskCapacityDialog").open,true);
+assert.equal(pendingTasks.has(task.id),false,"failed save must not create a phantom paused task");
+$("#taskCapacityDirect").onclick();
+await execution;
+assert.equal(downloads,1);
+assert.equal(task.persisted,false);
+assert.equal(task.transient,true);
+''')
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_normal_task_save_failure_does_not_offer_or_start_direct_download(self):
+        self.run_js(r'''
+fetchJson = async () => ({scope:"public",revision:0,basket:[],tasks:[],recent:[]});
+await restoreWorkspace();
+const task = prepareDownloadTask([{groups:[{id:"123",pages:[0]}],pageCount:1}],readDownloadOptions());
+fetchJson = async url => { assert.equal(url,"/api/workspace/task");throw new Error("disk unavailable"); };
+await assert.rejects(executeDownloadTask(task,()=>{throw new Error("must not download");},()=>{}), /disk unavailable/);
+assert.equal($("#taskCapacityDialog").open,false);
+assert.equal(pendingTasks.has(task.id),false);
+assert.equal(task.remainingChunks.length,1);
+''')
+
+    @unittest.skipUnless(shutil.which("node"), "Node required")
     def test_authorization_loss_aborts_requests_and_removes_restricted_views(self):
         self.run_js(r'''
 const item = {id:"123",pages:1,restriction:"r18",title:"Private",artist:"Artist",tags:[]};
@@ -157,7 +277,6 @@ assert.equal(resultSelectionEnabled,true);
         self.assertIn("syncResultSelectionControls()", local_update)
         self.assertNotIn("innerHTML", local_update)
         viewer = block("function renderViewerWindow", "function openAllViewer")
-        self.assertIn("item.pageImages.slice(start, end)", viewer)
         self.assertIn("data-viewer-window", viewer)
         self.assertIn("currentDetailItem", viewer)
         self.assertIn("renderViewerWindow(latestItem)", viewer)

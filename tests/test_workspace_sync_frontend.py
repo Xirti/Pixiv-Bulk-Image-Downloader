@@ -22,7 +22,8 @@ request = async (url,options) => {
 };
 selection.remember({...selection.get(item.id).item,pages:3});
 await new Promise(resolve=>setImmediate(resolve));
-selection.setPage({...item,pages:4},3,true);
+selection.remember({...item,pages:4});
+selection.setPage(item.id,3,true);
 failReply();
 await sync.settled();
 assert.equal(stored.basket[0].item.pages,3);
@@ -51,7 +52,8 @@ request = async (url,options) => {
 };
 selection.remember({...selection.get(item.id).item,pages:3});
 await new Promise(resolve=>setImmediate(resolve));
-selection.setPage({...item,pages:4},3,true);
+selection.remember({...item,pages:4});
+selection.setPage(item.id,3,true);
 finish();
 await sync.settled();
 assert.equal(stored.basket[0].item.pages,3);
