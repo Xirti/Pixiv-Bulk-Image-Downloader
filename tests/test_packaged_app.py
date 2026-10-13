@@ -206,9 +206,10 @@ class PackagedAppTests(unittest.TestCase):
     def test_desktop_host_uses_disposable_profile_and_removes_it_after_close(self):
         import moku_app
 
-        disposable = Path("C:/tmp/moku-webview-session")
         with tempfile.TemporaryDirectory() as raw_local:
             session_root = Path(raw_local) / "MOKU" / "WebView2Sessions"
+            disposable = session_root / "session-test"
+            disposable.mkdir(parents=True)
             with patch.dict(moku_app.os.environ, {"LOCALAPPDATA": raw_local}, clear=False), patch.object(
                 moku_app.tempfile, "mkdtemp", return_value=str(disposable)
             ) as make_profile, patch.object(moku_app, "_start_webview") as start, patch.object(
@@ -222,28 +223,38 @@ class PackagedAppTests(unittest.TestCase):
         ))
         remove.assert_called_once_with(disposable)
 
-    def test_stale_profile_cleanup_only_removes_old_session_directories(self):
+    def test_stale_profile_cleanup_only_removes_marked_idle_session_directories(self):
         import moku_app
 
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             old_session = root / "session-old"
+            active_session = root / "session-active"
+            legacy_session = root / "session-legacy"
             fresh_session = root / "session-fresh"
             unrelated = root / "important-user-folder"
-            for path in (old_session, fresh_session, unrelated):
+            for path in (old_session, active_session, legacy_session, fresh_session, unrelated):
                 path.mkdir()
+            with moku_app.webview_profile_lease(old_session):
+                pass
             old_time = 1_600_000_000
             fresh_time = old_time + 90_000
             os.utime(old_session, (old_time, old_time))
             os.utime(fresh_session, (fresh_time, fresh_time))
             os.utime(unrelated, (old_time, old_time))
+            os.utime(legacy_session, (old_time, old_time))
 
-            removed = moku_app.cleanup_stale_webview_profiles(root, now=fresh_time)
+            with moku_app.webview_profile_lease(active_session):
+                (active_session / "keep.txt").write_text("active", encoding="utf-8")
+                os.utime(active_session, (old_time, old_time))
+                removed = moku_app.cleanup_stale_webview_profiles(root, now=fresh_time)
+                self.assertEqual((active_session / "keep.txt").read_text(encoding="utf-8"), "active")
 
             self.assertEqual(removed, 1)
             self.assertFalse(old_session.exists())
             self.assertTrue(fresh_session.exists())
             self.assertTrue(unrelated.exists())
+            self.assertTrue(legacy_session.exists())
 
     def test_spec_and_build_include_pywebview_desktop_host(self):
         spec = (ROOT / "MOKU.spec").read_text(encoding="utf-8-sig")

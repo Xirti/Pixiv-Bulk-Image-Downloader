@@ -256,12 +256,41 @@ def _start_webview(
             os.environ["PYTHONNET_RUNTIME"] = inherited_pythonnet_runtime
 
 
+_PROFILE_MARKER = ".moku-session-lock"
+
+
+def _lock_profile(stream, *, release: bool = False) -> None:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK if release else msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(stream, fcntl.LOCK_UN if release else fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@contextlib.contextmanager
+def webview_profile_lease(path: Path):
+    """Keep a cross-process lock while this disposable profile is in use."""
+    marker = path / _PROFILE_MARKER
+    with marker.open("xb") as created:
+        created.write(b"MOKU session v1\n")
+    with marker.open("r+b") as stream:
+        _lock_profile(stream)
+        try:
+            yield
+        finally:
+            _lock_profile(stream, release=True)
+
+
 def remove_webview_profile(path: Path) -> bool:
-    for _ in range(20):
-        shutil.rmtree(path, ignore_errors=True)
-        if not path.exists():
-            return True
-        time.sleep(0.25)
+    if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+        return False
+    # WebView may release its final file handles after the window closes.
+    # Retry next launch instead of keeping startup/exit waiting for five seconds.
+    shutil.rmtree(path, ignore_errors=True)
+    if not path.exists():
+        return True
     LOG.warning("temporary WebView2 profile cleanup deferred")
     return False
 
@@ -274,7 +303,8 @@ def cleanup_stale_webview_profiles(root: Path, *, now: float | None = None) -> i
     except OSError:
         return 0
     for candidate in candidates:
-        if not candidate.is_dir() or not candidate.name.startswith("session-"):
+        if (not candidate.is_dir() or not candidate.name.startswith("session-")
+                or candidate.is_symlink() or getattr(candidate, "is_junction", lambda: False)()):
             continue
         try:
             age = current - candidate.stat().st_mtime
@@ -282,8 +312,19 @@ def cleanup_stale_webview_profiles(root: Path, *, now: float | None = None) -> i
             continue
         if age < 24 * 60 * 60:
             continue
-        if remove_webview_profile(candidate):
-            removed += 1
+        marker = candidate / _PROFILE_MARKER
+        if marker.is_symlink() or not marker.is_file():
+            continue
+        try:
+            with marker.open("r+b") as stream:
+                if stream.read(32) != b"MOKU session v1\n":
+                    continue
+                _lock_profile(stream)
+                _lock_profile(stream, release=True)
+            if remove_webview_profile(candidate):
+                removed += 1
+        except OSError:
+            continue
     return removed
 
 
@@ -297,10 +338,12 @@ def launch_desktop(
         raise RuntimeError("LOCALAPPDATA is unavailable")
     session_root = Path(local_app_data) / "MOKU" / "WebView2Sessions"
     session_root.mkdir(parents=True, exist_ok=True)
-    cleanup_stale_webview_profiles(session_root)
+    threading.Thread(target=cleanup_stale_webview_profiles, args=(session_root,),
+                     name="moku-profile-cleanup", daemon=True).start()
     storage_path = Path(tempfile.mkdtemp(prefix="session-", dir=str(session_root)))
     try:
-        _start_webview(url, storage_path, proxy, desktop_auth_token)
+        with webview_profile_lease(storage_path):
+            _start_webview(url, storage_path, proxy, desktop_auth_token)
     finally:
         remove_webview_profile(storage_path)
 
