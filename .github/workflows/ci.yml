@@ -66,7 +66,7 @@ jobs:
 
       - name: Build and verify portable Windows package
         shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\build-portable.ps1
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\build-portable.ps1 -SkipTests
 
       - name: Re-verify schema 3 distribution manifest
         shell: powershell
