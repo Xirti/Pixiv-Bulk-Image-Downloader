@@ -77,7 +77,7 @@ class ProbeHandler(server.Handler):
             "hasMore": False, "total": 1, "perPage": 36, "label": "Offline probe",
         })
 
-    def _get_pixiv_detail(self, _artwork_id):
+    def _get_pixiv_detail(self, _request, _artwork_id):
         type(self).detail_revision += 1
         return self.send_json(self.artwork())
 
