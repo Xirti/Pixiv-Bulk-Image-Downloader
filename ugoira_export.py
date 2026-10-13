@@ -75,7 +75,7 @@ def _gif(raw, frames) -> bytes:
     from PIL import Image
 
     images, durations = [], []
-    pixels = largest = elapsed = rounded = 0
+    elapsed = rounded = 0
     deadline = time.monotonic() + MAX_CONVERSION_SECONDS
     try:
         with closing(_decoded_frames(raw, frames)) as decoded:
@@ -85,14 +85,18 @@ def _gif(raw, frames) -> bytes:
                 if time.monotonic() >= deadline:
                     raise PixivPolicyError("GIF 动图过长，无法转换，请选择标准（缩小预览）或原始帧 ZIP")
                 frame_pixels = image.width * image.height
-                pixels += frame_pixels
-                largest = max(largest, frame_pixels)
-                if pixels * 3 + largest * 8 > MAX_GIF_MEMORY:
+                # Include Pillow's decoded/quantizer work buffers, retained
+                # palettes, encoder copies and bounded input/output buffers.
+                # Use the complete frame count so rejection happens on frame 1.
+                estimated_peak = frame_pixels * (len(frames) * 4 + 28) + len(raw) * 2 + MAX_ARCHIVE_BYTES * 2
+                if estimated_peak > MAX_GIF_MEMORY:
                     raise PixivPolicyError("GIF 转换需要的内存过多，请选择标准（缩小预览）或原始帧 ZIP")
                 with Image.new("RGBA", image.size, "white") as background:
                     background.alpha_composite(image)
-                    with background.convert("RGB") as rgb:
-                        palette = rgb.quantize(colors=255)
+                    rgb = background.convert("RGB")
+                # Release the full RGBA composite before quantization starts.
+                with rgb:
+                    palette = rgb.quantize(colors=255)
                 images.append(palette)
                 with image.getchannel("A") as alpha:
                     with alpha.point(lambda value: 255 if value < 128 else 0) as mask:

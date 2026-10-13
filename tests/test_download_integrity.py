@@ -1334,6 +1334,22 @@ class CrossPlatformPublicationContractTests(unittest.TestCase):
 
 
 class UgoiraDownloadTests(unittest.TestCase):
+    def test_large_gif_is_rejected_before_exceeding_conversion_memory_budget(self):
+        from PIL import Image
+        from ugoira_export import export_ugoira
+        from pixiv_adapter import PixivPolicyError
+
+        encoded = io.BytesIO()
+        with Image.new("RGB", (4000, 4000), "red") as image:
+            image.save(encoded, format="PNG")
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as stream:
+            for index in range(2):
+                stream.writestr(f"{index:06d}.png", encoded.getvalue())
+        with self.assertRaisesRegex(PixivPolicyError, "内存"):
+            export_ugoira(archive.getvalue(), [{"file":f"{index:06d}.png","delay":100}
+                                             for index in range(2)], "gif")
+
     """Exercise animation preview and download through the HTTP boundary."""
 
     UGOIRA_ID = "990101"
