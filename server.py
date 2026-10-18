@@ -1198,8 +1198,16 @@ def extend_history(
                 ), work_type)
                 total = int(block.get("total") or 0)
                 first_data = block.get("data") or []
-                if mode == "r18" and total > 0 and not any(int(row.get("xRestrict", -1)) == 1 for row in first_data):
-                    raise PixivPolicyError("账户设置不允许R-18搜索，或Pixiv未返回可用R-18内容")
+                if mode == "r18" and total > 0:
+                    for raw in first_data:
+                        try:
+                            candidate = normalize_search_item(raw, allow_r18=allow_r18)
+                        except PixivPolicyError:
+                            continue
+                        if candidate["restriction"] == "r18":
+                            break
+                    else:
+                        raise PixivPolicyError("账户设置不允许R-18搜索，或Pixiv未返回可用R-18内容")
                 if total > 600 and window["start"] < window["end"]:
                     span = (window["end"] - window["start"]).days
                     mid = window["start"] + timedelta(days=span // 2)
@@ -1225,17 +1233,17 @@ def extend_history(
                 ), work_type)
                 rows = block.get("data") or []
             for raw in rows:
-                artwork_id = str(raw.get("id") or "")
-                if not artwork_id or artwork_id in state["ids"]: continue
-                if date_range and not date_range.contains(publication_date(raw.get("createDate"))): continue
-                if mode == "r18" and int(raw.get("xRestrict", -1)) != 1: continue
-                try: normalize_search_item(raw, allow_r18=allow_r18)
+                try: candidate = normalize_search_item(raw, allow_r18=allow_r18)
                 except PixivPolicyError: continue
+                artwork_id = candidate["id"]
+                if artwork_id in state["ids"]: continue
+                if date_range and not date_range.contains(candidate["date"]): continue
+                if mode == "r18" and candidate["restriction"] != "r18": continue
                 state["ids"].add(artwork_id); state["items"].append(raw)
             # date_d bounds publication time, not ID order within one timestamp.
             # Real timestamps let the first batch confirm a useful prefix;
             # day-only values conservatively keep that day's tie pending.
-            if rows:
+            if rows and isinstance(rows[-1], dict):
                 last = rows[-1]
                 last_day = publication_date(last.get("createDate"))
                 last_id = str(last.get("id") or "")
@@ -1678,16 +1686,13 @@ def search_user_results(
             request_count += 1
             incoming: list[dict] = []
             for raw in raw_rows:
-                if str(raw.get("userId") or "") != user_id:
-                    continue
-                restriction = int(raw.get("xRestrict", -1))
-                if scope == "safe" and restriction != 0:
-                    continue
-                if scope == "r18" and restriction != 1:
-                    continue
                 try:
                     candidate = normalize_search_item(raw, allow_r18=scope in {"r18", "all"})
                 except PixivPolicyError:
+                    continue
+                if candidate["userId"] != user_id:
+                    continue
+                if scope in {"safe", "r18"} and candidate["restriction"] != scope:
                     continue
                 if work_type != "all" and candidate["workType"] != work_type:
                     continue
@@ -3966,6 +3971,8 @@ class Handler(SimpleHTTPRequestHandler):
             # A broken optional index must not make downloads unusable.
             HTTP_LOG.warning("下载目录索引读取失败，将正常下载")
             return pages
+        except OSError as exc:
+            raise PixivPolicyError("无法核验已下载文件，请检查原保存文件的访问权限与路径") from exc
         if skipped_files is not None:
             skipped_files.extend(str(file.relative_to(save_root)) for files in present.values() for file in files)
         return [page for page in pages if page not in present]

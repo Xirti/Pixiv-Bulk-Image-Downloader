@@ -46,6 +46,7 @@ def attempt_directory_rename(source: Path, destination: Path) -> subprocess.Comp
     return subprocess.run(
         [
             os.fspath(Path(sys.executable)),
+            "-X", "utf8",
             "-B",
             "-c",
             command,
@@ -55,6 +56,7 @@ def attempt_directory_rename(source: Path, destination: Path) -> subprocess.Comp
         capture_output=True,
         check=False,
         text=True,
+        encoding="utf-8",
         timeout=5,
     )
 
@@ -67,12 +69,13 @@ def attempt_file_write(path: Path, payload: bytes) -> subprocess.CompletedProces
     )
     return subprocess.run(
         [
-            os.fspath(Path(sys.executable)), "-B", "-c", command,
+            os.fspath(Path(sys.executable)), "-X", "utf8", "-B", "-c", command,
             os.fspath(path), payload.decode(),
         ],
         capture_output=True,
         check=False,
         text=True,
+        encoding="utf-8",
         timeout=5,
     )
 

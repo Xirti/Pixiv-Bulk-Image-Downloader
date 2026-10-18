@@ -57,6 +57,14 @@ class SearchSnapshotStreamTests(unittest.TestCase):
             start_date="2026-10-01", end_date="2026-10-07", **kwargs,
         )
 
+    def test_malformed_remote_rows_do_not_discard_valid_tag_results(self):
+        rows = [self.row(123, ["cat"]), {**self.row(124, ["cat"]), "pageCount": "invalid"},
+                {**self.row(125, ["cat"]), "xRestrict": None}, None]
+        payload = {"body": {"illustManga": {"total": len(rows), "lastPage": 1, "data": rows}}}
+        with patch.object(server, "search_pixiv_json", return_value=payload):
+            result = self.search("cat")
+        self.assertEqual([row["id"] for row in result["items"]], ["123"])
+
     def test_deep_and_pages_do_not_repeat_works_from_a_lagging_broader_tag(self):
         common = [self.row(10000 - i, ["cat", "night"]) for i in range(600)]
         unrelated = [self.row(20000 - i, ["cat"], "2026-10-06") for i in range(540)]

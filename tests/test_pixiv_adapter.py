@@ -12,6 +12,23 @@ from pixiv_adapter import (
 
 
 class PixivAdapterTests(unittest.TestCase):
+    def test_malformed_search_fields_raise_the_row_policy_error(self):
+        base = {"id": "123", "url": "https://i.pximg.net/a.jpg", "xRestrict": 0, "isUnlisted": False}
+        for field in ("xRestrict", "visibilityScope", "pageCount", "width", "height", "illustType", "aiType"):
+            for value in ("invalid", [], {}, 1.5, True):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(PixivPolicyError):
+                        normalize_search_item({**base, field: value}, allow_r18=True)
+        for raw in (None, [], "invalid", {**base, "xRestrict": None}):
+            with self.subTest(raw=raw):
+                with self.assertRaises(PixivPolicyError):
+                    normalize_search_item(raw, allow_r18=True)
+
+    def test_invalid_url_ports_are_rejected_without_raising(self):
+        for url in ("https://i.pximg.net:invalid/a.jpg", "https://i.pximg.net:99999/a.jpg", None, {}):
+            with self.subTest(url=url):
+                self.assertFalse(is_allowed_pixiv_url(url, image_only=True))
+
     def test_missing_bookmark_count_is_unknown_not_zero(self):
         raw = {"id": "123", "url": "https://i.pximg.net/a.jpg", "xRestrict": 0, "isUnlisted": False}
         self.assertIsNone(normalize_search_item(raw)["bookmarks"])

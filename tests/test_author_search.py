@@ -11,6 +11,14 @@ from search_service import SearchInputError, SearchQuery, parse_search_query
 
 
 class AuthorSearchRegressionTests(unittest.TestCase):
+    def test_malformed_remote_rows_do_not_discard_valid_author_results(self):
+        rows = [self.raw("123"), {**self.raw("124"), "xRestrict": None},
+                {**self.raw("125"), "pageCount": "invalid"}, None]
+        with patch.object(server, "load_user_profile_ids", return_value=["123", "124", "125", "126"]), \
+                patch.object(server, "load_user_profile_works", return_value=rows):
+            result = server.search_pixiv_results("uid:42", "safe", 1, "all", True, authorized=False)
+        self.assertEqual([row["id"] for row in result["items"]], ["123"])
+
     def setUp(self):
         server.reset_search_caches()
 

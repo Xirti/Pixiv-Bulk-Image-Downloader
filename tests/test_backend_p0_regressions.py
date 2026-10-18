@@ -395,20 +395,21 @@ class AuthorCursorCommitTests(unittest.TestCase):
         key = ("user", "uid", "42", "42", "safe", "all", True, False)
         self.assertEqual(server.SEARCH_SESSIONS[key]["profileOffset"], 0)
 
-    def test_malformed_profile_row_does_not_advance_cursor(self):
+    def test_malformed_profile_rows_are_skipped_without_stalling_the_cursor(self):
         ids = [str(5000 - index) for index in range(100)]
         with patch.object(server, "load_user_profile_ids", return_value=ids), patch.object(
             server, "load_user_profile_works", return_value=[{
                 "userId": "42", "xRestrict": "not-a-number",
             }]
         ):
-            with self.assertRaises(ValueError):
-                server.search_pixiv_results(
-                    "uid:42", "safe", 1, "all", True, authorized=False,
-                )
+            result = server.search_pixiv_results(
+                "uid:42", "safe", 1, "all", True, authorized=False,
+            )
 
         key = ("user", "uid", "42", "42", "safe", "all", True, False)
-        self.assertEqual(server.SEARCH_SESSIONS[key]["profileOffset"], 0)
+        self.assertEqual(server.SEARCH_SESSIONS[key]["profileOffset"], len(ids))
+        self.assertEqual(result["items"], [])
+        self.assertFalse(result["hasMore"])
 
     def test_author_resolution_is_reused_across_pages_and_cache_is_bounded(self):
         def response(user_id: str, name: str) -> dict:

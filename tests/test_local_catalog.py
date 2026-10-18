@@ -1,5 +1,7 @@
+import json
 import tempfile
 from collections import Counter
+from contextlib import closing
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -7,6 +9,75 @@ from pathlib import Path
 
 
 class LocalCatalogTests(unittest.TestCase):
+    def test_misdirected_catalog_row_does_not_skip_a_file_outside_the_target_directory(self):
+        from local_catalog import LocalCatalog
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            output.mkdir()
+            original, unrelated = output / "123.png", root / "456.png"
+            original.write_bytes(b"image")
+            unrelated.write_bytes(b"unrelated")
+            catalog = LocalCatalog(root / "catalog.db")
+            catalog.record("123", [0], "original", "source", output, [original])
+            catalog.record("456", [0], "original", "source", root, [unrelated])
+            with closing(sqlite3.connect(catalog.path)) as connection, connection:
+                connection.execute("UPDATE artifacts SET files=(SELECT files FROM artifacts WHERE artwork='456') WHERE artwork='123'")
+            self.assertEqual(catalog.existing_files("123", [0], "original", "source", output), {})
+
+    def test_malformed_index_rows_do_not_hide_valid_files_or_block_deduplication(self):
+        from local_catalog import LocalCatalog
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = [root / f"123_p{page}.png" for page in range(2)]
+            for file in files:
+                file.write_bytes(b"image")
+            catalog = LocalCatalog(root / "catalog.db")
+            catalog.record("123", [0, 1], "original", "source", root, files)
+            for encoded in ("{broken", "null", "{}", '[null]', '[{}]',
+                            json.dumps([{"path": str(files[1]), "size": "5", "mtime": 0}]),
+                            json.dumps([{"path": "bad\0path", "size": 5, "mtime": 0}])):
+                with self.subTest(encoded=encoded):
+                    with closing(sqlite3.connect(catalog.path)) as connection, connection:
+                        connection.execute("UPDATE artifacts SET files=? WHERE page=1", (encoded,))
+                    self.assertEqual(catalog.downloaded_pages("123"), {0})
+                    self.assertEqual(catalog.existing("123", [0, 1], "original", "source", root), {0})
+
+    def test_file_replaced_by_directory_is_stale_without_hiding_other_artifacts(self):
+        from local_catalog import LocalCatalog
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = [root / f"123_p{page}.png" for page in range(2)]
+            for file in files:
+                file.write_bytes(b"image")
+            catalog = LocalCatalog(root / "catalog.db")
+            catalog.record("123", [0, 1], "original", "source", root, files)
+            files[1].unlink()
+            files[1].mkdir()
+            self.assertEqual(catalog.downloaded_pages_many(["123", "456"]), {"123": {0}, "456": set()})
+            self.assertEqual(catalog.existing("123", [0, 1], "original", "source", root), {0})
+
+    def test_indicator_isolates_unreadable_file_but_download_checks_remain_strict(self):
+        from local_catalog import LocalCatalog
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = [root / f"123_p{page}.png" for page in range(2)]
+            for file in files:
+                file.write_bytes(b"image")
+            catalog = LocalCatalog(root / "catalog.db")
+            catalog.record("123", [0, 1], "original", "source", root, files)
+            original = Path.lstat
+
+            def unreadable(path, *args, **kwargs):
+                if path == files[1]:
+                    raise PermissionError("denied")
+                return original(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", unreadable):
+                self.assertEqual(catalog.downloaded_pages("123"), {0})
+                with self.assertRaises(PermissionError):
+                    catalog.existing("123", [0, 1], "original", "source", root)
+
     def test_indicators_check_shared_directories_once_but_files_on_every_read(self):
         from local_catalog import LocalCatalog
         with tempfile.TemporaryDirectory() as temporary:

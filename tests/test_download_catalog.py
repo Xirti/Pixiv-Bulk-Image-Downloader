@@ -6,6 +6,7 @@ import threading
 import unittest
 import uuid
 from pathlib import Path
+from contextlib import closing
 from unittest.mock import patch
 
 import server
@@ -97,6 +98,22 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
         self.assertEqual(len(third["saved"]), 1)
         self.assertEqual(third["skippedPages"], 1)
         self.assertEqual(self.network.call_count, 3)
+
+    def test_corrupt_catalog_row_can_be_downloaded_again(self):
+        self.post({"pages": [0]})
+        with closing(sqlite3.connect(self.catalog.path)) as connection, connection:
+            connection.execute("UPDATE artifacts SET files='broken' WHERE artwork='77'")
+        result = self.post({"pages": [0]})
+        self.assertEqual(result["skippedPages"], 0)
+        self.assertEqual(len(result["saved"]), 1)
+        self.assertEqual(self.network.call_count, 2)
+        self.assertEqual(self.catalog.existing("77", [0], "original", "source", self.output), {0})
+
+    def test_unreadable_catalog_file_has_a_specific_error_before_any_download(self):
+        with patch.object(self.catalog, "existing_files", side_effect=PermissionError("denied")):
+            result = self.post(expected=502)
+        self.assertIn("无法核验已下载文件", result["error"])
+        self.network.assert_not_called()
 
     def test_catalog_checks_a_full_result_page_with_one_database_read(self):
         ids = [str(100 + index) for index in range(36)]

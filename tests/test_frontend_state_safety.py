@@ -14,6 +14,27 @@ def block(start: str, end: str) -> str:
 
 
 class FrontendStateSafetyTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node required")
+    def test_single_download_summary_excludes_skipped_pages_from_saved_count(self):
+        self.run_js(r'''
+const messages = [];
+announceToast = message => messages.push(message);
+historyView.refresh = () => {};
+refreshDownloadedIndicators = async () => {};
+const item = {id:"123",source:"pixiv",pages:2,title:"test",artist:"Artist",tags:[],
+  qualities:[{id:"original"}],formats:[{id:"source",label:"源格式"}],
+  pageImages:[{regular:"/page-0"},{regular:"/page-1"}]};
+items = [item]; activeArtworkId = item.id;
+renderDetail(item,0);
+selection.choose([item],{context:activeSearchContext,resultPage:1});
+for(const skipped of [1,2]) {
+  fetchJson = async () => ({pages:2,skippedPages:skipped,saved:skipped===2?[]:["123_p0.png"]});
+  await $("#download").onclick();
+  assert.match(messages.at(-1),new RegExp(`已保存 ${2-skipped} 页，${2-skipped} 个文件`));
+  assert.match(messages.at(-1),new RegExp(`另有 ${skipped} 页已存在，已跳过`));
+}
+''')
+
     def run_js(self, assertions):
         harness = (ROOT / "tests/frontend_harness.js").read_text(encoding="utf-8")
         script = harness + "\n" + APP + "\nconst assert = require('node:assert/strict');\n"

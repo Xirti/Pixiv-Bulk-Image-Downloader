@@ -49,6 +49,18 @@ class HistoryAndR18Tests(unittest.TestCase):
             with self.assertRaises(PixivPolicyError):
                 server.extend_history("猫", "r18", 1, allow_r18=True)
 
+    def test_r18_history_isolates_malformed_rows_before_policy_and_frontier_checks(self):
+        import server
+        rows = [None, {**self._item(1), "id": "124", "xRestrict": None}, self._item(1), None]
+        payload = {"body": {"illustManga": {"total": len(rows), "lastPage": 1, "data": rows}}}
+        server.reset_search_caches()
+        try:
+            with patch.object(server, "search_pixiv_json", return_value=payload):
+                state = server.extend_history("猫", "r18", 1, allow_r18=True)
+            self.assertEqual([row["id"] for row in state["items"]], ["123"])
+        finally:
+            server.reset_search_caches()
+
     def test_empty_history_respects_shared_request_budget(self):
         import server
 

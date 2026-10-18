@@ -13,6 +13,20 @@ class PixivPolicyError(ValueError):
     pass
 
 
+def _integer_field(raw: dict[str, Any], field: str, default: int = 0, *, nullable: bool = False) -> int:
+    value = raw.get(field, default)
+    if nullable and (value is None or value == ""):
+        value = default
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]+", value):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    raise PixivPolicyError(f"invalid {field}")
+
+
 def publication_date(value: Any) -> str:
     """Normalize publication timestamps to the calendar used by Pixiv filters."""
     text = str(value or "")
@@ -61,32 +75,38 @@ def resolve_web_path(root: Path, request_path: str) -> Path:
 
 
 def validate_public_policy(raw: dict[str, Any], detail: bool = False) -> None:
+    if not isinstance(raw, dict):
+        raise PixivPolicyError("invalid artwork data")
     required = ["xRestrict", "isUnlisted"] + (["isLoginOnly"] if detail else [])
     if any(field not in raw for field in required):
         raise PixivPolicyError("missing public policy field")
-    if int(raw["xRestrict"]) != 0 or bool(raw["isUnlisted"]):
+    if _integer_field(raw, "xRestrict", -1) != 0 or bool(raw["isUnlisted"]):
         raise PixivPolicyError("restricted artwork")
-    if detail and (bool(raw.get("isMasked", False)) or int(raw.get("visibilityScope", 0)) != 0 or bool(raw["isLoginOnly"])):
+    if detail and (bool(raw.get("isMasked", False)) or _integer_field(raw, "visibilityScope") != 0 or bool(raw["isLoginOnly"])):
         raise PixivPolicyError("non-public artwork")
 
 
 def validate_detail_policy(raw: dict[str, Any], allow_r18: bool = False) -> str:
+    if not isinstance(raw, dict):
+        raise PixivPolicyError("invalid artwork data")
     required = ["xRestrict", "isUnlisted", "isLoginOnly"]
     if any(field not in raw for field in required): raise PixivPolicyError("missing public policy field")
-    restriction = int(raw["xRestrict"])
+    restriction = _integer_field(raw, "xRestrict", -1)
     if restriction not in ({0, 1} if allow_r18 else {0}) or bool(raw["isUnlisted"]): raise PixivPolicyError("restricted artwork")
-    if bool(raw.get("isMasked", False)) or int(raw.get("visibilityScope", 0)) != 0 or bool(raw["isLoginOnly"]): raise PixivPolicyError("non-public artwork")
+    if bool(raw.get("isMasked", False)) or _integer_field(raw, "visibilityScope") != 0 or bool(raw["isLoginOnly"]): raise PixivPolicyError("non-public artwork")
     return "r18" if restriction == 1 else "safe"
 
 
 def is_allowed_pixiv_url(url: str, image_only: bool = False) -> bool:
+    if not isinstance(url, str):
+        return False
     try:
         parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443):
+            return False
+        host = (parsed.hostname or "").lower()
     except ValueError:
         return False
-    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443):
-        return False
-    host = (parsed.hostname or "").lower()
     if host == "i.pximg.net":
         return bool(image_only)
     return host == "www.pixiv.net"
@@ -109,7 +129,9 @@ def bookmark_count(raw: dict[str, Any]) -> int | None:
 
 
 def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[str, Any]:
-    restriction = int(raw.get("xRestrict", -1))
+    if not isinstance(raw, dict):
+        raise PixivPolicyError("invalid artwork data")
+    restriction = _integer_field(raw, "xRestrict", -1)
     if restriction == 0:
         validate_public_policy(raw, detail=False)
     elif restriction == 1 and allow_r18:
@@ -124,7 +146,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
         raise PixivPolicyError("restricted artwork")
     if raw.get("isMasked"):
         raise PixivPolicyError("masked artwork is not available")
-    if "visibilityScope" in raw and int(raw["visibilityScope"]) != 0:
+    if _integer_field(raw, "visibilityScope") != 0:
         raise PixivPolicyError("non-public artwork is not available")
     artwork_id = str(raw.get("id") or "")
     if not artwork_id.isdigit():
@@ -144,6 +166,8 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
         clean_tag = str(tag).strip()
         if clean_tag:
             normalized_tags.append(clean_tag)
+    width = max(0, _integer_field(raw, "width", nullable=True))
+    height = max(0, _integer_field(raw, "height", nullable=True))
     return {
         "id": artwork_id,
         "restriction": "r18" if restriction == 1 else "safe",
@@ -152,18 +176,18 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
         "artist": str(raw.get("userName") or "未知画师"),
         "userId": str(raw.get("userId") or ""),
         "tags": normalized_tags,
-        "pages": max(1, int(raw.get("pageCount") or 1)),
-        "width": max(0, int(raw.get("width") or 0)),
-        "height": max(0, int(raw.get("height") or 0)),
+        "pages": max(1, _integer_field(raw, "pageCount", 1, nullable=True)),
+        "width": width,
+        "height": height,
         "bookmarks": bookmark_count(raw),
         "date": publication_date(raw.get("createDate")),
         "sortDate": publication_timestamp(raw.get("createDate")),
         "description": _plain_text(raw.get("description")),
-        "workType": {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType", 0)), "illustration"),
-        "aiGenerated": int(raw.get("aiType") or 1) == 2,
+        "workType": {0: "illustration", 1: "manga", 2: "ugoira"}.get(_integer_field(raw, "illustType", nullable=True), "illustration"),
+        "aiGenerated": _integer_field(raw, "aiType", 1, nullable=True) == 2,
         "thumb": proxy,
         "qualities": [
-            {"id": "original", "label": "Pixiv 原图", "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0)},
+            {"id": "original", "label": "Pixiv 原图", "width": width, "height": height},
             {"id": "regular", "label": "Pixiv 常规预览", "width": 0, "height": 0},
         ],
         "formats": [{"id": "source", "label": "保留源格式（推荐）"}],

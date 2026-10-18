@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import stat
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+
+
+LOG = logging.getLogger(__name__)
+
+
+class _StaleArtifactError(OSError):
+    """The indexed regular file has been replaced by another object."""
 
 
 class LocalCatalog:
@@ -54,14 +62,30 @@ class LocalCatalog:
             if current != path and checked_directories is not None and stat.S_ISDIR(info.st_mode):
                 checked_directories.add(current)
         if not stat.S_ISREG(info.st_mode):
-            raise OSError("下载文件已变为非普通文件")
+            raise _StaleArtifactError("下载文件已变为非普通文件")
         return {"path": str(path), "size": info.st_size, "mtime": info.st_mtime_ns}
 
-    def _present(self, encoded: str, checked_directories: set[Path] | None = None) -> bool:
-        files = json.loads(encoded)
+    @staticmethod
+    def _decode_files(encoded: str) -> list[dict]:
+        try:
+            files = json.loads(encoded)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(files, list) or not files:
+            return []
+        for file in files:
+            if (not isinstance(file, dict) or set(file) != {"path", "size", "mtime"}
+                    or not isinstance(file["path"], str) or "\0" in file["path"]
+                    or not Path(file["path"]).is_absolute()
+                    or type(file["size"]) is not int or file["size"] < 0
+                    or type(file["mtime"]) is not int):
+                return []
+        return files
+
+    def _present(self, files: list[dict], checked_directories: set[Path] | None = None) -> bool:
         try:
             return bool(files) and all(self._file_state(Path(file["path"]), checked_directories) == file for file in files)
-        except (FileNotFoundError, NotADirectoryError):
+        except (FileNotFoundError, NotADirectoryError, _StaleArtifactError):
             return False
 
     def record(self, artwork: str, pages: list[int], quality: str, format: str,
@@ -89,15 +113,18 @@ class LocalCatalog:
                        directory: Path) -> dict[int, list[Path]]:
         if not self.path.exists():
             return {}
+        directory_key = self._directory(directory)
         with self._lock, self._connection() as connection:
             rows = connection.execute("SELECT page,files FROM artifacts WHERE artwork=? AND quality=? AND format=? AND directory=?",
-                                      (str(artwork), quality, format, self._directory(directory))).fetchall()
+                                      (str(artwork), quality, format, directory_key)).fetchall()
         wanted, present = set(pages), {}
         for page, encoded in rows:
             if page not in wanted:
                 continue
-            if self._present(encoded):
-                present[page] = [Path(file["path"]) for file in json.loads(encoded)]
+            files = self._decode_files(encoded)
+            if (all(Path(self._directory(Path(file["path"]))).is_relative_to(directory_key) for file in files)
+                    and self._present(files)):
+                present[page] = [Path(file["path"]) for file in files]
         return present
 
     def downloaded_pages(self, artwork: str) -> set[int]:
@@ -116,6 +143,13 @@ class LocalCatalog:
         # always read again; download deduplication uses the strict uncached path.
         checked_directories: set[Path] = set()
         for artwork, page, encoded in rows:
-            if page not in present[artwork] and self._present(encoded, checked_directories):
-                present[artwork].add(page)
+            if page in present[artwork]:
+                continue
+            try:
+                if self._present(self._decode_files(encoded), checked_directories):
+                    present[artwork].add(page)
+            except OSError:
+                # Badges are optional. Actual download deduplication still
+                # propagates permission and reparse-point errors.
+                LOG.warning("无法核验下载目录记录：作品 %s，第 %s 页", artwork, page + 1)
         return present

@@ -300,7 +300,7 @@ async function resumeSavedTask(task) {
     await executeDownloadTask(task, chunk => savedTaskRequest(task, chunk), () => {
       showTaskDock("继续下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已处理 ${task.savedCount} 张`, 0);
     });
-    const summary = `任务完成，共处理 ${task.savedCount} 张${downloadCompletionWarnings(task)}`;
+    const summary = `任务完成，已保存 ${savedDownloadPages(task)} 页${downloadCompletionWarnings(task)}`;
     announceToast(summary);
     showTaskDock("下载完成", summary);
   } catch (error) {
@@ -1952,7 +1952,12 @@ async function executeDownloadTask(task, requestForChunk, reportProgress) {
 }
 
 function downloadCompletionWarnings(task) {
-  return `${task.skippedCount ? `；其中 ${task.skippedCount} 张已存在，已跳过` : ""}${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}${task.historyWarning ? "；下载历史记录失败，文件已保存" : ""}${task.catalogWarning ? "；目录记录失败，下次可能无法跳过这些图片" : ""}${task.stateWarning ? "；任务记录未更新，文件已保存" : ""}`;
+  return `${task.skippedCount ? `；另有 ${task.skippedCount} 页已存在，已跳过` : ""}${task.cleanupPending ? "；临时文件清理未完成，请检查日志" : ""}${task.historyWarning ? "；下载历史记录失败，文件已保存" : ""}${task.catalogWarning ? "；目录记录失败，下次可能无法跳过这些图片" : ""}${task.stateWarning ? "；任务记录未更新，文件已保存" : ""}`;
+}
+
+function savedDownloadPages(task) {
+  // savedCount is the persisted processed-page cursor, including skipped pages.
+  return Math.max(0, task.savedCount - task.skippedCount);
 }
 
 function setDownloadButtonState(button, text, disabled) {
@@ -2212,15 +2217,15 @@ $("#batchDownload").onclick = async () => {
       timeout: 300000,
     }), () => {
       setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
-      showTaskDock("批量下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${task.savedCount} 张`, 0);
+      showTaskDock("批量下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已处理 ${task.savedCount} 张`, 0);
     });
     resumableBatchTask = null;
-    const summary = `已保存 ${task.savedCount} 张图片，共 ${task.totalBatches} 批${downloadCompletionWarnings(task)}`;
+    const summary = `已保存 ${savedDownloadPages(task)} 张图片，共 ${task.totalBatches} 批${downloadCompletionWarnings(task)}`;
     announceToast(summary);
     showTaskDock("批量下载完成", summary, task.historyWarning ? 8000 : 3200);
   } catch (error) {
     resumableBatchTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
-    const prefix = task.savedCount ? `已保存 ${task.savedCount} 张；后续` : "批量下载";
+    const prefix = task.savedCount ? `已处理 ${task.savedCount} 张；后续` : "批量下载";
     const retryHint = resumableBatchTask
       ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
       : "账户状态已变更，请重新确认后发起下载。";
@@ -2338,18 +2343,18 @@ $("#download").onclick = async () => {
       body: item.source === "pixiv" ? { ...request.body, pages: chunk.groups[0].pages } : request.body,
     }), () => {
       setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
-      showTaskDock("正在保存", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${task.savedCount} 页`, 0);
+      showTaskDock("正在保存", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已处理 ${task.savedCount} 页`, 0);
     });
     resumableSingleTask = null;
-    const summary = `已保存 ${task.savedCount} 页，${task.fileCount} 个文件`;
-    announceToast(`${summary}：${task.firstSaved}${downloadCompletionWarnings(task)}`);
+    const summary = `已保存 ${savedDownloadPages(task)} 页，${task.fileCount} 个文件`;
+    announceToast(`${summary}${task.firstSaved ? `：${task.firstSaved}` : ""}${downloadCompletionWarnings(task)}`);
     showTaskDock("保存完成", `${summary}${downloadCompletionWarnings(task)}`, task.historyWarning ? 8000 : 3200);
   } catch (error) {
     resumableSingleTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
     const retryHint = resumableSingleTask
       ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
       : "账户状态已变更，请重新确认后发起下载。";
-    announceToast(`已保存 ${task.savedCount} 页；保存失败：${error.message || "未知错误"}。${retryHint}`);
+    announceToast(`已处理 ${task.savedCount} 页；保存失败：${error.message || "未知错误"}。${retryHint}`);
     showTaskDock("保存失败", error.message || "未知错误", 8000);
   } finally {
     singleDownloadPending = false;
