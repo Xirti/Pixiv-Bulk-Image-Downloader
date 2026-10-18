@@ -11,6 +11,22 @@ from search_service import SearchInputError, SearchQuery, parse_search_query
 
 
 class AuthorSearchRegressionTests(unittest.TestCase):
+    def test_raw_author_response_isolates_bad_rows_without_losing_valid_works(self):
+        rows = [self.raw("123"), None, "bad row", {**self.raw("124"), "pageCount": "bad"}]
+        for works in (rows, {str(index): row for index, row in enumerate(rows)}):
+            with self.subTest(shape=type(works).__name__):
+                server.reset_search_caches()
+                with patch.object(server, "load_user_profile_ids", return_value=["123", "124"]), \
+                        patch.object(server, "search_pixiv_json", return_value={"body": {"works": works}}):
+                    result = server.search_pixiv_results("uid:42", "safe", 1, "all", True, authorized=False)
+                self.assertEqual([row["id"] for row in result["items"]], ["123"])
+                self.assertFalse(result["hasMore"])
+
+    def test_invalid_author_response_container_still_fails(self):
+        with patch.object(server, "search_pixiv_json", return_value={"body": {"works": "bad container"}}):
+            with self.assertRaises(server.PixivPolicyError):
+                server.load_user_profile_works("42", ["123"])
+
     def test_malformed_remote_rows_do_not_discard_valid_author_results(self):
         rows = [self.raw("123"), {**self.raw("124"), "xRestrict": None},
                 {**self.raw("125"), "pageCount": "invalid"}, None]

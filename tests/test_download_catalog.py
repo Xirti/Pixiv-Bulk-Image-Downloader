@@ -290,6 +290,30 @@ class DownloadCatalogHTTPTests(unittest.TestCase):
         self.assertEqual(len(resumed["saved"]), 1)
         self.assertEqual(resumed["skippedPages"], 1)
 
+    def test_corrupt_receipt_recovers_over_http_without_redownloading_existing_files(self):
+        for endpoint in ("/api/pixiv/download", "/api/pixiv/batch-download"):
+            for column in ("result", "files"):
+                with self.subTest(endpoint=endpoint, column=column):
+                    directory = self.root / uuid.uuid4().hex
+                    directory.mkdir()
+                    journal = directory / "requests.db"
+                    request = {"saveRoot": str(directory), "requestId": uuid.uuid4().hex,
+                               "groups": [{"id": "77", "pages": [0, 2]}]}
+                    with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)):
+                        first = self.post(request, endpoint)
+                    file_states = [(directory / file).stat().st_mtime_ns for file in first["saved"]]
+                    network_calls = self.network.call_count
+                    with closing(sqlite3.connect(journal)) as connection, connection:
+                        connection.execute(f"UPDATE completed SET {column}=? WHERE id=?", ("{broken", request["requestId"]))
+                    with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)):
+                        repaired = self.post(request, endpoint)
+                    self.assertEqual(repaired["saved"], [])
+                    self.assertEqual(repaired["skippedPages"], 2)
+                    with patch.object(server, "DOWNLOAD_REQUESTS", DownloadRequests(path=journal)):
+                        self.assertEqual(self.post(request, endpoint), repaired)
+                    self.assertEqual(self.network.call_count, network_calls)
+                    self.assertEqual([(directory / file).stat().st_mtime_ns for file in first["saved"]], file_states)
+
     def test_queue_restart_replays_lost_response_without_repeating_download(self):
         request_id = uuid.uuid4().hex
         changes = self.queued_request(request_id, "/api/pixiv/batch-download")

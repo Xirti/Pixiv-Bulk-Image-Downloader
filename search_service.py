@@ -220,14 +220,16 @@ def parse_search_tags(value: str, *, max_tags: int = 6, max_length: int = 60) ->
     result: list[str] = []
     seen: set[str] = set()
     for raw in re.split(r"[;；]", str(value or "")):
-        tag = unicodedata.normalize("NFKC", raw).strip()[:max_length]
+        tag = unicodedata.normalize("NFKC", raw).strip()
+        if len(tag) > max_length:
+            raise SearchInputError(f"每个标签最多 {max_length} 个字符")
         folded = normalize_alias_key(tag)
         if not tag or folded in seen:
             continue
+        if len(result) >= max_tags:
+            raise SearchInputError(f"一次搜索最多 {max_tags} 个不同标签")
         seen.add(folded)
         result.append(tag)
-        if len(result) >= max_tags:
-            break
     return tuple(result or ["原创"])
 
 

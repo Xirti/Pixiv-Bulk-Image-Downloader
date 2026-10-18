@@ -13,7 +13,7 @@
   <div class="search-panel liquid reveal delay"><form id="searchForm">
     <label for="tag" class="search-label">输入标签、作品 ID 或画师</label>
     <div class="search-row"><input id="tag" value="猫耳" placeholder="标签；pid:作品ID；uid:画师ID；author:画师名"><button id="searchSubmit" type="submit">开始寻找 <span>↗</span></button><button id="cancelSearch" class="icon" type="button" aria-label="停止搜索" title="停止搜索" hidden>×</button></div>
-    <p class="search-help">多个标签用 ; 或 ； 分开，结果必须同时包含全部标签；标签内部可保留空格。</p>
+    <p class="search-help">多个标签用 ; 或 ； 分开，结果必须同时包含全部标签；最多 6 个标签，每个最多 60 个字符，标签内部可保留空格。</p>
     <div class="filters"><label>作品类型<select id="workType"><option value="all">所有作品类型</option><option value="illustration">插画</option><option value="manga">漫画</option><option value="ugoira">动图</option></select></label><label class="ai-choice"><input id="includeAi" type="checkbox"><span>包含 AI 生成作品</span></label><label class="fuzzy-choice"><input id="fuzzySearch" type="checkbox"><span>模糊 / 二次元别名搜索</span></label><label>安全范围<select id="safety"><option value="safe">公开全年龄</option><option value="r18" disabled>R-18（需账户授权）</option><option value="all" disabled>全部类型（全年龄 + R-18，需授权）</option></select></label></div>
     <div class="date-filter"><label>发布时间<select id="datePreset"><option value="all">不限时间</option><option value="1">今天</option><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="custom">自定义日期</option></select></label>
       <div id="customDates" class="custom-dates" hidden><label>开始日期<input id="startDate" type="date" min="2007-09-10" disabled></label><span aria-hidden="true">—</span><label>结束日期<input id="endDate" type="date" min="2007-09-10" disabled></label></div>

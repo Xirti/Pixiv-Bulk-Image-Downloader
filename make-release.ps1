@@ -60,7 +60,7 @@ if ($LASTEXITCODE -ne 0 -or $SourceInitial -notmatch '^source-sha256:[0-9a-f]{64
 }
 
 $VersionText = [IO.File]::ReadAllText((Join-Path $Root 'version.py'), [Text.Encoding]::UTF8)
-if ($VersionText -notmatch '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+if ($VersionText -notmatch '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+(?:-r[1-9][0-9]*)?)"') {
   throw 'Invalid version.py'
 }
 $Version = $Matches[1]

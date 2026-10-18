@@ -1594,9 +1594,9 @@ def load_user_profile_works(
         rows = works
     else:
         raise PixivPolicyError("Pixiv 画师作品结果格式异常")
-    if any(not isinstance(row, dict) for row in rows):
-        raise PixivPolicyError("Pixiv 画师作品结果格式异常")
-    return list(rows)
+    # Keep response-container validation above, but isolate individual bad rows
+    # before the normal per-artwork policy and field checks.
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def search_user_results(

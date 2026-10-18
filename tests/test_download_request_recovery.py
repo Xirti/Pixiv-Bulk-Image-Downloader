@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -123,6 +124,56 @@ class DownloadRequestRecoveryTests(unittest.TestCase):
 
 
 class DownloadRegistryTests(unittest.TestCase):
+    def test_corrupt_durable_receipts_recheck_and_repair_only_the_matching_request(self):
+        from pathlib import Path
+        from download_requests import DownloadRequestError, DownloadRequests
+
+        corruptions = [
+            ("result", "{bad json"), ("result", "[]"),
+            ("result", json.dumps({"saved": "saved.png", "pages": 1})),
+            ("result", json.dumps({"saved": ["saved.png"], "pages": "bad"})),
+            ("files", "{bad json"), ("files", "null"),
+            ("files", "[]"), ("files", '[["bad path"]]'),
+            ("files", '[["bad path", "bad size", 0]]'),
+        ]
+        for column, encoded in corruptions:
+            for restart in (False, True):
+                with self.subTest(column=column, encoded=encoded, restart=restart), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    file = root / "saved.png"
+                    file.write_bytes(b"saved")
+                    journal = root / "requests.db"
+                    body = {"saveRoot": str(root), "requestId": "corrupt-request-000001"}
+                    calls = []
+                    def operation():
+                        # Model normal download deduplication: the file exists,
+                        # so recovering the request reports a skip, not a rewrite.
+                        calls.append(1)
+                        return {"saved": [], "skippedFiles": ["saved.png"], "skippedPages": 1, "pages": 1}, 200
+                    registry = DownloadRequests(path=journal)
+                    registry.run(body["requestId"], "/single", body, operation, scope="account-a")
+                    initial_state = file.stat()
+                    connection = sqlite3.connect(journal)
+                    try:
+                        with connection:
+                            connection.execute(f"UPDATE completed SET {column}=? WHERE id=?", (encoded, body["requestId"]))
+                    finally:
+                        connection.close()
+                    with self.assertRaises(DownloadRequestError) as conflict:
+                        DownloadRequests(path=journal).run(body["requestId"], "/single", body, operation, scope="account-b")
+                    self.assertEqual(conflict.exception.status, 409)
+                    self.assertEqual(calls, [1])
+                    if restart:
+                        registry = DownloadRequests(path=journal)
+                    result = registry.run(body["requestId"], "/single", body, operation, scope="account-a")
+                    self.assertEqual(result[1], 200)
+                    self.assertEqual(calls, [1, 1])
+                    self.assertEqual(file.read_bytes(), b"saved")
+                    self.assertEqual(file.stat().st_mtime_ns, initial_state.st_mtime_ns)
+                    replay = DownloadRequests(path=journal).run(body["requestId"], "/single", body, operation, scope="account-a")
+                    self.assertEqual(replay, result)
+                    self.assertEqual(calls, [1, 1])
+
     def test_durable_success_survives_registry_restart_and_checks_files(self):
         from pathlib import Path
         from download_requests import DownloadRequests

@@ -65,7 +65,7 @@ $Dist = Join-Path $Root 'dist\MOKU'
 $Exe = Join-Path $Dist 'MOKU.exe'
 if (-not (Test-Path -LiteralPath $Exe)) { throw "Built executable not found: $Exe" }
 $VersionSource = [IO.File]::ReadAllText((Join-Path $Root 'version.py'), [Text.Encoding]::UTF8)
-if ($VersionSource -notmatch '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') { throw 'Invalid version.py' }
+if ($VersionSource -notmatch '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+(?:-r[1-9][0-9]*)?)"') { throw 'Invalid version.py' }
 $Version = $Matches[1]
 
 $Readme = @'
@@ -78,7 +78,7 @@ MOKU Lite __MOKU_VERSION__
 网络需要能访问 www.pixiv.net 和 i.pximg.net；可使用 Windows 已开启的本地 HTTP 代理或 TUN。
 
 搜图小提示
-- 多标签用 ; 或 ； 分隔，结果同时包含全部标签。
+- 多标签用 ; 或 ； 分隔，结果同时包含全部标签；最多 6 个标签，每个最多 60 个字符。
 - pid:作品ID 查作品，uid:画师ID 查画师，author:画师名 按名字查找。
 - 自定义日期的开始和结束设成同一天，就能查询当天发布的作品。
 - 采集篮支持任意数量的作品，最多选择 1,000 张图片。

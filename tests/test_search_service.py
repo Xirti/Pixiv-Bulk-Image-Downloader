@@ -23,10 +23,22 @@ class SearchServiceTests(unittest.TestCase):
         self.assertEqual(build_search_tag_groups("猫 夜景"), (("猫 夜景",),))
 
     def test_tag_parser_bounds_target_count_and_length(self):
-        tags = parse_search_tags("；".join(["a" * 80, "b", "c", "d", "e", "f", "g"]))
-        self.assertEqual(len(tags), 6)
-        self.assertEqual(tags[0], "a" * 60)
+        tags = parse_search_tags("；".join(["a" * 60, "b", "c", "d", "e", "f"]))
+        self.assertEqual(tags, ("a" * 60, "b", "c", "d", "e", "f"))
         self.assertEqual(parse_search_tags("   "), ("原创",))
+
+    def test_extra_distinct_tags_are_rejected_instead_of_ignored(self):
+        with self.assertRaisesRegex(SearchInputError, "最多.*6"):
+            parse_search_tags("a;b;c;d;e;f;g")
+        with self.assertRaises(SearchInputError):
+            build_search_tag_groups("a;b;c;d;e;f;g", fuzzy=True)
+        self.assertEqual(parse_search_tags("a;b;c;d;e;f;Ａ;;"), ("a", "b", "c", "d", "e", "f"))
+
+    def test_long_tags_are_rejected_after_normalization_instead_of_truncated(self):
+        for value in ("a" * 61, "Ａ" * 61, "a;b;c;d;e;f;" + "g" * 61):
+            with self.subTest(value=value), self.assertRaisesRegex(SearchInputError, "最多.*60"):
+                parse_search_tags(value)
+        self.assertEqual(parse_search_tags("  " + "Ａ" * 60 + "  "), ("A" * 60,))
 
     def test_all_scope_expands_to_safe_and_r18_only_when_authorized(self):
         self.assertEqual(resolve_source_modes("safe", authorized=False), ("safe",))
@@ -36,6 +48,20 @@ class SearchServiceTests(unittest.TestCase):
             resolve_source_modes("all", authorized=False)
         with self.assertRaises(SearchInputError):
             resolve_source_modes("r18", authorized=False)
+
+    def test_over_limit_search_returns_input_error_before_remote_search(self):
+        import server
+        from types import SimpleNamespace
+        from urllib.parse import urlencode, urlsplit
+
+        handler = SimpleNamespace(send_json=lambda data, code=200: (data, code))
+        for value in ("a;b;c;d;e;f;g", "a" * 61):
+            with self.subTest(value=value), patch.object(server, "validated_authorization", return_value=(False, None)), \
+                    patch.object(server, "load_search_source") as remote:
+                data, status = server.Handler._get_pixiv_search(handler, urlsplit("/api/pixiv/search?" + urlencode({"tag": value})))
+                self.assertEqual(status, 400)
+                self.assertIn("最多", data["error"])
+                remote.assert_not_called()
 
     def test_prefetch_count_includes_three_pages_ahead(self):
         self.assertEqual(prefetch_item_count(1, per_page=36, ahead=3), 144)

@@ -285,7 +285,7 @@ class BuildManifestTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         portable = (ROOT / "build-portable.ps1").read_text(encoding="utf-8-sig")
 
-        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+(?:-r[1-9]\d*)?$")
         self.assertIn(f'__version__ = "{__version__}"', version)
         self.assertIn(f"当前源码版本：**{__version__}**", readme)
         self.assertIn(f"当前源码版本是 `{__version__} Lite`", readme)
