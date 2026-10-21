@@ -62,6 +62,8 @@ uniform vec2 uPointer;
 uniform float uRadius;
 uniform float uScale;
 uniform float uRefraction;
+uniform float uBevelWidth;
+uniform float uBevelPower;
 uniform float uBlur;
 uniform float uDispersion;
 uniform float uTint;
@@ -137,9 +139,9 @@ void main(){
     surfaceDistance(p+vec2(e,0.))-surfaceDistance(p-vec2(e,0.)),
     surfaceDistance(p+vec2(0.,e))-surfaceDistance(p-vec2(0.,e))
   )+vec2(.00001));
-  float bevel = min(min(b.x,b.y)*.48,19.*uScale);
+  float bevel = min(min(b.x,b.y)*.48,uBevelWidth*uScale);
   float edge = clamp(1.+d/bevel,0.,1.);
-  float slope = pow(edge,1.65)*.94;
+  float slope = pow(edge,uBevelPower)*.94;
   vec2 faceNormal=clamp(p/max(b,vec2(1.)),vec2(-1.),vec2(1.))*.045*(1.-edge);
   vec2 normalXY=n2*slope+faceNormal;
   if(wellGlass) normalXY *= mix(-1.,1.,uOptic.z);
@@ -251,7 +253,7 @@ export class GlassRenderer {
   constructor(canvas, stage, options={}) {
     this.canvas=canvas; this.stage=stage;
     this.artwork=typeof options.artwork==='function'?options.artwork:null;
-    this.settings={...tokens.materials.thick,brightness:.95,tintScale:1,artworkAligned:false,motion:true,opaque:false,compare:false,scene:'aurora',...options};
+    this.settings={...tokens.materials.thick,brightness:.95,tintScale:1,bevelWidth:19,bevelPower:1.65,artworkAligned:false,motion:true,opaque:false,compare:false,scene:'aurora',...options};
     this.pointer={x:0,y:0}; this.smoothPointer={x:0,y:0};
     this.time=0; this.lastTime=0; this.frame=0; this.dirty=true; this.rectDirty=true;
     this.geometry=[]; this.visible=true; this.destroyed=false; this.animatingUntil=0;
@@ -519,6 +521,7 @@ export class GlassRenderer {
         gl.uniform1f(u.uPressure,optical.pressure);gl.uniform1f(u.uEnergy,optical.energy);
         gl.uniform2f(u.uPointer,this.smoothPointer.x,this.smoothPointer.y);
         const rail=g.kind==='switch-track',thumb=g.kind==='thumb';
+        gl.uniform1f(u.uBevelWidth,this.settings.bevelWidth);gl.uniform1f(u.uBevelPower,this.settings.bevelPower);
         gl.uniform1f(u.uRefraction,this.settings.refraction*(rail?.12:thumb?.45:1));gl.uniform1f(u.uBlur,this.settings.blur);gl.uniform1f(u.uDispersion,this.settings.dispersion*((rail||thumb)?.2:1));
         const tint={panel:.14,dock:.095,small:.12,thumb:.83,'switch-track':.06,'slider-thumb':.18,selected:.19,tab:.18,note:.09,free:.012,menu:.60,'optical-lens':.012,'optical-well':.055}[g.kind]??.13;
         gl.uniform1f(u.uTint,tint);gl.uniform1f(u.uTintScale,this.settings.tintScale);gl.uniform1f(u.uDark,this.settings.scene==='ocean'&&!thumb?1:0);

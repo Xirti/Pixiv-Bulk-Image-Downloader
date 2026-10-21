@@ -19,7 +19,7 @@ const backdrop = mountLatticeBackdrop(document.getElementById('home'), {onFrame(
 }});
 components.push(backdrop);
 const feedback = new Map();
-const materials = {clear:{refraction:.72,blur:.025,dispersion:.30},thick:{refraction:.9,blur:.08,dispersion:.55},soft:{refraction:.48,blur:.32,dispersion:.16}};
+const materials = {clear:{refraction:.98,blur:.025,dispersion:.8},thick:{refraction:1,blur:.10,dispersion:1},soft:{refraction:.85,blur:.32,dispersion:.35}};
 let material = 'clear';
 root.dataset.material = material;
 let enabled = true;
@@ -103,7 +103,7 @@ function syncSystems() {
       unmount(stage);
     } else if (active && !systems.has(stage)) {
       const system = createGlassSystem(stage, {
-        material: materials[material], artworkAligned: true, tintScale: .12, brightness: 1, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
+        material: materials[material], artworkAligned: true, tintScale: .12, brightness: 1, bevelWidth: 64, bevelPower: 1.05, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
         artwork: (ctx, size) => drawArtwork(ctx, size, stage), motion: false, elasticity: reduced.matches ? 0 : .42,
         audio: {enabled: false},
       });

@@ -78,6 +78,9 @@ assert.equal(searchButton.dataset.glass,undefined,'inner controls stay ceramic')
 assert.equal(tagInput.parentElement,form,'business input identity and parent stay intact');
 assert.equal(form.parentElement.parentElement,search);
 assert.equal(constructed[0].options.material.blur,.025);
+assert.equal(constructed[0].options.bevelWidth,64);
+assert.equal(constructed[0].options.bevelPower,1.05);
+assert.equal(constructed[0].options.material.refraction,.98);
 for(const item of rail.childNodes.filter(c=>c.tag==='a'||c.tag==='button'))assert.equal(item.dataset.glass,undefined);
 const originalTag=new Element();originalTag.tag='span';dTags.append(originalTag);
 observerLists.mutation.find(o=>o.nodes.includes(dTags)).fire();

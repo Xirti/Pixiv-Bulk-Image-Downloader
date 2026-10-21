@@ -1,4 +1,4 @@
-/* MOKU Glass Lab 01 / R8 — live clear glass, quiet rail and interactive point lettering. */
+/* MOKU Glass Lab 01 / R9 — live clear glass, quiet rail and interactive point lettering. */
 :root {
   --bg:#0b111b;--ink:#e9f2fc;--muted:#a1b3c8;--line:#8ab4d52e;
   --surface:#152131;--surface-2:#1b2b3d;--accent:#8acbff;--on-accent:#0a2037;
@@ -16,6 +16,7 @@
   --primary:linear-gradient(150deg,#365b79,#244661 60%,#203a55);--primary-hover:linear-gradient(150deg,#426f90,#305976 60%,#294b6b);
   --rail-glass:linear-gradient(145deg,#d4efff24,#a5d5ff08 55%,#72afff12);--glass-edge:#ceebff54;
   --glass-control:linear-gradient(145deg,#d4efff2e,#83c5f910 55%,#90c6f324);
+  --tag-bg:#1b2d40d9;--tag-ink:#dceaf7;--tag-border:#9cbbd22b;--tag-hover:#293f55;--tag-hover-ink:#f2f7fd;--tag-hover-border:#bed6e04a;
   --menu-bg:#19293b;--menu-active:#38516b;--menu-pressed:#42617f;--menu-tick:#b9e2ff;
   --login-bg:#142132f5;--login-field:#0d1826;--login-ink:#e9f2fc;--login-muted:#adbed0;
 }
@@ -34,6 +35,7 @@
   --primary:linear-gradient(150deg,#e6f3ff,#c9e1f4 60%,#b7d2e9);--primary-hover:linear-gradient(150deg,#f2faff,#d9edfc 60%,#c5e0f5);
   --rail-glass:linear-gradient(145deg,#ffffff9c,#d9edff25 55%,#b5d4ef42);--glass-edge:#fff9;
   --glass-control:linear-gradient(145deg,#ffffff92,#d9edff25 55%,#b5d4ef42);
+  --tag-bg:#dfebf4e8;--tag-ink:#31526c;--tag-border:#a1bfd37d;--tag-hover:#cddfea;--tag-hover-ink:#24465f;--tag-hover-border:#93b6cf;
   --menu-bg:#f0f6fb;--menu-active:#d8e8f5;--menu-pressed:#c6deef;--menu-tick:#286a9e;
   --login-bg:#f5f9fdf5;--login-field:#e7f0f8;--login-ink:#263e55;--login-muted:#526c83;
 }
@@ -104,10 +106,10 @@ body button:not(:where(.deck-card,.batch-card-open,.lg-choice,.back-top,.recent-
 
 /* Quiet dark labels; recent history stays a plain native interaction. */
 .tags span,.tags span.lab-glass-tag,.recent-searches button {
-  padding:5px 10px;border:1px solid #9cbbd22b;border-radius:6px;
-  background:#1b2d40d9;color:#dceaf7;box-shadow:none;backdrop-filter:none;font-size:12px;font-weight:500;
+  padding:5px 10px;border:1px solid var(--tag-border);border-radius:6px;
+  background:var(--tag-bg);color:var(--tag-ink);box-shadow:none;backdrop-filter:none;font-size:12px;font-weight:500;
 }
-.recent-searches button:hover:not(:disabled) {background:#293f55;color:#f2f7fd;border-color:#bed6e04a}
+.recent-searches button:hover:not(:disabled) {background:var(--tag-hover);color:var(--tag-hover-ink);border-color:var(--tag-hover-border)}
 .text-context-menu,.text-menu-notice {background:var(--surface-2);border-color:var(--line);backdrop-filter:none}
 .text-context-menu button {border:0;border-radius:6px;background:transparent;color:var(--ink);box-shadow:none;font-weight:400}
 .text-context-menu button:hover:not(:disabled),.text-context-menu button:focus-visible {background:var(--surface);box-shadow:none}
@@ -264,3 +266,9 @@ body .page-rail :is(a,button)[aria-current] {background:#252d38;color:#f0f3f6}
  #home .home-intro {padding:20px 0 26px}
  .search-panel .lab-search-body {padding:18px 16px}
 }
+
+/* Empty artwork guidance belongs in the centre of the open preview column. */
+body:not(.batch-mode) #downloadPage #detail:has(#deck:empty):has(#collectionPages:empty) {align-items:stretch}
+body:not(.batch-mode) #downloadPage .detail-content:has(>#deck:empty):has(>#collectionPages:empty) {position:relative;min-height:360px}
+body:not(.batch-mode) #downloadPage .detail-content:has(>#deck:empty):has(>#collectionPages:empty) #deck {display:none}
+body:not(.batch-mode) #downloadPage .detail-content:has(>#deck:empty):has(>#collectionPages:empty) #deckHint {position:absolute;inset:0;display:grid;place-items:center;text-align:center;margin:0;padding:24px}

@@ -4,11 +4,11 @@ import {GlassSound,bindControlSounds} from './sound.js';
 import {tokens,resolveMaterial} from './tokens.js';
 import {bindKeyboardFocus} from './focus.js';
 
-export function createGlassSystem(stage,{canvas,material='thick',scene='aurora',artwork,artworkAligned=false,tintScale=1,brightness=.95,motion=false,elasticity=tokens.motion.elasticity,audio={},onFallback=()=>{}}={}){
+export function createGlassSystem(stage,{canvas,material='thick',scene='aurora',artwork,artworkAligned=false,tintScale=1,brightness=.95,bevelWidth=19,bevelPower=1.65,motion=false,elasticity=tokens.motion.elasticity,audio={},onFallback=()=>{}}={}){
   if(!stage||!stage.querySelector)throw new TypeError('A stage element is required');
   const ownsCanvas=!canvas;canvas ||= stage.ownerDocument.createElement('canvas');canvas.setAttribute('aria-hidden','true');canvas.classList.add('lg-canvas');if(ownsCanvas)stage.prepend(canvas);stage.classList.add('lg-stage');stage.dataset.scene=scene;
   const initialMaterial=resolveMaterial(material);stage.style.setProperty('--lg-fallback-blur',`${4+initialMaterial.blur*24}px`);
-  let renderer;try{renderer=new GlassRenderer(canvas,stage,{...initialMaterial,scene,artwork,artworkAligned,tintScale,brightness,motion});}catch(error){stage.classList.add('fallback');onFallback(error);}
+  let renderer;try{renderer=new GlassRenderer(canvas,stage,{...initialMaterial,scene,artwork,artworkAligned,tintScale,brightness,bevelWidth,bevelPower,motion});}catch(error){stage.classList.add('fallback');onFallback(error);}
   const jelly=new JellyController(stage,renderer,{intensity:elasticity}),sound=new GlassSound(audio),unbind=bindControlSounds(stage,sound),unbindFocus=bindKeyboardFocus(stage),abort=new AbortController(),observers=[],media=matchMedia('(prefers-reduced-motion: reduce)');renderer?.setMotionSource(jelly);
   const signal=abort.signal;media.addEventListener('change',event=>{jelly.reduced=event.matches;if(renderer){renderer.reducedMotion=event.matches;renderer.invalidate();}},{signal});
   const mount=(root=stage)=>{
