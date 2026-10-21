@@ -10,7 +10,8 @@ const components = [];
 const abort = new AbortController();
 const {signal} = abort;
 const feedback = new Map();
-let material = 'thick';
+let material = 'clear';
+root.dataset.material = material;
 let enabled = true;
 let disposed = false;
 
@@ -33,13 +34,6 @@ function drawArtwork(ctx, {width, height, dpr}) {
   }
 }
 
-function enhanceButton(button) {
-  button.classList.add('lg-surface');
-  button.dataset.glass = 'button';
-  // Press mode leaves native clicks, input focus and touch scrolling in control.
-  button.dataset.lgDrag = 'press';
-}
-
 const searchStage = document.querySelector('.search-panel');
 const searchPanel = createComponent('panel', {
   label: '搜索与筛选', motion: 'none', children: [...searchStage.childNodes],
@@ -48,19 +42,24 @@ searchPanel.element.classList.add('lab-search-body');
 searchStage.append(searchPanel.element);
 components.push(searchPanel);
 for (const id of ['workType', 'safety', 'datePreset', 'quality', 'format']) {
-  components.push(enhanceSelect(document.getElementById(id), {material: id === 'datePreset' ? 'quiet' : 'glass'}));
+  components.push(enhanceSelect(document.getElementById(id), {material: 'quiet'}));
 }
-searchStage.querySelectorAll('button:not(.lab-select-quiet)').forEach(enhanceButton);
 components.push(mountDotTitle(document.querySelector('.home-intro h1')));
 
 const selectionStage = document.getElementById('selectionBar');
-// The app owns this node's hidden state and text; only its existing controls are enhanced.
-selectionStage.querySelectorAll('button').forEach(enhanceButton);
+// The app owns this node's hidden state and text. Only its rim receives optical rendering.
+const selectionRim = document.createElement('div');
+selectionRim.className = 'lab-optical-rim';
+selectionRim.dataset.glass = 'dock';
+selectionRim.setAttribute('aria-hidden', 'true');
+selectionStage.prepend(selectionRim);
+components.push({destroy: () => selectionRim.remove()});
 
 const mountPoints = [searchStage, selectionStage];
 function unmount(stage) {
   systems.get(stage)?.destroy();
   systems.delete(stage);
+  stage.querySelector(':scope > .lab-optics')?.remove();
   stage.classList.remove('webgl-ready', 'fallback');
   for (const element of stage.querySelectorAll('[data-jelly]')) {
     delete element.dataset.jelly; delete element.dataset.held;
@@ -81,8 +80,14 @@ function syncSystems() {
     if (!active && systems.has(stage)) {
       unmount(stage);
     } else if (active && !systems.has(stage)) {
+      const rim = document.createElement('div');
+      rim.className = 'lab-optics';
+      rim.setAttribute('aria-hidden', 'true');
+      const canvas = document.createElement('canvas');
+      rim.append(canvas);
+      stage.prepend(rim);
       const system = createGlassSystem(stage, {
-        material, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
+        canvas, material, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
         artwork: drawArtwork, motion: false, elasticity: reduced.matches ? 0 : .42,
         audio: {enabled: false},
       });
@@ -105,6 +110,7 @@ const materialChoices = createComponent('choices', {
   options: [{value: 'thick', label: '厚润'}, {value: 'clear', label: '清透'}, {value: 'soft', label: '柔雾'}],
   onChange(value) {
     material = value;
+    root.dataset.material = value;
     for (const system of systems.values()) system.setMaterial(value);
   },
 });
@@ -129,11 +135,10 @@ document.getElementById('glassLabControls').append(label, materialChoices.elemen
 components.push(materialChoices, effectToggle);
 root.dataset.glass = 'on';
 
-function pulse(button, keyboard = false) {
+function pulse(button) {
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true' || reduced.matches) return;
-  if (button.matches('.head-actions button,.lab-select-quiet')) return;
-  // Lens supplies the optical press inside its stages. Elsewhere only decorate; never dispatch actions.
-  if (button.closest('.lg-stage') && enabled && !keyboard) return;
+  if (button.matches('.head-actions button,.dialog-close')) return;
+  // Ceramic controls keep their native clicks. Decorate only; never dispatch actions.
   feedback.get(button)?.cancel();
   const animation = button.animate([{scale: '1'}, {scale: '.955', offset: .24}, {scale: '1.012', offset: .7}, {scale: '1'}], {duration: 270, easing: 'cubic-bezier(.2,.8,.2,1)'});
   feedback.set(button, animation);
@@ -143,7 +148,7 @@ document.addEventListener('pointerdown', event => {
   if (event.button === 0 && event.isPrimary) pulse(event.target.closest?.('button'));
 }, {signal, passive: true});
 document.addEventListener('keydown', event => {
-  if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) pulse(event.target.closest?.('button'), true);
+  if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) pulse(event.target.closest?.('button'));
 }, {signal});
 reduced.addEventListener('change', () => {
   if (reduced.matches) for (const animation of feedback.values()) animation.cancel();
