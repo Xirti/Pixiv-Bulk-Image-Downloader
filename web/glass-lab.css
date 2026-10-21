@@ -1,0 +1,58 @@
+/* MOKU Glass Lab 01 — a scoped visual layer over the existing application. */
+:root {
+  --bg:#0b111b;--ink:#e9f2fc;--muted:#a1b3c8;--line:#8ab4d52e;
+  --surface:#152131;--surface-2:#1b2b3d;--accent:#8acbff;--on-accent:#0a2037;
+  --action-fill:#a4d8ff;--moon:#a4d8ff;--badge:#13253ce8;
+  --lab-panel:#17283bcc;--lab-glint:#dcf3ff45;--lab-shadow:0 18px 65px #0003;
+  --lg-color-text:var(--ink);--lg-color-muted:var(--muted);--lg-color-focus:#79baff;
+  --lg-surface-fallback:#193149ba;--lg-surface-solid:#1b2b3d;
+}
+:root[data-theme=light] {
+  --bg:#f3f7fb;--ink:#24364b;--muted:#61768d;--line:#8ba7c638;
+  --surface:#ffffffb8;--surface-2:#e9f1f9;--accent:#276aab;--on-accent:#fff;
+  --action-fill:#316fa6;--moon:#316fa6;--badge:#f6fbffec;
+  --lab-panel:#ffffffa8;--lab-glint:#fff;--lab-shadow:0 18px 65px #2b527410;
+  --lg-color-text:var(--ink);--lg-color-muted:var(--muted);--lg-color-focus:#2875ed;
+  --lg-surface-fallback:#f4faffb5;--lg-surface-solid:#f4f8fc;
+}
+body {background-color:var(--bg);background-image:radial-gradient(ellipse at 12% 12%,#52b8ff13,transparent 54%),radial-gradient(ellipse at 88% 22%,#8c86ef0d,transparent 46%),radial-gradient(circle,#7899b324 .8px,transparent 1px);background-size:auto,auto,24px 24px;background-attachment:fixed;font-family:"Segoe UI","Microsoft YaHei",sans-serif}
+body>header {background:var(--lab-panel);border-bottom:1px solid var(--line);backdrop-filter:blur(20px) saturate(1.25)}
+.brand {letter-spacing:-1.5px}.brand .edition-label {letter-spacing:1.3px;font-size:10px;color:var(--muted);font-weight:650}
+.head-actions button,.page-rail,.page-rail a,.page-rail button {border-color:var(--line);border-radius:14px}
+.page-rail {padding:7px;background:var(--lab-panel);box-shadow:var(--lab-shadow);backdrop-filter:blur(18px)}
+.page-rail a,.page-rail button {background:transparent}.page-rail a[aria-current],.page-rail button[aria-current] {background:var(--surface-2);box-shadow:inset 0 1px 0 var(--lab-glint);color:var(--accent)}
+.home-intro .eyebrow {letter-spacing:3px;color:var(--muted)}.lab-badge {display:inline-block;letter-spacing:1px;font-size:10px;border:1px solid var(--line);border-radius:999px;padding:5px 10px;margin-left:10px;vertical-align:middle;color:var(--accent)}
+.hero h1 {letter-spacing:-3px;font-weight:600}.home-title-mark {color:var(--accent)}
+.search-panel {padding:0!important;border:1px solid var(--line);border-radius:28px!important;overflow:visible;box-shadow:var(--lab-shadow);background:var(--lab-panel);isolation:isolate;position:relative;transform:none!important}
+.search-panel.lg-stage {overflow:visible;font:inherit;color:var(--ink);background:var(--lab-panel)}
+.search-panel .lg-canvas {border-radius:28px}
+.lab-search-body {padding:28px!important;border-radius:28px;overflow:visible;touch-action:auto;font:inherit}
+.search-panel .search-label {color:var(--muted);font-size:12px;letter-spacing:.5px}
+.search-row {gap:12px}.search-row input {min-height:58px;border:1px solid var(--line);border-radius:17px;background:var(--surface);box-shadow:inset 0 2px 5px #071d3610;color:var(--ink);font-size:17px}
+.search-row #searchSubmit {border:1px solid #8dbee45e;border-radius:17px;min-height:58px;padding:0 28px;font-size:14px;color:var(--ink);background:var(--surface-2);box-shadow:inset 0 1px 0 var(--lab-glint),0 6px 18px #204d6e10;white-space:nowrap}
+.webgl-ready #searchSubmit,.webgl-ready .lab-search-body {background:transparent;backdrop-filter:none;box-shadow:none}
+.search-panel .filters {gap:12px 18px}.filters select,.date-filter select,.custom-dates input {background:var(--surface);border:1px solid var(--line);border-radius:10px;color:var(--ink);min-height:38px}
+.search-panel :is(.ai-choice,.fuzzy-choice) {padding:8px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface);transition:background .16s,border-color .16s}
+.search-panel :is(.ai-choice,.fuzzy-choice):has(input:checked) {border-color:var(--accent);background:var(--surface-2)}input[type=checkbox] {accent-color:var(--accent)}
+.lab-controls {display:flex;align-items:center;justify-content:flex-end;gap:12px;margin:18px auto 0;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.lab-control-label {font-size:11px;letter-spacing:1.5px;margin-right:4px}
+.lab-material-choices {gap:4px;padding:4px;border:1px solid var(--line);border-radius:999px;background:var(--lab-panel)}
+.lab-material-choices .lg-choice {min-height:32px;padding:0 12px;border-radius:999px;font-size:12px;color:var(--muted);border:0;gap:4px;background:transparent;box-shadow:none;backdrop-filter:none;cursor:pointer}
+.lab-material-choices .lg-choice>.lg-icon {display:none}.lab-material-choices .lg-choice[aria-pressed=true] {background:var(--surface-2);color:var(--accent);outline:1px solid var(--line)}
+.lab-controls>.lg-button {min-height:36px;padding:0 15px;border:1px solid var(--line);background:var(--lab-panel);color:var(--muted);font-size:12px;cursor:pointer;box-shadow:inset 0 1px 0 var(--lab-glint)}
+button {transition:background-color .16s,border-color .16s,box-shadow .16s}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible {outline:2px solid var(--lg-color-focus)!important;outline-offset:4px}
+button:disabled {cursor:default}
+.grid .card {border-color:var(--line);border-radius:18px;background:var(--lab-panel);box-shadow:0 8px 25px #0a25430b}.grid .card.is-selected {outline:2px solid var(--accent);outline-offset:2px}
+.poster {border-radius:14px 14px 0 0}.poster img {filter:none}
+#selectionBar {border:1px solid var(--line);border-radius:20px;padding:12px 16px;background:var(--lab-panel);box-shadow:var(--lab-shadow);backdrop-filter:blur(18px);isolation:isolate;color:var(--ink)}
+#selectionBar.lg-stage {font:inherit;overflow:visible}#selectionBar .lg-canvas {border-radius:20px}
+#selectionBar b {color:var(--ink);white-space:nowrap}#selectionBar button {position:relative;border:1px solid var(--line);padding:9px 15px;border-radius:13px;background:var(--surface-2);color:var(--ink);white-space:nowrap}
+#selectionBar.webgl-ready button {background:transparent}
+:is(.floating-chip,.workspace-notice,.task-dock,dialog) {border-color:var(--line);background:var(--lab-panel);box-shadow:inset 0 1px 0 var(--lab-glint),var(--lab-shadow);backdrop-filter:blur(22px) saturate(1.25)}
+dialog {border-radius:24px}dialog::backdrop {background:#07142266;backdrop-filter:blur(6px)}
+:is(.viewer-bar,.basket-bar,.workspace-bar) {background:var(--lab-panel);backdrop-filter:blur(20px);border-color:var(--line)}
+.task-dock {padding-left:30px}.task-dock::before {content:"";position:absolute;left:14px;top:18px;width:4px;height:4px;border-radius:50%;background:var(--accent);box-shadow:0 8px 0 var(--accent),0 16px 0 var(--line)}
+.pagination button,.dialog-actions button,.basket-header-actions button,.history-tools button,.batch-actions button {border-radius:12px}
+:root[data-glass=off] .lab-search-body {background:var(--lab-panel);backdrop-filter:none}
+@media(max-width:700px) {.lab-search-body{padding:20px!important}.search-row #searchSubmit{padding:0 16px}.lab-controls{justify-content:center}.brand .edition-label{font-size:9px}.lab-badge{display:none}}
+@media(prefers-reduced-motion:reduce) {button{transition:none!important}.lg-optic-beam{animation:none!important}}

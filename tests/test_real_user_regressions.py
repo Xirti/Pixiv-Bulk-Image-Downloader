@@ -71,7 +71,7 @@ class WorkflowRegressionTests(unittest.TestCase):
                 data = json.loads(response.read())
             self.assertEqual(data.get("instanceId"), instance_id)
             self.assertEqual(data.get("protocolVersion"), 5)
-            self.assertEqual(data.get("applicationId"), "MOKU.PixivTagGallery")
+            self.assertEqual(data.get("applicationId"), "MOKU.PixivTagGallery.GlassLab01")
             self.assertEqual(data.get("codeGeneration"), "regression-generation")
             self.assertTrue(data.get("requestToken"))
         finally:

@@ -34,3 +34,11 @@ Pixiv and artwork displayed or downloaded through MOKU are not third-party softw
 MOKU Lite does not distribute the decorative model brand SVGs from earlier releases.
 
 Optional MP4 export invokes an FFmpeg executable already registered in the user's local PATH. FFmpeg is not included in MOKU's distribution, and MOKU does not install or download it. Its license depends on the user's chosen FFmpeg build.
+
+
+## Lens design system
+
+MIT License, Copyright (c) 2026 DayDreamInAReverie.
+Source: https://github.com/ruiqichenbiec/design-systems at 7a424c93b9be13cf835b91ea67495fec2ec0584e.
+Original license: web/vendor/lens/LICENSE.
+Lattice dot composition informed the custom background; this experiment implements the dot drawing locally.

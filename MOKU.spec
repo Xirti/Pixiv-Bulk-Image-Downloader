@@ -105,7 +105,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='MOKU',
+    name='MOKU-Glass-Lab',
     icon='assets/moku-icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
@@ -125,5 +125,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='MOKU',
+    name='MOKU-Glass-Lab',
 )

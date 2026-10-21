@@ -453,7 +453,7 @@ assert.equal(resultSelectionEnabled,true);
       return new Promise((resolve, reject) => {
         releaseHandshake = () => resolve({ok: true, json: async () => ({
           protocolVersion: 5,
-          applicationId: "MOKU.PixivTagGallery",
+          applicationId: "MOKU.PixivTagGallery.GlassLab01",
           requestToken: "test-request-token",
         })});
         options.signal.addEventListener("abort", () => {

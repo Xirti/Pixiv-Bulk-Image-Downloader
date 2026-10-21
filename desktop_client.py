@@ -189,7 +189,7 @@ class DesktopApi:
                 height=820,
                 min_size=(720, 620),
                 resizable=True,
-                background_color="#fbf7ed",
+                background_color="#f3f7fb",
             )
             if login is None:
                 raise RuntimeError("无法创建 Pixiv 桌面登录窗口")
@@ -341,14 +341,14 @@ def start_desktop(
         desktop_auth_token=desktop_auth_token,
     )
     window = webview.create_window(
-        "MOKU Lite — Pixiv 搜图与采集",
+        "MOKU Glass Lab · 01 — Pixiv 搜图与采集",
         url,
         js_api=api,
         width=1280,
         height=820,
         min_size=(900, 620),
         resizable=True,
-        background_color="#fbf7ed",
+        background_color="#f3f7fb",
         text_select=True,
     )
     api._window = window

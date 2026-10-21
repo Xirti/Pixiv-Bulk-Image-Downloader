@@ -2,7 +2,7 @@
 (() => {
   const root = document.documentElement;
   let saved;
-  try { saved = localStorage.getItem('moku-theme'); } catch { /* Private hosts may deny storage. */ }
+  try { saved = localStorage.getItem('moku-glass-lab-theme'); } catch { /* Private hosts may deny storage. */ }
   const systemDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
   root.dataset.theme = saved === 'light' || saved === 'dark' ? saved : (systemDark ? 'dark' : 'light');
 
@@ -17,7 +17,7 @@
     };
     button.onclick = () => {
       root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
-      try { localStorage.setItem('moku-theme', root.dataset.theme); } catch { /* The current page still switches. */ }
+      try { localStorage.setItem('moku-glass-lab-theme', root.dataset.theme); } catch { /* The current page still switches. */ }
       label();
     };
     label();

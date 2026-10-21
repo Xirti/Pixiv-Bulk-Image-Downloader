@@ -1,0 +1,28 @@
+# MOKU Glass Lab · 01
+
+目标：在完整的 MOKU 搜图、选页与下载流程中，体验 Lens 液态玻璃和轻量点阵语言。
+
+基线为 `v1.1.4-r1` / `8ac6d6f81b7a09309417e28ed928a8da712ec4ba`。实验分支为 `experiment/glass-lab-01`。
+
+- 搜索面板与按钮、采集篮操作条使用 Lens 的真实折射与按压反馈。
+- 其余按钮使用短促弹性反馈；原生输入、下拉框和复选框继续承担输入和状态。
+- 搜索区下方可切换厚润、清透、柔雾材质，并可关闭光学效果。
+- 日夜主题覆盖主页面、详情、采集篮和弹窗。系统降低动态效果设置同步生效，音效初始关闭。
+- Lens 来源固定于 `design-systems@7a424c9`，保留原始模块和 MIT 许可证。点阵背景由本实验适配层绘制。
+
+源码入口：`moku_app.py`。安装已有锁定依赖后执行 `python moku_app.py`。便携版双击 `MOKU-Glass-Lab.exe`。
+
+隔离约定：
+
+| 内容 | 实验版位置或标识 |
+|---|---|
+| 默认下载、日志 | 本实验版程序目录下的 `downloads`、`logs` |
+| 历史、采集篮和未完成任务 | `%LOCALAPPDATA%/MOKU-Glass-Lab-01/library` |
+| 运行描述与临时 WebView2 配置 | `%LOCALAPPDATA%/MOKU-Glass-Lab-01/` |
+| Windows 登录凭据 | `MOKU.GlassLab01.Pixiv.PHPSESSID` |
+| 后端身份 | `MOKU.PixivTagGallery.GlassLab01`，独立互斥锁、动态本机端口 |
+| 页面主题记忆 | `moku-glass-lab-theme` |
+
+主要变更集中在 `web/glass-lab.js`、`web/glass-lab.css`、`experiment_profile.py`。原有业务节点保留身份与事件绑定，界面层只读取状态和装饰交互。玻璃区域离屏或页面隐藏时释放渲染器；重新可见时恢复。
+
+本轮验收：原版目录状态保持一致；独立存储与凭据标识；搜索提交、筛选、结果选择、采集篮和详情；材质切换、光学开关、日夜主题；静态回退和降低动态效果；打包资源齐全。

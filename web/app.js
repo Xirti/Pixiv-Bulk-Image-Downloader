@@ -346,7 +346,7 @@ async function getRequestToken() {
         return response.json();
       })
       .then((data) => {
-        if (data.protocolVersion !== 5 || data.applicationId !== "MOKU.PixivTagGallery") throw new Error("MOKU 后端版本过旧，请关闭当前窗口并重新启动 MOKU");
+        if (data.protocolVersion !== 5 || data.applicationId !== "MOKU.PixivTagGallery.GlassLab01") throw new Error("MOKU 后端版本过旧，请关闭当前窗口并重新启动 MOKU");
         if (!data.requestToken) throw new Error("本机请求授权未初始化");
         requestToken = data.requestToken;
         if (data.animationFormats) animationFormats = data.animationFormats;

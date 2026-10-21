@@ -57,6 +57,8 @@ CODE_GENERATION_FILES = (
     "web/index.html", "web/app.js", "web/text-context-menu.js", "web/download-history.js", "web/workspace-sync.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
 )
 
+CODE_GENERATION_FILES += ('experiment_profile.py', 'web/glass-lab.css', 'web/glass-lab.js', 'web/vendor/lens/card-list.js', 'web/vendor/lens/component-catalog.js', 'web/vendor/lens/component-patterns.js', 'web/vendor/lens/components.css', 'web/vendor/lens/components.js', 'web/vendor/lens/focus.js', 'web/vendor/lens/index.js', 'web/vendor/lens/internal/context-budget.js', 'web/vendor/lens/internal/jelly-physics.js', 'web/vendor/lens/internal/jelly.js', 'web/vendor/lens/internal/lens-surface.js', 'web/vendor/lens/internal/optical-motion.js', 'web/vendor/lens/internal/optics.js', 'web/vendor/lens/internal/renderer.js', 'web/vendor/lens/LICENSE', 'web/vendor/lens/optical-components.js', 'web/vendor/lens/README.md', 'web/vendor/lens/runtime.js', 'web/vendor/lens/sound.js', 'web/vendor/lens/tokens.css', 'web/vendor/lens/tokens.js', 'web/vendor/lens/UPSTREAM.md')
+
 
 def compute_code_generation(
     *, root: Path | None = None, files: tuple[str, ...] = CODE_GENERATION_FILES,
@@ -112,7 +114,7 @@ MAX_SEARCH_CANCEL_TOMBSTONES = 64
 SEARCH_CANCEL_TOMBSTONE_SECONDS = 120.0
 MAX_ACTIVE_DOWNLOAD_TASKS = 2
 PROTOCOL_VERSION = 5
-APPLICATION_ID = "MOKU.PixivTagGallery"
+APPLICATION_ID = "MOKU.PixivTagGallery.GlassLab01"
 TEST_FIXTURES_ENABLED = os.getenv("MOKU_ENABLE_TEST_FIXTURES") == "1"
 CODE_GENERATION = (os.getenv("MOKU_CODE_GENERATION") or compute_code_generation()) + (
     ":fixtures" if TEST_FIXTURES_ENABLED else ""

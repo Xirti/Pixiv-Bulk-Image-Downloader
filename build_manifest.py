@@ -49,6 +49,8 @@ BUILD_INPUT_FILES = (
     "requirements.lock",
     "requirements-dev.lock",
     "build-portable.ps1",
+    "build-glass-lab.ps1",
+    "EXPERIMENT.md",
     "make-release.ps1",
     "build_manifest.py",
     "run_tests.py",

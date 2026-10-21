@@ -18,9 +18,9 @@ from ctypes import wintypes
 from pathlib import Path
 
 import server
+from experiment_profile import DATA_FOLDER, MUTEX_NAME
 
 
-MUTEX_NAME = r"Local\MOKU.PixivTagGallery.Backend.v1"
 WAIT_OBJECT_0 = 0
 WAIT_ABANDONED = 0x80
 LOG = logging.getLogger("moku.app")
@@ -225,7 +225,7 @@ def runtime_directory() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
         raise RuntimeError("LOCALAPPDATA is unavailable")
-    return Path(local_app_data) / "MOKU" / "runtime"
+    return Path(local_app_data) / DATA_FOLDER / "runtime"
 
 
 def _start_webview(
@@ -336,7 +336,7 @@ def launch_desktop(
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
         raise RuntimeError("LOCALAPPDATA is unavailable")
-    session_root = Path(local_app_data) / "MOKU" / "WebView2Sessions"
+    session_root = Path(local_app_data) / DATA_FOLDER / "WebView2Sessions"
     session_root.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=cleanup_stale_webview_profiles, args=(session_root,),
                      name="moku-profile-cleanup", daemon=True).start()

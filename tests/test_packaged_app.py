@@ -207,7 +207,7 @@ class PackagedAppTests(unittest.TestCase):
         import moku_app
 
         with tempfile.TemporaryDirectory() as raw_local:
-            session_root = Path(raw_local) / "MOKU" / "WebView2Sessions"
+            session_root = Path(raw_local) / "MOKU-Glass-Lab-01" / "WebView2Sessions"
             disposable = session_root / "session-test"
             disposable.mkdir(parents=True)
             with patch.dict(moku_app.os.environ, {"LOCALAPPDATA": raw_local}, clear=False), patch.object(

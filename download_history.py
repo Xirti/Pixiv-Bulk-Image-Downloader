@@ -9,10 +9,12 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from experiment_profile import DATA_FOLDER
+
 
 def history_path() -> Path:
     override = os.getenv("MOKU_LIBRARY_DIR")
-    directory = Path(override) if override else Path(os.environ["LOCALAPPDATA"]) / "MOKU" / "library"
+    directory = Path(override) if override else Path(os.environ["LOCALAPPDATA"]) / DATA_FOLDER / "library"
     return directory / "downloads.sqlite3"
 
 
