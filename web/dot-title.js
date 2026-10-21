@@ -5,6 +5,7 @@ export function mountDotTitle(title) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return {destroy() {}};
   canvas.className = 'lab-dot-title'; canvas.setAttribute('aria-hidden', 'true');
+  canvas.hidden = true;
   title.append(canvas);
   const abort = new AbortController(), {signal} = abort;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
@@ -50,7 +51,7 @@ export function mountDotTitle(title) {
     if (destroyed) return;
     cancelFrame();
     if (reduced.matches || contrast.matches) {
-      settled = true; title.classList.remove('has-dot-title'); canvas.dataset.state = 'static-text'; return;
+      settled = true; canvas.hidden = true; title.classList.remove('has-dot-title'); canvas.dataset.state = 'static-text'; return;
     }
     const bounds = title.getBoundingClientRect();
     if (!bounds.width || !bounds.height) return;
@@ -61,7 +62,7 @@ export function mountDotTitle(title) {
     const raster = document.createElement('canvas');
     raster.width = width * 2; raster.height = height * 2;
     const mask = raster.getContext('2d', {willReadFrequently: true});
-    if (!mask) {title.classList.remove('has-dot-title'); return;}
+    if (!mask) {canvas.hidden = true; title.classList.remove('has-dot-title'); return;}
     mask.scale(2, 2); mask.fillStyle = '#fff'; mask.textBaseline = 'alphabetic';
     const spans = [...title.querySelectorAll('.home-title-text,.home-title-mark')];
     const baseColor = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim();
@@ -95,7 +96,8 @@ export function mountDotTitle(title) {
           dx: Math.sin(index * 2.399) * 8, dy: 10 + (index % 9) * 1.8, delay: x / width * .19});
       }
     }
-    if (!points.length) {title.classList.remove('has-dot-title'); return;}
+    if (!points.length) {canvas.hidden = true; title.classList.remove('has-dot-title'); return;}
+    canvas.hidden = false;
     title.classList.add('has-dot-title');
     if (settled || document.hidden) stopAtRest();
     else if (onScreen) {canvas.dataset.state = 'assembling'; frame = requestAnimationFrame(tick);}

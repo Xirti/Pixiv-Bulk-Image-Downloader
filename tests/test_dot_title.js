@@ -66,6 +66,14 @@ function setup({reduced = false, contrast = false, canvasAvailable = true} = {})
   for (let index = 0; index < 20; index++) normal.advance();
   assert.equal(normal.draws, rendered, 'idle title should perform no new drawing');
 
+  const preferStatic = normal.media.get('(prefers-reduced-motion: reduce)');
+  preferStatic.matches = true; preferStatic.dispatchEvent(new Event('change')); normal.advance();
+  assert.equal(normal.title.canvas.hidden, true, 'native fallback must hide already-rendered dots');
+  assert.equal(normal.title.classList.contains('has-dot-title'), false);
+  preferStatic.matches = false; preferStatic.dispatchEvent(new Event('change')); normal.advance();
+  assert.equal(normal.title.canvas.hidden, false);
+  assert.equal(normal.frames.size, 0, 'motion preference changes must not replay the intro');
+
   normal.observers.mutation[0].callback(); normal.advance();
   assert.equal(normal.title.canvas.dataset.state, 'settled', 'theme change does not restart introduction');
   assert.equal(normal.frames.size, 0);
