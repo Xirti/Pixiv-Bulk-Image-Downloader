@@ -52,6 +52,8 @@ class LocalCatalog:
         path = Path(os.path.abspath(path))
         # Never turn an unreadable directory into an apparent missing file.
         current = Path(path.anchor)
+        if path == current:
+            raise _StaleArtifactError("索引路径不是普通文件")
         for part in path.parts[1:]:
             current /= part
             if current != path and checked_directories is not None and current in checked_directories:

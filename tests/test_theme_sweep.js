@@ -1,9 +1,9 @@
-const assert = require('node:assert/strict');
+﻿const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../web/theme.js'), 'utf8');
-function setup({supported=true,reduced=false,readyFailure=false}={}) {
+function setup({supported=true,reduced=false,readyFailure=false,deferred=false}={}) {
   const root={dataset:{},animate(frames,options){api.frames=frames;api.options=options;return {finished:Promise.resolve(),cancel(){api.cancelled=true;}};}};
   const button={attrs:{},setAttribute(k,v){this.attrs[k]=v;},getBoundingClientRect(){return {left:900,top:20,width:80,height:40};}};
   const media=new Map(),events={},stored=[];
@@ -11,7 +11,7 @@ function setup({supported=true,reduced=false,readyFailure=false}={}) {
   const doc={documentElement:root,hidden:false,readyState:'complete',getElementById(){return button;},addEventListener(type,fn){events[type]=fn;}};
   for(const query of ['(prefers-color-scheme: dark)','(prefers-reduced-motion: reduce)','(forced-colors: active)'])media.set(query,{matches:query==='(prefers-color-scheme: dark)'||query==='(prefers-reduced-motion: reduce)'&&reduced,addEventListener(type,fn){this.change=fn;}});
   if(supported)doc.startViewTransition=commit=>{
-    api.transitions=(api.transitions||0)+1;commit();
+    api.transitions=(api.transitions||0)+1;if(deferred)(api.updates||=[]).push(commit);else commit();
     api.transition={ready:readyFailure?Promise.reject(new Error('snapshot unavailable')):Promise.resolve(),
       finished:new Promise(resolve=>{api.finish=resolve;}),skipTransition(){api.skipped=true;api.finish();}};
     return api.transition;
@@ -39,6 +39,13 @@ function setup({supported=true,reduced=false,readyFailure=false}={}) {
   const failed=setup({readyFailure:true});await failed.button.onclick();assert.equal(failed.root.dataset.theme,'light');assert.equal(failed.root.dataset.themeSweep,undefined);
   const hidden=setup();const pending=hidden.button.onclick();await new Promise(resolve=>setImmediate(resolve));hidden.events.pagehide();hidden.finish();await pending;
   assert.equal(hidden.skipped,true);assert.equal(hidden.root.dataset.themeSweep,undefined);
+  const delayed=setup({deferred:true});const old=delayed.button.onclick();
+  delayed.events.pagehide();
+  assert.equal(delayed.root.dataset.theme,'light','interrupted snapshot must settle the requested palette before allowing another click');
+  const newer=delayed.button.onclick();delayed.updates[1]();
+  assert.equal(delayed.root.dataset.theme,'dark');delayed.updates[0]();
+  assert.equal(delayed.root.dataset.theme,'dark','late old update must not overwrite the newer choice');
+  delayed.events.pagehide();await Promise.all([old,newer]);
   console.log('Theme sweep: button origin, viewport coverage, both themes, click lock, fallback, reduced motion and cancellation passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 

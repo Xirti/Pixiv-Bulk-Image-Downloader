@@ -85,21 +85,34 @@ export function enhanceSelect(select, {material = 'glass'} = {}) {
   function sync() {
     if (destroyed) return;
     const previousActive = records.find(row => row.index === activeIndex)?.option;
-    records = [...select.options].map((option, index) => {
-      const element = owner.createElement('div');
-      element.id = `${id}-option-${index}`; element.className = 'lab-select-option';
-      element.setAttribute('role', 'option'); element.setAttribute('aria-selected', String(option.selected));
-      const disabled = option.disabled || Boolean(option.closest('optgroup')?.disabled);
-      element.setAttribute('aria-disabled', String(disabled));
-      element.dataset.index = String(index); element.textContent = option.label;
-      return {index, option, disabled, element};
+    const options = [...select.options].map((option, index) => ({
+      index, option, label: option.label, selected: option.selected,
+      disabled: option.disabled || Boolean(option.closest('optgroup')?.disabled),
+    }));
+    const changed = options.length !== records.length || options.some((row, index) => {
+      const old = records[index];
+      return row.option !== old.option || row.label !== old.label
+        || row.selected !== old.selected || row.disabled !== old.disabled;
     });
-    popup.replaceChildren(...records.map(row => row.element));
-    valueText.textContent = select.selectedOptions[0]?.label || '请选择';
-    trigger.title = valueText.textContent;
-    trigger.setAttribute('aria-label', `${caption}：${valueText.textContent}`);
-    trigger.disabled = select.disabled || !available().length;
-    trigger.hidden = select.hidden;
+    if (changed) {
+      records = options.map(row => {
+        const element = owner.createElement('div');
+        element.id = `${id}-option-${row.index}`; element.className = 'lab-select-option';
+        element.setAttribute('role', 'option'); element.setAttribute('aria-selected', String(row.selected));
+        element.setAttribute('aria-disabled', String(row.disabled));
+        element.dataset.index = String(row.index); element.textContent = row.label;
+        return {...row, element};
+      });
+      popup.replaceChildren(...records.map(row => row.element));
+    }
+    const value = select.selectedOptions[0]?.label || '请选择';
+    if (valueText.textContent !== value) valueText.textContent = value;
+    if (trigger.title !== value) trigger.title = value;
+    const label = `${caption}：${value}`;
+    if (trigger.getAttribute('aria-label') !== label) trigger.setAttribute('aria-label', label);
+    const disabled = select.disabled || !available().length;
+    if (trigger.disabled !== disabled) trigger.disabled = disabled;
+    if (trigger.hidden !== select.hidden) trigger.hidden = select.hidden;
     if (trigger.disabled || trigger.hidden) close();
     if (opened) {
       const next = records.find(row => row.option === previousActive && !row.disabled) || records.find(row => row.option.selected && !row.disabled) || available()[0];

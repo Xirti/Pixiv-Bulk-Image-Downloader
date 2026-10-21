@@ -9,6 +9,20 @@ from pathlib import Path
 
 
 class LocalCatalogTests(unittest.TestCase):
+    def test_root_path_in_index_does_not_break_other_artwork_badges(self):
+        from local_catalog import LocalCatalog
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            file = root / 'good.png'
+            file.write_bytes(b'image')
+            catalog = LocalCatalog(root / 'catalog.db')
+            catalog.record('123', [0], 'original', 'source', root, [file])
+            encoded = json.dumps([{'path': str(Path(root.anchor)), 'size': 0, 'mtime': 0}])
+            with catalog._connection() as connection:
+                connection.execute('INSERT INTO artifacts VALUES (?,?,?,?,?,?)',
+                                   ('456', 0, 'original', 'source', str(root), encoded))
+            self.assertEqual(catalog.downloaded_pages_many(['123', '456']), {'123': {0}, '456': set()})
+
     def test_misdirected_catalog_row_does_not_skip_a_file_outside_the_target_directory(self):
         from local_catalog import LocalCatalog
         with tempfile.TemporaryDirectory() as temporary:

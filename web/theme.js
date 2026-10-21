@@ -11,7 +11,7 @@
     if (!button) return;
     const reduced = matchMedia('(prefers-reduced-motion: reduce)');
     const contrast = matchMedia('(forced-colors: active)');
-    let busy = false, transition = null, sweep = null, sequence = 0;
+    let busy = false, transition = null, sweep = null, sequence = 0, pendingCommit = null;
     const label = () => {
       const dark = root.dataset.theme === 'dark';
       button.textContent = dark ? '☀ 日间' : '☾ 夜间';
@@ -20,14 +20,16 @@
     };
     function finish(id) {
       if (id !== sequence) return;
-      busy = false; transition = null; sweep = null;
+      busy = false; transition = null; sweep = null; pendingCommit = null;
       delete root.dataset.themeSweep;
     }
     function cancel() {
+      // A skipped snapshot can still run its update callback later. Settle once before unlocking.
+      pendingCommit?.();
       sequence++;
       sweep?.cancel();
       transition?.skipTransition();
-      busy = false; transition = null; sweep = null;
+      busy = false; transition = null; sweep = null; pendingCommit = null;
       delete root.dataset.themeSweep;
     }
     button.onclick = async () => {
@@ -49,7 +51,7 @@
       const radius = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
       const center = 'px at ' + x + 'px ' + y + 'px)';
       const id = ++sequence;
-      busy = true; root.dataset.themeSweep = 'active';
+      busy = true; pendingCommit = commit; root.dataset.themeSweep = 'active';
       try {
         transition = document.startViewTransition(commit);
         const current = transition;
