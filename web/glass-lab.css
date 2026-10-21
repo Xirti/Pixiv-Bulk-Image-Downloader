@@ -56,3 +56,85 @@ dialog {border-radius:24px}dialog::backdrop {background:#07142266;backdrop-filte
 :root[data-glass=off] .lab-search-body {background:var(--lab-panel);backdrop-filter:none}
 @media(max-width:700px) {.lab-search-body{padding:20px!important}.search-row #searchSubmit{padding:0 16px}.lab-controls{justify-content:center}.brand .edition-label{font-size:9px}.lab-badge{display:none}}
 @media(prefers-reduced-motion:reduce) {button{transition:none!important}.lg-optic-beam{animation:none!important}}
+
+/* Control materials, including the opened menus: all surfaces are drawn by the page. */
+:root {
+  --control-glass:linear-gradient(150deg,#e2f4ff27 0%,#bbdefe13 45%,#72bfe917 100%);
+  --control-hover:linear-gradient(150deg,#e9f8ff3d,#a5d3fa25 55%,#80c6ed24);
+  --control-border:#d1edff40;--control-rim:#edfaff5c;--control-floor:#0b1d375c;
+  --control-shadow:0 5px 14px #020c221e;--control-checked:#a1d8ff;
+  --menu-glass:linear-gradient(150deg,#32586ce8,#183046d9 65%,#193349e8);
+  --menu-active:linear-gradient(120deg,#cbf0ff35,#92cbf61c);--menu-edge:#cbebff52;
+}
+:root[data-theme=light] {
+  --control-glass:linear-gradient(150deg,#ffffffa8 0%,#f4fbff63 46%,#bedcf55e 100%);
+  --control-hover:linear-gradient(150deg,#ffffffe8,#f7fcff99 50%,#c9e8ff90);
+  --control-border:#ffffffc9;--control-rim:#ffffffed;--control-floor:#7193b53a;
+  --control-shadow:0 5px 14px #31537115;--control-checked:#377aa9;
+  --menu-glass:linear-gradient(150deg,#f4fbfff0,#e2eff7d9 65%,#dceefbe8);
+  --menu-active:linear-gradient(120deg,#ffffffdd,#b1d9f15e);--menu-edge:#ffffffeb;
+}
+.lab-native-select {display:none!important}
+button.lab-select-trigger,
+.search-panel button.lab-select-trigger {
+  display:flex;align-items:center;justify-content:space-between;gap:18px;width:100%;min-width:0;
+  min-height:44px;margin-top:6px;padding:10px 14px;border:1px solid var(--control-border);border-radius:13px;
+  background:var(--control-glass);color:var(--ink);font:500 13px/1.5 "Segoe UI","Microsoft YaHei",sans-serif;
+  box-shadow:inset 0 1px 0 var(--control-rim),inset 0 -1px 0 var(--control-floor),var(--control-shadow);
+  backdrop-filter:blur(14px) saturate(1.5);cursor:pointer;overflow:hidden;isolation:isolate;
+}
+.search-panel.webgl-ready button.lab-select-trigger {background:linear-gradient(150deg,#ffffff13,#a5d5ff06);backdrop-filter:none;box-shadow:inset 0 1px 0 var(--control-rim),inset 0 -1px 0 var(--control-floor),var(--control-shadow)}
+button.lab-select-trigger:hover:not(:disabled) {background:var(--control-hover);border-color:var(--control-rim)}
+button.lab-select-trigger[aria-expanded=true] {border-color:var(--accent);box-shadow:inset 0 1px 0 var(--control-rim),0 0 0 3px #74c8ff17,var(--control-shadow)}
+.lab-select-value {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;min-width:0}
+.lab-select-chevron {width:7px;height:7px;border-right:1.8px solid currentColor;border-bottom:1.8px solid currentColor;transform:rotate(45deg) translateY(-2px);flex-shrink:0;opacity:.8}
+[aria-expanded=true]>.lab-select-chevron {transform:rotate(225deg) translate(-1px,-1px)}
+.lab-select-popup {
+  position:fixed;inset:auto;margin:0;padding:7px;border:1px solid var(--menu-edge);border-radius:18px;
+  background:var(--menu-glass);color:var(--ink);box-shadow:inset 0 1px 0 var(--control-rim),inset 0 -1px 0 var(--control-floor),0 20px 55px #020c2240;
+  backdrop-filter:blur(24px) saturate(1.65);overflow:auto;overscroll-behavior:contain;z-index:12000;
+  font:13px/1.5 "Segoe UI","Microsoft YaHei",sans-serif;scrollbar-width:thin;scrollbar-color:var(--line) transparent;
+}
+.lab-select-popup[hidden] {display:none!important}
+.lab-select-option {position:relative;min-height:40px;padding:11px 34px 11px 13px;margin:2px 0;border:1px solid transparent;border-radius:12px;cursor:pointer;user-select:none;transition:background .12s,border-color .12s}
+.lab-select-option.is-active:not([aria-disabled=true]),.lab-select-option[aria-selected=true] {background:var(--menu-active);border-color:var(--control-border);box-shadow:inset 0 1px 0 var(--control-rim)}
+.lab-select-option[aria-selected=true]::after {content:"✓";position:absolute;right:12px;top:11px;color:var(--accent);font-weight:800}
+.lab-select-option[aria-disabled=true] {opacity:.4;cursor:default}
+.lab-select-option:active:not([aria-disabled=true]) {background:var(--control-hover)}
+.search-panel :is(.ai-choice,.fuzzy-choice),
+:is(.save-settings,.detail-info,#loginDialog) :is(.folder-choice,.remember-choice) {
+  border:1px solid var(--control-border);border-radius:13px;padding:10px 12px;min-height:44px;
+  background:var(--control-glass);box-shadow:inset 0 1px 0 var(--control-rim),inset 0 -1px 0 var(--control-floor),var(--control-shadow);
+  backdrop-filter:blur(14px) saturate(1.5);color:var(--ink);gap:10px;align-items:center;cursor:pointer;
+}
+.search-panel.webgl-ready :is(.ai-choice,.fuzzy-choice) {background:linear-gradient(150deg,#ffffff13,#a5d5ff06);backdrop-filter:none}
+.search-panel :is(.ai-choice,.fuzzy-choice):has(input:checked),
+.detail-info .folder-choice:has(input:checked) {border-color:var(--control-checked);box-shadow:inset 0 1px 0 var(--control-rim),0 0 0 2px #74c8ff12,var(--control-shadow)}
+:is(#searchForm,#downloadOptions,#loginDialog) input[type=checkbox] {
+  appearance:none;-webkit-appearance:none;display:inline-grid;place-content:center;position:relative;
+  width:21px;height:21px;min-width:21px;flex:0 0 21px;margin:0;border:1px solid var(--control-border);border-radius:7px;
+  background:linear-gradient(145deg,#fff3,#8bbcf515);box-shadow:inset 0 1px 1px var(--control-rim),inset 0 -1px 2px var(--control-floor);cursor:pointer;
+}
+:is(#searchForm,#downloadOptions,#loginDialog) input[type=checkbox]::after {content:"";width:6px;height:10px;border-right:2px solid var(--ink);border-bottom:2px solid var(--ink);transform:translateY(-1px) rotate(45deg) scale(0);transition:transform .12s}
+:is(#searchForm,#downloadOptions,#loginDialog) input[type=checkbox]:checked {background:linear-gradient(140deg,#b8e3ff66,#78b6e239);border-color:var(--control-checked)}
+:is(#searchForm,#downloadOptions,#loginDialog) input[type=checkbox]:checked::after {transform:translateY(-1px) rotate(45deg) scale(1)}
+:is(#searchForm,#downloadOptions,#loginDialog) input[type=checkbox]:disabled {opacity:.4;cursor:default}
+#download,#batchDownload,#basketDownload,#browseFolder,#openBasketPicker,#authAction,
+.batch-actions button,.dialog-actions button,.pending-downloads button,.basket-header-actions button,
+.page-selection-tools button,.history-tools button,.history-selection button,.view-all,.view-more,
+#batchEntryPane .batch-actions button,.head-actions button,.recent-searches button {
+  border:1px solid var(--control-border);border-radius:14px;background:var(--control-glass);color:var(--ink);
+  box-shadow:inset 0 1px 0 var(--control-rim),inset 0 -1px 0 var(--control-floor),var(--control-shadow);
+  backdrop-filter:blur(18px) saturate(1.6);font-weight:650;
+}
+:is(#download,#batchDownload,#basketDownload,#browseFolder,#openBasketPicker,#authAction,.batch-actions button,.dialog-actions button,.pending-downloads button):hover:not(:disabled) {background:var(--control-hover);border-color:var(--control-rim);box-shadow:inset 0 1px 0 var(--control-rim),inset 0 -1px 0 var(--control-floor),0 7px 20px #268ed52b}
+#download,#batchDownload {min-height:52px;background:linear-gradient(140deg,#a1d4ff34,#a2dfff14 55%,#61b5f534);letter-spacing:.3px}
+:root[data-theme=light] :is(#download,#batchDownload) {background:linear-gradient(140deg,#ffffffd6,#c7e5f894 55%,#aed7f485);color:#1e5277}
+.download .lab-select-trigger {margin-top:8px}.lab-select-trigger:disabled {opacity:.45}
+#downloadPage :is(.save-settings,.download) {background:var(--control-glass);border:1px solid var(--control-border);box-shadow:inset 0 1px 0 var(--control-rim),var(--control-shadow);backdrop-filter:blur(16px) saturate(1.35)}
+#downloadPage :is(input[type=text],input:not([type]),input[type=date]) {background:var(--control-glass);border-color:var(--control-border);box-shadow:inset 0 1px 0 #fff2}
+@media(forced-colors:active) {
+  :is(#searchForm,#downloadOptions,#loginDialog) input[type=checkbox] {appearance:auto;-webkit-appearance:auto}
+  :is(#searchForm,#downloadOptions,#loginDialog) input[type=checkbox]::after {display:none}
+  .lab-select-popup,.lab-select-trigger,.lab-select-option {forced-color-adjust:auto}
+}

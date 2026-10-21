@@ -1,5 +1,6 @@
 /* Experimental presentation adapter. Original DOM identities and actions stay owned by app.js. */
 import {createComponent, createGlassSystem} from './vendor/lens/index.js';
+import {enhanceSelect} from './glass-select.js';
 
 const root = document.documentElement;
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
@@ -45,6 +46,12 @@ const searchPanel = createComponent('panel', {
 searchPanel.element.classList.add('lab-search-body');
 searchStage.append(searchPanel.element);
 components.push(searchPanel);
+for (const id of ['workType', 'safety', 'datePreset', 'quality', 'format']) {
+  components.push(enhanceSelect(document.getElementById(id)));
+}
+searchStage.querySelectorAll('.ai-choice,.fuzzy-choice').forEach(tile => {
+  tile.classList.add('lg-surface', 'lab-check-tile'); tile.dataset.glass = 'chip';
+});
 searchStage.querySelectorAll('button').forEach(enhanceButton);
 
 const selectionStage = document.getElementById('selectionBar');

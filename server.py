@@ -60,6 +60,9 @@ CODE_GENERATION_FILES = (
 CODE_GENERATION_FILES += ('experiment_profile.py', 'web/glass-lab.css', 'web/glass-lab.js', 'web/vendor/lens/card-list.js', 'web/vendor/lens/component-catalog.js', 'web/vendor/lens/component-patterns.js', 'web/vendor/lens/components.css', 'web/vendor/lens/components.js', 'web/vendor/lens/focus.js', 'web/vendor/lens/index.js', 'web/vendor/lens/internal/context-budget.js', 'web/vendor/lens/internal/jelly-physics.js', 'web/vendor/lens/internal/jelly.js', 'web/vendor/lens/internal/lens-surface.js', 'web/vendor/lens/internal/optical-motion.js', 'web/vendor/lens/internal/optics.js', 'web/vendor/lens/internal/renderer.js', 'web/vendor/lens/LICENSE', 'web/vendor/lens/optical-components.js', 'web/vendor/lens/README.md', 'web/vendor/lens/runtime.js', 'web/vendor/lens/sound.js', 'web/vendor/lens/tokens.css', 'web/vendor/lens/tokens.js', 'web/vendor/lens/UPSTREAM.md')
 
 
+CODE_GENERATION_FILES += ("web/glass-select.js",)
+
+
 def compute_code_generation(
     *, root: Path | None = None, files: tuple[str, ...] = CODE_GENERATION_FILES,
     executable: Path | None = None, frozen: bool | None = None,
