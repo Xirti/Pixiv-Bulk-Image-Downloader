@@ -4,7 +4,7 @@ import {createComponent} from './vendor/lens/index.js';
 let sequence = 0;
 let activeControl = null;
 
-export function enhanceSelect(select) {
+export function enhanceSelect(select, {material = 'glass'} = {}) {
   const owner = select.ownerDocument;
   const captionNode = select.labels?.[0];
   const caption = select.getAttribute('aria-label') || captionNode?.querySelector(':scope > span')?.textContent.trim()
@@ -17,11 +17,17 @@ export function enhanceSelect(select) {
   const trigger = component.element;
   trigger.id = `${id}-trigger`;
   trigger.classList.add('lab-select-trigger');
+  if (material === 'quiet') {
+    trigger.classList.add('lab-select-quiet');
+    trigger.classList.remove('lg-surface');
+    delete trigger.dataset.glass; delete trigger.dataset.lgLens;
+  }
   trigger.setAttribute('role', 'combobox');
   trigger.setAttribute('aria-haspopup', 'listbox');
   trigger.setAttribute('aria-expanded', 'false');
   trigger.setAttribute('aria-controls', `${id}-popup`);
-  trigger.dataset.lgDrag = 'press';
+  if (material === 'quiet') delete trigger.dataset.lgDrag;
+  else trigger.dataset.lgDrag = 'press';
   const valueText = owner.createElement('span');
   valueText.className = 'lab-select-value';
   const arrow = owner.createElement('span');
@@ -31,6 +37,7 @@ export function enhanceSelect(select) {
   const popup = owner.createElement('div');
   popup.id = `${id}-popup`;
   popup.className = 'lab-select-popup';
+  if (material === 'quiet') popup.classList.add('lab-select-popup-quiet');
   popup.setAttribute('role', 'listbox'); popup.setAttribute('aria-label', caption);
   const supportsPopover = typeof popup.showPopover === 'function';
   if (supportsPopover) popup.setAttribute('popover', 'auto');

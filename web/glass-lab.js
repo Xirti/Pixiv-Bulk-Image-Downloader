@@ -1,6 +1,7 @@
 /* Experimental presentation adapter. Original DOM identities and actions stay owned by app.js. */
 import {createComponent, createGlassSystem} from './vendor/lens/index.js';
 import {enhanceSelect} from './glass-select.js';
+import {mountDotTitle} from './dot-title.js';
 
 const root = document.documentElement;
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
@@ -47,12 +48,10 @@ searchPanel.element.classList.add('lab-search-body');
 searchStage.append(searchPanel.element);
 components.push(searchPanel);
 for (const id of ['workType', 'safety', 'datePreset', 'quality', 'format']) {
-  components.push(enhanceSelect(document.getElementById(id)));
+  components.push(enhanceSelect(document.getElementById(id), {material: id === 'datePreset' ? 'quiet' : 'glass'}));
 }
-searchStage.querySelectorAll('.ai-choice,.fuzzy-choice').forEach(tile => {
-  tile.classList.add('lg-surface', 'lab-check-tile'); tile.dataset.glass = 'chip';
-});
-searchStage.querySelectorAll('button').forEach(enhanceButton);
+searchStage.querySelectorAll('button:not(.lab-select-quiet)').forEach(enhanceButton);
+components.push(mountDotTitle(document.querySelector('.home-intro h1')));
 
 const selectionStage = document.getElementById('selectionBar');
 // The app owns this node's hidden state and text; only its existing controls are enhanced.
@@ -132,6 +131,7 @@ root.dataset.glass = 'on';
 
 function pulse(button, keyboard = false) {
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true' || reduced.matches) return;
+  if (button.matches('.head-actions button,.lab-select-quiet')) return;
   // Lens supplies the optical press inside its stages. Elsewhere only decorate; never dispatch actions.
   if (button.closest('.lg-stage') && enabled && !keyboard) return;
   feedback.get(button)?.cancel();
