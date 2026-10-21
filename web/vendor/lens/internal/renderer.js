@@ -65,6 +65,7 @@ uniform float uRefraction;
 uniform float uBlur;
 uniform float uDispersion;
 uniform float uTint;
+uniform float uTintScale;
 uniform float uDark;
 uniform float uCompare;
 uniform float uHover;
@@ -163,7 +164,7 @@ void main(){
   float luma = dot(c,vec3(.2126,.7152,.0722));
   c = mix(vec3(luma),c,1.035);
   vec3 tint = mix(vec3(.97,.985,1.),vec3(.16,.24,.34),uDark);
-  c = mix(c,tint,uTint+uBlur*.12+uCompare*.11+uDark*.10);
+  c = mix(c,tint,(uTint+uBlur*.12+uCompare*.11+uDark*.10)*uTintScale);
   c = mix(c,uAccent.rgb,uAccent.a);
   if(fieldGlass){
     vec2 q=clamp((local+b-vec2(40.*uScale))/max(uLocalSize-vec2(80.*uScale),vec2(1.)),0.,1.);
@@ -250,7 +251,7 @@ export class GlassRenderer {
   constructor(canvas, stage, options={}) {
     this.canvas=canvas; this.stage=stage;
     this.artwork=typeof options.artwork==='function'?options.artwork:null;
-    this.settings={...tokens.materials.thick,brightness:.95,motion:true,opaque:false,compare:false,scene:'aurora',...options};
+    this.settings={...tokens.materials.thick,brightness:.95,tintScale:1,artworkAligned:false,motion:true,opaque:false,compare:false,scene:'aurora',...options};
     this.pointer={x:0,y:0}; this.smoothPointer={x:0,y:0};
     this.time=0; this.lastTime=0; this.frame=0; this.dirty=true; this.rectDirty=true;
     this.geometry=[]; this.visible=true; this.destroyed=false; this.animatingUntil=0;
@@ -358,7 +359,7 @@ export class GlassRenderer {
   setScene(name) {
     this.settings.scene=name;
     if(this.suspended||!this.gl||this.gl.isContextLost?.())return;
-    const art=document.createElement('canvas');art.width=this.width;art.height=this.height;
+    const art=this.artCanvas ||= document.createElement('canvas');art.width=this.width;art.height=this.height;
     const ctx=art.getContext('2d'),w=art.width,h=art.height;
     if(this.artwork){
       this.artwork(ctx,{width:w,height:h,dpr:this.dpr,scene:name});
@@ -399,6 +400,18 @@ export class GlassRenderer {
     gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,art);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
     this.invalidate();
+  }
+
+  // Reuse the artwork backing store for live scenes. No geometry or GPU lease changes.
+  refreshArtwork() {
+    if(!this.artwork||this.destroyed||this.suspended||this.lost||!this.visible||document.hidden||!this.gl||this.gl.isContextLost?.())return;
+    const art=this.artCanvas,gl=this.gl;
+    if(!art||!this.width||!this.height)return;
+    const ctx=art.getContext('2d');ctx.clearRect(0,0,this.width,this.height);
+    this.artwork(ctx,{width:this.width,height:this.height,dpr:this.dpr,scene:this.settings.scene});
+    gl.bindTexture(gl.TEXTURE_2D,this.textures.art);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,art);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);this.invalidate(0,false);
   }
 
   set(next) {
@@ -481,7 +494,7 @@ export class GlassRenderer {
     this.use(p.background);
     gl.uniform1i(p.background.uniforms.uArtwork,0);gl.uniform1f(p.background.uniforms.uTime,this.time);
     // Pause freezes time, so the background never jumps back to an initial pose.
-    gl.uniform1f(p.background.uniforms.uAnimate,this.reducedMotion?0:1);
+    gl.uniform1f(p.background.uniforms.uAnimate,this.reducedMotion||this.settings.artworkAligned?0:1);
     gl.uniform1f(p.background.uniforms.uGrid,this.settings.scene==='grid'?1:0);
     gl.uniform1f(p.background.uniforms.uBrightness,this.settings.brightness);
     gl.drawArrays(gl.TRIANGLES,0,6);
@@ -508,7 +521,7 @@ export class GlassRenderer {
         const rail=g.kind==='switch-track',thumb=g.kind==='thumb';
         gl.uniform1f(u.uRefraction,this.settings.refraction*(rail?.12:thumb?.45:1));gl.uniform1f(u.uBlur,this.settings.blur);gl.uniform1f(u.uDispersion,this.settings.dispersion*((rail||thumb)?.2:1));
         const tint={panel:.14,dock:.095,small:.12,thumb:.83,'switch-track':.06,'slider-thumb':.18,selected:.19,tab:.18,note:.09,free:.012,menu:.60,'optical-lens':.012,'optical-well':.055}[g.kind]??.13;
-        gl.uniform1f(u.uTint,tint);gl.uniform1f(u.uDark,this.settings.scene==='ocean'&&!thumb?1:0);
+        gl.uniform1f(u.uTint,tint);gl.uniform1f(u.uTintScale,this.settings.tintScale);gl.uniform1f(u.uDark,this.settings.scene==='ocean'&&!thumb?1:0);
         const progress=rail?(this.motionSource?.toggleProgress(g.el.parentElement)||0):0;
         gl.uniform4f(u.uAccent,rail?.38-progress*.22:.25,rail?.45+progress*.17:.51,rail?.54-progress*.17:.87,rail?.48+progress*.34:g.selected*.17);
         gl.uniform1f(u.uOpacity,g.opacity*(effect?.opacity??1));

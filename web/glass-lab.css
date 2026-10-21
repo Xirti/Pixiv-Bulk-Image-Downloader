@@ -1,4 +1,4 @@
-/* MOKU Glass Lab 01 / R7 — transparent glass, tinted tags, ceramic controls. */
+/* MOKU Glass Lab 01 / R8 — live clear glass, quiet rail and interactive point lettering. */
 :root {
   --bg:#0b111b;--ink:#e9f2fc;--muted:#a1b3c8;--line:#8ab4d52e;
   --surface:#152131;--surface-2:#1b2b3d;--accent:#8acbff;--on-accent:#0a2037;
@@ -7,7 +7,7 @@
   --lg-color-text:var(--ink);--lg-color-muted:var(--muted);--lg-color-focus:#79baff;
   --lg-surface-fallback:#19314920;--lg-surface-solid:#1b2b3d;
   --page-art:radial-gradient(ellipse at 12% 12%,#52b8ff13,transparent 54%),radial-gradient(ellipse at 88% 22%,#8c86ef0d,transparent 46%),radial-gradient(circle,#7899b330 .8px,transparent 1px);
-  --pane-fill:linear-gradient(130deg,#c5e7ff0c,#8a85d504 48%,#9acbfa08);--pane-blur:2px;
+  --pane-fill:linear-gradient(130deg,#c5e7ff04,#8a85d501 48%,#9acbfa03);--pane-blur:.35px;
   --pane-rim:linear-gradient(135deg,#e4faff85,#a3cfff1c 24%,#a8a3ff0b 48%,#8abaff3d 75%,#e0f6ff66);
   --ceramic:linear-gradient(155deg,#293b4f,#1e2c3e 52%,#182535);
   --ceramic-hover:linear-gradient(155deg,#344b62,#273a50 52%,#203146);
@@ -25,7 +25,7 @@
   --action-fill:#316fa6;--moon:#316fa6;--badge:#f6fbffec;
   --lab-panel:#ffffffa8;--lab-glint:#fff;--lab-shadow:0 18px 65px #2b527410;
   --lg-color-focus:#2875ed;--lg-surface-fallback:#f4faff25;--lg-surface-solid:#f4f8fc;
-  --pane-fill:linear-gradient(130deg,#ffffff32,#d2e5fa0b 48%,#ffffff20);
+  --pane-fill:linear-gradient(130deg,#ffffff0c,#d2e5fa02 48%,#ffffff06);
   --pane-rim:linear-gradient(135deg,#fff,#94badb45 24%,#b7b4e324 48%,#a3c9e56b 75%,#fff);
   --ceramic:linear-gradient(155deg,#ffffff,#edf3f8 52%,#dce7f0);
   --ceramic-hover:linear-gradient(155deg,#ffffff,#f7fbff 52%,#e6f0f8);
@@ -37,25 +37,25 @@
   --menu-bg:#f0f6fb;--menu-active:#d8e8f5;--menu-pressed:#c6deef;--menu-tick:#286a9e;
   --login-bg:#f5f9fdf5;--login-field:#e7f0f8;--login-ink:#263e55;--login-muted:#526c83;
 }
-:root[data-material=thick] {--pane-blur:5px}
-:root[data-material=soft] {--pane-blur:10px}
+:root[data-material=thick] {--pane-blur:.8px}
+:root[data-material=soft] {--pane-blur:3px}
 body {background-color:var(--bg);background-image:var(--page-art);background-size:auto,auto,24px 24px;background-attachment:fixed;font-family:"Segoe UI","Microsoft YaHei",sans-serif}
 body>header {background:var(--lab-panel);border-bottom:1px solid var(--line);backdrop-filter:blur(20px) saturate(1.25)}
 .brand {letter-spacing:-1.5px}.brand .edition-label {letter-spacing:1.3px;font-size:10px;color:var(--muted);font-weight:650}
-.page-rail {padding:7px;border-color:var(--line);border-radius:14px;background:var(--lab-panel);box-shadow:var(--lab-shadow);backdrop-filter:blur(18px)}
-.page-rail a,.page-rail button {border-color:var(--line);border-radius:14px;background:transparent}.page-rail :is(a,button)[aria-current] {background:var(--surface-2);box-shadow:inset 0 1px 0 var(--lab-glint);color:var(--accent)}
+.page-rail {padding:7px;border:0;border-radius:0;background:var(--bg);box-shadow:none;backdrop-filter:none}
+.page-rail a,.page-rail button {border:0;border-radius:13px;background:transparent}.page-rail :is(a,button)[aria-current] {background:var(--surface-2);box-shadow:none;color:var(--ink)}
 .home-intro .eyebrow {letter-spacing:3px;color:var(--muted)}.lab-badge {display:inline-block;letter-spacing:1px;font-size:10px;border:1px solid var(--line);border-radius:999px;padding:5px 10px;margin-left:10px;vertical-align:middle;color:var(--accent)}
 .home-intro h1 {display:inline-flex;align-items:baseline;letter-spacing:0;font-weight:600;line-height:1.25}.home-title-mark {position:static;color:var(--accent)}
-.lab-dot-title {position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.lab-dot-title {position:absolute;inset:-48px;width:calc(100% + 96px);height:calc(100% + 96px);pointer-events:none}
 .home-intro h1.has-dot-title :is(.home-title-text,.home-title-mark) {color:transparent}
 
 /* Full Lens scenes: refraction, broad reflection and interactive optical edges. */
-.search-panel,.search-panel.lg-stage,#downloadPage #detail,#basketArtworkDetail,#selectionBar.lg-stage {
+.search-panel,.search-panel.lg-stage,.lab-detail-pane,.lab-detail-pane.lg-stage,#selectionBar.lg-stage {
   position:relative;isolation:isolate;border:1px solid var(--line);border-radius:28px;
   background:var(--pane-fill);box-shadow:inset 0 1px 1px #edfaff10,inset 0 -1px 1px #6886b414,var(--lab-shadow);
   backdrop-filter:blur(var(--pane-blur)) saturate(1.15);color:var(--ink);
 }
-:is(.search-panel,#downloadPage #detail,#basketArtworkDetail,#selectionBar)::after {
+:is(.search-panel,.lab-detail-pane,#selectionBar)::after {
   content:"";position:absolute;inset:-1px;border-radius:inherit;padding:1px;pointer-events:none;
   background:var(--pane-rim);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;
 }
@@ -159,11 +159,13 @@ input[type=checkbox]:disabled {opacity:.4;cursor:default}
 .batch-collection .batch-card-select input:checked+span {color:transparent;border-color:var(--action-fill)}
 .batch-collection .batch-card-select input:checked+span::after {transform:translateY(-2px) rotate(45deg) scale(1)}
 
-/* One transparent face contains metadata, settings and artwork previews. */
-#downloadPage,.basket-page {background-image:var(--page-art);background-size:auto,auto,24px 24px;background-attachment:fixed}
-#downloadPage #detail,#basketArtworkDetail {margin:24px clamp(16px,3vw,44px) 36px;padding:30px;min-height:0;gap:36px;border-top:1px solid var(--line);align-items:start}
-#downloadPage :is(.detail-info,.detail-content,.save-settings,.download),#basketArtworkDetail :is(.detail-info,.detail-content) {background:transparent;box-shadow:none;backdrop-filter:none}
+/* Only the metadata column is glass; artwork remains on the open page. */
+#downloadPage,.basket-page {background-image:radial-gradient(circle,#7899b330 .8px,transparent 1px);background-size:24px 24px;background-attachment:fixed}
+#downloadPage #detail,#basketArtworkDetail {margin:24px clamp(16px,3vw,44px) 36px;padding:0;min-height:0;gap:36px;border:0;border-radius:0;background:transparent;box-shadow:none;backdrop-filter:none;align-items:start}
+#downloadPage :is(.detail-content,.save-settings,.download),#basketArtworkDetail .detail-content {background:transparent;box-shadow:none;backdrop-filter:none}
 #downloadPage :is(.save-settings,.download) {border:0;border-radius:0;padding:0}
+.lab-detail-pane {padding:28px;min-width:0}
+#downloadPage .detail-content,#basketArtworkDetail .detail-content {border:0;border-radius:0;padding:0;overflow:visible}
 #downloadPage .save-settings {margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
 #downloadPage .download {margin:16px 0 20px;gap:14px}
 #downloadPage .path-picker {margin:8px 0 12px}
@@ -180,10 +182,10 @@ input[type=checkbox]:disabled {opacity:.4;cursor:default}
 #loginDialog #authAction:hover:not(:disabled) {background:linear-gradient(145deg,#5194ba,#39759d 55%,#315e89)}
 #loginDialog .dialog-close {background:transparent;border-color:transparent;box-shadow:none;color:var(--login-muted)}
 #loginDialog .dialog-close:hover {background:#a1c9eb13;color:var(--login-ink)}
-:root[data-glass=off] :is(.search-panel,#detail,#basketArtworkDetail,#selectionBar) {backdrop-filter:none}
-:root[data-glass=off] :is(.search-panel,#detail,#basketArtworkDetail,#selectionBar)::after {opacity:.4}
+:root[data-glass=off] :is(.search-panel,.lab-detail-pane,#selectionBar) {backdrop-filter:none}
+:root[data-glass=off] :is(.search-panel,.lab-detail-pane,#selectionBar)::after {opacity:.4}
 @media(max-width:900px) {#downloadPage #detail,#basketArtworkDetail{grid-template-columns:1fr;gap:20px}}
-@media(max-width:700px) {.search-panel .lab-search-body{padding:20px}.search-row #searchSubmit{padding:0 16px}.lab-controls{justify-content:center}.brand .edition-label{font-size:9px}.lab-badge{display:none}#downloadPage #detail,#basketArtworkDetail{margin:16px 12px 24px;padding:20px;border-radius:22px}}
+@media(max-width:700px) {.search-panel .lab-search-body{padding:20px}.search-row #searchSubmit{padding:0 16px}.lab-controls{justify-content:center}.brand .edition-label{font-size:9px}.lab-badge{display:none}#downloadPage #detail,#basketArtworkDetail{margin:16px 12px 24px;padding:0;border-radius:0}}
 @media(prefers-reduced-motion:reduce) {button,input[type=checkbox],input[type=checkbox]::after,.batch-card-select span,.batch-card-select span::after{transition:none!important}.lg-optic-beam{animation:none!important}}
 @media(forced-colors:active) {
   input[type=checkbox]:not(:where(.batch-card-select input)) {appearance:auto;-webkit-appearance:auto}
@@ -192,31 +194,24 @@ input[type=checkbox]:disabled {opacity:.4;cursor:default}
   .batch-collection .batch-card-select input:checked+span {background:Highlight;border-color:Highlight}
   .batch-collection .batch-card-select span::after {border-color:HighlightText}
   .lab-select-popup,.lab-select-trigger,.lab-select-option {forced-color-adjust:auto}
-  :is(.search-panel,#detail,#basketArtworkDetail,#selectionBar)::after,.lg-canvas {display:none}
+  :is(.search-panel,.lab-detail-pane,#selectionBar)::after,.lg-canvas {display:none}
 }
 
 @supports not (mask-composite:exclude) {
-  :is(.search-panel,#detail,#basketArtworkDetail,#selectionBar)::after {display:none}
+  :is(.search-panel,.lab-detail-pane,#selectionBar)::after {display:none}
 }
 
-body .page-rail a,body .page-rail button,.page-rail.lg-stage :is(a,button) {
-  border:1px solid var(--glass-edge);border-radius:14px;background:var(--rail-glass);color:var(--muted);
-  box-shadow:inset 0 1px 0 var(--lab-glint),inset 0 -1px 0 #3462861c,0 3px 9px #04112212;
-  backdrop-filter:blur(12px) saturate(1.4);padding:0;
+body .page-rail :is(a,button) {
+  border:0;border-radius:13px;background:transparent;color:var(--muted);box-shadow:none;backdrop-filter:none;padding:0;
 }
-body .page-rail :is(a,button):is(:hover,[aria-current]) {background:var(--glass-control);border-color:var(--accent);color:var(--accent)}
-.page-rail.lg-stage {font:inherit;overflow-y:auto;overflow-x:hidden;background:var(--lab-panel)}
-.search-panel #searchSubmit.lab-glass-action {background:var(--glass-control);color:var(--ink);border-color:var(--glass-edge);box-shadow:inset 0 1px 0 var(--lab-glint),inset 0 -1px 0 #1e547b29,0 6px 16px #08233d1a;backdrop-filter:blur(12px) saturate(1.4)}
-.search-panel.webgl-ready #searchSubmit.lab-glass-action {background:linear-gradient(145deg,#ffffff12,#a5cfff05);backdrop-filter:none}
-#downloadPage #detail.lg-stage,#basketArtworkDetail.lg-stage {font:inherit;overflow:visible}
-
-/* The shader already supplies the material: do not blur its optical bevel away. */
-.page-rail.webgl-ready :is(a,button) {backdrop-filter:none;background:linear-gradient(145deg,#ffffff0b,#8ebaff03)}
+body .page-rail :is(a,button):is(:hover,[aria-current]) {background:var(--surface-2);color:var(--ink)}
+body .page-rail :is(a,button):active {background:var(--line)}
+.lab-detail-pane.lg-stage {font:inherit;overflow:visible}
 .webgl-ready .tags span.lab-glass-tag {backdrop-filter:none}
 
 /* Lens owns paint and motion. Navigation and page scroll retain their layout. */
-body>.page-rail,body>.page-rail.lg-stage {position:fixed;left:0;top:0;bottom:0;padding:clamp(72px,13svh,132px) 7px 28px;gap:18px}
-#home.hero {isolation:isolate;scroll-margin-top:var(--chrome-height,68px);min-height:0;justify-content:flex-start;gap:24px;padding:32px clamp(16px,4vw,56px) 48px}
+body>.page-rail,body>.page-rail.lg-stage {position:fixed;left:0;top:0;bottom:0;padding:28px 7px 24px;gap:18px}
+#home.hero {isolation:isolate;scroll-margin-top:var(--chrome-height,68px);min-height:0;justify-content:flex-start;gap:24px;padding:16px clamp(16px,4vw,56px) 36px}
 #home .lab-controls {width:min(100%,860px);margin-top:0}
 html {scrollbar-gutter:stable}
 html[data-scroll-owner=workspace] {overflow-y:hidden}
@@ -228,12 +223,44 @@ body>header {position:relative;top:auto}
 :root[data-scroll-owner=workspace] body>header {visibility:hidden;pointer-events:none}
 #downloadPage,#historyPage,#favoritesPage,#basketPage {inset:0 0 0 var(--rail-width)}
 #backTop {top:12px}
-#home .home-intro h1 {font-size:clamp(44px,7.2vw,96px);font-weight:650;line-height:1.16;letter-spacing:0}
+#home .home-intro h1 {font-size:clamp(42px,7.8vw,112px);font-weight:650;line-height:1.16;letter-spacing:0}
 #home .home-intro .eyebrow {letter-spacing:2px;margin-bottom:20px}
 .lab-ambient {position:absolute;inset:0;z-index:-1;width:100%;height:100%;pointer-events:none}
 ::view-transition-old(root),::view-transition-new(root) {animation:none;mix-blend-mode:normal}
 ::view-transition-old(root) {z-index:1}
 ::view-transition-new(root) {z-index:2}
 ::view-transition-group(root) {animation-duration:0s}
-@media(max-height:560px) {body>.page-rail,body>.page-rail.lg-stage {padding-top:36px;gap:12px}}
+@media(max-height:560px) {body>.page-rail,body>.page-rail.lg-stage {padding-top:18px;gap:10px}}
 @media(forced-colors:active) {.lab-ambient {display:none}}
+
+@media(max-width:700px) {.lab-detail-pane {padding:20px}}
+
+/* Quiet icon rail, following the supplied narrow navigation reference. */
+.page-rail {background:#111720}
+:root[data-theme=light] .page-rail {background:#f7f7f6}
+body .page-rail :is(a,button) {width:48px;height:48px;min-height:48px;border-radius:15px;color:#89929e}
+body .page-rail :is(a,button)[aria-current] {background:#252d38;color:#f0f3f6}
+:root[data-theme=light] .page-rail :is(a,button)[aria-current] {background:#e8e9e9;color:#171b1e}
+.page-rail svg {width:24px;height:24px;stroke-width:1.6}
+.page-rail a[href="#home"] svg {fill:currentColor;stroke-width:1.2}
+.page-rail #navHistory {margin-top:18px}
+.page-rail #navHistory::before {content:"";position:absolute;left:9px;right:9px;top:-18px;border-top:1px solid var(--line)}
+/* Give the lettering room; compress the form rather than the touch targets. */
+#home .home-intro {padding:24px 0 32px;max-width:100%;overflow:clip;overflow-clip-margin:32px}
+#home .search-panel {width:min(100%,940px)}
+#home .lab-controls {width:min(100%,940px)}
+.search-panel .lab-search-body,.search-panel.webgl-ready .lab-search-body,.search-panel.fallback .lab-search-body {padding:20px 24px}
+.search-panel .search-row {margin:10px 0;gap:10px}
+.search-panel .search-row input {min-height:48px;font-size:15px;padding:10px 14px;border-radius:12px}
+.search-panel #searchSubmit {min-height:48px;border-radius:12px;padding:0 22px}
+.search-panel .search-help {font-size:11px;line-height:1.6;margin-bottom:10px}
+.search-panel .filters {gap:8px 14px}
+.search-panel :is(.ai-choice,.fuzzy-choice) {min-height:40px;padding:6px 2px}
+.search-panel .date-filter {margin-top:12px;padding-top:12px;gap:10px}
+.search-panel .recent-searches {margin-top:12px;font-size:12px}
+@media(max-width:600px) {
+ body .page-rail :is(a,button) {width:40px;height:44px;min-height:44px}
+ #home .home-intro h1 {font-size:clamp(30px,7vw,42px)}
+ #home .home-intro {padding:20px 0 26px}
+ .search-panel .lab-search-body {padding:18px 16px}
+}

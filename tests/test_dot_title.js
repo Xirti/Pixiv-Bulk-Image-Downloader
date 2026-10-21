@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../web/dot-title.js'), 'utf8').replace('export function mountDotTitle', 'function mountDotTitle');
+const physics = fs.readFileSync(path.join(__dirname, '../web/vendor/lattice/dots.js'),'utf8').replace('export class Dots','class Dots');
+const source = fs.readFileSync(path.join(__dirname, '../web/dot-title.js'), 'utf8').replace(/^import .*;\r?\n/gm,'').replace('export function mountDotTitle', 'function mountDotTitle');
 
 function setup({reduced = false, contrast = false, canvasAvailable = true} = {}) {
   const frames = new Map(), canvases = [], observers = {intersection: [], resize: [], mutation: []};
@@ -20,17 +21,17 @@ function setup({reduced = false, contrast = false, canvasAvailable = true} = {})
     remove() {this.removed = true;}
     getContext() {
       if (!canvasAvailable) return null;
-      return {setTransform() {}, scale() {}, clearRect() {draws++;}, beginPath() {}, arc() {}, fill() {}, fillText() {},
+      return {setTransform() {}, scale() {}, clearRect: () => {draws++;this.points=[];}, beginPath() {}, arc: (x,y) => {this.points.push([x,y]);}, fill() {}, fillText() {},
         measureText(text) {return {width: text.length * 36, fontBoundingBoxAscent: 39, fontBoundingBoxDescent: 9};},
         getImageData: () => ({data: new Uint8ClampedArray(this.width * this.height * 4).fill(255)})};
     }
   }
-  const title = {classList: new Classes(), append(canvas) {this.canvas = canvas;},
+  const title = Object.assign(new EventTarget(), {classList: new Classes(), append(canvas) {this.canvas = canvas;},
     getBoundingClientRect: () => ({left: 0, top: 0, width: 260, height: 60}),
     querySelectorAll: () => [
       {textContent: '想找点什么', classList: {contains: () => false}, getBoundingClientRect: () => ({left: 0, top: 0, width: 220, height: 60})},
       {textContent: '？', classList: {contains: () => true}, getBoundingClientRect: () => ({left: 220, top: 0, width: 40, height: 60})},
-    ]};
+    ]});
   const doc = new EventTarget(); doc.hidden = false; doc.documentElement = {}; doc.fonts = {ready: Promise.resolve()};
   doc.createElement = () => {const canvas = new Canvas(); canvases.push(canvas); return canvas;};
   const media = new Map();
@@ -47,7 +48,7 @@ function setup({reduced = false, contrast = false, canvasAvailable = true} = {})
     getComputedStyle: () => ({fontSize: '46px', fontWeight: '600', fontFamily: 'sans-serif', letterSpacing: '0px', getPropertyValue: () => '#ddeeff'}),
     devicePixelRatio: 1, requestAnimationFrame: cb => {frames.set(++nextId, cb); return nextId;}, cancelAnimationFrame: id => frames.delete(id),
     Uint8ClampedArray, Math});
-  vm.runInContext(source + '\nthis.mount = mountDotTitle;', context);
+  vm.runInContext(physics + '\n' + source + '\nthis.mount = mountDotTitle;', context);
   const api = context.mount(title);
   function advance(ms = 17) {
     time += ms;
@@ -65,6 +66,16 @@ function setup({reduced = false, contrast = false, canvasAvailable = true} = {})
   const rendered = normal.draws;
   for (let index = 0; index < 20; index++) normal.advance();
   assert.equal(normal.draws, rendered, 'idle title should perform no new drawing');
+
+  function pointer(type,x=100,y=30) {const e=new Event(type);Object.assign(e,{clientX:x,clientY:y,button:0,pointerType:'mouse'});normal.title.dispatchEvent(e);}
+  const resting=JSON.stringify(normal.title.canvas.points);
+  pointer('pointermove');normal.advance();
+  assert.notEqual(JSON.stringify(normal.title.canvas.points),resting,'upstream pointer field must displace the actual glyph dots');
+  assert.equal(normal.title.canvas.dataset.state,'interactive','pointer must wake the settled title');
+  assert.ok(normal.frames.size>0);
+  pointer('pointerdown');normal.advance();
+  pointer('pointerleave');for(let i=0;i<240;i++)normal.advance();
+  assert.equal(normal.frames.size,0,'spring return must stop after pointer leaves');
 
   const preferStatic = normal.media.get('(prefers-reduced-motion: reduce)');
   preferStatic.matches = true; preferStatic.dispatchEvent(new Event('change')); normal.advance();
@@ -99,5 +110,5 @@ function setup({reduced = false, contrast = false, canvasAvailable = true} = {})
 
   const noCanvas = setup({canvasAvailable: false});
   assert.equal(noCanvas.title.classList.contains('has-dot-title'), false); noCanvas.api.destroy();
-  console.log('Dot title: one-shot, idle, theme, hidden, reduced motion, contrast, teardown and canvas fallback passed.');
+  console.log('Dot title: intro, pointer repulsion, click burst, spring return, idle, theme, visibility and cleanup passed.');
 })().catch(error => {console.error(error); process.exitCode = 1;});

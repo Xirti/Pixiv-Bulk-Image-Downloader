@@ -1,4 +1,5 @@
-/* Lattice-inspired Chinese lettering: sample local glyphs, assemble once, then stop drawing. */
+/* Local glyphs with the upstream Lattice spring, pointer field and burst physics. */
+import {Dots} from './vendor/lattice/dots.js';
 export function mountDotTitle(title) {
   if (!title) return {destroy() {}};
   const canvas = document.createElement('canvas');
@@ -12,25 +13,27 @@ export function mountDotTitle(title) {
   const contrast = matchMedia('(forced-colors: active)');
   let frame = 0, started = null, settled = false, destroyed = false, onScreen = false;
   let points = [], width = 0, height = 0;
-  let paintTimer = 0;
-  const duration = 1450;
+  let paintTimer = 0, dots = null, pointer = null, lastTick = 0;
+  const duration = 1450, bleed = 48;
 
-  function cancelFrame() {cancelAnimationFrame(frame); frame = 0;}
+  function cancelFrame() {cancelAnimationFrame(frame); frame = 0; lastTick = 0;}
   function stopAtRest() {
     cancelFrame(); settled = true;
+    dots?.snap(); pointer = null;
     if (points.length) draw(1);
     canvas.dataset.state = 'settled';
   }
 
   function draw(progress) {
-    ctx.clearRect(0, 0, width, height);
-    for (const point of points) {
+    ctx.clearRect(-bleed, -bleed, width + bleed * 2, height + bleed * 2);
+    for (let i = 0; i < points.length; i++) {
+      const point = points[i];
       const phase = Math.max(0, Math.min(1, (progress - point.delay) / (1 - point.delay)));
       const eased = phase * phase * phase * (phase * (phase * 6 - 15) + 10);
       ctx.globalAlpha = Math.min(1, phase * 3);
       ctx.fillStyle = point.color;
       ctx.beginPath();
-      ctx.arc(point.x + point.dx * (1 - eased), point.y + point.dy * (1 - eased), point.radius, 0, Math.PI * 2);
+      ctx.arc(dots.x[i] + point.dx * (1 - eased), dots.y[i] + point.dy * (1 - eased), point.radius, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -40,9 +43,14 @@ export function mountDotTitle(title) {
     frame = 0;
     if (destroyed || document.hidden || !onScreen) {stopAtRest(); return;}
     started ??= now;
-    const progress = Math.min(1, (now - started) / duration);
+    const progress = settled ? 1 : Math.min(1, (now - started) / duration);
+    const dt = lastTick ? Math.min((now - lastTick) / 1000, 1 / 30) : 1 / 60;
+    lastTick = now;
+    if (pointer) dots.attract(pointer.x, pointer.y, 140, -135);
+    const moving = dots.step(dt);
     draw(progress);
-    if (progress < 1) frame = requestAnimationFrame(tick);
+    if (progress >= 1) {settled = true; canvas.dataset.state = moving || pointer ? 'interactive' : 'settled';}
+    if (progress < 1 || moving || pointer) frame = requestAnimationFrame(tick);
     else stopAtRest();
   }
 
@@ -57,8 +65,8 @@ export function mountDotTitle(title) {
     if (!bounds.width || !bounds.height) return;
     width = Math.ceil(bounds.width); height = Math.ceil(bounds.height);
     const dpr = Math.min(devicePixelRatio || 1, 2);
-    canvas.width = Math.ceil(width * dpr); canvas.height = Math.ceil(height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    canvas.width = Math.ceil((width + bleed * 2) * dpr); canvas.height = Math.ceil((height + bleed * 2) * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, bleed * dpr, bleed * dpr);
     const raster = document.createElement('canvas');
     raster.width = width * 2; raster.height = height * 2;
     const mask = raster.getContext('2d', {willReadFrequently: true});
@@ -96,6 +104,8 @@ export function mountDotTitle(title) {
           dy: 16 + Math.cos(x / width * Math.PI) * 5, delay: x / width * .14 + y / height * .04});
       }
     }
+    dots = new Dots(points.length);
+    points.forEach((p,i) => {dots.home(i,p.x,p.y); dots.place(i,p.x,p.y);});dots.snap();
     if (!points.length) {canvas.hidden = true; title.classList.remove('has-dot-title'); return;}
     canvas.hidden = false;
     title.classList.add('has-dot-title');
@@ -103,6 +113,25 @@ export function mountDotTitle(title) {
     else if (onScreen) {canvas.dataset.state = 'assembling'; frame = requestAnimationFrame(tick);}
     else draw(0);
   }
+
+  function wake() {
+    if (!destroyed && onScreen && !document.hidden && dots && !reduced.matches && !contrast.matches && !frame) {
+      lastTick = 0; frame = requestAnimationFrame(tick);
+    }
+  }
+  function localPointer(event) {
+    const r = title.getBoundingClientRect();
+    return {x: event.clientX - r.left, y: event.clientY - r.top};
+  }
+  title.addEventListener('pointermove', event => {
+    if (event.pointerType === 'touch') return;
+    pointer = localPointer(event); wake();
+  }, {signal, passive: true});
+  title.addEventListener('pointerleave', () => {pointer = null; wake();}, {signal});
+  title.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || reduced.matches || contrast.matches || !dots) return;
+    const p = localPointer(event);dots.burst(p.x, p.y, 430);wake();
+  }, {signal, passive: true});
 
   function scheduleLayout() {
     if (!paintTimer) paintTimer = requestAnimationFrame(layout);

@@ -8,42 +8,35 @@ import {mountLatticeBackdrop} from './lattice-backdrop.js';
 const root = document.documentElement;
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 const contrast = matchMedia('(forced-colors: active)');
+const searchStage = document.querySelector('.search-panel');
 const systems = new Map();
 const components = [];
 const abort = new AbortController();
 const {signal} = abort;
 components.push(mountCheckboxFeedback(document));
-const backdrop = mountLatticeBackdrop(document.getElementById('home'));
+const backdrop = mountLatticeBackdrop(document.getElementById('home'), {onFrame() {
+  systems.get(searchStage)?.refreshArtwork();
+}});
 components.push(backdrop);
 const feedback = new Map();
-let material = 'thick';
+const materials = {clear:{refraction:.72,blur:.025,dispersion:.30},thick:{refraction:.9,blur:.08,dispersion:.55},soft:{refraction:.48,blur:.32,dispersion:.16}};
+let material = 'clear';
 root.dataset.material = material;
 let enabled = true;
 let disposed = false;
 
 function drawArtwork(ctx, {width, height, dpr}, stage) {
+  if (stage === searchStage) {backdrop.paint(ctx, {width, height, dpr}, stage); return;}
   const dark = root.dataset.theme === 'dark';
-  ctx.fillStyle = dark ? '#0b111b' : '#f3f7fb';
-  ctx.fillRect(0, 0, width, height);
-  const glow = ctx.createRadialGradient(width * .18, height * .05, 0, width * .18, height * .05, Math.max(width, height) * .85);
-  glow.addColorStop(0, dark ? '#254b61' : '#d8ebf7');
-  glow.addColorStop(.65, dark ? '#142537' : '#eaf2fa');
-  glow.addColorStop(1, dark ? '#0b111b' : '#f3f7fb');
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, width, height);
-  const step = 24 * dpr;
-  ctx.fillStyle = dark ? '#b7d9ef58' : '#446a8b4a';
-  const rect = stage.getBoundingClientRect();
+  ctx.fillStyle = dark ? '#0b111b' : '#f3f7fb';ctx.fillRect(0, 0, width, height);
+  const rect = stage.getBoundingClientRect(), step = 24 * dpr;
+  ctx.fillStyle = dark ? '#7899b330' : '#7899b330';
   const first = offset => (((12 - offset) % 24 + 24) % 24) * dpr;
-  for (let x = first(rect.left); x < width; x += step) {
-    for (let y = first(rect.top); y < height; y += step) {
-      ctx.beginPath(); ctx.arc(x, y, .85 * dpr, 0, Math.PI * 2); ctx.fill();
-    }
+  for (let x = first(rect.left); x < width; x += step) for (let y = first(rect.top); y < height; y += step) {
+    ctx.beginPath();ctx.arc(x,y,.8*dpr,0,Math.PI*2);ctx.fill();
   }
-  if (stage === searchStage) backdrop.paint(ctx, {width, height, dpr}, stage);
 }
 
-const searchStage = document.querySelector('.search-panel');
 const searchPanel = createComponent('panel', {
   label: '搜索与筛选', motion: 'none', children: [...searchStage.childNodes],
 });
@@ -54,28 +47,18 @@ for (const id of ['workType', 'safety', 'datePreset', 'quality', 'format']) {
   components.push(enhanceSelect(document.getElementById(id), {material: 'quiet'}));
 }
 components.push(mountDotTitle(document.querySelector('.home-intro h1')));
-const searchButton = document.getElementById('searchSubmit');
-searchButton.classList.add('lg-surface', 'lab-glass-action');
-searchButton.dataset.glass = 'button';
-searchButton.dataset.lgDrag = 'press';
-
 const selectionStage = document.getElementById('selectionBar');
 // Decorative planes supply lens geometry without moving business nodes.
-const detailStage = document.getElementById('detail');
-const basketStage = document.getElementById('basketArtworkDetail');
+const detailStage = document.getElementById('detail').querySelector('.detail-info');
+const basketStage = document.getElementById('basketArtworkDetail').querySelector('.detail-info');
 for (const stage of [selectionStage, detailStage, basketStage]) {
+  if (stage !== selectionStage) stage.classList.add('lab-detail-pane');
   const plane = document.createElement('div');
   plane.className = 'lab-glass-plane';
   plane.dataset.glass = stage === selectionStage ? 'dock' : 'panel';
   plane.setAttribute('aria-hidden', 'true');
   stage.prepend(plane);
   components.push({destroy: () => plane.remove()});
-}
-const railStage = document.querySelector('.page-rail');
-for (const control of railStage.querySelectorAll('a,button')) {
-  control.classList.add('lg-surface', 'lab-rail-control');
-  control.dataset.glass = 'small';
-  control.dataset.lgDrag = 'press';
 }
 const tagRoots = ['dTags', 'basketDetailTags'].map(id => document.getElementById(id)).filter(Boolean);
 function decorateTags() {
@@ -87,7 +70,7 @@ function decorateTags() {
 decorateTags();
 const tagObserver = new MutationObserver(decorateTags);
 tagRoots.forEach(group => tagObserver.observe(group, {childList: true}));
-const mountPoints = [searchStage, selectionStage, railStage, detailStage, basketStage];
+const mountPoints = [searchStage, selectionStage, detailStage, basketStage];
 function unmount(stage) {
   systems.get(stage)?.destroy();
   systems.delete(stage);
@@ -120,8 +103,8 @@ function syncSystems() {
       unmount(stage);
     } else if (active && !systems.has(stage)) {
       const system = createGlassSystem(stage, {
-        material, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
-        artwork: (ctx, size) => drawArtwork(ctx, size, stage), motion: stage === searchStage, elasticity: reduced.matches ? 0 : .42,
+        material: materials[material], artworkAligned: true, tintScale: .12, brightness: 1, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
+        artwork: (ctx, size) => drawArtwork(ctx, size, stage), motion: false, elasticity: reduced.matches ? 0 : .42,
         audio: {enabled: false},
       });
       systems.set(stage, system);
@@ -148,7 +131,7 @@ const materialChoices = createComponent('choices', {
   onChange(value) {
     material = value;
     root.dataset.material = value;
-    for (const system of systems.values()) system.setMaterial(value);
+    for (const system of systems.values()) system.setMaterial(materials[value]);
   },
 });
 materialChoices.element.classList.add('lab-material-choices');
