@@ -9,6 +9,8 @@ if (-not $SkipChecks) {
     node --check $script.FullName
     if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax: $($script.Name)" }
   }
+  node tests/test_glass_runtime.js
+  if ($LASTEXITCODE -ne 0) { throw 'Glass lifecycle checks failed' }
   node tests/test_dot_title.js
   if ($LASTEXITCODE -ne 0) { throw 'Dot title lifecycle checks failed' }
 }

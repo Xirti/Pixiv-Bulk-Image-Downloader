@@ -10,25 +10,27 @@ const components = [];
 const abort = new AbortController();
 const {signal} = abort;
 const feedback = new Map();
-let material = 'clear';
+let material = 'thick';
 root.dataset.material = material;
 let enabled = true;
 let disposed = false;
 
-function drawArtwork(ctx, {width, height, dpr}) {
+function drawArtwork(ctx, {width, height, dpr}, stage) {
   const dark = root.dataset.theme === 'dark';
-  ctx.fillStyle = dark ? '#101d2c' : '#e5eff8';
+  ctx.fillStyle = dark ? '#0b111b' : '#f3f7fb';
   ctx.fillRect(0, 0, width, height);
   const glow = ctx.createRadialGradient(width * .18, height * .05, 0, width * .18, height * .05, Math.max(width, height) * .85);
-  glow.addColorStop(0, dark ? '#26566c' : '#cee8f8');
-  glow.addColorStop(.65, dark ? '#142739' : '#eaf0fa');
-  glow.addColorStop(1, dark ? '#101d2c' : '#e5eff8');
+  glow.addColorStop(0, dark ? '#254b61' : '#d8ebf7');
+  glow.addColorStop(.65, dark ? '#142537' : '#eaf2fa');
+  glow.addColorStop(1, dark ? '#0b111b' : '#f3f7fb');
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, width, height);
   const step = 24 * dpr;
-  ctx.fillStyle = dark ? '#acd8e332' : '#54758a36';
-  for (let x = step / 2; x < width; x += step) {
-    for (let y = step / 2; y < height; y += step) {
+  ctx.fillStyle = dark ? '#b7d9ef58' : '#446a8b4a';
+  const rect = stage.getBoundingClientRect();
+  const first = offset => (((12 - offset) % 24 + 24) % 24) * dpr;
+  for (let x = first(rect.left); x < width; x += step) {
+    for (let y = first(rect.top); y < height; y += step) {
       ctx.beginPath(); ctx.arc(x, y, .85 * dpr, 0, Math.PI * 2); ctx.fill();
     }
   }
@@ -45,21 +47,43 @@ for (const id of ['workType', 'safety', 'datePreset', 'quality', 'format']) {
   components.push(enhanceSelect(document.getElementById(id), {material: 'quiet'}));
 }
 components.push(mountDotTitle(document.querySelector('.home-intro h1')));
+const searchButton = document.getElementById('searchSubmit');
+searchButton.classList.add('lg-surface', 'lab-glass-action');
+searchButton.dataset.glass = 'button';
+searchButton.dataset.lgDrag = 'press';
 
 const selectionStage = document.getElementById('selectionBar');
-// The app owns this node's hidden state and text. Only its rim receives optical rendering.
-const selectionRim = document.createElement('div');
-selectionRim.className = 'lab-optical-rim';
-selectionRim.dataset.glass = 'dock';
-selectionRim.setAttribute('aria-hidden', 'true');
-selectionStage.prepend(selectionRim);
-components.push({destroy: () => selectionRim.remove()});
-
-const mountPoints = [searchStage, selectionStage];
+// Decorative planes supply lens geometry without moving business nodes.
+const detailStage = document.getElementById('detail');
+const basketStage = document.getElementById('basketArtworkDetail');
+for (const stage of [selectionStage, detailStage, basketStage]) {
+  const plane = document.createElement('div');
+  plane.className = 'lab-glass-plane';
+  plane.dataset.glass = stage === selectionStage ? 'dock' : 'panel';
+  plane.setAttribute('aria-hidden', 'true');
+  stage.prepend(plane);
+  components.push({destroy: () => plane.remove()});
+}
+const railStage = document.querySelector('.page-rail');
+for (const control of railStage.querySelectorAll('a,button')) {
+  control.classList.add('lg-surface', 'lab-rail-control');
+  control.dataset.glass = 'small';
+  control.dataset.lgDrag = 'press';
+}
+const tagRoots = ['dTags', 'basketDetailTags', 'recentSearches'].map(id => document.getElementById(id)).filter(Boolean);
+function decorateTags() {
+  for (const group of tagRoots) for (const tag of group.querySelectorAll('span,button')) {
+    tag.classList.add('lab-glass-tag');
+    tag.dataset.glass = 'small';
+  }
+}
+decorateTags();
+const tagObserver = new MutationObserver(decorateTags);
+tagRoots.forEach(group => tagObserver.observe(group, {childList: true}));
+const mountPoints = [searchStage, selectionStage, railStage, detailStage, basketStage];
 function unmount(stage) {
   systems.get(stage)?.destroy();
   systems.delete(stage);
-  stage.querySelector(':scope > .lab-optics')?.remove();
   stage.classList.remove('webgl-ready', 'fallback');
   for (const element of stage.querySelectorAll('[data-jelly]')) {
     delete element.dataset.jelly; delete element.dataset.held;
@@ -69,7 +93,12 @@ function unmount(stage) {
 }
 function visible(stage) {
   if (!stage.getClientRects().length || document.hidden) return false;
+  // Pause the home layers while a workspace covers them.
+  if ((stage === searchStage || stage === selectionStage) && document.querySelector('.workspace-page:not([hidden]),.basket-page:not([hidden]),.all-viewer:not([hidden])')) return false;
   const r = stage.getBoundingClientRect();
+  const dpr = Math.min(devicePixelRatio || 1, 1.75);
+  // Long collections use the same CSS glass instead of allocating enormous framebuffers.
+  if (r.width * r.height * dpr * dpr > 8_000_000 || Math.max(r.width, r.height) * dpr > 8192) return false;
   return r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
 }
 
@@ -80,15 +109,9 @@ function syncSystems() {
     if (!active && systems.has(stage)) {
       unmount(stage);
     } else if (active && !systems.has(stage)) {
-      const rim = document.createElement('div');
-      rim.className = 'lab-optics';
-      rim.setAttribute('aria-hidden', 'true');
-      const canvas = document.createElement('canvas');
-      rim.append(canvas);
-      stage.prepend(rim);
       const system = createGlassSystem(stage, {
-        canvas, material, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
-        artwork: drawArtwork, motion: false, elasticity: reduced.matches ? 0 : .42,
+        material, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
+        artwork: (ctx, size) => drawArtwork(ctx, size, stage), motion: false, elasticity: reduced.matches ? 0 : .42,
         audio: {enabled: false},
       });
       systems.set(stage, system);
@@ -99,7 +122,11 @@ function syncSystems() {
 const observer = new IntersectionObserver(syncSystems);
 mountPoints.forEach(stage => observer.observe(stage));
 const selectionObserver = new MutationObserver(syncSystems);
-selectionObserver.observe(selectionStage, {attributes: true, attributeFilter: ['hidden']});
+for (const page of document.querySelectorAll('.workspace-page,.basket-page,.all-viewer,#selectionBar')) {
+  selectionObserver.observe(page, {attributes: true, attributeFilter: ['hidden']});
+}
+const sizeObserver = new ResizeObserver(syncSystems);
+mountPoints.forEach(stage => sizeObserver.observe(stage));
 const themeObserver = new MutationObserver(() => {
   for (const system of systems.values()) system.setScene(root.dataset.theme === 'dark' ? 'ocean' : 'aurora');
 });
@@ -135,9 +162,10 @@ document.getElementById('glassLabControls').append(label, materialChoices.elemen
 components.push(materialChoices, effectToggle);
 root.dataset.glass = 'on';
 
-function pulse(button) {
+function pulse(button, keyboard = false) {
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true' || reduced.matches) return;
   if (button.matches('.head-actions button,.dialog-close')) return;
+  if (!keyboard && enabled && button.dataset.lgDrag && systems.has(button.closest('.lg-stage'))) return;
   // Ceramic controls keep their native clicks. Decorate only; never dispatch actions.
   feedback.get(button)?.cancel();
   const animation = button.animate([{scale: '1'}, {scale: '.955', offset: .24}, {scale: '1.012', offset: .7}, {scale: '1'}], {duration: 270, easing: 'cubic-bezier(.2,.8,.2,1)'});
@@ -148,7 +176,7 @@ document.addEventListener('pointerdown', event => {
   if (event.button === 0 && event.isPrimary) pulse(event.target.closest?.('button'));
 }, {signal, passive: true});
 document.addEventListener('keydown', event => {
-  if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) pulse(event.target.closest?.('button'));
+  if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) pulse(event.target.closest?.('button'), true);
 }, {signal});
 reduced.addEventListener('change', () => {
   if (reduced.matches) for (const animation of feedback.values()) animation.cancel();
@@ -165,7 +193,7 @@ window.addEventListener('pagehide', event => {
   for (const animation of feedback.values()) animation.cancel();
   if (event.persisted) return;
   disposed = true;
-  observer.disconnect(); selectionObserver.disconnect(); themeObserver.disconnect();
+  observer.disconnect(); selectionObserver.disconnect(); themeObserver.disconnect(); sizeObserver.disconnect(); tagObserver.disconnect();
   components.forEach(component => component.destroy());
   abort.abort();
 }, {signal});
