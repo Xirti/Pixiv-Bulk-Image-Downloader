@@ -1,4 +1,4 @@
-/* MOKU Glass Lab 01 / R5 — transparent glass, tinted tags, ceramic controls. */
+/* MOKU Glass Lab 01 / R6 — transparent glass, tinted tags, ceramic controls. */
 :root {
   --bg:#0b111b;--ink:#e9f2fc;--muted:#a1b3c8;--line:#8ab4d52e;
   --surface:#152131;--surface-2:#1b2b3d;--accent:#8acbff;--on-accent:#0a2037;
@@ -147,6 +147,13 @@ input[type=checkbox]:not(:where(.batch-card-select input)) {appearance:none;-web
 input[type=checkbox]::after {content:"";width:4px;height:8px;border-right:1.8px solid var(--on-accent);border-bottom:1.8px solid var(--on-accent);transform:translateY(-1px) rotate(45deg) scale(0);transform-origin:center;transition:transform .24s cubic-bezier(.2,1.6,.4,1)}
 input[type=checkbox]:checked {background:var(--action-fill);border-color:var(--action-fill)}
 input[type=checkbox]:checked::after {transform:translateY(-1px) rotate(45deg) scale(1)}
+input[type=checkbox][data-check-feedback=check]::after,
+.batch-card-select span[data-check-feedback=check]::after {animation:lab-check-draw .36s cubic-bezier(.2,.7,.3,1) both}
+@keyframes lab-check-draw {
+  from {clip-path:inset(100% 0 0 0)}
+  55% {clip-path:inset(45% 0 0 0)}
+  to {clip-path:inset(0)}
+}
 input[type=checkbox]:indeterminate {background:var(--action-fill);border-color:var(--action-fill)}
 input[type=checkbox]:indeterminate::after {width:8px;height:0;border-right:0;border-bottom:2px solid var(--on-accent);transform:none}
 input[type=checkbox]:disabled {opacity:.4;cursor:default}
@@ -212,3 +219,12 @@ body .page-rail :is(a,button):is(:hover,[aria-current]) {background:var(--glass-
 /* The shader already supplies the material: do not blur its optical bevel away. */
 .page-rail.webgl-ready :is(a,button) {backdrop-filter:none;background:linear-gradient(145deg,#ffffff0b,#8ebaff03)}
 .webgl-ready .tags span.lab-glass-tag,.webgl-ready .recent-searches button.lab-glass-tag {backdrop-filter:none}
+
+/* Lens owns paint and motion. Navigation and page scroll retain their layout. */
+body>.page-rail,body>.page-rail.lg-stage {position:fixed;left:0;top:0;bottom:0}
+#home.hero {min-height:0;justify-content:flex-start;gap:24px;padding:32px clamp(16px,4vw,56px) 48px}
+#home .lab-controls {width:min(100%,860px);margin-top:0}
+html {scrollbar-gutter:stable}
+html[data-scroll-owner=workspace] {overflow-y:hidden}
+.workspace-page,.basket-page,.all-viewer {scrollbar-gutter:stable}
+@media(max-width:600px) {#home.hero {padding:24px 16px 36px;gap:20px}}

@@ -2,6 +2,7 @@
 import {createComponent, createGlassSystem} from './vendor/lens/index.js';
 import {enhanceSelect} from './glass-select.js';
 import {mountDotTitle} from './dot-title.js';
+import {mountCheckboxFeedback} from './check-feedback.js';
 
 const root = document.documentElement;
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
@@ -9,6 +10,7 @@ const systems = new Map();
 const components = [];
 const abort = new AbortController();
 const {signal} = abort;
+components.push(mountCheckboxFeedback(document));
 const feedback = new Map();
 let material = 'thick';
 root.dataset.material = material;
@@ -91,10 +93,10 @@ function unmount(stage) {
     element.style.removeProperty('--jelly-matrix');
   }
 }
-function visible(stage) {
+function visible(stage, overlayOpen) {
   if (!stage.getClientRects().length || document.hidden) return false;
   // Pause the home layers while a workspace covers them.
-  if ((stage === searchStage || stage === selectionStage) && document.querySelector('.workspace-page:not([hidden]),.basket-page:not([hidden]),.all-viewer:not([hidden])')) return false;
+  if ((stage === searchStage || stage === selectionStage) && overlayOpen) return false;
   const r = stage.getBoundingClientRect();
   const dpr = Math.min(devicePixelRatio || 1, 1.75);
   // Long collections use the same CSS glass instead of allocating enormous framebuffers.
@@ -104,8 +106,10 @@ function visible(stage) {
 
 function syncSystems() {
   if (disposed) return;
+  const overlayOpen = Boolean(document.querySelector('.workspace-page:not([hidden]),.basket-page:not([hidden]),.all-viewer:not([hidden])'));
+  root.dataset.scrollOwner = overlayOpen ? 'workspace' : 'document';
   for (const stage of mountPoints) {
-    const active = enabled && visible(stage);
+    const active = enabled && visible(stage, overlayOpen);
     if (!active && systems.has(stage)) {
       unmount(stage);
     } else if (active && !systems.has(stage)) {

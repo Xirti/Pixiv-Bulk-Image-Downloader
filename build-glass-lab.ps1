@@ -11,6 +11,8 @@ if (-not $SkipChecks) {
   }
   node tests/test_glass_runtime.js
   if ($LASTEXITCODE -ne 0) { throw 'Glass lifecycle checks failed' }
+  node tests/test_check_feedback.js
+  if ($LASTEXITCODE -ne 0) { throw 'Checkbox feedback checks failed' }
   node tests/test_dot_title.js
   if ($LASTEXITCODE -ne 0) { throw 'Dot title lifecycle checks failed' }
 }
