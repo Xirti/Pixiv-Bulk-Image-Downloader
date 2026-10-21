@@ -62,7 +62,10 @@ CODE_GENERATION_FILES += ('experiment_profile.py', 'web/glass-lab.css', 'web/gla
 
 CODE_GENERATION_FILES += ("web/glass-select.js",)
 CODE_GENERATION_FILES += ("web/dot-title.js",)
-CODE_GENERATION_FILES += ("web/check-feedback.js",)
+CODE_GENERATION_FILES += (
+    "web/check-feedback.js", "web/lattice-backdrop.js",
+    "web/vendor/lattice/lorenz.js", "web/vendor/lattice/LICENSE", "web/vendor/lattice/UPSTREAM.md",
+)
 
 
 def compute_code_generation(

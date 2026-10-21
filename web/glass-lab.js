@@ -3,14 +3,18 @@ import {createComponent, createGlassSystem} from './vendor/lens/index.js';
 import {enhanceSelect} from './glass-select.js';
 import {mountDotTitle} from './dot-title.js';
 import {mountCheckboxFeedback} from './check-feedback.js';
+import {mountLatticeBackdrop} from './lattice-backdrop.js';
 
 const root = document.documentElement;
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+const contrast = matchMedia('(forced-colors: active)');
 const systems = new Map();
 const components = [];
 const abort = new AbortController();
 const {signal} = abort;
 components.push(mountCheckboxFeedback(document));
+const backdrop = mountLatticeBackdrop(document.getElementById('home'));
+components.push(backdrop);
 const feedback = new Map();
 let material = 'thick';
 root.dataset.material = material;
@@ -36,6 +40,7 @@ function drawArtwork(ctx, {width, height, dpr}, stage) {
       ctx.beginPath(); ctx.arc(x, y, .85 * dpr, 0, Math.PI * 2); ctx.fill();
     }
   }
+  if (stage === searchStage) backdrop.paint(ctx, {width, height, dpr}, stage);
 }
 
 const searchStage = document.querySelector('.search-panel');
@@ -72,7 +77,7 @@ for (const control of railStage.querySelectorAll('a,button')) {
   control.dataset.glass = 'small';
   control.dataset.lgDrag = 'press';
 }
-const tagRoots = ['dTags', 'basketDetailTags', 'recentSearches'].map(id => document.getElementById(id)).filter(Boolean);
+const tagRoots = ['dTags', 'basketDetailTags'].map(id => document.getElementById(id)).filter(Boolean);
 function decorateTags() {
   for (const group of tagRoots) for (const tag of group.querySelectorAll('span,button')) {
     tag.classList.add('lab-glass-tag');
@@ -108,14 +113,15 @@ function syncSystems() {
   if (disposed) return;
   const overlayOpen = Boolean(document.querySelector('.workspace-page:not([hidden]),.basket-page:not([hidden]),.all-viewer:not([hidden])'));
   root.dataset.scrollOwner = overlayOpen ? 'workspace' : 'document';
+  backdrop.setActive(!overlayOpen);
   for (const stage of mountPoints) {
-    const active = enabled && visible(stage, overlayOpen);
+    const active = enabled && !contrast.matches && visible(stage, overlayOpen);
     if (!active && systems.has(stage)) {
       unmount(stage);
     } else if (active && !systems.has(stage)) {
       const system = createGlassSystem(stage, {
         material, scene: root.dataset.theme === 'dark' ? 'ocean' : 'aurora',
-        artwork: (ctx, size) => drawArtwork(ctx, size, stage), motion: false, elasticity: reduced.matches ? 0 : .42,
+        artwork: (ctx, size) => drawArtwork(ctx, size, stage), motion: stage === searchStage, elasticity: reduced.matches ? 0 : .42,
         audio: {enabled: false},
       });
       systems.set(stage, system);
@@ -169,6 +175,7 @@ root.dataset.glass = 'on';
 function pulse(button, keyboard = false) {
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true' || reduced.matches) return;
   if (button.matches('.head-actions button,.dialog-close')) return;
+  if (button.closest('.recent-searches,.text-context-menu')) return;
   if (!keyboard && enabled && button.dataset.lgDrag && systems.has(button.closest('.lg-stage'))) return;
   // Ceramic controls keep their native clicks. Decorate only; never dispatch actions.
   feedback.get(button)?.cancel();
@@ -190,6 +197,7 @@ reduced.addEventListener('change', () => {
   }
 }, {signal});
 document.addEventListener('visibilitychange', syncSystems, {signal});
+contrast.addEventListener('change', syncSystems, {signal});
 window.addEventListener('resize', syncSystems, {signal, passive: true});
 window.addEventListener('pageshow', syncSystems, {signal});
 window.addEventListener('pagehide', event => {

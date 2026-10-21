@@ -30,7 +30,8 @@ class Element {
   closest(selector) {for(let el=this;el;el=el.parentElement)if(selector==='.lg-stage'&&el.classList.contains('lg-stage'))return el;return null;}
 }
 const root = new Element('root'),body=new Element('body');root.append(body);root.dataset.theme='dark';
-const search=new Element('search',['search-panel']);body.append(search);
+const home=new Element('home',['hero']);body.append(home);
+const search=new Element('search',['search-panel']);home.append(search);
 const form=new Element('searchForm'),tagInput=new Element('tag'),searchButton=new Element('searchSubmit');searchButton.tag='button';form.append(tagInput,searchButton);search.append(form);
 for(const id of ['workType','safety','datePreset','quality','format']) {const node=new Element(id);form.append(node);}
 const title=new Element('title');body.append(title);
@@ -60,11 +61,16 @@ const document={documentElement:root,hidden:false,getElementById(id){return all.
 const window={addEventListener(type,fn){listeners.window[type]=fn;}};
 const source=fs.readFileSync(path.join(__dirname,'../web/glass-lab.js'),'utf8').replace(/^import .*;\r?\n/gm,'');
 let checkboxMounted=false;
-vm.runInNewContext(source,{document,window,matchMedia:()=>reduced,innerWidth:1200,innerHeight:850,devicePixelRatio:1,AbortController,IntersectionObserver:Observer('intersection'),MutationObserver:Observer('mutation'),ResizeObserver:Observer('resize'),createComponent,createGlassSystem,enhanceSelect:()=>({destroy(){}}),mountDotTitle:()=>({destroy(){}}),mountCheckboxFeedback:doc=>{assert.equal(doc,document);checkboxMounted=true;return {destroy(){checkboxMounted=false;}};}});
+let ambientActive=false,ambientDestroyed=false;
+vm.runInNewContext(source,{document,window,matchMedia:()=>reduced,innerWidth:1200,innerHeight:850,devicePixelRatio:1,AbortController,IntersectionObserver:Observer('intersection'),MutationObserver:Observer('mutation'),ResizeObserver:Observer('resize'),createComponent,createGlassSystem,enhanceSelect:()=>({destroy(){}}),mountDotTitle:()=>({destroy(){}}),mountLatticeBackdrop:node=>{assert.equal(node,home);return {paint(){},setActive(value){ambientActive=value;},destroy(){ambientDestroyed=true;}};},mountCheckboxFeedback:doc=>{assert.equal(doc,document);checkboxMounted=true;return {destroy(){checkboxMounted=false;}};}});
 const stages=()=>[...live].map(r=>r.stage.id).sort();
 assert.deepEqual(stages(),['rail','search']);
 assert.equal(root.dataset.scrollOwner,'document');
 assert.equal(checkboxMounted,true);
+assert.equal(ambientActive,true);
+assert.equal(constructed.find(r=>r.stage===search).options.motion,true);
+assert.equal(constructed.find(r=>r.stage===rail).options.motion,false);
+assert.equal(recent.dataset.glass,undefined);
 assert.equal(searchButton.dataset.lgDrag,'press');
 assert.equal(tagInput.parentElement,form,'business input identity and parent stay intact');
 assert.equal(form.parentElement.parentElement,search);
@@ -82,6 +88,7 @@ download.hidden=true;hiddenObserver.fire();assert.equal(root.dataset.scrollOwner
 opticalToggle.options.onPress();assert.deepEqual(stages(),['rail','search']);
 download.hidden=false;hiddenObserver.fire();assert.deepEqual(stages(),['detail','rail']);
 assert.equal(root.dataset.scrollOwner,'workspace');
+assert.equal(ambientActive,false);
 assert.equal(tagInput.parentElement,form);
 detail.rect.height=10000;observerLists.resize[0].fire();assert.deepEqual(stages(),['rail']);
 detail.rect.height=450;observerLists.resize[0].fire();assert.deepEqual(stages(),['detail','rail']);
@@ -100,4 +107,5 @@ for(const observers of Object.values(observerLists))for(const observer of observ
 assert.equal(constructed.filter(r=>!r.destroyed).length,0);
 assert.equal(all.filter(el=>el.parentElement&&el.classList.contains('lg-canvas')).length,0);
 assert.equal(checkboxMounted,false);
+assert.equal(ambientDestroyed,true);
 console.log('Glass runtime: full Lens canvas, consistent rail, tag identity, workspace switching, GPU bounds, theme, BFCache and teardown passed.');

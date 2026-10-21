@@ -1,4 +1,4 @@
-/* MOKU Glass Lab 01 / R6 — transparent glass, tinted tags, ceramic controls. */
+/* MOKU Glass Lab 01 / R7 — transparent glass, tinted tags, ceramic controls. */
 :root {
   --bg:#0b111b;--ink:#e9f2fc;--muted:#a1b3c8;--line:#8ab4d52e;
   --surface:#152131;--surface-2:#1b2b3d;--accent:#8acbff;--on-accent:#0a2037;
@@ -14,7 +14,6 @@
   --ceramic-ink:#dfebf7;--ceramic-edge:#a1bcd334;--ceramic-rim:#edf6ff24;
   --ceramic-shadow:inset 0 1px 0 var(--ceramic-rim),inset 0 -1px 1px #030b186b,0 3px 7px #020b181c;
   --primary:linear-gradient(150deg,#365b79,#244661 60%,#203a55);--primary-hover:linear-gradient(150deg,#426f90,#305976 60%,#294b6b);
-  --tag-rgb:119 207 238;--tag-ink:#beeafa;
   --rail-glass:linear-gradient(145deg,#d4efff24,#a5d5ff08 55%,#72afff12);--glass-edge:#ceebff54;
   --glass-control:linear-gradient(145deg,#d4efff2e,#83c5f910 55%,#90c6f324);
   --menu-bg:#19293b;--menu-active:#38516b;--menu-pressed:#42617f;--menu-tick:#b9e2ff;
@@ -28,7 +27,6 @@
   --lg-color-focus:#2875ed;--lg-surface-fallback:#f4faff25;--lg-surface-solid:#f4f8fc;
   --pane-fill:linear-gradient(130deg,#ffffff32,#d2e5fa0b 48%,#ffffff20);
   --pane-rim:linear-gradient(135deg,#fff,#94badb45 24%,#b7b4e324 48%,#a3c9e56b 75%,#fff);
-  --tag-rgb:48 139 179;--tag-ink:#205d7c;
   --ceramic:linear-gradient(155deg,#ffffff,#edf3f8 52%,#dce7f0);
   --ceramic-hover:linear-gradient(155deg,#ffffff,#f7fbff 52%,#e6f0f8);
   --ceramic-ink:#29455e;--ceramic-edge:#a4b9cc8a;--ceramic-rim:#fff;
@@ -87,16 +85,16 @@ dialog {border-radius:24px}dialog::backdrop {background:#07142266;backdrop-filte
 .task-dock {padding-left:30px}.task-dock::before {content:"";position:absolute;left:14px;top:18px;width:4px;height:4px;border-radius:50%;background:var(--accent);box-shadow:0 8px 0 var(--accent),0 16px 0 var(--line)}
 
 /* More solid, softly glazed controls; artwork buttons keep their image treatment. */
-body button:not(:where(.deck-card,.batch-card-open,.lg-choice,.back-top,.recent-searches button,.page-rail button)),
+body button:not(:where(.deck-card,.batch-card-open,.lg-choice,.back-top,.recent-searches button,.page-rail button,.text-context-menu button)),
 .search-row button,#download,#batchDownload,#basketDownload,#browseFolder,#networkCheck,#selectionBar button,
 .batch-actions button,.dialog-actions button,.pending-downloads button,.basket-header-actions button,
 .head-actions button,.lab-controls>.lg-button,.workspace-bar button,.basket-bar button,.viewer-bar button,
 .page-selection-tools button,.history-tools button,.history-selection button,.history-pagination button,
-.view-all,.view-more,#batchEntryPane .batch-actions button,.text-context-menu button {
+.view-all,.view-more,#batchEntryPane .batch-actions button {
   border:1px solid var(--ceramic-edge);border-radius:12px;background:var(--ceramic);color:var(--ceramic-ink);
   box-shadow:var(--ceramic-shadow);backdrop-filter:none;font-weight:550;
 }
-body button:not(:where(.deck-card,.batch-card-open,.lg-choice,.back-top,.recent-searches button,.page-rail button)):hover:not(:disabled),#browseFolder:hover:not(:disabled),#networkCheck:hover:not(:disabled) {background:var(--ceramic-hover);border-color:#b5d2e34d}
+body button:not(:where(.deck-card,.batch-card-open,.lg-choice,.back-top,.recent-searches button,.page-rail button,.text-context-menu button)):hover:not(:disabled),#browseFolder:hover:not(:disabled),#networkCheck:hover:not(:disabled) {background:var(--ceramic-hover);border-color:#b5d2e34d}
 :is(#searchSubmit,#download,#batchDownload,#basketDownload,#openBatch) {background:var(--primary);color:var(--ceramic-ink);border-color:#91b9d05e;font-weight:650}
 :is(#searchSubmit,#download,#batchDownload,#basketDownload,#openBatch):hover:not(:disabled) {background:var(--primary-hover)}
 #searchSubmit {border-radius:17px;min-height:58px;padding:0 28px;font-size:14px;white-space:nowrap}
@@ -104,19 +102,15 @@ body button:not(:where(.deck-card,.batch-card-open,.lg-choice,.back-top,.recent-
 .head-actions button {font-weight:500;box-shadow:inset 0 1px 0 #ffffff12}
 .head-actions #loginBtn {border-color:var(--ceramic-edge);color:var(--ceramic-ink)}
 
-/* Tags carry the color and the glass, without making every control luminous. */
-.tags span,.recent-searches button,.tags span.lab-glass-tag,.recent-searches button.lab-glass-tag {
-  --chip-rgb:var(--tag-rgb);--chip-ink:var(--tag-ink);position:relative;isolation:isolate;
-  padding:6px 11px;border:1px solid rgb(var(--chip-rgb) / .32);border-radius:999px;
-  color:var(--chip-ink);background:linear-gradient(145deg,rgb(var(--chip-rgb) / .20),rgb(var(--chip-rgb) / .055) 58%,rgb(var(--chip-rgb) / .12));
-  box-shadow:inset 0 1px 0 #f0fcff60,inset 0 -1px 0 rgb(var(--chip-rgb) / .18),0 2px 6px #04122212;
-  backdrop-filter:blur(9px) saturate(1.35);font-size:12px;font-weight:500;
+/* Quiet dark labels; recent history stays a plain native interaction. */
+.tags span,.tags span.lab-glass-tag,.recent-searches button {
+  padding:5px 10px;border:1px solid #9cbbd22b;border-radius:6px;
+  background:#1b2d40d9;color:#dceaf7;box-shadow:none;backdrop-filter:none;font-size:12px;font-weight:500;
 }
-.tags span:nth-child(3n+2),.recent-searches button:nth-of-type(3n+2) {--chip-rgb:179 160 244;--chip-ink:#ddd3ff}
-.tags span:nth-child(3n),.recent-searches button:nth-of-type(3n) {--chip-rgb:218 189 138;--chip-ink:#e9d7b7}
-:root[data-theme=light] :is(.tags span:nth-child(3n+2),.recent-searches button:nth-of-type(3n+2)) {--chip-rgb:135 104 197;--chip-ink:#644a94}
-:root[data-theme=light] :is(.tags span:nth-child(3n),.recent-searches button:nth-of-type(3n)) {--chip-rgb:157 114 43;--chip-ink:#795b2e}
-.recent-searches button:hover {background:linear-gradient(145deg,rgb(var(--chip-rgb) / .30),rgb(var(--chip-rgb) / .10));border-color:rgb(var(--chip-rgb) / .5)}
+.recent-searches button:hover:not(:disabled) {background:#293f55;color:#f2f7fd;border-color:#bed6e04a}
+.text-context-menu,.text-menu-notice {background:var(--surface-2);border-color:var(--line);backdrop-filter:none}
+.text-context-menu button {border:0;border-radius:6px;background:transparent;color:var(--ink);box-shadow:none;font-weight:400}
+.text-context-menu button:hover:not(:disabled),.text-context-menu button:focus-visible {background:var(--surface);box-shadow:none}
 
 /* Native values and events remain authoritative; the visible list is ceramic. */
 .lab-native-select {display:none!important}
@@ -218,13 +212,28 @@ body .page-rail :is(a,button):is(:hover,[aria-current]) {background:var(--glass-
 
 /* The shader already supplies the material: do not blur its optical bevel away. */
 .page-rail.webgl-ready :is(a,button) {backdrop-filter:none;background:linear-gradient(145deg,#ffffff0b,#8ebaff03)}
-.webgl-ready .tags span.lab-glass-tag,.webgl-ready .recent-searches button.lab-glass-tag {backdrop-filter:none}
+.webgl-ready .tags span.lab-glass-tag {backdrop-filter:none}
 
 /* Lens owns paint and motion. Navigation and page scroll retain their layout. */
-body>.page-rail,body>.page-rail.lg-stage {position:fixed;left:0;top:0;bottom:0}
-#home.hero {min-height:0;justify-content:flex-start;gap:24px;padding:32px clamp(16px,4vw,56px) 48px}
+body>.page-rail,body>.page-rail.lg-stage {position:fixed;left:0;top:0;bottom:0;padding:clamp(72px,13svh,132px) 7px 28px;gap:18px}
+#home.hero {isolation:isolate;scroll-margin-top:var(--chrome-height,68px);min-height:0;justify-content:flex-start;gap:24px;padding:32px clamp(16px,4vw,56px) 48px}
 #home .lab-controls {width:min(100%,860px);margin-top:0}
 html {scrollbar-gutter:stable}
 html[data-scroll-owner=workspace] {overflow-y:hidden}
 .workspace-page,.basket-page,.all-viewer {scrollbar-gutter:stable}
 @media(max-width:600px) {#home.hero {padding:24px 16px 36px;gap:20px}}
+
+/* The account toolbar belongs to the landing section and scrolls away naturally. */
+body>header {position:relative;top:auto}
+:root[data-scroll-owner=workspace] body>header {visibility:hidden;pointer-events:none}
+#downloadPage,#historyPage,#favoritesPage,#basketPage {inset:0 0 0 var(--rail-width)}
+#backTop {top:12px}
+#home .home-intro h1 {font-size:clamp(44px,7.2vw,96px);font-weight:650;line-height:1.16;letter-spacing:0}
+#home .home-intro .eyebrow {letter-spacing:2px;margin-bottom:20px}
+.lab-ambient {position:absolute;inset:0;z-index:-1;width:100%;height:100%;pointer-events:none}
+::view-transition-old(root),::view-transition-new(root) {animation:none;mix-blend-mode:normal}
+::view-transition-old(root) {z-index:1}
+::view-transition-new(root) {z-index:2}
+::view-transition-group(root) {animation-duration:0s}
+@media(max-height:560px) {body>.page-rail,body>.page-rail.lg-stage {padding-top:36px;gap:12px}}
+@media(forced-colors:active) {.lab-ambient {display:none}}

@@ -13,6 +13,10 @@ if (-not $SkipChecks) {
   if ($LASTEXITCODE -ne 0) { throw 'Glass lifecycle checks failed' }
   node tests/test_check_feedback.js
   if ($LASTEXITCODE -ne 0) { throw 'Checkbox feedback checks failed' }
+  node tests/test_theme_sweep.js
+  if ($LASTEXITCODE -ne 0) { throw 'Theme sweep checks failed' }
+  node tests/test_lattice_backdrop.js
+  if ($LASTEXITCODE -ne 0) { throw 'Lattice backdrop checks failed' }
   node tests/test_dot_title.js
   if ($LASTEXITCODE -ne 0) { throw 'Dot title lifecycle checks failed' }
 }
@@ -29,6 +33,7 @@ foreach ($name in @('EXPERIMENT.md','LICENSE','PRIVACY.md','SECURITY.md','THIRD_
 python -B generate-third-party-licenses.py (Join-Path $Dist 'THIRD_PARTY_LICENSES.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Third-party notices failed' }
 Get-Content -LiteralPath (Join-Path $Root 'web\vendor\lens\LICENSE') -Raw | Add-Content -LiteralPath (Join-Path $Dist 'THIRD_PARTY_LICENSES.txt') -Encoding UTF8
+Get-Content -LiteralPath (Join-Path $Root 'web\vendor\lattice\LICENSE') -Raw | Add-Content -LiteralPath (Join-Path $Dist 'THIRD_PARTY_LICENSES.txt') -Encoding UTF8
 $Hash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash
 [IO.File]::WriteAllText((Join-Path $Dist 'SHA256.txt'), "$Hash  MOKU-Glass-Lab.exe`r`n", [Text.UTF8Encoding]::new($false))
 python -B build_manifest.py write (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe --expected-source-generation $SourceBefore

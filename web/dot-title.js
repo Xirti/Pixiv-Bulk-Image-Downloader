@@ -13,7 +13,7 @@ export function mountDotTitle(title) {
   let frame = 0, started = null, settled = false, destroyed = false, onScreen = false;
   let points = [], width = 0, height = 0;
   let paintTimer = 0;
-  const duration = 1150;
+  const duration = 1450;
 
   function cancelFrame() {cancelAnimationFrame(frame); frame = 0;}
   function stopAtRest() {
@@ -26,7 +26,7 @@ export function mountDotTitle(title) {
     ctx.clearRect(0, 0, width, height);
     for (const point of points) {
       const phase = Math.max(0, Math.min(1, (progress - point.delay) / (1 - point.delay)));
-      const eased = 1 - (1 - phase) ** 3;
+      const eased = phase * phase * phase * (phase * (phase * 6 - 15) + 10);
       ctx.globalAlpha = Math.min(1, phase * 3);
       ctx.fillStyle = point.color;
       ctx.beginPath();
@@ -85,15 +85,15 @@ export function mountDotTitle(title) {
     }
     const pixels = mask.getImageData(0, 0, raster.width, raster.height).data;
     const size = parseFloat(getComputedStyle(title).fontSize);
-    const pitch = Math.max(1.8, Math.min(2.5, size / 19));
+    const pitch = Math.max(2.1, Math.min(3.4, size / 22));
     points = [];
     for (let y = pitch / 2; y < height; y += pitch) {
       for (let x = pitch / 2; x < width; x += pitch) {
         const alpha = pixels[(Math.floor(y * 2) * raster.width + Math.floor(x * 2)) * 4 + 3];
         if (alpha < 110) continue;
-        const index = points.length;
         points.push({x, y, color: x >= accentStart ? accentColor : baseColor, radius: pitch * .39,
-          dx: Math.sin(index * 2.399) * 8, dy: 10 + (index % 9) * 1.8, delay: x / width * .19});
+          dx: Math.sin(y / height * Math.PI * 1.5) * 10 + (x / width - .5) * 8,
+          dy: 16 + Math.cos(x / width * Math.PI) * 5, delay: x / width * .14 + y / height * .04});
       }
     }
     if (!points.length) {canvas.hidden = true; title.classList.remove('has-dot-title'); return;}
