@@ -2,7 +2,9 @@ name: Glass Lab
 
 "on":
   push:
-    branches: [experiment/glass-lab-01]
+    branches: [main, experiment/glass-lab-01]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

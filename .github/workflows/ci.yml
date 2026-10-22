@@ -1,9 +1,10 @@
-name: CI
+name: Lite backup
 
 "on":
   push:
-    branches: [main]
+    branches: [lite-backup]
   pull_request:
+    branches: [lite-backup]
   workflow_dispatch:
 
 permissions:
@@ -11,6 +12,7 @@ permissions:
 
 jobs:
   test:
+    if: github.ref == 'refs/heads/lite-backup' || github.base_ref == 'lite-backup'
     runs-on: windows-latest
     timeout-minutes: 40
     steps:

@@ -6,7 +6,9 @@
 
 MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作品 ID，翻翻预览，把喜欢的画放进采集篮，再挑好图片一起下载。
 
-当前源码版本：**1.1.4-r1**（业务基线），实验修订 **R11**，发布标记 `v1.1.4-glass-r11`。
+当前源码版本：**1.1.4-r1**（业务基线），动效版 **R11**，发布标记 `v1.1.4-glass-r11`。
+
+`main` 现为动效 MAX 主线。原 Lite 版完整保存在 [lite-backup](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/tree/lite-backup)，对应 `v1.1.4-r1`。
 
 花里胡哨版，谨慎下载😂。清透玻璃、宽边折射、实时点阵背景和鼠标联动标题都放开玩；详情、选图和下载延续 MOKU 的完整流程。
 
@@ -102,11 +104,11 @@ python -m pip install -r requirements-dev.lock
 powershell -ExecutionPolicy Bypass -File .\make-glass-release.ps1
 ```
 
-便携程序生成在 `dist\MOKU-Glass-Lab`，发布压缩包、校验值和更新说明生成在 `release\v1.1.4-glass-r11`。实验配置与存储说明见 [EXPERIMENT.md](EXPERIMENT.md)。
+便携程序生成在 `dist\MOKU-Glass-Lab`，发布压缩包、校验值和更新说明生成在 `release\v1.1.4-glass-r11`。版本配置与存储说明见 [EXPERIMENT.md](EXPERIMENT.md)。
 
 ## 本版更新
 
-正式版基线为 `1.1.4-r1 Lite`。本次实验聚焦液态玻璃与点阵交互，修复滚动时下拉菜单误关、玻璃恢复失败，并减少重复绘制。更新重点见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，历史记录见 [CHANGELOG](CHANGELOG.md)。
+正式版基线为 `1.1.4-r1 Lite`，已归档至 `lite-backup`。当前主线聚焦液态玻璃与点阵交互，修复滚动时下拉菜单误关、玻璃恢复失败，并减少重复绘制。更新重点见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，历史记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可证与作品使用
 
