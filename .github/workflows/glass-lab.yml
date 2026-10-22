@@ -22,9 +22,19 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '22.17.0'
+      - name: Create isolated build environment
+        shell: pwsh
+        run: |
+          $ciVenv = Join-Path $env:RUNNER_TEMP 'moku-glass-ci-venv'
+          python -m venv $ciVenv
+          if ($LASTEXITCODE -ne 0) { throw 'Virtual environment creation failed' }
+          (Join-Path $ciVenv 'Scripts') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "VIRTUAL_ENV=$ciVenv" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install dependencies
         shell: pwsh
         run: |
+          python -c "import sys; assert sys.prefix != sys.base_prefix"
+          if ($LASTEXITCODE -ne 0) { throw 'Build environment is not isolated' }
           python -m pip install -r requirements-dev.lock
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
           python -m pip check
