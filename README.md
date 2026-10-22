@@ -10,17 +10,17 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 `main` 现为动效 MAX 主线。原 Lite 版完整保存在 [lite-backup](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/tree/lite-backup)，对应 `v1.1.4-r1`。
 
-花里胡哨版，谨慎下载😂。清透玻璃、宽边折射、实时点阵背景和鼠标联动标题都放开玩；详情、选图和下载延续 MOKU 的完整流程。
+花里胡哨版，谨慎下载😂。清透玻璃、宽边折射、实时点阵背景和鼠标联动标题；详情、选图和下载延续 MOKU 的完整流程。
 
 ## 开始使用
 
 从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.4-glass-r11) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU-Glass-Lab.exe`。便携版直接运行，无需安装 Python。
 
-需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU-Glass-Lab.exe.config` 也一起保留。
+需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，保留`MOKU-Glass-Lab.exe.config` 。
 
 ![Glass Lab R11 日间首页](assets/screenshots/glass-r11-home-light.jpg)
 
-首页提供厚润、清透、柔雾三种材质；日夜配色从切换按钮向全屏扩散。鼠标划过标题会推开点阵，点击可以让它散开再归位。
+首页提供厚润、清透、柔雾三种材质；日夜视图切散。
 
 ## 搜索与筛选
 
