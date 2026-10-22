@@ -17,6 +17,8 @@ if (-not $SkipChecks) {
   if ($LASTEXITCODE -ne 0) { throw 'Checkbox feedback checks failed' }
   node tests/test_live_glass.js
   if ($LASTEXITCODE -ne 0) { throw 'Live glass texture checks failed' }
+  node tests/test_glass_recovery.js
+  if ($LASTEXITCODE -ne 0) { throw 'Glass context recovery checks failed' }
   node tests/test_theme_sweep.js
   if ($LASTEXITCODE -ne 0) { throw 'Theme sweep checks failed' }
   node tests/test_lattice_backdrop.js

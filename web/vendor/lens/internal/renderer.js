@@ -258,7 +258,7 @@ export class GlassRenderer {
     this.time=0; this.lastTime=0; this.frame=0; this.dirty=true; this.rectDirty=true;
     this.geometry=[]; this.visible=true; this.destroyed=false; this.animatingUntil=0;
     this.reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
-    this.gl=null;this.suspended=true;this.width=0;this.height=0;this.dpr=1;this.onState=options.onState;
+    this.gl=null;this.suspended=true;this.width=0;this.height=0;this.dpr=1;this.onState=options.onState;this.restoreTimer=0;
     canvas.hidden=true;canvas.dataset.gpuState='idle';stage.classList.add('fallback');
     this.resizeObserver=new ResizeObserver(()=>{this.resize();this.invalidate(150);});
     this.resizeObserver.observe(stage);
@@ -282,14 +282,21 @@ export class GlassRenderer {
     window.addEventListener('resize',()=>this.invalidate(300),{signal,passive:true});
     document.addEventListener('visibilitychange',()=>{this.lastTime=0;if(!document.hidden)this.invalidate();},{signal});
     canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();this.lossObserved=true;this.lost=true;cancelAnimationFrame(this.frame);this.frame=0;canvas.hidden=true;stage.classList.remove('webgl-ready');stage.classList.add('fallback');if(!this.suspended)options.onState?.('lost');if(this.gpuLease?.active)this.resumeGPU();},{signal});
-    canvas.addEventListener('webglcontextrestored',()=>{this.lossObserved=false;if(this.destroyed||!this.gpuLease?.active){this.contextExtension?.loseContext();return;}this.startGPU();},{signal});
+    canvas.addEventListener('webglcontextrestored',()=>{clearTimeout(this.restoreTimer);this.restoreTimer=0;this.lossObserved=false;if(this.destroyed||!this.gpuLease?.active){this.contextExtension?.loseContext();return;}this.startGPU();},{signal});
     this.gpuLease=observeGPU(stage,()=>this.resumeGPU(),()=>this.suspendGPU());
   }
 
   resumeGPU(){
     if(this.destroyed)return;
     if(this.gl?.isContextLost()){
-      if(this.lossObserved){this.canvas.dataset.gpuState='restoring';this.contextExtension?.restoreContext();}
+      // The browser permits restoration only after the contextlost event returns.
+      if(this.lossObserved&&!this.restoreTimer){
+        this.restoreTimer=setTimeout(()=>{
+          this.restoreTimer=0;
+          if(this.destroyed||!this.gpuLease?.active||!this.lossObserved||!this.gl?.isContextLost())return;
+          this.canvas.dataset.gpuState='restoring';this.contextExtension?.restoreContext();
+        },0);
+      }
       return;
     }
     this.startGPU();
@@ -308,6 +315,7 @@ export class GlassRenderer {
   }
 
   suspendGPU(){
+    clearTimeout(this.restoreTimer);this.restoreTimer=0;
     this.suspended=true;cancelAnimationFrame(this.frame);this.frame=0;
     this.canvas.hidden=true;this.canvas.dataset.gpuState='suspended';this.stage.classList.remove('webgl-ready');this.stage.classList.add('fallback');
     if(this.gl&&!this.gl.isContextLost())this.contextExtension?.loseContext();
@@ -550,7 +558,7 @@ export class GlassRenderer {
   }
 
   destroy() {
-    this.destroyed=true;cancelAnimationFrame(this.frame);this.abort.abort();
+    this.destroyed=true;clearTimeout(this.restoreTimer);this.restoreTimer=0;cancelAnimationFrame(this.frame);this.abort.abort();
     this.resizeObserver.disconnect();this.mutationObserver.disconnect();this.intersectionObserver.disconnect();
     this.gpuLease?.destroy();
     const gl=this.gl;if(!gl)return;

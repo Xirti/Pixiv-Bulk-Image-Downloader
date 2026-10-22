@@ -14,26 +14,28 @@ export function mountLatticeBackdrop(home, {onFrame = () => {}} = {}) {
   const contrast = matchMedia('(forced-colors: active)');
   let active = true, onScreen = false, destroyed = false, frame = 0;
   let last = 0, painted = 0, phase = .35, shapeTime = 0, pointerX = 0, pointerY = 0, targetX = 0, targetY = 0;
-  let width = 0, height = 0, dpr = 1, grid = null;
+  let width = 0, height = 0, dpr = 1, grid = null, wash = null, washDark = null;
 
   function paintField(g) {
     if (contrast.matches) return;
-    const world = home.getBoundingClientRect();
     const dark = document.documentElement.dataset.theme === 'dark';
     g.save();
     g.fillStyle = dark ? '#0b111b' : '#f3f7fb';
     g.fillRect(0, 0, width, height);
-    const wash = g.createRadialGradient(width * .18, height * .12, 0, width * .18, height * .12, Math.max(width, height));
-    wash.addColorStop(0, dark ? '#173041' : '#e2f1fc'); wash.addColorStop(1, dark ? '#0b111b' : '#f3f7fb');
+    if (!wash || washDark !== dark) {
+      wash = g.createRadialGradient(width * .18, height * .12, 0, width * .18, height * .12, Math.max(width, height));
+      wash.addColorStop(0, dark ? '#173041' : '#e2f1fc'); wash.addColorStop(1, dark ? '#0b111b' : '#f3f7fb');
+      washDark = dark;
+    }
     g.fillStyle = wash; g.fillRect(0, 0, width, height);
     g.fillStyle = dark ? '#b7d9ef38' : '#446a8b30';
     if (grid) g.fill(grid);
-    const scale = Math.min(world.width * .32, world.height * .48);
-    const cx = world.width * .67 + pointerX, cy = world.height * .57 + pointerY;
+    const scale = Math.min(width * .32, height * .48);
+    const cx = width * .67 + pointerX, cy = height * .57 + pointerY;
     const glow = g.createRadialGradient(cx, cy, 0, cx, cy, scale * 1.6);
     glow.addColorStop(0, dark ? '#527eaf24' : '#9bbfdf24');
     glow.addColorStop(1, '#8ecbfa00');
-    g.fillStyle = glow; g.fillRect(0, 0, world.width, world.height);
+    g.fillStyle = glow; g.fillRect(0, 0, width, height);
     const cycle = shapeTime / 10, index = Math.floor(cycle) % formations.length;
     const from = formations[index], to = formations[(index + 1) % formations.length];
     const progress = Math.max(0, (cycle % 1 - .65) / .35);
@@ -92,6 +94,7 @@ export function mountLatticeBackdrop(home, {onFrame = () => {}} = {}) {
     const nextDpr = Math.min(devicePixelRatio || 1, 1.5, Math.sqrt(2_500_000 / (nextWidth * nextHeight)));
     if (nextWidth === width && nextHeight === height && nextDpr === dpr) return;
     width = nextWidth; height = nextHeight; dpr = nextDpr;
+    wash = null;
     canvas.width = Math.ceil(width * dpr); canvas.height = Math.ceil(height * dpr);
     grid = new Path2D();
     for (let x = 12; x < width; x += 24) for (let y = 12; y < height; y += 24) {

@@ -6,7 +6,7 @@ class Node extends EventTarget {
  append(...nodes){this.children.push(...nodes);nodes.forEach(n=>n.parent=this);}replaceChildren(...nodes){this.rebuilds++;this.children=[];this.append(...nodes);}
  after(node){this.sibling=node;}remove(){this.removed=true;}contains(node){return this===node||this.children.some(c=>c.contains?.(node));}
  closest(query){return query==='optgroup'?null:this;}getBoundingClientRect(){return {left:100,top:100,bottom:144,width:240,height:44};}
- get scrollHeight(){return 140;}get offsetHeight(){return 140;}scrollIntoView(){}focus(){this.focused=true;}
+ get scrollHeight(){return 140;}get offsetHeight(){return 140;}scrollIntoView(){throw new Error('option reveal must not scroll document ancestors');}focus(){this.focused=true;}
 }
 const owner=new Node('document');owner.body=new Node('body');owner.createElement=tag=>new Node(tag);
 const select=new Node('select');select.ownerDocument=owner;select.labels=[];
@@ -25,7 +25,13 @@ vm.createContext(context);vm.runInContext(source+'\nglobalThis.mount=enhanceSele
  assert.equal(api.popup.children[0],first,'stable options retain their DOM identity');
  select.selectedIndex=1;owner.dispatchEvent(new Event('click'));await new Promise(resolve=>setImmediate(resolve));
  assert.equal(api.trigger.children[0].textContent,'R-18','programmatic history restoration must still update the caption');
- api.trigger.onclick();assert.equal(api.trigger.getAttribute('aria-expanded'),'true');
+ api.popup.clientTop=1;api.popup.clientHeight=100;api.popup.scrollTop=0;
+ api.popup.getBoundingClientRect=()=>({top:200,bottom:302});
+ api.popup.children[1].getBoundingClientRect=()=>({top:320,bottom:360});
+ api.trigger.onclick();assert.equal(api.trigger.getAttribute('aria-expanded'),'true','opening an option must not scroll the document and close its own popup');
+ assert.equal(api.popup.scrollTop,59,'only the popup should scroll to reveal the active option');
+ owner.dispatchEvent(new Event('scroll'));assert.equal(api.trigger.getAttribute('aria-expanded'),'true','late scroll notifications keep the popup anchored');
+ owner.dispatchEvent(new Event('wheel'));assert.equal(api.trigger.getAttribute('aria-expanded'),'false','new wheel input outside the popup dismisses it');api.trigger.onclick();
  const second=api.popup.children[1];api.sync();assert.equal(api.popup.children[1],second);
  select.options[1].disabled=true;observers[0].callback();await new Promise(resolve=>setImmediate(resolve));
  assert.equal(api.popup.children[1].getAttribute('aria-disabled'),'true');

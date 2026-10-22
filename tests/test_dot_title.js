@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, '../web/dot-title.js'), 'utf
 
 function setup({reduced = false, contrast = false, canvasAvailable = true} = {}) {
   const frames = new Map(), canvases = [], observers = {intersection: [], resize: [], mutation: []};
-  let nextId = 0, time = 0, draws = 0;
+  let nextId = 0, time = 0, draws = 0, rasterReads = 0;
   class Classes {
     constructor() {this.values = new Set();}
     add(value) {this.values.add(value);}
@@ -23,7 +23,7 @@ function setup({reduced = false, contrast = false, canvasAvailable = true} = {})
       if (!canvasAvailable) return null;
       return {setTransform() {}, scale() {}, clearRect: () => {draws++;this.points=[];}, beginPath() {}, arc: (x,y) => {this.points.push([x,y]);}, fill() {}, fillText() {},
         measureText(text) {return {width: text.length * 36, fontBoundingBoxAscent: 39, fontBoundingBoxDescent: 9};},
-        getImageData: () => ({data: new Uint8ClampedArray(this.width * this.height * 4).fill(255)})};
+        getImageData: () => {rasterReads++;return {data: new Uint8ClampedArray(this.width * this.height * 4).fill(255)};}};
     }
   }
   const title = Object.assign(new EventTarget(), {classList: new Classes(), append(canvas) {this.canvas = canvas;},
@@ -55,7 +55,7 @@ function setup({reduced = false, contrast = false, canvasAvailable = true} = {})
     const ready = [...frames.values()]; frames.clear(); ready.forEach(callback => callback(time));
   }
   function show() {observers.intersection[0]?.callback([{isIntersecting: true}]); advance();}
-  return {title, api, frames, doc, media, observers, advance, show, get draws() {return draws;}};
+  return {title, api, frames, doc, media, observers, advance, show, get draws() {return draws;}, get rasterReads() {return rasterReads;}};
 }
 
 (async () => {
@@ -85,9 +85,18 @@ function setup({reduced = false, contrast = false, canvasAvailable = true} = {})
   assert.equal(normal.title.canvas.hidden, false);
   assert.equal(normal.frames.size, 0, 'motion preference changes must not replay the intro');
 
+  const rasters=normal.rasterReads;
   normal.observers.mutation[0].callback(); normal.advance();
+  assert.equal(normal.rasterReads,rasters,'theme changes recolor the existing glyphs without resampling text');
   assert.equal(normal.title.canvas.dataset.state, 'settled', 'theme change does not restart introduction');
   assert.equal(normal.frames.size, 0);
+
+  pointer('pointermove');normal.advance();normal.api.setActive(false);
+  assert.equal(normal.frames.size,0,'covering the home page must stop title physics immediately');
+  const paused=normal.draws;pointer('pointermove');normal.advance();
+  assert.equal(normal.draws,paused,'covered titles ignore pointer wakeups');
+  normal.api.setActive(true);pointer('pointermove');normal.advance();
+  assert.ok(normal.draws>paused,'returning home retains pointer interaction');
   normal.api.destroy();
   assert.equal(normal.title.classList.contains('has-dot-title'), false);
   assert.equal(normal.title.canvas.removed, true);

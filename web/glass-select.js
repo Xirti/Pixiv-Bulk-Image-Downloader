@@ -63,7 +63,12 @@ export function enhanceSelect(select, {material = 'glass'} = {}) {
     const row = records.find(item => item.index === index);
     if (row) {
       trigger.setAttribute('aria-activedescendant', row.element.id);
-      row.element.scrollIntoView({block: 'nearest'});
+      // scrollIntoView can move the page as well as this fixed popup, closing it.
+      const bounds = row.element.getBoundingClientRect();
+      const top = popup.getBoundingClientRect().top + popup.clientTop;
+      const bottom = top + popup.clientHeight;
+      if (bounds.top < top) popup.scrollTop -= top - bounds.top;
+      else if (bounds.bottom > bottom) popup.scrollTop += bounds.bottom - bottom;
     } else trigger.removeAttribute('aria-activedescendant');
   }
 
@@ -213,8 +218,10 @@ export function enhanceSelect(select, {material = 'glass'} = {}) {
   owner.addEventListener('change', scheduleSync, {signal});
   owner.addEventListener('reset', scheduleSync, {signal});
   owner.addEventListener('visibilitychange', () => {if (owner.hidden) close();}, {signal});
-  // Close during scrolling, rather than letting a menu drift away from its control.
-  owner.addEventListener('scroll', event => {if (opened && !popup.contains(event.target)) close();}, {signal, capture: true, passive: true});
+  // A wheel begun before opening can deliver its scroll notification afterwards.
+  // Keep that notification aligned; new wheel input outside the popup dismisses it.
+  owner.addEventListener('scroll', event => {if (opened && !popup.contains(event.target)) position();}, {signal, capture: true, passive: true});
+  owner.addEventListener('wheel', event => {if (opened && !popup.contains(event.target)) close();}, {signal, capture: true, passive: true});
   window.addEventListener('resize', () => close(), {signal, passive: true});
   select.addEventListener('change', scheduleSync, {signal});
   const observer = new MutationObserver(scheduleSync);

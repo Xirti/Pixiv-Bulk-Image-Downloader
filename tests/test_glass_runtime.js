@@ -64,13 +64,13 @@ const document={documentElement:root,hidden:false,getElementById(id){return all.
 const window={addEventListener(type,fn){listeners.window[type]=fn;}};
 const source=fs.readFileSync(path.join(__dirname,'../web/glass-lab.js'),'utf8').replace(/^import .*;\r?\n/gm,'');
 let checkboxMounted=false;
-let ambientActive=false,ambientDestroyed=false,onBackgroundFrame;
-vm.runInNewContext(source,{document,window,matchMedia:()=>reduced,innerWidth:1200,innerHeight:850,devicePixelRatio:1,AbortController,IntersectionObserver:Observer('intersection'),MutationObserver:Observer('mutation'),ResizeObserver:Observer('resize'),createComponent,createGlassSystem,enhanceSelect:()=>({destroy(){}}),mountDotTitle:()=>({destroy(){}}),mountLatticeBackdrop:(node,options)=>{onBackgroundFrame=options.onFrame;assert.equal(node,home);return {paint(){},setActive(value){ambientActive=value;},destroy(){ambientDestroyed=true;}};},mountCheckboxFeedback:doc=>{assert.equal(doc,document);checkboxMounted=true;return {destroy(){checkboxMounted=false;}};}});
+let ambientActive=false,ambientDestroyed=false,titleActive=false,onBackgroundFrame;
+vm.runInNewContext(source,{document,window,matchMedia:()=>reduced,innerWidth:1200,innerHeight:850,devicePixelRatio:1,AbortController,IntersectionObserver:Observer('intersection'),MutationObserver:Observer('mutation'),ResizeObserver:Observer('resize'),createComponent,createGlassSystem,enhanceSelect:()=>({destroy(){}}),mountDotTitle:()=>({setActive(value){titleActive=value;},destroy(){}}),mountLatticeBackdrop:(node,options)=>{onBackgroundFrame=options.onFrame;assert.equal(node,home);return {paint(){},setActive(value){ambientActive=value;},destroy(){ambientDestroyed=true;}};},mountCheckboxFeedback:doc=>{assert.equal(doc,document);checkboxMounted=true;return {destroy(){checkboxMounted=false;}};}});
 const stages=()=>[...live].map(r=>r.stage.id).sort();
 assert.deepEqual(stages(),['search']);
 assert.equal(root.dataset.scrollOwner,'document');
 assert.equal(checkboxMounted,true);
-assert.equal(ambientActive,true);
+assert.equal(ambientActive,true);assert.equal(titleActive,true);
 onBackgroundFrame();assert.equal(constructed.find(r=>r.stage===search).refreshes,1);
 assert.equal(constructed.find(r=>r.stage===search).options.artworkAligned,true);
 assert.equal(recent.dataset.glass,undefined);
@@ -94,7 +94,7 @@ download.hidden=true;hiddenObserver.fire();assert.equal(root.dataset.scrollOwner
 opticalToggle.options.onPress();assert.deepEqual(stages(),['search']);
 download.hidden=false;hiddenObserver.fire();assert.deepEqual(stages(),['detailInfo']);
 assert.equal(root.dataset.scrollOwner,'workspace');
-assert.equal(ambientActive,false);
+assert.equal(ambientActive,false);assert.equal(titleActive,false);
 assert.equal(tagInput.parentElement,form);
 detailInfo.rect.height=10000;observerLists.resize[0].fire();assert.deepEqual(stages(),[]);
 detailInfo.rect.height=450;observerLists.resize[0].fire();assert.deepEqual(stages(),['detailInfo']);

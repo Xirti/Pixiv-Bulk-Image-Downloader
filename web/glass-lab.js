@@ -46,7 +46,8 @@ components.push(searchPanel);
 for (const id of ['workType', 'safety', 'datePreset', 'quality', 'format']) {
   components.push(enhanceSelect(document.getElementById(id), {material: 'quiet'}));
 }
-components.push(mountDotTitle(document.querySelector('.home-intro h1')));
+const dotTitle = mountDotTitle(document.querySelector('.home-intro h1'));
+components.push(dotTitle);
 const selectionStage = document.getElementById('selectionBar');
 // Decorative planes supply lens geometry without moving business nodes.
 const detailStage = document.getElementById('detail').querySelector('.detail-info');
@@ -97,6 +98,7 @@ function syncSystems() {
   const overlayOpen = Boolean(document.querySelector('.workspace-page:not([hidden]),.basket-page:not([hidden]),.all-viewer:not([hidden])'));
   root.dataset.scrollOwner = overlayOpen ? 'workspace' : 'document';
   backdrop.setActive(!overlayOpen);
+  dotTitle.setActive(!overlayOpen);
   for (const stage of mountPoints) {
     const active = enabled && !contrast.matches && visible(stage, overlayOpen);
     if (!active && systems.has(stage)) {

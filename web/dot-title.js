@@ -1,19 +1,20 @@
 /* Local glyphs with the upstream Lattice spring, pointer field and burst physics. */
 import {Dots} from './vendor/lattice/dots.js';
 export function mountDotTitle(title) {
-  if (!title) return {destroy() {}};
+  if (!title) return {setActive() {}, destroy() {}};
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
-  if (!ctx) return {destroy() {}};
+  if (!ctx) return {setActive() {}, destroy() {}};
   canvas.className = 'lab-dot-title'; canvas.setAttribute('aria-hidden', 'true');
   canvas.hidden = true;
   title.append(canvas);
   const abort = new AbortController(), {signal} = abort;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   const contrast = matchMedia('(forced-colors: active)');
-  let frame = 0, started = null, settled = false, destroyed = false, onScreen = false;
+  let frame = 0, started = null, settled = false, destroyed = false, onScreen = false, active = true;
   let points = [], width = 0, height = 0;
   let paintTimer = 0, dots = null, pointer = null, lastTick = 0;
+  let paintProgress = 0, baseColor = '', accentColor = '';
   const duration = 1450, bleed = 48;
 
   function cancelFrame() {cancelAnimationFrame(frame); frame = 0; lastTick = 0;}
@@ -25,15 +26,22 @@ export function mountDotTitle(title) {
   }
 
   function draw(progress) {
+    paintProgress = progress;
+    const complete = progress >= 1;
     ctx.clearRect(-bleed, -bleed, width + bleed * 2, height + bleed * 2);
+    if (complete) ctx.globalAlpha = 1;
     for (let i = 0; i < points.length; i++) {
       const point = points[i];
-      const phase = Math.max(0, Math.min(1, (progress - point.delay) / (1 - point.delay)));
-      const eased = phase * phase * phase * (phase * (phase * 6 - 15) + 10);
-      ctx.globalAlpha = Math.min(1, phase * 3);
-      ctx.fillStyle = point.color;
+      let x = dots.x[i], y = dots.y[i];
+      if (!complete) {
+        const phase = Math.max(0, Math.min(1, (progress - point.delay) / (1 - point.delay)));
+        const eased = phase * phase * phase * (phase * (phase * 6 - 15) + 10);
+        ctx.globalAlpha = Math.min(1, phase * 3);
+        x += point.dx * (1 - eased); y += point.dy * (1 - eased);
+      }
+      ctx.fillStyle = point.accent ? accentColor : baseColor;
       ctx.beginPath();
-      ctx.arc(dots.x[i] + point.dx * (1 - eased), dots.y[i] + point.dy * (1 - eased), point.radius, 0, Math.PI * 2);
+      ctx.arc(x, y, point.radius, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -41,7 +49,7 @@ export function mountDotTitle(title) {
 
   function tick(now) {
     frame = 0;
-    if (destroyed || document.hidden || !onScreen) {stopAtRest(); return;}
+    if (destroyed || !active || document.hidden || !onScreen) {stopAtRest(); return;}
     started ??= now;
     const progress = settled ? 1 : Math.min(1, (now - started) / duration);
     const dt = lastTick ? Math.min((now - lastTick) / 1000, 1 / 30) : 1 / 60;
@@ -73,8 +81,7 @@ export function mountDotTitle(title) {
     if (!mask) {canvas.hidden = true; title.classList.remove('has-dot-title'); return;}
     mask.scale(2, 2); mask.fillStyle = '#fff'; mask.textBaseline = 'alphabetic';
     const spans = [...title.querySelectorAll('.home-title-text,.home-title-mark')];
-    const baseColor = getComputedStyle(document.documentElement).getPropertyValue('--ink').trim();
-    const accentColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+    readColors();
     let accentStart = width;
     for (const span of spans) {
       const rect = span.getBoundingClientRect(), css = getComputedStyle(span);
@@ -99,7 +106,7 @@ export function mountDotTitle(title) {
       for (let x = pitch / 2; x < width; x += pitch) {
         const alpha = pixels[(Math.floor(y * 2) * raster.width + Math.floor(x * 2)) * 4 + 3];
         if (alpha < 110) continue;
-        points.push({x, y, color: x >= accentStart ? accentColor : baseColor, radius: pitch * .39,
+        points.push({x, y, accent: x >= accentStart, radius: pitch * .39,
           dx: Math.sin(y / height * Math.PI * 1.5) * 10 + (x / width - .5) * 8,
           dy: 16 + Math.cos(x / width * Math.PI) * 5, delay: x / width * .14 + y / height * .04});
       }
@@ -109,13 +116,13 @@ export function mountDotTitle(title) {
     if (!points.length) {canvas.hidden = true; title.classList.remove('has-dot-title'); return;}
     canvas.hidden = false;
     title.classList.add('has-dot-title');
-    if (settled || document.hidden) stopAtRest();
+    if (settled || !active || document.hidden) stopAtRest();
     else if (onScreen) {canvas.dataset.state = 'assembling'; frame = requestAnimationFrame(tick);}
     else draw(0);
   }
 
   function wake() {
-    if (!destroyed && onScreen && !document.hidden && dots && !reduced.matches && !contrast.matches && !frame) {
+    if (!destroyed && active && onScreen && !document.hidden && dots && !reduced.matches && !contrast.matches && !frame) {
       lastTick = 0; frame = requestAnimationFrame(tick);
     }
   }
@@ -137,12 +144,22 @@ export function mountDotTitle(title) {
     if (!paintTimer) paintTimer = requestAnimationFrame(layout);
   }
   const resize = new ResizeObserver(scheduleLayout); resize.observe(title);
-  const theme = new MutationObserver(scheduleLayout);
+  function readColors() {
+    const style = getComputedStyle(document.documentElement);
+    baseColor = style.getPropertyValue('--ink').trim();
+    accentColor = style.getPropertyValue('--accent').trim();
+  }
+  const theme = new MutationObserver(() => {
+    if (destroyed) return;
+    readColors();
+    // Color changes retain the glyph mask, spring positions and current intro progress.
+    if (!canvas.hidden && points.length) draw(paintProgress);
+  });
   theme.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
   const intersection = new IntersectionObserver(entries => {
     onScreen = entries[0].isIntersecting;
     if (!onScreen && started !== null) stopAtRest();
-    else if (onScreen && !settled && points.length && !frame) {
+    else if (active && onScreen && !settled && points.length && !frame) {
       canvas.dataset.state = 'assembling'; frame = requestAnimationFrame(tick);
     }
   });
@@ -153,7 +170,11 @@ export function mountDotTitle(title) {
   window.addEventListener('pagehide', stopAtRest, {signal});
   document.fonts?.ready.then(() => {if (!destroyed) scheduleLayout();});
   scheduleLayout();
-  return {destroy() {
+  return {setActive(value) {
+    if (destroyed || active === value) return;
+    active = value;
+    if (!active) stopAtRest();
+  }, destroy() {
     destroyed = true; cancelFrame(); cancelAnimationFrame(paintTimer); abort.abort();
     resize.disconnect(); theme.disconnect(); intersection.disconnect();
     title.classList.remove('has-dot-title'); canvas.remove();
