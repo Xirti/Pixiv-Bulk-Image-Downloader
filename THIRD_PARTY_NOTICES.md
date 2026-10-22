@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-MOKU is built with third-party open-source software. The release build generates `THIRD_PARTY_LICENSES.txt` from the exact installed distributions and places it beside `MOKU.exe`.
+MOKU is built with third-party open-source software. The release build generates `THIRD_PARTY_LICENSES.txt` from the exact installed distributions and places it beside `MOKU-Glass-Lab.exe`.
 
 Primary runtime components:
 
@@ -22,7 +22,6 @@ Primary runtime components:
 | pywin32-ctypes | 0.2.3 | BSD-3-Clause | https://github.com/enthought/pywin32-ctypes |
 | setuptools | 83.0.0 | MIT | https://github.com/pypa/setuptools |
 | typing-extensions | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
-| websocket-client | 1.9.0 | Apache-2.0 | https://github.com/websocket-client/websocket-client |
 | CPython | 3.12.10 | PSF License | https://www.python.org/ |
 
 The generated license bundle intentionally covers every distribution in the exact runtime and build lock files. This conservative closure includes build helpers that PyInstaller may analyze or embed, even when they are not direct application imports.
