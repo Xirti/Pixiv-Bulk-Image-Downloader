@@ -1,4 +1,4 @@
-# MOKU Lite - Pixiv Tag Gallery
+# MOKU Glass Lab R11 · 动效 MAX
 
 <p align="center">
   <img src="assets/moku-icon.png" width="148" alt="MOKU 猫娘图标">
@@ -6,15 +6,19 @@
 
 MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作品 ID，翻翻预览，把喜欢的画放进采集篮，再挑好图片一起下载。
 
-当前源码版本：**1.1.4-r1** Lite。
+当前源码版本：**1.1.4-r1**（业务基线），实验修订 **R11**，发布标记 `v1.1.4-glass-r11`。
+
+花里胡哨版，谨慎下载😂。清透玻璃、宽边折射、实时点阵背景和鼠标联动标题都放开玩；详情、选图和下载延续 MOKU 的完整流程。
 
 ## 开始使用
 
-从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
+从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.4-glass-r11) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU-Glass-Lab.exe`。便携版直接运行，无需安装 Python。
 
-需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU.exe.config` 也一起保留。
+需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU-Glass-Lab.exe.config` 也一起保留。
 
-![MOKU Lite v1.1.1 首页](assets/screenshots/v1.1.1-home.jpg)
+![Glass Lab R11 日间首页](assets/screenshots/glass-r11-home-light.jpg)
+
+首页提供厚润、清透、柔雾三种材质；日夜配色从切换按钮向全屏扩散。鼠标划过标题会推开点阵，点击可以让它散开再归位。
 
 ## 搜索与筛选
 
@@ -36,11 +40,13 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 采集篮会自动保存在本机。重开软件，之前挑好的作品和页码还在；缩略图在进入采集篮后按需加载。保存遇到问题时，当前选择会留在页面里，点击提示中的「重试保存」即可重新同步；继续改选也会尝试保存。
 
-动图在鼠标悬停时播放，第一次加载先显示首帧，缓存后的预览再次悬停即可播放。右上角提供回到顶部和全局日夜切换，页面、文字与弹窗一起换色。
+动图在鼠标悬停时播放，第一次加载先显示首帧，缓存后的预览再次悬停即可播放。首页顶部提供日夜切换、使用说明与 Pixiv 登录入口，页面、文字与弹窗一起换色。
 
 输入框右键可剪切、复制、粘贴和全选，普通文字也能右键复制，键盘快捷键照常使用。
 
-![MOKU Lite v1.1.1 采集篮（示例作品）](assets/screenshots/v1.1.1-basket.jpg)
+![Glass Lab R11 下载与作品详情](assets/screenshots/glass-r11-detail-dark.jpg)
+
+此处采用项目内置测试图片。
 
 ## 下载
 
@@ -66,9 +72,7 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 历史页用一行展示作品、清晰度、格式、下载时间和文件路径，右侧可以打开保存位置、复制路径或删除记录。可以搜索记录、单条删除，也可以勾选多条一起删除；图片仍保留在原文件夹，下载去重记录也会保留。
 
-记录从使用新版后的成功下载开始累积，重启后保留，最多保存最近 5,000 条。本地历史、文件目录、采集篮和未完成任务保存在 `%LOCALAPPDATA%\MOKU\library`，属于当前 Windows 用户。
-
-![MOKU Lite v1.1.1 下载历史（示例记录）](assets/screenshots/v1.1.1-history.jpg)
+记录从使用新版后的成功下载开始累积，重启后保留，最多保存最近 5,000 条。本地历史、文件目录、采集篮和未完成任务保存在 `%LOCALAPPDATA%\MOKU-Glass-Lab-01\library`，属于当前 Windows 用户。
 
 ## 登录与网络
 
@@ -95,14 +99,14 @@ python moku_app.py
 
 ```powershell
 python -m pip install -r requirements-dev.lock
-powershell -ExecutionPolicy Bypass -File .\make-release.ps1
+powershell -ExecutionPolicy Bypass -File .\make-glass-release.ps1
 ```
 
-便携程序生成在 `dist\MOKU`，发布压缩包和更新说明生成在 `release\v版本号`。
+便携程序生成在 `dist\MOKU-Glass-Lab`，发布压缩包、校验值和更新说明生成在 `release\v1.1.4-glass-r11`。实验配置与存储说明见 [EXPERIMENT.md](EXPERIMENT.md)。
 
 ## 本版更新
 
-当前源码版本是 `1.1.4-r1 Lite`。这次完善了搜索条件超限提示、画师搜索异常记录隔离，以及下载回执损坏后的续传恢复。完整更新见 [CHANGELOG](CHANGELOG.md)。
+正式版基线为 `1.1.4-r1 Lite`。本次实验聚焦液态玻璃与点阵交互，修复滚动时下拉菜单误关、玻璃恢复失败，并减少重复绘制。更新重点见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，历史记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可证与作品使用
 

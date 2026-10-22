@@ -1,0 +1,56 @@
+name: Glass Lab
+
+"on":
+  push:
+    branches: [experiment/glass-lab-01]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22.17.0'
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-dev.lock
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          python -m pip check
+      - name: Check interaction and package contracts
+        shell: pwsh
+        run: |
+          python -I -B run_tests.py test_experiment_profile test_packaged_app test_frontend_state_safety test_frontend_layout_resilience test_frontend_startup_budget test_build_manifest
+          if ($LASTEXITCODE -ne 0) { throw 'Regression checks failed' }
+          foreach ($file in Get-ChildItem -LiteralPath web -Recurse -Filter *.js) {
+            node --check $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Syntax: $($file.Name)" }
+          }
+          foreach ($name in @('glass_select','glass_recovery','glass_runtime','check_feedback','live_glass','theme_sweep','lattice_backdrop','dot_title')) {
+            node "tests/test_$name.js"
+            if ($LASTEXITCODE -ne 0) { throw "Behavior: $name" }
+          }
+      - name: Build release package
+        shell: pwsh
+        run: |
+          ./build-glass-lab.ps1 -SkipChecks
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+          ./make-glass-release.ps1 -SkipBuild
+          if ($LASTEXITCODE -ne 0) { throw 'Release package failed' }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: MOKU-Glass-Lab-windows-x64
+          path: release/v*-glass-r*/
+          if-no-files-found: error
+          retention-days: 7

@@ -33,7 +33,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Experimental package build failed' }
 $Dist = Join-Path $Root 'dist\MOKU-Glass-Lab'
 $Exe = Join-Path $Dist 'MOKU-Glass-Lab.exe'
 Copy-Item -LiteralPath (Join-Path $Root 'MOKU.exe.config') -Destination (Join-Path $Dist 'MOKU-Glass-Lab.exe.config')
-foreach ($name in @('EXPERIMENT.md','LICENSE','PRIVACY.md','SECURITY.md','THIRD_PARTY_NOTICES.md')) {
+foreach ($name in @('RELEASE_NOTES.md','EXPERIMENT.md','LICENSE','PRIVACY.md','SECURITY.md','THIRD_PARTY_NOTICES.md')) {
   Copy-Item -LiteralPath (Join-Path $Root $name) -Destination (Join-Path $Dist $name)
 }
 python -B generate-third-party-licenses.py (Join-Path $Dist 'THIRD_PARTY_LICENSES.txt')

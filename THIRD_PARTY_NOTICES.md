@@ -41,4 +41,4 @@ Optional MP4 export invokes an FFmpeg executable already registered in the user'
 MIT License, Copyright (c) 2026 DayDreamInAReverie.
 Source: https://github.com/ruiqichenbiec/design-systems at 7a424c93b9be13cf835b91ea67495fec2ec0584e.
 Original license: web/vendor/lens/LICENSE.
-Lattice dot composition informed the custom background; this experiment implements the dot drawing locally.
+Lattice point formations and Dots spring physics are extracted from the same pinned source. Canvas rendering and lifecycle integration are local. The Lattice MIT license is preserved in web/vendor/lattice/LICENSE.

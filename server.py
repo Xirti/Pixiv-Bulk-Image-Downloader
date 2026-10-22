@@ -64,7 +64,7 @@ CODE_GENERATION_FILES += ("web/glass-select.js",)
 CODE_GENERATION_FILES += ("web/dot-title.js",)
 CODE_GENERATION_FILES += (
     "web/check-feedback.js", "web/lattice-backdrop.js",
-    "web/vendor/lattice/lorenz.js", "web/vendor/lattice/point-sets.js", "web/vendor/lattice/dots.js", "web/vendor/lattice/LICENSE", "web/vendor/lattice/UPSTREAM.md",
+    "web/vendor/lattice/point-sets.js", "web/vendor/lattice/dots.js", "web/vendor/lattice/LICENSE", "web/vendor/lattice/UPSTREAM.md",
 )
 
 
