@@ -41,6 +41,110 @@ class CurrentRevisionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_workspace_restore_refreshes_changed_detail_but_preserves_unchanged_deck(self):
+        self.run_frontend(r'''
+const old = artwork("77", 3);
+items = [old];
+activeArtworkId = old.id;
+choose(old);
+renderDetail(old, 0);
+const row = (item, pages) => ({id:item.id,item,pages,context:activeSearchContext,resultPage:1});
+const deck = $("#deck"), html = Object.getOwnPropertyDescriptor(FakeElement.prototype,"innerHTML");
+let rebuilds = 0;
+Object.defineProperty(deck,"innerHTML",{get(){return html.get.call(this);},set(value){rebuilds++;html.set.call(this,value);}});
+restoreBasketView([row(old,[0,2])]);
+assert.equal(rebuilds,0,"selection-only restore rebuilt the pinned preview");
+assert.equal($("#collectionPages").querySelectorAll("[data-collection-page]")[1].checked,false);
+const updated = {...old,pages:2,title:"updated elsewhere",tags:["new tag"]};
+delete updated.pageImages;
+restoreBasketView([row(updated,[0,1])]);
+assert.equal(currentDetailItem.pages,2);
+assert.equal($("#collectionPages").querySelectorAll("[data-collection-page]").length,2,
+  "workspace restore left an obsolete page checkbox");
+assert.equal($("#dTitle").textContent,updated.title);
+assert.ok($("#dTags").innerHTML.includes("new tag"));
+assert.equal(rebuilds,1);
+''')
+
+    def test_workspace_restore_keeps_normal_and_basket_details_separate(self):
+        self.run_frontend(r'''
+const normal = artwork("77",3), basket = artwork("88",3);
+items = [normal,basket];
+activeArtworkId = normal.id;
+choose(normal); choose(basket);
+renderDetail(normal,0);
+openSelectionBasket();
+await openBatchCollection(basket.id);
+const row = item => ({id:item.id,item,pages:[0,1],context:activeSearchContext,resultPage:1});
+restoreBasketView([row({...normal,pages:2,title:"new normal"}),row({...basket,pages:2,title:"new basket"})]);
+assert.equal($("#basketDetailTitle").textContent,"new basket");
+assert.equal($("#basketPages").querySelectorAll("[data-collection-page]").length,2);
+closeBasketPage();
+assert.equal(currentDetailItem.id,normal.id);
+assert.equal($("#dTitle").textContent,"new normal");
+assert.equal($("#collectionPages").querySelectorAll("[data-collection-page]").length,2);
+assert.ok(!$("#deck").innerHTML.includes("88"));
+''')
+
+    def test_workspace_restore_fetches_missing_pages_for_an_open_detail(self):
+        self.run_frontend(r'''
+const old = artwork("77",2), fresh = artwork("77",4,"fresh");
+items = [old]; activeArtworkId = old.id; choose(old); renderDetail(old,0); openDownloadPage();
+let reads = 0;
+fetchJson = async url => { assert.ok(url.startsWith("/api/pixiv/artwork/77"));reads++;return fresh; };
+const updated = {...old,pages:4}; delete updated.pageImages;
+restoreBasketView([{id:old.id,item:updated,pages:[0,3],context:activeSearchContext,resultPage:1}]);
+await new Promise(resolve=>setImmediate(resolve));
+assert.equal(reads,1,"the active detail never fetched its newly available pages");
+assert.equal($("#collectionPages").querySelectorAll("[data-collection-page]").length,4);
+assert.equal(currentDetailItem.pageImages[3].regular,"/fresh-3");
+assert.deepEqual(currentDownloadPages(currentDetailItem),[0,3]);
+''')
+
+    def test_preview_refresh_updates_formats_and_keeps_the_chosen_quality(self):
+        self.run_frontend(r'''
+const old = artwork("77",1);
+items = [old]; activeArtworkId = old.id; renderDetail(old,0);
+$("#quality").value = "regular";
+const fresh = {...old,workType:"ugoira",qualities:[...old.qualities,{id:"original",label:"original"}],
+  formats:[{id:"source",label:"ZIP"},{id:"gif",label:"GIF"},{id:"mp4",label:"MP4"}]};
+fetchJson = async () => fresh;
+assert.equal(await refreshArtworkPreview(old.id),true);
+assert.ok($("#format").innerHTML.includes('value="gif"'),"refreshed detail kept obsolete format choices");
+assert.equal($("#quality").value,"regular","metadata refresh reset the user's chosen quality");
+''')
+
+    def test_task_capacity_manage_opens_the_pending_task_workspace(self):
+        self.run_frontend(r'''
+const item = artwork("77", 1);
+activeArtworkId = item.id;
+renderDetail(item, 0);
+openDownloadPage();
+const error = Object.assign(new Error("full"), {ownTaskCount:20,otherTaskCount:0});
+const decision = chooseDirectDownload(error);
+$("#taskCapacityManage").onclick();
+assert.equal(await decision, false);
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.equal(activeWorkspace, "download", "manage tasks navigated away from the download workspace");
+assert.equal($("#downloadPage").hidden, false);
+assert.match($("#pendingDownloadStatus").textContent, /移除/);
+''')
+
+    def test_preview_refresh_updates_the_open_viewer_heading(self):
+        self.run_frontend(r'''
+const old = artwork("77", 5);
+items = [old]; activeArtworkId = old.id; renderDetail(old, 0);
+openAllViewer();
+const fresh = {...old,title:"renamed artwork",artist:"renamed artist",pages:6,
+  pageImages:[...old.pageImages,{regular:"/new-5",original:"/new-original-5"}]};
+fetchJson = async () => fresh;
+assert.equal(await refreshArtworkPreview(old.id), true);
+assert.equal($("#viewerTitle").textContent, fresh.title, "viewer retained the old artwork heading");
+assert.equal($("#viewerArtist").textContent, fresh.artist);
+assert.equal($("#viewerCount").textContent, "6 张 · 连续浏览");
+assert.ok($("#viewerGrid").innerHTML.includes("/new-5"));
+''')
+
     def test_basket_actions_clear_confirm_and_download_only_navigates(self):
         self.run_frontend(r'''
 const item = artwork("77");

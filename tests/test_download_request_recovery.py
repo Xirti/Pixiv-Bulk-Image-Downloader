@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 import server
@@ -15,6 +18,8 @@ import server
 class DownloadRequestRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.TemporaryDirectory()
+        # The mocked publisher's completed artifact must exist for receipt checks.
+        (Path(self.root.name) / "saved.jpg").write_bytes(b"downloaded fixture image")
         self.httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.worker = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.worker.start()
@@ -90,8 +95,9 @@ class DownloadRequestRecoveryTests(unittest.TestCase):
                     self.assertEqual(result["saved"], ["saved.jpg"])
                     self.assertEqual(calls, [1], "retry repeated the completed network/save operation")
 
-    def test_request_id_cannot_be_reused_for_a_different_body_or_account_epoch(self):
-        with patch.object(server, "ensure_network_opener_current"), patch.object(
+    def test_request_id_rejects_changed_body_or_account_but_allows_same_account_relogin(self):
+        with patch.object(server, "workspace_scope", return_value="account-a") as owner_scope, patch.object(
+            server, "ensure_network_opener_current"), patch.object(
             server, "validated_authorization", return_value=(True, 11),
         ) as authorization, patch.object(
             server, "pixiv_item_for_download", return_value=self.artwork()), patch.object(
@@ -102,6 +108,9 @@ class DownloadRequestRecoveryTests(unittest.TestCase):
             self.assertEqual(self.post(changed)[0], 409)
             self.assertEqual(self.post(self.payload, path="/api/pixiv/batch-download")[0], 409)
             authorization.return_value = (True, 12)
+            self.assertEqual(self.post(self.payload)[0], 200)
+            owner_scope.return_value = "account-b"
+            authorization.return_value = (True, 13)
             self.assertEqual(self.post(self.payload)[0], 409)
             self.assertEqual(stage.call_count, 1)
 
@@ -124,6 +133,48 @@ class DownloadRequestRecoveryTests(unittest.TestCase):
 
 
 class DownloadRegistryTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows directory junction required")
+    def test_completed_receipt_cannot_follow_a_replacement_directory_junction(self):
+        from download_requests import DownloadRequests
+
+        for mode in ("memory", "restart", "write_failed", "read_failed"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                saved, moved = root / "saved", root / "moved"
+                saved.mkdir()
+                (saved / "image.png").write_bytes(b"image")
+                journal = root / "receipts.sqlite3"
+                body = {"saveRoot": str(saved), "requestId": "junction-receipt-000001"}
+                calls = []
+                def operation():
+                    calls.append(1)
+                    server.Handler._save_root(body)
+                    return {"saved": ["image.png"], "pages": 1}, 200
+                registry = DownloadRequests(path=journal)
+                if mode == "write_failed":
+                    with patch.object(registry, "_write_success", side_effect=OSError("journal unavailable")):
+                        registry.run(body["requestId"], "/single", body, operation, scope="public")
+                else:
+                    registry.run(body["requestId"], "/single", body, operation, scope="public")
+                self.assertTrue(saved.resolve().is_relative_to(root))
+                self.assertTrue(moved.resolve().is_relative_to(root))
+                saved.rename(moved)
+                result = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(saved), str(moved)],
+                                        capture_output=True)
+                if result.returncode:
+                    self.skipTest("Windows junction creation is unavailable")
+                try:
+                    if mode == "restart":
+                        registry = DownloadRequests(path=journal)
+                    with patch.object(registry, "_read_success", wraps=registry._read_success) as read:
+                        if mode == "read_failed":
+                            read.side_effect = sqlite3.OperationalError("journal unavailable")
+                        with self.assertRaisesRegex(server.RequestInputError, "链接|重解析"):
+                            registry.run(body["requestId"], "/single", body, operation, scope="public")
+                    self.assertEqual(calls, [1, 1])
+                finally:
+                    saved.rmdir()
+
     def test_corrupt_durable_receipts_recheck_and_repair_only_the_matching_request(self):
         from pathlib import Path
         from download_requests import DownloadRequestError, DownloadRequests

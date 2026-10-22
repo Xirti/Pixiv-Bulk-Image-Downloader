@@ -202,22 +202,30 @@ function restoreWorkspace() { return workspaceSync.restore(); }
 
 function restoreBasketView(rows) {
   // Disk records contain durable metadata, not preview URLs. Keep previews
-  // already loaded by this account, and reconcile controls without navigating
-  // or rebuilding the detail deck (which would lose its pinned card).
+  // already loaded by this account. Selection-only restores keep the deck;
+  // changed metadata must also reach the visible fields and page controls.
   const previewItems = new Map([...items, ...batchCandidateItems, ...selection.snapshot().map(row => row.item),
     basketDownloadSnapshot?.item, currentDetailItem, basketDetailItem].filter(Boolean).map(item => [String(item.id), item]));
   const restored = rows.map(row => ({...row, item: {...previewItems.get(String(row.id)), ...row.item}}));
   if (!selection.restore(restored, {allowOverflow: true}).accepted) throw new Error("采集篮记录不完整");
   const records = new Map(selection.snapshot().map(row => [row.id, row]));
+  const changedDetailIds = new Set();
   const latestItem = item => item ? records.get(String(item.id))?.item || item : null;
   for (const row of records.values()) {
     const preview = previewItems.get(row.id);
+    if (["title", "artist", "pages", "workType", "restriction", "tags"].some(
+      field => JSON.stringify(preview?.[field]) !== JSON.stringify(row.item[field]),
+    )) changedDetailIds.add(row.id);
     if (!preview?.pageImages || preview.pages !== row.item.pages || preview.workType !== row.item.workType
       || preview.restriction !== row.item.restriction) staleBasketPreviewIds.add(row.id);
   }
   currentDetailItem = latestItem(currentDetailItem);
   basketDetailItem = latestItem(basketDetailItem);
-  if (basketDownloadSnapshot) basketDownloadSnapshot.item = latestItem(basketDownloadSnapshot.item);
+  const changed = item => item && changedDetailIds.has(String(item.id));
+  if (basketDownloadSnapshot) {
+    basketDownloadSnapshot.item = latestItem(basketDownloadSnapshot.item);
+    basketDownloadSnapshot.detailChanged ||= Boolean(changed(basketDownloadSnapshot.item));
+  }
   syncResultSelectionControls();
   const syncPages = (root, item) => {
     root.querySelectorAll("[data-collection-page]").forEach(box => {
@@ -226,22 +234,32 @@ function restoreBasketView(rows) {
     if (item) bindCollectionPageInputs(root, item);
   };
   syncPages($("#collectionPages"), basketDownloadSnapshot?.item || currentDetailItem);
-  if (!basketPageOpen()) return;
-  const candidates = new Map(batchCandidateItems.map(item => [String(item.id), item]));
-  for (const row of records.values()) {
-    candidates.set(row.id, row.item);
-    batchCandidateContextByArtwork.set(row.id, {...row.context});
-    batchCandidateResultPageByArtwork.set(row.id, row.resultPage);
-  }
-  batchCandidateItems = [...candidates.values()];
-  if (basketReturnMode === "picker") openBasketArtworkPicker();
-  else {
-    syncPages($("#basketPages"), basketDetailItem);
-    if (basketDetailItem && records.has(String(basketDetailItem.id))) {
-      currentDetailContext = {...records.get(String(basketDetailItem.id)).context};
+  if (!basketPageOpen()) {
+    if (changed(currentDetailItem)) refreshDetailControls(currentDetailItem, false);
+  } else {
+    const candidates = new Map(batchCandidateItems.map(item => [String(item.id), item]));
+    for (const row of records.values()) {
+      candidates.set(row.id, row.item);
+      batchCandidateContextByArtwork.set(row.id, {...row.context});
+      batchCandidateResultPageByArtwork.set(row.id, row.resultPage);
     }
-    syncBasketHeader();
-    syncBasketArtworkMeta();
+    batchCandidateItems = [...candidates.values()];
+    if (basketReturnMode === "picker") openBasketArtworkPicker();
+    else {
+      if (changed(basketDetailItem)) refreshDetailControls(basketDetailItem, true);
+      else syncPages($("#basketPages"), basketDetailItem);
+      if (basketDetailItem && records.has(String(basketDetailItem.id))) {
+        currentDetailContext = {...records.get(String(basketDetailItem.id)).context};
+      }
+      syncBasketHeader();
+      syncBasketArtworkMeta();
+    }
+  }
+  const visibleDetail = basketPageOpen() ? (basketReturnMode === "detail" ? basketDetailItem : null)
+    : ((activeWorkspace === "download" || !$("#allViewer").hidden) ? currentDetailItem : null);
+  if (changed(visibleDetail) && visibleDetail.source === "pixiv" && staleBasketPreviewIds.has(String(visibleDetail.id))) {
+    detailRefreshAttempts.delete(String(visibleDetail.id));
+    void refreshArtworkPreview(visibleDetail.id);
   }
 }
 
@@ -564,6 +582,8 @@ function refreshDetailControls(item, inBasket = basketPageOpen()) {
     const visible = normalDetailView.render(item, undefined, {preserve: true});
     renderCollectionPageWindow(item);
     $("#viewAll").hidden = item.pages <= visible;
+    renderSingleDownloadOptions(item, true);
+    updateFormatHint();
   }
   if (!$("#allViewer").hidden) renderViewerWindow(item);
   $("#download").textContent = downloadButtonLabel(item);
@@ -1310,7 +1330,7 @@ async function select(index) {
   $("#download").disabled = true;
 
   try {
-    if (item.source === "pixiv" && !item.pageImages) {
+    if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)))) {
       item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, 18000);
       if (controller !== detailController || generation !== viewGeneration) return;
       rememberArtworkDetail(item);
@@ -1354,6 +1374,19 @@ function detailView(prefix, deck, hint) {
 const normalDetailView = detailView("d", "#deck", "#deckHint");
 const basketDetailView = detailView("basketDetail", "#basketDetailDeck", "#basketDetailDeckHint");
 
+function renderSingleDownloadOptions(item, preserve = false) {
+  const quality = preserve ? $("#quality").value : null;
+  const format = preserve ? $("#format").value : null;
+  const qualityOptions = item.qualities.map((option) => `<option value="${option.id}">${esc(downloadQualityLabel(option.id, item) || option.label)}${option.width > 0 && option.height > 0 ? ` · ${option.width} × ${option.height}` : ""}</option>`).join("");
+  const formatOptions = downloadFormatOptions(item.formats);
+  if ($("#quality").innerHTML !== qualityOptions) $("#quality").innerHTML = qualityOptions;
+  if ($("#format").innerHTML !== formatOptions) $("#format").innerHTML = formatOptions;
+  const defaultQuality = item.qualities.find(option => option.id === "original")?.id || item.qualities[0]?.id || "original";
+  $("#quality").value = item.qualities.some(option => option.id === quality) ? quality : defaultQuality;
+  const formats = item.formats.filter(option => option.id !== "mp4" || animationFormats.mp4 !== false);
+  $("#format").value = formats.some(option => option.id === format) ? format : formats[0]?.id || "source";
+}
+
 function renderDetail(item, index, detailContext = activeSearchContext) {
   normalDetailView.reset();
   selection.remember(item);
@@ -1363,9 +1396,7 @@ function renderDetail(item, index, detailContext = activeSearchContext) {
   const visible = normalDetailView.render(item, page => `/api/image/${(currentPage - 1) * 12 + index}/${page}?size=preview`);
   renderCollectionPageWindow(item);
   $("#viewAll").hidden = item.pages <= visible;
-  $("#quality").innerHTML = item.qualities.map((quality) => `<option value="${quality.id}">${esc(downloadQualityLabel(quality.id, item) || quality.label)}${quality.width > 0 && quality.height > 0 ? ` · ${quality.width} × ${quality.height}` : ""}</option>`).join("");
-  $("#quality").value = item.qualities.some(quality => quality.id === "original") ? "original" : item.qualities[0]?.id || "original";
-  $("#format").innerHTML = downloadFormatOptions(item.formats);
+  renderSingleDownloadOptions(item);
   $("#download").textContent = downloadButtonLabel(item);
   syncSearchScopedControls();
   updateFormatHint();
@@ -1431,6 +1462,8 @@ function renderCollectionPageWindow(item = currentDetailItem) {
 }
 
 function renderViewerWindow(item) {
+  $("#viewerTitle").textContent = item?.title || "";
+  $("#viewerArtist").textContent = item?.artist || "";
   const pages = Array.isArray(item?.pageImages) ? item.pageImages.slice(0, item.pages) : [];
   const lastStart = Math.max(0, Math.floor(Math.max(0, pages.length - 1) / VIEWER_PAGE_WINDOW) * VIEWER_PAGE_WINDOW);
   const start = Math.min(Math.max(0, viewerPageOffset), lastStart);
@@ -1468,8 +1501,6 @@ function openAllViewer() {
   const item = activeDetail || selection.get(activeArtworkId)?.item || items.find((row) => row.id === activeArtworkId);
   if (!item?.pageImages) return;
   viewerPageOffset = 0;
-  $("#viewerTitle").textContent = item.title;
-  $("#viewerArtist").textContent = item.artist;
   renderViewerWindow(item);
   $("#allViewer").hidden = false;
   document.body.classList.add("viewer-open");
@@ -1897,7 +1928,7 @@ function chooseDirectDownload(error) {
     $("#taskCapacityManage").onclick = () => {
       finish(false);
       setTimeout(() => {
-        navigatePrimary("#download");
+        navigatePrimary("#detail");
         $("#pendingDownloads").scrollIntoView({behavior: "auto"});
         $("#pendingDownloadStatus").textContent = error.ownTaskCount
           ? "移除不再需要的未完成任务后，可重新下载。"

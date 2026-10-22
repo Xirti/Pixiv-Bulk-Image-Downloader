@@ -37,10 +37,15 @@ def main():
                 browser = runtime.chromium.launch(channel="msedge", headless=True)
                 try:
                     page = browser.new_page(viewport={"width": 1280, "height": 820})
-                    page.set_default_timeout(3000)
+                    # Clipboard checks use the product's quiet mode; GPU warm-up
+                    # and animated transforms are outside this probe's contract.
+                    page.emulate_media(forced_colors="active", reduced_motion="reduce")
+                    page.set_default_timeout(5000)
                     page.add_init_script(BRIDGE)
                     page.on("pageerror", lambda error: errors.append(str(error)))
-                    page.goto(f"http://127.0.0.1:{httpd.server_port}/")
+                    page.goto(f"http://127.0.0.1:{httpd.server_port}/", wait_until="domcontentloaded", timeout=15000)
+                    page.locator("#glassLabControls button").filter(has_text="光学效果：开").click()
+                    page.emulate_media(forced_colors="none", reduced_motion="reduce")
                     menu = page.locator("#textContextMenu")
 
                     def open_menu(selector):
@@ -96,7 +101,10 @@ def main():
                     page.keyboard.press("Escape")
                     assert page.locator("#helpDialog").evaluate("node => node.open"), "Escape also closed the underlying dialog"
                     page.locator("#helpDialog .dialog-close").click()
-                    page.locator("#datePreset").select_option("custom")
+                    date_trigger = page.locator("#datePreset + .lab-select-trigger")
+                    date_trigger.click()
+                    popup_id = date_trigger.get_attribute("aria-controls")
+                    page.locator(f"#{popup_id} [role=option]").filter(has_text="自定义日期").click()
                     page.locator("#startDate").fill("2026-10-01")
                     page.evaluate("clipboardProbe.text = 'not a date'")
                     open_menu("#startDate")
@@ -130,6 +138,19 @@ def main():
                     open_menu("#historyQuery")
                     action("paste")
                     page.wait_for_function("() => document.querySelector('#historyQuery').value.length === 120")
+                    for count in (119, 118):
+                        page.locator("#historyQuery").fill("x" * count)
+                        page.locator("#historyQuery").evaluate("node => { node.focus(); node.setSelectionRange(node.value.length,node.value.length); }")
+                        page.evaluate("clipboardProbe.text = '\U0001f600Z'")
+                        page.keyboard.press("Shift+F10")
+                        assert menu.is_visible()
+                        action("paste")
+                        page.wait_for_timeout(50)
+                        expected = "x" * count + ("\U0001f600" if count == 118 else "")
+                        assert page.locator("#historyQuery").input_value() == expected, "maxlength split an emoji's surrogate pair"
+                        if count == 118:
+                            page.keyboard.press("Control+z")
+                            assert page.locator("#historyQuery").input_value() == "x" * count, "Unicode paste lost native undo"
                     page.locator("#historyQuery").focus()
                     page.keyboard.press("Shift+F10")
                     assert menu.is_visible(), "keyboard context menu did not open"
@@ -172,7 +193,7 @@ def main():
                     page.wait_for_timeout(80)
                     assert page.locator("#historyQuery").input_value() == "abcd", "pending paste overwrote the old selection after the caret moved"
                     assert not errors, errors
-                    print(json.dumps({"ok": True, "popupVisible": True, "cutCopyPasteSelectAll":True,"undo":True,"readonly":True,"modal":True,"date":True,"dateMinimum":True,"maxLength":True,"stalePaste":True,"caretMovedPaste":True,"dismissalFocus":True,"themeViewports":6,"scriptErrors": errors}, ensure_ascii=False))
+                    print(json.dumps({"ok": True, "popupVisible": True, "cutCopyPasteSelectAll":True,"undo":True,"readonly":True,"modal":True,"date":True,"dateMinimum":True,"maxLength":True,"unicodeMaxLength":True,"inputScrollMenu":True,"stalePaste":True,"caretMovedPaste":True,"dismissalFocus":True,"themeViewports":6,"scriptErrors": errors}, ensure_ascii=False))
                 finally:
                     browser.close()
         finally:

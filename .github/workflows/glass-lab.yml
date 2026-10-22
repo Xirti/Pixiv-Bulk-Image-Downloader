@@ -43,7 +43,7 @@ jobs:
       - name: Check interaction and package contracts
         shell: pwsh
         run: |
-          python -I -B run_tests.py test_experiment_profile test_packaged_app test_frontend_state_safety test_frontend_layout_resilience test_frontend_startup_budget test_build_manifest
+          python -I -B run_tests.py test_experiment_profile test_packaged_app test_frontend_state_safety test_frontend_layout_resilience test_frontend_startup_budget test_build_manifest test_current_revision test_workspace_sync_frontend test_local_catalog test_download_request_recovery test_pixiv_adapter test_pixiv_reliability
           if ($LASTEXITCODE -ne 0) { throw 'Regression checks failed' }
           foreach ($file in Get-ChildItem -LiteralPath web -Recurse -Filter *.js) {
             node --check $file.FullName

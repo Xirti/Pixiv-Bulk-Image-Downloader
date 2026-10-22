@@ -12,6 +12,28 @@ from pixiv_adapter import (
 
 
 class PixivAdapterTests(unittest.TestCase):
+    def test_detail_rejects_broken_page_shapes_without_changing_page_indices(self):
+        raw = {"illustId":"123", "xRestrict":0, "isUnlisted":False, "isLoginOnly":False}
+        page = {"urls":{"regular":"https://i.pximg.net/123.jpg", "original":"https://i.pximg.net/123.png"}}
+        for pages in (None, "bad", {"data":[page]}, [page, None, page], [page, "bad"],
+                      [{"urls":"bad"}], [{"urls":["bad"]}]):
+            with self.subTest(pages=pages):
+                with self.assertRaisesRegex(PixivPolicyError, "图片页"):
+                    normalize_detail(raw, pages)
+
+    def test_detail_isolates_malformed_optional_tags_and_keeps_pages_in_order(self):
+        raw = {"illustId":"123", "xRestrict":0, "isUnlisted":False, "isLoginOnly":False,
+               "tags":{"tags":[None, "invalid", {"tag":"猫耳"}, {"tag":"原创"}]}}
+        pages = [{"urls":{"regular":f"https://i.pximg.net/123_p{page}.jpg"}} for page in range(2)]
+        item = normalize_detail(raw, pages)
+        self.assertEqual(item["tags"], ["猫耳", "原创"])
+        self.assertEqual(item["pages"], 2)
+        for page, image in enumerate(item["pageImages"]):
+            self.assertIn(f"123_p{page}.jpg", image["regular"])
+        for tags in (None, "invalid", {"unexpected":"shape"}):
+            with self.subTest(tags=tags):
+                self.assertEqual(normalize_detail({**raw, "tags":{"tags":tags}}, pages)["tags"], [])
+
     def test_malformed_search_fields_raise_the_row_policy_error(self):
         base = {"id": "123", "url": "https://i.pximg.net/a.jpg", "xRestrict": 0, "isUnlisted": False}
         for field in ("xRestrict", "visibilityScope", "pageCount", "width", "height", "illustType", "aiType"):

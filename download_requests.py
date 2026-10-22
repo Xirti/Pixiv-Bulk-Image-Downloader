@@ -11,6 +11,8 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from local_catalog import artifact_file_state
+
 
 Response = tuple[dict, int]
 
@@ -92,6 +94,7 @@ class DownloadRequests:
         for file in files:
             if (not isinstance(file, list) or len(file) != 3
                     or not isinstance(file[0], str) or not file[0] or "\0" in file[0]
+                    or not Path(file[0]).is_absolute()
                     or type(file[1]) is not int or file[1] < 0 or type(file[2]) is not int):
                 return None
         if payload.get("skippedPages") and not payload.get("skippedFiles"):
@@ -99,10 +102,10 @@ class DownloadRequests:
             return None
         for path, size, mtime in files:
             try:
-                info = Path(path).stat()
-            except (FileNotFoundError, NotADirectoryError):
+                info = artifact_file_state(Path(path))
+            except (OSError, ValueError):
                 return None
-            if info.st_size != size or info.st_mtime_ns != mtime:
+            if info["size"] != size or info["mtime"] != mtime:
                 return None
         return payload, 200
 
@@ -112,8 +115,8 @@ class DownloadRequests:
         files = []
         for relative in dict.fromkeys(result[0].get("saved", []) + result[0].get("skippedFiles", [])):
             file = root / relative
-            info = file.stat()
-            files.append([str(file), info.st_size, info.st_mtime_ns])
+            info = artifact_file_state(file)
+            files.append([info["path"], info["size"], info["mtime"]])
         connection = self._journal_connection()
         try:
             with connection:
@@ -164,12 +167,12 @@ class DownloadRequests:
                 if entry.active:
                     return {"pending": True, "retryAfterMs": 1000}, 202
                 if entry.result is not None:
-                    if self._path is None or entry.result[0].get("recoveryWarning"):
+                    if self._path is None:
                         return entry.result
                     try:
                         restored = self._read_success(request_id, durable_fingerprint)
                     except (OSError, sqlite3.Error):
-                        return entry.result
+                        restored = None
                     if restored is not None:
                         return restored
                     entry.result = None

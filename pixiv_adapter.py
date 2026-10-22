@@ -292,7 +292,14 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
     artwork_id = str(raw.get("illustId") or raw.get("id") or "")
     if not artwork_id.isdigit():
         raise PixivPolicyError("invalid artwork id")
+    if (not isinstance(pages, list)
+            or any(not isinstance(page, dict) or not isinstance(page.get("urls") or {}, dict) for page in pages)):
+        # Page positions are download identities. Reject the whole malformed
+        # list rather than dropping rows and shifting the remaining page IDs.
+        raise PixivPolicyError("Pixiv 图片页数据格式异常，请重试")
     tag_rows = (raw.get("tags") or {}).get("tags") if isinstance(raw.get("tags"), dict) else []
+    if not isinstance(tag_rows, list):
+        tag_rows = []
     page_images = []
     for page in pages:
         urls = page.get("urls") or {}
@@ -318,7 +325,7 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
         "id": artwork_id, "restriction": restriction, "source": "pixiv",
         "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"),
         "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""),
-        "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30],
+        "tags": [str(row.get("tag")) for row in tag_rows if isinstance(row, dict) and row.get("tag")][:30],
         "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0),
         "bookmarks": bookmark_count(raw), "date": publication_date(raw.get("createDate")),
         "description": _plain_text(raw.get("description") or raw.get("illustComment")),

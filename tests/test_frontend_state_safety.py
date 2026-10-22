@@ -63,7 +63,7 @@ assert.equal(selection.get(item.id).item.title,"test");
     def test_old_page_checkbox_cannot_restore_invalid_pages_after_refresh(self):
         self.run_js(r'''
 const old = {id:"987",source:"pixiv",pages:3,title:"test",artist:"Artist",tags:[],
-  qualities:[{id:"original"}],formats:[{id:"source",label:"源格式"}],
+  qualities:[{id:"original"},{id:"regular"}],formats:[{id:"source",label:"源格式"}],
   thumb:"/old",pageImages:[{regular:"/old-0"},{regular:"/old-1"},{regular:"/old-2"}]};
 items = [old];
 selection.choose([old], {context:activeSearchContext,resultPage:1});
