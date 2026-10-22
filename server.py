@@ -51,7 +51,7 @@ from search_service import SearchDateRange, SearchResultIndex, SearchInputError,
 from version import __version__
 
 CODE_GENERATION_FILES = (
-    "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
+    "server.py", "auth_store.py", "folder_picker.py",
     "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
     "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "download_history.py", "local_catalog.py", "workspace_store.py", "preview_resources.py", "ugoira_export.py", "version.py",
     "web/index.html", "web/app.js", "web/text-context-menu.js", "web/download-history.js", "web/workspace-sync.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
@@ -123,26 +123,7 @@ SEARCH_CANCEL_TOMBSTONE_SECONDS = 120.0
 MAX_ACTIVE_DOWNLOAD_TASKS = 2
 PROTOCOL_VERSION = 5
 APPLICATION_ID = "MOKU.PixivTagGallery.GlassLab01"
-TEST_FIXTURES_ENABLED = os.getenv("MOKU_ENABLE_TEST_FIXTURES") == "1"
-CODE_GENERATION = (os.getenv("MOKU_CODE_GENERATION") or compute_code_generation()) + (
-    ":fixtures" if TEST_FIXTURES_ENABLED else ""
-)
-
-
-def fixture_records(tag: str) -> list[dict]:
-    if not TEST_FIXTURES_ENABLED:
-        raise RuntimeError("fixture routes are disabled")
-    from fixture_gallery import records
-
-    return records(tag)
-
-
-def fixture_artwork_svg(index: int, page: int, size: str) -> bytes:
-    if not TEST_FIXTURES_ENABLED:
-        raise RuntimeError("fixture routes are disabled")
-    from fixture_gallery import artwork_svg
-
-    return artwork_svg(index, page, size)
+CODE_GENERATION = os.getenv("MOKU_CODE_GENERATION") or compute_code_generation()
 INSTANCE_ID = os.getenv("MOKU_INSTANCE_ID") or secrets.token_hex(16)
 REQUEST_TOKEN = secrets.token_urlsafe(32)
 DESKTOP_AUTH_TOKEN = os.getenv("MOKU_DESKTOP_AUTH_TOKEN") or secrets.token_urlsafe(32)
@@ -3428,9 +3409,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not trusted_local_request(self):
             self.send_json({"error": "请求只允许本机同源界面调用"}, 403)
             return True
-        image_capability = path == "/api/pixiv/image" or bool(
-            TEST_FIXTURES_ENABLED and re.fullmatch(r"/api/image/\d+/\d+", path)
-        )
+        image_capability = path == "/api/pixiv/image"
         if path != "/api/health" and not image_capability and not valid_request_token(self):
             self.send_json({"error": "请求授权令牌无效"}, 403)
             return True
@@ -3511,8 +3490,6 @@ class Handler(SimpleHTTPRequestHandler):
         if request.path.startswith("/api/pixiv/"):
             ensure_network_opener_current()
         if request.path == "/api/pixiv/search":
-            if TEST_FIXTURES_ENABLED:
-                return self._get_fixture_search(request)
             return self._get_pixiv_search(request)
         artwork_match = re.fullmatch(r"/api/pixiv/artwork/(\d+)", request.path)
         if artwork_match:
@@ -3522,40 +3499,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._get_pixiv_ugoira(request, ugoira_match.group(1))
         if request.path == "/api/pixiv/image":
             return self._get_pixiv_image(request)
-        if request.path == "/api/search":
-            if not TEST_FIXTURES_ENABLED:
-                return self.send_json({"error": "not found"}, 404)
-            return self._get_fixture_search(request)
-        image_match = re.fullmatch(r"/api/image/(\d+)/(\d+)", request.path)
-        if image_match:
-            if not TEST_FIXTURES_ENABLED:
-                return self.send_json({"error": "not found"}, 404)
-            index, page = map(int, image_match.groups())
-            size = urllib.parse.parse_qs(request.query).get("size", ["preview"])[0]
-            if size not in {"original", "large", "preview"}:
-                size = "preview"
-            return self.send_bytes(
-                fixture_artwork_svg(index, page, size), "image/svg+xml", "public,max-age=86400",
-            )
         super().do_GET()
-
-    def _get_fixture_search(self, request):
-        query = urllib.parse.parse_qs(request.query)
-        tag = query.get("tag", ["原创"])[0][:60]
-        try:
-            page = max(1, int(query.get("page", ["1"])[0]))
-        except ValueError:
-            page = 1
-        all_items = fixture_records(tag)
-        per_page = 12
-        start = (page - 1) * per_page
-        return self.send_json({
-            "tag": tag, "total": len(all_items), "page": page,
-            "pages": 2, "pageNumbers": [1, 2],
-            "preloadedThrough": 2, "hasMore": False,
-            "perPage": per_page,
-            "items": all_items[start:start + per_page],
-        })
 
     def _get_pixiv_search(self, request):
         query = urllib.parse.parse_qs(request.query)
@@ -3790,8 +3734,6 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
             "/api/pixiv/download": (16384, self._post_pixiv_download),
         }
-        if TEST_FIXTURES_ENABLED:
-            routes["/api/download"] = (16384, self._post_fixture_download)
         route = routes.get(path)
         if route is None:
             return self.send_json({"error": "not found"}, 404)
@@ -4311,31 +4253,6 @@ class Handler(SimpleHTTPRequestHandler):
             }
             response_status = 502
         return response_payload, response_status
-
-    def _post_fixture_download(self, data: dict):
-        try:
-            index = max(0, min(23, int(data.get("index", 0))))
-            pages = min(20, max(1, int(data.get("pages", 1))))
-        except (TypeError, ValueError):
-            return self.send_json({"error": "invalid numeric fields"}, 400)
-        quality = data.get("quality", "original")
-        image_format = data.get("format", "source")
-        if quality not in {"original", "large", "preview"} or image_format not in {"source", "svg"}:
-            return self.send_json({"error": "unsupported quality or format"}, 400)
-        folder_name = re.sub(
-            r"[^\w\-\u4e00-\u9fff]+", "_", str(data.get("tag", "未分类")),
-        )[:80] or "未分类"
-        folder = DOWNLOADS / folder_name
-        folder.mkdir(exist_ok=True)
-        saved = []
-        for page in range(pages):
-            file = folder / f"{81024000 + index}_p{page}_{quality}.svg"
-            file.write_bytes(fixture_artwork_svg(index, page, quality))
-            saved.append(str(file))
-        return self.send_json({
-            "ok": True, "saved": saved, "quality": quality, "format": image_format,
-        })
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8765"))

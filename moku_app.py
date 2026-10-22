@@ -348,18 +348,10 @@ def launch_desktop(
         remove_webview_profile(storage_path)
 
 
-def _run_backend_for_test() -> str:
-    raise RuntimeError("test backend hook was not configured")
-
-
 def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--serve-only", action="store_true")
-    parser.add_argument("--desktop-host-test", action="store_true")
     options, _unknown = parser.parse_known_args(argv)
-    if options.desktop_host_test:
-        launch_desktop(_run_backend_for_test())
-        return 0
 
     no_browser = options.serve_only or os.environ.get("MOKU_NO_BROWSER") == "1"
 
@@ -410,16 +402,12 @@ def run(argv: list[str] | None = None) -> int:
             owns_backend = True
             LOG.info("start pid=%s url=%s instance=%s", os.getpid(), url, server.INSTANCE_ID)
 
-    exit_after = float(os.environ.get("MOKU_TEST_EXIT_AFTER_SECONDS") or 0)
     try:
         if no_browser:
             if not owns_backend:
                 return 0
-            if exit_after > 0:
-                time.sleep(exit_after)
-            else:
-                while thread and thread.is_alive():
-                    thread.join(timeout=3600)
+            while thread and thread.is_alive():
+                thread.join(timeout=3600)
         else:
             launch_desktop(
                 url,

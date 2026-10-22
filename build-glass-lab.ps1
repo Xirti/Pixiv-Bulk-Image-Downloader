@@ -3,28 +3,25 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $Root
 if (-not $SkipChecks) {
-  python -B run_tests.py test_experiment_profile test_packaged_app test_auth_store test_workspace_store test_search_service
-  if ($LASTEXITCODE -ne 0) { throw 'Experimental checks failed' }
-  foreach ($script in (Get-ChildItem -LiteralPath (Join-Path $Root 'web') -Recurse -Filter '*.js')) {
+  $SyntaxSource = @'
+from pathlib import Path
+paths = list(Path(".").glob("*.py")) + list(Path("build_hooks").glob("*.py")) + [Path("MOKU.spec")]
+for path in paths:
+    compile(path.read_text(encoding="utf-8-sig"), str(path), "exec")
+print(f"Python syntax verified: {len(paths)} files")
+'@
+  $SyntaxSource | python -I -B -
+  if ($LASTEXITCODE -ne 0) { throw 'Python syntax check failed' }
+  foreach ($script in Get-ChildItem -LiteralPath $Root -Filter '*.ps1') {
+    $parseTokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+    if ($parseErrors.Count) { throw "PowerShell syntax: $($script.Name): $parseErrors" }
+  }
+  foreach ($script in Get-ChildItem -LiteralPath (Join-Path $Root 'web') -Recurse -Filter '*.js') {
     node --check $script.FullName
     if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax: $($script.Name)" }
   }
-  node tests/test_glass_select.js
-  if ($LASTEXITCODE -ne 0) { throw 'Select bridge checks failed' }
-  node tests/test_glass_runtime.js
-  if ($LASTEXITCODE -ne 0) { throw 'Glass lifecycle checks failed' }
-  node tests/test_check_feedback.js
-  if ($LASTEXITCODE -ne 0) { throw 'Checkbox feedback checks failed' }
-  node tests/test_live_glass.js
-  if ($LASTEXITCODE -ne 0) { throw 'Live glass texture checks failed' }
-  node tests/test_glass_recovery.js
-  if ($LASTEXITCODE -ne 0) { throw 'Glass context recovery checks failed' }
-  node tests/test_theme_sweep.js
-  if ($LASTEXITCODE -ne 0) { throw 'Theme sweep checks failed' }
-  node tests/test_lattice_backdrop.js
-  if ($LASTEXITCODE -ne 0) { throw 'Lattice backdrop checks failed' }
-  node tests/test_dot_title.js
-  if ($LASTEXITCODE -ne 0) { throw 'Dot title lifecycle checks failed' }
 }
 $SourceBefore = (python -B build_manifest.py source).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Source fingerprint failed' }

@@ -49,7 +49,7 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 ![Glass Lab R11 下载与作品详情](assets/screenshots/glass-r11-detail-dark.jpg)
 
-此处采用项目内置测试图片。
+此处采用测试图片演示。
 
 ## 下载
 
@@ -92,16 +92,12 @@ python -m pip install -r requirements.lock
 python moku_app.py
 ```
 
-## 开发与测试
-
-`tests/` 保留搜索、选图、下载等功能的回归测试，以及发布时使用的检查脚本。安装开发依赖后，运行 `python -I -B run_tests.py` 即可检查源码；只测某项时，可在命令后加测试名，例如 `test_search_service`。测试使用临时资料库，这些脚本不会放进便携包。
-
 ## 打包
 
-安装开发依赖后，运行项目自带的发布脚本：
+安装构建依赖后，运行项目自带的发布脚本：
 
 ```powershell
-python -m pip install -r requirements-dev.lock
+python -m pip install -r requirements-build.lock
 powershell -ExecutionPolicy Bypass -File .\make-glass-release.ps1
 ```
 

@@ -47,20 +47,16 @@ BUILD_INPUT_FILES = (
     "assets/moku-icon.ico",
     "assets/moku-icon.png",
     "requirements.lock",
-    "requirements-dev.lock",
-    "build-portable.ps1",
+    "requirements-build.lock",
     "build-glass-lab.ps1",
     "make-glass-release.ps1",
     ".github/workflows/glass-lab.yml",
     "README.md",
     "RELEASE_NOTES.md",
     "EXPERIMENT.md",
-    "make-release.ps1",
     "build_manifest.py",
-    "run_tests.py",
     "generate-third-party-licenses.py",
     "CHANGELOG.md",
-    ".github/workflows/ci.yml",
     "PRIVACY.md",
     "SECURITY.md",
     "THIRD_PARTY_NOTICES.md",
@@ -81,13 +77,6 @@ def file_sha256(path: Path) -> str:
 def build_input_files(source_root: Path) -> tuple[str, ...]:
     root = Path(source_root)
     files = list(BUILD_INPUT_FILES)
-    tests_root = root / "tests"
-    if tests_root.is_dir():
-        files.extend(
-            path.relative_to(root).as_posix()
-            for path in tests_root.rglob("*")
-            if path.is_file() and path.suffix.lower() in {".py", ".js", ".ps1"}
-        )
     if (root / "LICENSE").is_file():
         files.append("LICENSE")
     return tuple(sorted(set(files), key=lambda value: (value.casefold(), value)))

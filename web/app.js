@@ -289,7 +289,7 @@ function renderPendingTasks() {
 }
 
 async function saveDownloadTask(task) {
-  if (task.transient || (!workspaceSync.ready && !task.persisted) || task.taskOptions?.endpoint === "/api/download") return;
+  if (task.transient || (!workspaceSync.ready && !task.persisted)) return;
   if (!task.remainingChunks.length) { await deleteSavedTask(task.id); return; }
   await fetchJson("/api/workspace/task", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task, scope: workspaceSync.scope})});
   pendingTasks.set(task.id, task);
@@ -1393,7 +1393,7 @@ function renderDetail(item, index, detailContext = activeSearchContext) {
   currentDetailItem = item;
   currentDetailContext = { ...detailContext };
   collectionPageOffset = 0;
-  const visible = normalDetailView.render(item, page => `/api/image/${(currentPage - 1) * 12 + index}/${page}?size=preview`);
+  const visible = normalDetailView.render(item);
   renderCollectionPageWindow(item);
   $("#viewAll").hidden = item.pages <= visible;
   renderSingleDownloadOptions(item);
@@ -1944,7 +1944,7 @@ async function executeDownloadTask(task, requestForChunk, reportProgress) {
   if (!task.transient && (workspaceSync.ready || task.persisted)) {
     try {
       await saveDownloadTask(task);
-      task.persisted = task.taskOptions?.endpoint !== "/api/download";
+      task.persisted = true;
     } catch (error) {
       if (!error.taskCapacity || task.persisted || !await chooseDirectDownload(error)) throw error;
       if (task.authorizationRevision !== downloadAuthorizationRevision) throw new Error("Pixiv 账户状态已变更，请重新确认下载");
@@ -2019,18 +2019,11 @@ function setBasketSelectionLocked(locked) {
   if (!locked) void restoreWorkspaceWhenUnlocked();
 }
 
-function downloadPayload(item, sourceIndex) {
-  if (item.source === "pixiv") {
-    const downloadContext = currentDetailContext || activeSearchContext;
-    return {
-      endpoint: "/api/pixiv/download",
-      body: { id: item.id, pages: currentDownloadPages(item), ...readDownloadOptions(), context: downloadContext },
-      timeout: 120000,
-    };
-  }
+function downloadPayload(item) {
+  const downloadContext = currentDetailContext || activeSearchContext;
   return {
-    endpoint: "/api/download",
-    body: { index: (currentPage - 1) * 12 + sourceIndex, pages: item.pages, quality: $("#quality").value, format: $("#format").value, tag: $("#tagTitle").textContent },
+    endpoint: "/api/pixiv/download",
+    body: { id: item.id, pages: currentDownloadPages(item), ...readDownloadOptions(), context: downloadContext },
     timeout: 120000,
   };
 }
@@ -2357,11 +2350,8 @@ $("#download").onclick = async () => {
     announceToast("请至少勾选一张图片");
     return;
   }
-  const sourceIndex = Math.max(0, items.findIndex((row) => row.id === item.id));
-  const request = downloadPayload(item, sourceIndex);
-  const chunks = item.source === "pixiv"
-    ? planDownloadChunks([{ id: item.id, pages: request.body.pages }])
-    : [{ pageCount: item.pages }];
+  const request = downloadPayload(item);
+  const chunks = planDownloadChunks([{ id: item.id, pages: request.body.pages }]);
   const task = prepareDownloadTask(chunks, { endpoint: request.endpoint, body: request.body }, resumableSingleTask);
   const button = $("#download");
   singleDownloadPending = true;
@@ -2371,7 +2361,7 @@ $("#download").onclick = async () => {
   try {
     await executeDownloadTask(task, (chunk) => ({
       ...request,
-      body: item.source === "pixiv" ? { ...request.body, pages: chunk.groups[0].pages } : request.body,
+      body: { ...request.body, pages: chunk.groups[0].pages },
     }), () => {
       setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
       showTaskDock("正在保存", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已处理 ${task.savedCount} 页`, 0);
