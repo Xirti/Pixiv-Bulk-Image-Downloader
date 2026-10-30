@@ -8,9 +8,9 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 当前版本：**1.1.4-glass-r12**，动效版 **R12**，发布标记 `v1.1.4-glass-r12`。
 
-`main` 现为动效 MAX 主线。原 Lite 版完整保存在 [lite-backup](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/tree/lite-backup)，对应 `v1.1.4-r1`。
+`main` 现为动效 MAX 主线。原 Lite 版完整保存在 [lite-backup](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/tree/lite-backup)，对应 `v1.1.4-r2`。
 
-**花里胡哨版，谨慎下载———若不喜欢可进入Release页面，下载前一个版本 `MOKU Lite-v1.1.4-r1`**。
+**花里胡哨版，谨慎下载———若不喜欢可进入Release页面，下载前一个版本 `MOKU Lite-v1.1.4-r2`**。
 
 清透玻璃、宽边折射、实时点阵背景和鼠标联动标题继续保留。R12 重点完善下载收尾、采集篮同步和多窗口历史记录，减少玻璃重绘时的布局计算。
 
