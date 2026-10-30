@@ -94,7 +94,14 @@
     const field = current.field;
     restore(current);
     if (current.ranged) {
-      if (field.maxLength >= 0) text = text.slice(0, Math.max(0, field.maxLength - (field.value.length - current.end + current.start)));
+      if (field.maxLength >= 0) {
+        let limit = Math.max(0, field.maxLength - (field.value.length - current.end + current.start));
+        // maxlength counts UTF-16 units; keep supplementary characters whole.
+        if (limit < text.length && /[\uD800-\uDBFF]/.test(text.charAt(limit - 1))
+          && /[\uDC00-\uDFFF]/.test(text.charAt(limit))) limit--;
+        text = text.slice(0, limit);
+      }
+      if (!cutting && !text && current.start === current.end) return;
       if (document.execCommand(cutting ? "delete" : "insertText", false, text)) return;
       field.setRangeText(text, current.start, current.end, "end");
     } else {
@@ -145,7 +152,11 @@
     open(current, event.clientX, event.clientY);
   }, true);
   document.addEventListener("pointerdown", event => { if (!menu.contains(event.target)) close(); }, true);
-  window.addEventListener("scroll", () => close(true), true);
+  window.addEventListener("scroll", event => {
+    // Caret/focus restoration can queue an input's own horizontal scroll.
+    if (event.target instanceof Element && event.target.matches("input,textarea")) return;
+    close(true);
+  }, true);
   window.addEventListener("resize", () => close(true));
   window.addEventListener("blur", () => close());
   window.addEventListener("keydown", event => {

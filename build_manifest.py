@@ -11,7 +11,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-import server
+from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 from version import __version__
 
 SCHEMA_VERSION = 3
@@ -40,21 +40,23 @@ ALLOWED_TOP_LEVEL_DISTRIBUTION_METADATA = (
     "pywebview-6.2.1.dist-info",
 )
 BUILD_INPUT_FILES = (
-    *server.CODE_GENERATION_FILES,
+    *CODE_GENERATION_FILES,
     "MOKU.spec",
     "build_hooks/hook-PIL.Image.py",
     "MOKU.exe.config",
     "assets/moku-icon.ico",
     "assets/moku-icon.png",
     "requirements.lock",
-    "requirements-dev.lock",
+    "requirements-build.lock",
     "build-portable.ps1",
     "make-release.ps1",
+    ".github/workflows/ci.yml",
+    "README.md",
+    "RELEASE_NOTES.md",
+    "LITE.md",
     "build_manifest.py",
-    "run_tests.py",
     "generate-third-party-licenses.py",
     "CHANGELOG.md",
-    ".github/workflows/ci.yml",
     "PRIVACY.md",
     "SECURITY.md",
     "THIRD_PARTY_NOTICES.md",
@@ -75,13 +77,6 @@ def file_sha256(path: Path) -> str:
 def build_input_files(source_root: Path) -> tuple[str, ...]:
     root = Path(source_root)
     files = list(BUILD_INPUT_FILES)
-    tests_root = root / "tests"
-    if tests_root.is_dir():
-        files.extend(
-            path.relative_to(root).as_posix()
-            for path in tests_root.rglob("*")
-            if path.is_file() and path.suffix.lower() in {".py", ".js", ".ps1"}
-        )
     if (root / "LICENSE").is_file():
         files.append("LICENSE")
     return tuple(sorted(set(files), key=lambda value: (value.casefold(), value)))
@@ -89,7 +84,7 @@ def build_input_files(source_root: Path) -> tuple[str, ...]:
 
 def source_generation(*, source_root: Path | None = None) -> str:
     root = Path(source_root or Path(__file__).resolve().parent)
-    return server.compute_code_generation(
+    return compute_code_generation(
         root=root,
         files=build_input_files(root),
         frozen=False,

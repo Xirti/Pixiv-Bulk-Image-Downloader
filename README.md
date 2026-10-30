@@ -6,11 +6,13 @@
 
 MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作品 ID，翻翻预览，把喜欢的画放进采集篮，再挑好图片一起下载。
 
-当前源码版本：**1.1.4-r1** Lite。
+当前源码版本：**1.1.4-r2** Lite。
+
+R2 同步完善下载收尾、详情与选择状态、历史迁移及异常数据处理，沿用 Lite 的轻量界面。
 
 ## 开始使用
 
-从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
+从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.4-r2) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
 
 需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU.exe.config` 也一起保留。
 
@@ -87,14 +89,14 @@ python moku_app.py
 
 ## 开发与测试
 
-`tests/` 保留搜索、选图、下载等功能的回归测试，以及发布时使用的检查脚本。安装开发依赖后，运行 `python -I -B run_tests.py` 即可检查源码；只测某项时，可在命令后加测试名，例如 `test_search_service`。测试使用临时资料库，这些脚本不会放进便携包。
+回归测试和发布验证材料保存在本地工作区。源码构建入口为 `build-portable.ps1`，执行 Python、JavaScript 和 PowerShell 语法检查，并校验分发文件清单与源码指纹。
 
 ## 打包
 
 安装开发依赖后，运行项目自带的发布脚本：
 
 ```powershell
-python -m pip install -r requirements-dev.lock
+python -m pip install -r requirements-build.lock
 powershell -ExecutionPolicy Bypass -File .\make-release.ps1
 ```
 

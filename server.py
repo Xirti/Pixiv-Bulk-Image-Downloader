@@ -19,7 +19,6 @@ import time
 import secrets
 import sqlite3
 import socket
-import sys
 import threading
 import weakref
 import winreg
@@ -46,42 +45,11 @@ from workspace_store import TaskCapacityError, WorkspaceCapacityError, Workspace
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from ugoira_export import export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
-from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status
+from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status, valid_pixiv_id
 from search_service import SearchDateRange, SearchResultIndex, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
 
-CODE_GENERATION_FILES = (
-    "server.py", "auth_store.py", "fixture_gallery.py", "folder_picker.py",
-    "pixiv_login.py", "moku_app.py", "desktop_client.py", "network_config.py",
-    "pixiv_adapter.py", "search_aliases.py", "search_service.py", "download_requests.py", "download_history.py", "local_catalog.py", "workspace_store.py", "preview_resources.py", "ugoira_export.py", "version.py",
-    "web/index.html", "web/app.js", "web/text-context-menu.js", "web/download-history.js", "web/workspace-sync.js", "web/ugoira-preview.js", "web/theme.js", "web/selection-store.js", "web/artwork-detail-view.js", "web/style.css",
-)
-
-
-def compute_code_generation(
-    *, root: Path | None = None, files: tuple[str, ...] = CODE_GENERATION_FILES,
-    executable: Path | None = None, frozen: bool | None = None,
-) -> str:
-    """Fingerprint the code that may share a persistent loopback backend."""
-    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else bool(frozen)
-    digest = hashlib.sha256()
-    if is_frozen:
-        target = Path(executable or sys.executable).resolve()
-        with target.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return f"exe-sha256:{digest.hexdigest()}"
-
-    source_root = Path(root or Path(__file__).resolve().parent)
-    for relative in files:
-        path = source_root / relative
-        digest.update(relative.replace("\\", "/").encode("utf-8"))
-        digest.update(b"\0")
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        digest.update(b"\0")
-    return f"source-sha256:{digest.hexdigest()}"
+from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 
 
 ROOT = Path(__file__).resolve().parent
@@ -113,26 +81,7 @@ SEARCH_CANCEL_TOMBSTONE_SECONDS = 120.0
 MAX_ACTIVE_DOWNLOAD_TASKS = 2
 PROTOCOL_VERSION = 5
 APPLICATION_ID = "MOKU.PixivTagGallery"
-TEST_FIXTURES_ENABLED = os.getenv("MOKU_ENABLE_TEST_FIXTURES") == "1"
-CODE_GENERATION = (os.getenv("MOKU_CODE_GENERATION") or compute_code_generation()) + (
-    ":fixtures" if TEST_FIXTURES_ENABLED else ""
-)
-
-
-def fixture_records(tag: str) -> list[dict]:
-    if not TEST_FIXTURES_ENABLED:
-        raise RuntimeError("fixture routes are disabled")
-    from fixture_gallery import records
-
-    return records(tag)
-
-
-def fixture_artwork_svg(index: int, page: int, size: str) -> bytes:
-    if not TEST_FIXTURES_ENABLED:
-        raise RuntimeError("fixture routes are disabled")
-    from fixture_gallery import artwork_svg
-
-    return artwork_svg(index, page, size)
+CODE_GENERATION = os.getenv("MOKU_CODE_GENERATION") or compute_code_generation()
 INSTANCE_ID = os.getenv("MOKU_INSTANCE_ID") or secrets.token_hex(16)
 REQUEST_TOKEN = secrets.token_urlsafe(32)
 DESKTOP_AUTH_TOKEN = os.getenv("MOKU_DESKTOP_AUTH_TOKEN") or secrets.token_urlsafe(32)
@@ -214,8 +163,7 @@ def validate_mutating_request(handler) -> tuple[int, str] | None:
     """Authorize browser and local automation POST requests before side effects."""
     if not trusted_local_request(handler):
         return 403, "请求只允许本机同源界面调用"
-    supplied = str(handler.headers.get("X-MOKU-Request-Token") or "")
-    if not supplied or not hmac.compare_digest(supplied, REQUEST_TOKEN):
+    if not valid_request_token(handler):
         return 403, "请求授权令牌无效"
     if str(handler.headers.get_content_type() or "").lower() != "application/json":
         return 415, "请求必须使用 application/json"
@@ -227,7 +175,7 @@ def validate_desktop_auth_request(handler) -> tuple[int, str] | None:
     if not trusted_local_request(handler):
         return 403, "桌面认证只允许本机调用"
     supplied = str(handler.headers.get(DESKTOP_AUTH_HEADER) or "")
-    if not supplied or not hmac.compare_digest(supplied, DESKTOP_AUTH_TOKEN):
+    if not supplied or not supplied.isascii() or not hmac.compare_digest(supplied, DESKTOP_AUTH_TOKEN):
         return 403, "桌面认证能力无效"
     if str(handler.headers.get_content_type() or "").lower() != "application/json":
         return 415, "请求必须使用 application/json"
@@ -236,7 +184,7 @@ def validate_desktop_auth_request(handler) -> tuple[int, str] | None:
 
 def valid_request_token(handler) -> bool:
     supplied = str(handler.headers.get("X-MOKU-Request-Token") or "")
-    return bool(supplied) and hmac.compare_digest(supplied, REQUEST_TOKEN)
+    return bool(supplied) and supplied.isascii() and hmac.compare_digest(supplied, REQUEST_TOKEN)
 
 
 def health_request_may_disclose_token(handler) -> bool:
@@ -251,6 +199,35 @@ def health_request_may_disclose_token(handler) -> bool:
 class LocalThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
+
+    def __init__(self, *args, **kwargs):
+        self._download_idle = threading.Condition()
+        self._download_jobs: set[threading.Event] = set()
+        self._closing_downloads = False
+        super().__init__(*args, **kwargs)
+
+    @contextmanager
+    def download_job(self):
+        cancel = threading.Event()
+        with self._download_idle:
+            if self._closing_downloads:
+                raise DownloadRequestError("应用正在退出，下载任务已暂停", 503)
+            self._download_jobs.add(cancel)
+        try:
+            yield cancel
+        finally:
+            with self._download_idle:
+                self._download_jobs.remove(cancel)
+                self._download_idle.notify_all()
+
+    def server_close(self):
+        with self._download_idle:
+            self._closing_downloads = True
+            for cancel in self._download_jobs:
+                cancel.set()
+            while self._download_jobs:
+                self._download_idle.wait()
+        super().server_close()
 
 
 PIXIV_HEADERS = {"Referer": "https://www.pixiv.net/", "User-Agent": "Mozilla/5.0 PixivTagGallery/0.1", "Accept-Language": "zh-CN,zh;q=0.9"}
@@ -897,6 +874,8 @@ def pixiv_request(
                 final_url = response.geturl()
                 if not is_allowed_pixiv_url(final_url, image_only=image_only):
                     raise PixivPolicyError("Pixiv 重定向到了不允许的地址")
+                if response.status == 206 or response.headers.get("Content-Range"):
+                    raise PixivPolicyError("Pixiv 返回了局部内容，请重新下载完整文件")
                 content_type = response.headers.get_content_type()
                 length = response.headers.get("Content-Length")
                 declared_length = None
@@ -907,15 +886,11 @@ def pixiv_request(
                         raise PixivPolicyError("Pixiv 返回了无效的 Content-Length") from exc
                     if declared_length < 0 or declared_length > max_bytes:
                         raise PixivPolicyError("远程响应过大")
-                raw = (
-                    response.read(max_bytes + 1)
-                    if cancel_event is None
-                    else _read_cancellable_response(
-                        response,
-                        max_bytes=max_bytes,
-                        cancel_event=cancel_event,
-                        deadline=deadline,
-                    )
+                raw = _read_cancellable_response(
+                    response,
+                    max_bytes=max_bytes,
+                    cancel_event=cancel_event or threading.Event(),
+                    deadline=deadline,
                 )
                 if len(raw) > max_bytes:
                     raise PixivPolicyError("远程响应过大")
@@ -1496,8 +1471,7 @@ def _author_rows_from_payload(payload: object) -> list[dict]:
     if not isinstance(ordered_ids, list) or len(ordered_ids) > 100:
         raise PixivPolicyError("Pixiv 画师搜索结果格式异常")
     allowed_ids = {
-        str(user_id) for user_id in ordered_ids
-        if str(user_id).isascii() and str(user_id).isdigit()
+        user_id for user_id in map(str, ordered_ids) if valid_pixiv_id(user_id)
     }
     rows = users.values() if isinstance(users, dict) else users
     normalized_rows = []
@@ -1533,7 +1507,7 @@ def resolve_author_user(
     if exact is None:
         raise SearchInputError(f"未找到名称完全匹配“{author}”的 Pixiv 画师；可改用 uid:数字 精确搜索")
     user_id = str(exact.get("userId") or exact.get("id") or "")
-    if not user_id.isascii() or not user_id.isdigit():
+    if not valid_pixiv_id(user_id):
         raise SearchInputError("Pixiv 未返回有效的画师用户 ID")
     resolved_name = str(exact.get("name") or exact.get("userName") or author)
     with AUTHOR_RESOLUTION_CACHE_LOCK:
@@ -1571,7 +1545,7 @@ def load_user_profile_ids(
         candidates = rows.keys() if isinstance(rows, dict) else (rows if isinstance(rows, list) else [])
         for artwork_id in candidates:
             clean = str(artwork_id or "")
-            if clean.isascii() and clean.isdigit():
+            if valid_pixiv_id(clean):
                 ids.add(clean)
     return sorted(ids, key=int, reverse=True)
 
@@ -2230,7 +2204,7 @@ def pixiv_ugoira_meta(
         if authorization_epoch is not None:
             assert_authorization_generation(authorization_epoch)
         if cancel_event is not None:
-            raise
+            raise SearchCancelledError("动图信息读取已取消") from exc
         raise PixivPolicyError("动图信息读取已取消，请重试") from exc
     except PreviewBusyError as exc:
         raise PixivPolicyError("动图资源繁忙，请稍后再试") from exc
@@ -2368,13 +2342,14 @@ def owned_staging_batch():
 def stage_ugoira_zip(
     item: dict, quality: str, folder: Path, staging_root: Path,
     *, authorization_epoch: int | None = None, ugoira_format: str = "source",
+    cancel_event: threading.Event | None = None,
 ) -> list[PublishedFileOwnership]:
     if ugoira_format == "mp4":
         require_mp4_encoder()
     artwork_id = str(item.get("id") or "")
-    meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch)
+    meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch, cancel_event=cancel_event)
     zip_url = str(meta["originalSrc"] if quality == "original" else meta["src"])
-    raw, _content_type = pixiv_request(zip_url, image_only=True)
+    raw, _content_type = pixiv_request(zip_url, image_only=True, cancel_event=cancel_event)
     # Re-check the capability after the network request, mirroring the per-page
     # token re-check: logout during flight must not publish restricted bytes.
     if item.get("restriction") == "r18" and authorization_epoch is not None:
@@ -2383,7 +2358,9 @@ def stage_ugoira_zip(
         raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
     stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
     if ugoira_format != "source":
+        raise_if_search_cancelled(cancel_event)
         converted = export_ugoira(raw, meta["frames"], ugoira_format)
+        raise_if_search_cancelled(cancel_event)
         if item.get("restriction") == "r18" and authorization_epoch is not None:
             assert_authorization_generation(authorization_epoch)
         with owned_staging_batch() as staged:
@@ -2404,6 +2381,7 @@ def stage_artwork_pages(
     create_folder: bool, staging_root: Path, *, download_context: dict | None = None,
     group_artwork: bool = False, authorization_epoch: int | None = None,
     ugoira_format: str = "source",
+    cancel_event: threading.Event | None = None,
 ) -> list[PublishedFileOwnership]:
     artwork_id = str(item.get("id") or "")
     page_images = item.get("pageImages")
@@ -2421,15 +2399,17 @@ def stage_artwork_pages(
             item, quality, folder, staging_root,
             authorization_epoch=authorization_epoch,
             ugoira_format=ugoira_format,
+            cancel_event=cancel_event,
         )
     stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
     with owned_staging_batch() as staged:
         for page_no in selected_pages:
+            raise_if_search_cancelled(cancel_event)
             page = page_images[page_no]
             if not isinstance(page, dict) or quality not in page:
                 raise PixivPolicyError("作品图片信息不完整")
             remote_url = approved_image_url(str(page[quality]), artwork_id)
-            raw, content_type = pixiv_request(remote_url, image_only=True)
+            raw, content_type = pixiv_request(remote_url, image_only=True, cancel_event=cancel_event)
             # Re-check the capability after the network request. Logout can revoke
             # an R-18 token while bytes are in flight; revoked data must not publish.
             if approved_image_url(str(page[quality]), artwork_id) != remote_url:
@@ -3290,12 +3270,14 @@ def _stage_and_publish_download(
     stage: Callable[[Path, list[PublishedFileOwnership]], None],
     authorization_epochs: set[int] | None = None,
     authorization_check: Callable[[], object] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[str], bool]:
     """Stage a complete request, then transfer the whole batch to publication."""
     staging_context = secure_staging_directory(save_root, prefix=prefix)
     with staging_context as staging_root:
         with owned_staging_batch() as staged:
             stage(staging_root, staged)
+            raise_if_search_cancelled(cancel_event)
 
         def publish() -> list[str]:
             # Calling the publisher transfers ownership of the complete batch,
@@ -3418,9 +3400,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not trusted_local_request(self):
             self.send_json({"error": "请求只允许本机同源界面调用"}, 403)
             return True
-        image_capability = path == "/api/pixiv/image" or bool(
-            TEST_FIXTURES_ENABLED and re.fullmatch(r"/api/image/\d+/\d+", path)
-        )
+        image_capability = path == "/api/pixiv/image"
         if path != "/api/health" and not image_capability and not valid_request_token(self):
             self.send_json({"error": "请求授权令牌无效"}, 403)
             return True
@@ -3501,8 +3481,6 @@ class Handler(SimpleHTTPRequestHandler):
         if request.path.startswith("/api/pixiv/"):
             ensure_network_opener_current()
         if request.path == "/api/pixiv/search":
-            if TEST_FIXTURES_ENABLED:
-                return self._get_fixture_search(request)
             return self._get_pixiv_search(request)
         artwork_match = re.fullmatch(r"/api/pixiv/artwork/(\d+)", request.path)
         if artwork_match:
@@ -3512,40 +3490,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._get_pixiv_ugoira(request, ugoira_match.group(1))
         if request.path == "/api/pixiv/image":
             return self._get_pixiv_image(request)
-        if request.path == "/api/search":
-            if not TEST_FIXTURES_ENABLED:
-                return self.send_json({"error": "not found"}, 404)
-            return self._get_fixture_search(request)
-        image_match = re.fullmatch(r"/api/image/(\d+)/(\d+)", request.path)
-        if image_match:
-            if not TEST_FIXTURES_ENABLED:
-                return self.send_json({"error": "not found"}, 404)
-            index, page = map(int, image_match.groups())
-            size = urllib.parse.parse_qs(request.query).get("size", ["preview"])[0]
-            if size not in {"original", "large", "preview"}:
-                size = "preview"
-            return self.send_bytes(
-                fixture_artwork_svg(index, page, size), "image/svg+xml", "public,max-age=86400",
-            )
         super().do_GET()
-
-    def _get_fixture_search(self, request):
-        query = urllib.parse.parse_qs(request.query)
-        tag = query.get("tag", ["原创"])[0][:60]
-        try:
-            page = max(1, int(query.get("page", ["1"])[0]))
-        except ValueError:
-            page = 1
-        all_items = fixture_records(tag)
-        per_page = 12
-        start = (page - 1) * per_page
-        return self.send_json({
-            "tag": tag, "total": len(all_items), "page": page,
-            "pages": 2, "pageNumbers": [1, 2],
-            "preloadedThrough": 2, "hasMore": False,
-            "perPage": per_page,
-            "items": all_items[start:start + per_page],
-        })
 
     def _get_pixiv_search(self, request):
         query = urllib.parse.parse_qs(request.query)
@@ -3780,8 +3725,6 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
             "/api/pixiv/download": (16384, self._post_pixiv_download),
         }
-        if TEST_FIXTURES_ENABLED:
-            routes["/api/download"] = (16384, self._post_fixture_download)
         route = routes.get(path)
         if route is None:
             return self.send_json({"error": "not found"}, 404)
@@ -3814,11 +3757,15 @@ class Handler(SimpleHTTPRequestHandler):
                         if data.get("scope") != owner_scope or not WORKSPACE_STORE.has_task(data["queueId"], owner_scope):
                             return self.send_json({"error": "这项任务不属于当前账户，请重新确认下载"}, 403)
                         self._queued_authorization = (owner_scope, authorized, epoch)
-                payload, status = DOWNLOAD_REQUESTS.run(
-                    data.get("requestId"), path, data, download_result,
-                    scope=str(epoch) if authorized else "public",
-                    durable_scope=owner_scope, output_root=DOWNLOADS,
-                )
+                with self.server.download_job() as cancel:
+                    self._download_cancel = cancel
+                    payload, status = DOWNLOAD_REQUESTS.run(
+                        data.get("requestId"), path, data, download_result,
+                        scope=str(epoch) if authorized else "public",
+                        durable_scope=owner_scope, output_root=DOWNLOADS,
+                    )
+            except SearchCancelledError:
+                payload, status = {"error": "下载已暂停，重新打开后可继续", "retryable": True}, 503
             except DownloadRequestError as exc:
                 payload, status = {"error": str(exc), "requestIdConflict": exc.status == 409}, exc.status
             except (TypeError, ValueError) as exc:
@@ -4106,6 +4053,7 @@ class Handler(SimpleHTTPRequestHandler):
             return snapshot
 
     def _post_pixiv_batch_download(self, data: dict) -> tuple[dict, int]:
+        cancel_event = getattr(self, "_download_cancel", None)
         try:
             quality, create_folder = self._download_options(data)
             ugoira_format = self._ugoira_format(data)
@@ -4157,6 +4105,7 @@ class Handler(SimpleHTTPRequestHandler):
                         artwork_id,
                         allow_r18=authorized,
                         authorization_epoch=authorization_epoch,
+                        cancel_event=cancel_event,
                     )
                     if item.get("restriction") == "r18" and not authorized:
                         raise PixivPolicyError("R-18 下载需要有效账户授权")
@@ -4176,6 +4125,7 @@ class Handler(SimpleHTTPRequestHandler):
                         download_context=download_context,
                         group_artwork=group_artworks,
                         authorization_epoch=authorization_epoch,
+                        cancel_event=cancel_event,
                         ugoira_format=ugoira_format,
                     )
                     staged.extend(artwork_files)
@@ -4186,6 +4136,7 @@ class Handler(SimpleHTTPRequestHandler):
                 prefix=".moku-batch-",
                 stage=stage_batch,
                 authorization_epochs=restricted_epochs,
+                cancel_event=cancel_event,
                 **({"authorization_check": self._download_authorization_snapshot}
                    if hasattr(self, "_queued_authorization") else {}),
             )
@@ -4211,6 +4162,7 @@ class Handler(SimpleHTTPRequestHandler):
         return response_payload, response_status
 
     def _post_pixiv_download(self, data: dict) -> tuple[dict, int]:
+        cancel_event = getattr(self, "_download_cancel", None)
         artwork_id = str(data.get("id") or "")
         if not artwork_id.isdigit():
             return {"error": "作品 ID 无效"}, 400
@@ -4232,6 +4184,7 @@ class Handler(SimpleHTTPRequestHandler):
                 artwork_id,
                 allow_r18=authorized,
                 authorization_epoch=authorization_epoch,
+                cancel_event=cancel_event,
             )
             page_images = item.get("pageImages")
             if not isinstance(page_images, list) or not page_images:
@@ -4268,6 +4221,7 @@ class Handler(SimpleHTTPRequestHandler):
                     download_context=download_context,
                     group_artwork=group_artworks,
                     authorization_epoch=authorization_epoch,
+                    cancel_event=cancel_event,
                     ugoira_format=ugoira_format,
                 ))
 
@@ -4276,6 +4230,7 @@ class Handler(SimpleHTTPRequestHandler):
                 prefix=".moku-single-",
                 stage=stage_single,
                 authorization_epochs=restricted_epochs,
+                cancel_event=cancel_event,
                 **({"authorization_check": self._download_authorization_snapshot}
                    if hasattr(self, "_queued_authorization") else {}),
             )
@@ -4301,31 +4256,6 @@ class Handler(SimpleHTTPRequestHandler):
             }
             response_status = 502
         return response_payload, response_status
-
-    def _post_fixture_download(self, data: dict):
-        try:
-            index = max(0, min(23, int(data.get("index", 0))))
-            pages = min(20, max(1, int(data.get("pages", 1))))
-        except (TypeError, ValueError):
-            return self.send_json({"error": "invalid numeric fields"}, 400)
-        quality = data.get("quality", "original")
-        image_format = data.get("format", "source")
-        if quality not in {"original", "large", "preview"} or image_format not in {"source", "svg"}:
-            return self.send_json({"error": "unsupported quality or format"}, 400)
-        folder_name = re.sub(
-            r"[^\w\-\u4e00-\u9fff]+", "_", str(data.get("tag", "未分类")),
-        )[:80] or "未分类"
-        folder = DOWNLOADS / folder_name
-        folder.mkdir(exist_ok=True)
-        saved = []
-        for page in range(pages):
-            file = folder / f"{81024000 + index}_p{page}_{quality}.svg"
-            file.write_bytes(fixture_artwork_svg(index, page, quality))
-            saved.append(str(file))
-        return self.send_json({
-            "ok": True, "saved": saved, "quality": quality, "format": image_format,
-        })
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8765"))

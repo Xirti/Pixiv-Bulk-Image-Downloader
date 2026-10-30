@@ -149,7 +149,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
     if _integer_field(raw, "visibilityScope") != 0:
         raise PixivPolicyError("non-public artwork is not available")
     artwork_id = str(raw.get("id") or "")
-    if not artwork_id.isdigit():
+    if not valid_pixiv_id(artwork_id):
         raise PixivPolicyError("invalid artwork id")
     source_thumb = str(raw.get("url") or "")
     if not is_allowed_pixiv_url(source_thumb, image_only=True):
@@ -231,7 +231,7 @@ def search_response_block(data: dict, work_type: str = "all") -> dict:
 
 def _validated_user_id(user_id: str) -> str:
     clean = str(user_id or "").strip()
-    if not clean.isascii() or not clean.isdigit():
+    if not valid_pixiv_id(clean):
         raise PixivPolicyError("invalid Pixiv user id")
     return clean
 
@@ -254,7 +254,7 @@ def build_user_profile_works_url(user_id: str, artwork_ids) -> str:
     seen: set[str] = set()
     for artwork_id in artwork_ids:
         clean = str(artwork_id or "").strip()
-        if not clean.isascii() or not clean.isdigit() or clean in seen:
+        if not valid_pixiv_id(clean) or clean in seen:
             continue
         seen.add(clean)
         ids.append(clean)
@@ -269,7 +269,7 @@ def build_user_profile_works_url(user_id: str, artwork_ids) -> str:
 
 def build_ugoira_meta_url(artwork_id: str) -> str:
     clean = str(artwork_id or "").strip()
-    if not clean.isascii() or not clean.isdigit():
+    if not valid_pixiv_id(clean):
         raise PixivPolicyError("invalid Pixiv artwork id")
     return f"https://www.pixiv.net/ajax/illust/{clean}/ugoira_meta?lang=zh"
 
@@ -287,43 +287,60 @@ def _proxy_image_or_empty(url: Any) -> str:
     return _proxy_image(clean) if clean else ""
 
 
+def valid_pixiv_id(value: str) -> bool:
+    """Check remote IDs before they become sort keys, cache keys or URL parts."""
+    return 1 <= len(value) <= 30 and value.isascii() and value.isdigit()
+
+
 def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18: bool = False) -> dict[str, Any]:
     restriction = validate_detail_policy(raw, allow_r18=allow_r18)
     artwork_id = str(raw.get("illustId") or raw.get("id") or "")
-    if not artwork_id.isdigit():
+    if not valid_pixiv_id(artwork_id):
         raise PixivPolicyError("invalid artwork id")
+    if (not isinstance(pages, list) or not pages
+            or any(not isinstance(page, dict) or not isinstance(page.get("urls") or {}, dict) for page in pages)):
+        # Page positions are download identities. Reject the whole malformed
+        # list rather than dropping rows and shifting the remaining page IDs.
+        raise PixivPolicyError("Pixiv 图片页数据格式异常，请重试")
+    if _integer_field(raw, "pageCount", len(pages), nullable=True) != len(pages):
+        raise PixivPolicyError("Pixiv 图片页数据不完整，请重新读取作品")
+    width = max(0, _integer_field(raw, "width", nullable=True))
+    height = max(0, _integer_field(raw, "height", nullable=True))
+    work_type = {0: "illustration", 1: "manga", 2: "ugoira"}.get(_integer_field(raw, "illustType", nullable=True), "illustration")
     tag_rows = (raw.get("tags") or {}).get("tags") if isinstance(raw.get("tags"), dict) else []
+    if not isinstance(tag_rows, list):
+        tag_rows = []
     page_images = []
     for page in pages:
         urls = page.get("urls") or {}
-        page_images.append({"width": int(page.get("width") or 0), "height": int(page.get("height") or 0), "regular": _proxy_image_or_empty(urls.get("regular")), "original": _proxy_image_or_empty(urls.get("original"))})
-    work_type = {0: "illustration", 1: "manga", 2: "ugoira"}.get(int(raw.get("illustType") or 0), "illustration")
+        page_images.append({
+            "width": max(0, _integer_field(page, "width", nullable=True)),
+            "height": max(0, _integer_field(page, "height", nullable=True)),
+            "regular": _proxy_image_or_empty(urls.get("regular")),
+            "original": _proxy_image_or_empty(urls.get("original")),
+        })
+    qualities = [
+        {"id": "original", "label": "动图原始清晰度" if work_type == "ugoira" else "Pixiv 原图", "width": width, "height": height},
+        {"id": "regular", "label": "动图标准清晰度（600px）" if work_type == "ugoira" else "Pixiv 常规预览", "width": 0, "height": 0},
+    ]
     if work_type == "ugoira":
-        qualities = [
-            {"id": "original", "label": "动图原始清晰度", "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0)},
-            {"id": "regular", "label": "动图标准清晰度（600px）", "width": 0, "height": 0},
-        ]
         formats = [
             {"id": "source", "label": "ZIP 帧包 + 帧延迟 JSON"},
             {"id": "gif", "label": "GIF 动图"},
             {"id": "mp4", "label": "MP4 视频（需本机 FFmpeg）"},
         ]
     else:
-        qualities = [
-            {"id": "original", "label": "Pixiv 原图", "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0)},
-            {"id": "regular", "label": "Pixiv 常规预览", "width": 0, "height": 0},
-        ]
         formats = [{"id": "source", "label": "保留源格式（推荐）"}]
     return {
         "id": artwork_id, "restriction": restriction, "source": "pixiv",
         "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"),
         "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""),
-        "tags": [str(row.get("tag")) for row in (tag_rows or []) if row.get("tag")][:30],
-        "pages": len(page_images), "width": int(raw.get("width") or 0), "height": int(raw.get("height") or 0),
+        "tags": [str(row.get("tag")) for row in tag_rows if isinstance(row, dict) and row.get("tag")][:30],
+        "pages": len(page_images), "width": width, "height": height,
         "bookmarks": bookmark_count(raw), "date": publication_date(raw.get("createDate")),
         "description": _plain_text(raw.get("description") or raw.get("illustComment")),
-        "workType": work_type, "aiGenerated": int(raw.get("aiType") or 1) == 2,
-        "thumb": (page_images[0]["regular"] or page_images[0]["original"]) if page_images else "",
+        "workType": work_type, "aiGenerated": _integer_field(raw, "aiType", 1, nullable=True) == 2,
+        "thumb": page_images[0]["regular"] or page_images[0]["original"],
         "pageImages": page_images, "qualities": qualities, "formats": formats,
     }
 

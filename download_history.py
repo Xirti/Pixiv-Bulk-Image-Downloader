@@ -9,10 +9,12 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from edition_profile import DATA_FOLDER
+
 
 def history_path() -> Path:
     override = os.getenv("MOKU_LIBRARY_DIR")
-    directory = Path(override) if override else Path(os.environ["LOCALAPPDATA"]) / "MOKU" / "library"
+    directory = Path(override) if override else Path(os.environ["LOCALAPPDATA"]) / DATA_FOLDER / "library"
     return directory / "downloads.sqlite3"
 
 
@@ -40,13 +42,17 @@ class DownloadHistory:
             with connection:
                 connection.execute("PRAGMA secure_delete=ON")
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
+                if version in {0, 1}:
+                    connection.execute("BEGIN IMMEDIATE")
+                    # Another window may have migrated while this connection
+                    # waited. Rebuilding v2 would reset its non-reused IDs.
+                    version = connection.execute("PRAGMA user_version").fetchone()[0]
                 if version not in {0, 1, 2}:
                     raise ValueError("unsupported history schema")
                 # Non-reused IDs keep stale UI selections from deleting newer
                 # records after the last row is removed. Migrate atomically.
                 if version != 2:
                     if version == 1:
-                        connection.execute("BEGIN IMMEDIATE")
                         connection.execute("ALTER TABLE downloads RENAME TO downloads_v1")
                     connection.execute("""CREATE TABLE IF NOT EXISTS downloads (
                         id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL,

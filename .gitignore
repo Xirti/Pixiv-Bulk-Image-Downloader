@@ -24,13 +24,17 @@ dist/
 release/
 *.zip
 
-# Local test output and downloaded artwork
+# Private validation sources and output
+/tests/
+/run_tests.py
+/fixture_gallery.py
+/requirements-dev.lock
+test_*.py
+test_*.js
+*_probe.py
+*_probe.ps1
 custom-download-test/
 test-*.json
-tests/*_result.json
-tests/*-evidence.json
-tests/*.png
-tests/*.jpg
 test-builds/
 runtime-*.err
 runtime-*.txt

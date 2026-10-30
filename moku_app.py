@@ -18,9 +18,9 @@ from ctypes import wintypes
 from pathlib import Path
 
 import server
+from edition_profile import DATA_FOLDER, MUTEX_NAME
 
 
-MUTEX_NAME = r"Local\MOKU.PixivTagGallery.Backend.v1"
 WAIT_OBJECT_0 = 0
 WAIT_ABANDONED = 0x80
 LOG = logging.getLogger("moku.app")
@@ -225,7 +225,7 @@ def runtime_directory() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
         raise RuntimeError("LOCALAPPDATA is unavailable")
-    return Path(local_app_data) / "MOKU" / "runtime"
+    return Path(local_app_data) / DATA_FOLDER / "runtime"
 
 
 def _start_webview(
@@ -336,7 +336,7 @@ def launch_desktop(
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
         raise RuntimeError("LOCALAPPDATA is unavailable")
-    session_root = Path(local_app_data) / "MOKU" / "WebView2Sessions"
+    session_root = Path(local_app_data) / DATA_FOLDER / "WebView2Sessions"
     session_root.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=cleanup_stale_webview_profiles, args=(session_root,),
                      name="moku-profile-cleanup", daemon=True).start()
@@ -348,18 +348,10 @@ def launch_desktop(
         remove_webview_profile(storage_path)
 
 
-def _run_backend_for_test() -> str:
-    raise RuntimeError("test backend hook was not configured")
-
-
 def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--serve-only", action="store_true")
-    parser.add_argument("--desktop-host-test", action="store_true")
     options, _unknown = parser.parse_known_args(argv)
-    if options.desktop_host_test:
-        launch_desktop(_run_backend_for_test())
-        return 0
 
     no_browser = options.serve_only or os.environ.get("MOKU_NO_BROWSER") == "1"
 
@@ -410,16 +402,12 @@ def run(argv: list[str] | None = None) -> int:
             owns_backend = True
             LOG.info("start pid=%s url=%s instance=%s", os.getpid(), url, server.INSTANCE_ID)
 
-    exit_after = float(os.environ.get("MOKU_TEST_EXIT_AFTER_SECONDS") or 0)
     try:
         if no_browser:
             if not owns_backend:
                 return 0
-            if exit_after > 0:
-                time.sleep(exit_after)
-            else:
-                while thread and thread.is_alive():
-                    thread.join(timeout=3600)
+            while thread and thread.is_alive():
+                thread.join(timeout=3600)
         else:
             launch_desktop(
                 url,

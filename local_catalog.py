@@ -18,6 +18,27 @@ class _StaleArtifactError(OSError):
     """The indexed regular file has been replaced by another object."""
 
 
+def artifact_file_state(path: Path, checked_directories: set[Path] | None = None) -> dict:
+    """Snapshot a regular artifact without following directory or file links."""
+    path = Path(os.path.abspath(path))
+    # Never turn an unreadable directory into an apparent missing file.
+    current = Path(path.anchor)
+    if path == current:
+        raise _StaleArtifactError("索引路径不是普通文件")
+    for part in path.parts[1:]:
+        current /= part
+        if current != path and checked_directories is not None and current in checked_directories:
+            continue
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise OSError("下载目录包含链接，请重新选择保存位置")
+        if current != path and checked_directories is not None and stat.S_ISDIR(info.st_mode):
+            checked_directories.add(current)
+    if not stat.S_ISREG(info.st_mode):
+        raise _StaleArtifactError("下载文件已变为非普通文件")
+    return {"path": str(path), "size": info.st_size, "mtime": info.st_mtime_ns}
+
+
 class LocalCatalog:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -47,23 +68,7 @@ class LocalCatalog:
     def _directory(directory: Path) -> str:
         return os.path.normcase(os.path.abspath(directory))
 
-    @staticmethod
-    def _file_state(path: Path, checked_directories: set[Path] | None = None) -> dict:
-        path = Path(os.path.abspath(path))
-        # Never turn an unreadable directory into an apparent missing file.
-        current = Path(path.anchor)
-        for part in path.parts[1:]:
-            current /= part
-            if current != path and checked_directories is not None and current in checked_directories:
-                continue
-            info = current.lstat()
-            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-                raise OSError("下载目录包含链接，请重新选择保存位置")
-            if current != path and checked_directories is not None and stat.S_ISDIR(info.st_mode):
-                checked_directories.add(current)
-        if not stat.S_ISREG(info.st_mode):
-            raise _StaleArtifactError("下载文件已变为非普通文件")
-        return {"path": str(path), "size": info.st_size, "mtime": info.st_mtime_ns}
+    _file_state = staticmethod(artifact_file_state)
 
     @staticmethod
     def _decode_files(encoded: str) -> list[dict]:
