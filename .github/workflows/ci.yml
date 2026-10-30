@@ -2,9 +2,9 @@ name: MOKU Lite
 
 "on":
   push:
-    branches: [lite-r2]
+    branches: [lite-backup]
   pull_request:
-    branches: [lite-r2]
+    branches: [lite-backup]
   workflow_dispatch:
 
 permissions:
