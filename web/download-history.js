@@ -76,7 +76,14 @@ function createDownloadHistoryView({ fetchJson }) {
       get("historyList").querySelectorAll("[data-copy-history]").forEach(button => {
         button.onclick = async () => {
           try {
-            await navigator.clipboard.writeText(data.items[Number(button.dataset.copyHistory)].files.join("\n"));
+            const text = data.items[Number(button.dataset.copyHistory)].files.join("\n");
+            const api = globalThis.pywebview?.api;
+            if (typeof api?.write_clipboard === "function") {
+              const result = await api.write_clipboard(text);
+              if (result?.ok !== true) throw new Error("clipboard unavailable");
+            } else {
+              await navigator.clipboard.writeText(text);
+            }
             if (current === generation) get("historyStatus").textContent = "路径已复制";
           } catch {
             if (current === generation) get("historyStatus").textContent = "复制失败，请重试。";
