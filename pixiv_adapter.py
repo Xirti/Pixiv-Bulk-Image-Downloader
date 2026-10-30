@@ -374,7 +374,7 @@ def safe_context_folder_name(kind: str, value: str) -> str:
         "pid": "pid", "uid": "uid",
     }.get(str(kind), "search")
     clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', str(value or ''))
-    clean = re.sub(r"\s+", " ", clean).strip(" ._")[:100] or "未命名"
+    clean = re.sub(r"\s+", " ", clean).strip(" ._")[:100].rstrip(" ._") or "未命名"
     if clean.upper() in {"CON", "PRN", "AUX", "NUL", "COM1", "LPT1"}:
         clean = "_" + clean
     return f"{prefix}_{clean}"
