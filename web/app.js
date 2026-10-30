@@ -622,7 +622,8 @@ async function refreshArtworkPreview(rawArtworkId) {
       document.querySelectorAll("[data-detail-artwork]").forEach((img) => {
         if (String(img.dataset.detailArtwork || "") !== artworkId) return;
         const page = Number(img.dataset.detailPage);
-        const source = fresh.pageImages?.[page]?.regular || (page === 0 ? fresh.thumb : "");
+        const image = fresh.pageImages?.[page];
+        const source = image?.regular || image?.original || (page === 0 ? fresh.thumb : "");
         if (!source) return;
         delete img.dataset.detailRefreshAttemptedUrl;
         img.classList.remove("image-unavailable");
@@ -1128,6 +1129,8 @@ function render() {
 async function refreshDownloadedIndicators() {
   const generation = searchGeneration;
   const ids = items.map(item => String(item.id)).filter(id => /^\d+$/.test(id));
+  const visibleIds = new Set(ids);
+  for (const id of downloadedPages.keys()) if (!visibleIds.has(id)) downloadedPages.delete(id);
   if (!ids.length) return;
   try {
     const data = await fetchJson(`/api/library/catalog?${new URLSearchParams({ids: ids.join(",")})}`);
@@ -1447,7 +1450,7 @@ function renderCollectionWindowInto(item, pagesRoot, moreButton) {
   const ugoiraHover = item.workType === "ugoira" ? ` data-ugoira-preview="${esc(String(item.id))}"` : "";
   pagesRoot.innerHTML = pages.slice(start, end).map((page, localIndex) => {
     const pageNo = start + localIndex;
-    return `<label class="page-select"${ugoiraHover}><input type="checkbox" data-collection-page="${pageNo}" ${chosenPages?.has(pageNo) ? "checked" : ""} ${selection.locked ? "disabled" : ""}><img src="${esc(page.regular)}" data-detail-artwork="${esc(item.id)}" data-detail-page="${pageNo}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${pageNo + 1}</span></label>`;
+    return `<label class="page-select"${ugoiraHover}><input type="checkbox" data-collection-page="${pageNo}" ${chosenPages?.has(pageNo) ? "checked" : ""} ${selection.locked ? "disabled" : ""}><img src="${esc(page.regular || page.original || "")}" data-detail-artwork="${esc(item.id)}" data-detail-page="${pageNo}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${pageNo + 1}</span></label>`;
   }).join("");
   installImageFallbacks(pagesRoot);
   attachUgoiraHoverTargets(pagesRoot);
@@ -1474,7 +1477,7 @@ function renderViewerWindow(item) {
     : "";
   $("#viewerGrid").innerHTML = `${navigation}${pages.slice(start, end).map((page, localIndex) => {
     const pageNo = start + localIndex;
-    return `<figure><img src="${esc(page.regular)}" data-detail-artwork="${esc(item.id)}" data-detail-page="${pageNo}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${String(pageNo + 1).padStart(2, "0")} / ${String(pages.length).padStart(2, "0")}</span></figure>`;
+    return `<figure><img src="${esc(page.regular || page.original || "")}" data-detail-artwork="${esc(item.id)}" data-detail-page="${pageNo}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${String(pageNo + 1).padStart(2, "0")} / ${String(pages.length).padStart(2, "0")}</span></figure>`;
   }).join("")}`;
   installImageFallbacks($("#viewerGrid"));
   $("#viewerGrid").querySelectorAll("[data-viewer-window]:not([disabled])").forEach((button) => {
@@ -1800,12 +1803,27 @@ function pumpBasketThumbnails() {
       const controller = new AbortController();
       basketThumbnailControllers.add(controller);
       fetchJson(`/api/pixiv/artwork/${id}`, {signal: controller.signal}, 18000).then(fresh => {
-        if (controller.signal.aborted || generation !== basketThumbnailWindow || !basketPageOpen() || !selection.has(id) || String(fresh.id) !== id) return;
+        if (controller.signal.aborted || generation !== basketThumbnailWindow || !basketPageOpen() || !batchCandidateItems.some(item => String(item.id) === id) || String(fresh.id) !== id) return;
         rememberArtworkDetail(fresh);
         image.src = fresh.thumb || "";
         image.classList.remove("image-unavailable");
         image.closest(".batch-collection")?.classList.remove("image-unavailable");
         delete image.dataset.restoreArtwork;
+        const card = image.closest(".batch-collection");
+        if (card) {
+          const pages = selection.get(id)?.pages.size || 0;
+          card.classList.toggle("is-selected", pages > 0);
+          card.querySelector("[data-batch-select]").checked = pages > 0;
+          card.querySelector(".batch-card-select").setAttribute("aria-label", `${pages ? "取消选择" : "选择"} ${fresh.title}`);
+          card.querySelector(".batch-card-open").setAttribute("aria-label", `打开 ${fresh.title} 的作品详情并选择图片`);
+          card.querySelector(".batch-card-copy b").textContent = fresh.title;
+          card.querySelector(".batch-card-copy small").textContent = `${fresh.artist} · 已选 ${pages}/${fresh.pages} 张`;
+          card.querySelector(".batch-page-count").textContent = `${fresh.pages}P`;
+          image.alt = fresh.title;
+        }
+        updateSelectionBar();
+        syncResultSelectionControls();
+        syncBasketHeader();
       }).catch(() => {
         if (generation === basketThumbnailWindow) image.alt = "预览暂未加载，点击作品重试";
       }).finally(() => {

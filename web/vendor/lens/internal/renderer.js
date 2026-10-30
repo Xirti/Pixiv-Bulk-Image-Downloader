@@ -256,7 +256,7 @@ export class GlassRenderer {
     this.settings={...tokens.materials.thick,brightness:.95,tintScale:1,bevelWidth:19,bevelPower:1.65,artworkAligned:false,motion:true,opaque:false,compare:false,scene:'aurora',...options};
     this.pointer={x:0,y:0}; this.smoothPointer={x:0,y:0};
     this.time=0; this.lastTime=0; this.frame=0; this.dirty=true; this.rectDirty=true;
-    this.geometry=[]; this.visible=true; this.destroyed=false; this.animatingUntil=0;
+    this.geometry=[]; this.visible=true; this.destroyed=false; this.animatingUntil=0; this.geometryUntil=0;
     this.reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.gl=null;this.suspended=true;this.width=0;this.height=0;this.dpr=1;this.onState=options.onState;this.restoreTimer=0;
     canvas.hidden=true;canvas.dataset.gpuState='idle';stage.classList.add('fallback');
@@ -434,8 +434,10 @@ export class GlassRenderer {
 
   invalidate(duration=0,geometry=true) {
     if(this.destroyed||this.suspended||this.lost)return;
-    this.dirty=true;if(geometry)this.rectDirty=true;
-    this.animatingUntil=Math.max(this.animatingUntil,performance.now()+duration);
+    const until=performance.now()+duration;
+    this.dirty=true;
+    if(geometry){this.rectDirty=true;this.geometryUntil=Math.max(this.geometryUntil,until);}
+    this.animatingUntil=Math.max(this.animatingUntil,until);
     if(!this.frame)this.frame=requestAnimationFrame(t=>this.render(t));
   }
 
@@ -495,7 +497,7 @@ export class GlassRenderer {
     if(this.settings.motion&&!this.reducedMotion)this.time+=dt;
     const lerp=this.reducedMotion?1:1-Math.exp(-dt*13);
     this.smoothPointer.x+=(this.pointer.x-this.smoothPointer.x)*lerp;this.smoothPointer.y+=(this.pointer.y-this.smoothPointer.y)*lerp;
-    if(this.rectDirty||now<this.animatingUntil)this.readGeometry();
+    if(this.rectDirty||now<this.geometryUntil)this.readGeometry();
     const gl=this.gl,p=this.programs;
     let opticalMoving=false;
     gl.viewport(0,0,this.width,this.height);gl.activeTexture(gl.TEXTURE0);

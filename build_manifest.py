@@ -11,7 +11,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-import server
+from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 from version import __version__
 
 SCHEMA_VERSION = 3
@@ -40,7 +40,7 @@ ALLOWED_TOP_LEVEL_DISTRIBUTION_METADATA = (
     "pywebview-6.2.1.dist-info",
 )
 BUILD_INPUT_FILES = (
-    *server.CODE_GENERATION_FILES,
+    *CODE_GENERATION_FILES,
     "MOKU.spec",
     "build_hooks/hook-PIL.Image.py",
     "MOKU.exe.config",
@@ -84,7 +84,7 @@ def build_input_files(source_root: Path) -> tuple[str, ...]:
 
 def source_generation(*, source_root: Path | None = None) -> str:
     root = Path(source_root or Path(__file__).resolve().parent)
-    return server.compute_code_generation(
+    return compute_code_generation(
         root=root,
         files=build_input_files(root),
         frozen=False,

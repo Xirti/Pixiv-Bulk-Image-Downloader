@@ -27,7 +27,7 @@ def _integer(value, low: int, high: int) -> int:
 
 
 def _id(value) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"\d{1,30}", value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,30}", value):
         raise ValueError("invalid artwork ID")
     return value
 
@@ -42,7 +42,7 @@ def _context(value) -> dict:
     if value is None:
         return {"kind": "tags", "value": "原创"}
     if (not isinstance(value, dict) or set(value) != {"kind", "value"}
-            or value["kind"] not in {"tags", "pid", "uid", "author"}
+            or value["kind"] not in ("tags", "pid", "uid", "author")
             or not isinstance(value["value"], str) or not 1 <= len(value["value"]) <= 500):
         raise ValueError("invalid task context")
     return dict(value)
@@ -60,7 +60,7 @@ def _options(value, *, single=False) -> dict:
         keys |= {"id", "pages", "context"}
     if not isinstance(value, dict) or set(value) - keys:
         raise ValueError("invalid queue options")
-    if value.get("quality", "original") not in {"original", "regular"} or value.get("ugoiraFormat", "source") not in {"source", "gif", "mp4"}:
+    if value.get("quality", "original") not in ("original", "regular") or value.get("ugoiraFormat", "source") not in ("source", "gif", "mp4"):
         raise ValueError("invalid queue format")
     if any(type(value.get(key, False)) is not bool for key in ("createFolder", "groupArtworks", "skipExisting")):
         raise ValueError("invalid queue options")
@@ -77,7 +77,7 @@ def _options(value, *, single=False) -> dict:
 
 
 def normalize_task(value: dict) -> dict:
-    if not isinstance(value, dict) or value.get("kind") not in {"single", "batch"}:
+    if not isinstance(value, dict) or value.get("kind") not in ("single", "batch"):
         raise ValueError("invalid queue task")
     kind = value["kind"]
     options = value.get("taskOptions")
@@ -213,7 +213,7 @@ class WorkspaceStore:
             raise ValueError("invalid recent search")
         if set(filters) != {"mode", "workType", "includeAi", "fuzzy", "startDate", "endDate"}:
             raise ValueError("invalid recent filters")
-        if (filters["mode"] not in {"safe", "r18", "all"} or filters["workType"] not in {"all", "illustration", "manga", "ugoira"}
+        if (filters["mode"] not in ("safe", "r18", "all") or filters["workType"] not in ("all", "illustration", "manga", "ugoira")
                 or type(filters["includeAi"]) is not bool or type(filters["fuzzy"]) is not bool
                 or any(not isinstance(filters[key], str) or not re.fullmatch(r"(?:\d{4}-\d{2}-\d{2})?", filters[key]) for key in ("startDate", "endDate"))):
             raise ValueError("invalid recent filters")
@@ -242,7 +242,7 @@ class WorkspaceStore:
             pages = _pages(row.get("pages"))
             raw = row["item"]
             count = _integer(raw.get("pages"), 1, 1000001)
-            if pages[-1] >= count or raw.get("restriction", "safe") not in {"safe", "r18"}:
+            if pages[-1] >= count or raw.get("restriction", "safe") not in ("safe", "r18"):
                 raise ValueError("invalid basket pages")
             if raw.get("restriction") == "r18" and scope == "public":
                 raise ValueError("restricted basket needs account")
@@ -250,7 +250,7 @@ class WorkspaceStore:
                     "title": str(raw.get("title") or "未命名作品")[:1000],
                     "artist": str(raw.get("artist") or "未知画师")[:500],
                     "restriction": raw.get("restriction", "safe"),
-                    "workType": raw.get("workType") if raw.get("workType") in {"illustration", "manga", "ugoira"} else "illustration",
+                    "workType": raw.get("workType") if raw.get("workType") in ("illustration", "manga", "ugoira") else "illustration",
                     "tags": [str(tag)[:100] for tag in raw.get("tags", [])[:30]] if isinstance(raw.get("tags", []), list) else [],
                     "bookmarks": None, "thumb": ""}
             # Thumbnails are fetched again on entry; no expiring capability is stored.

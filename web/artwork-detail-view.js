@@ -43,7 +43,8 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
     const visible = Math.min(item.pages, 4), middle = (visible - 1) / 2;
     deck.innerHTML = Array.from({length: visible}, (_, page) => {
       const delta = page - middle;
-      const src = item.pageImages?.[page]?.regular || item.thumb || fallback(page);
+      const image = item.pageImages?.[page];
+      const src = image?.regular || image?.original || item.thumb || fallback(page);
       return `<button class="deck-card" data-page="${page}" style="--i:${page};--angle:${delta * 3.2}deg;--lift:${Math.abs(delta) * 4}px" aria-label="第 ${page + 1} 张" aria-pressed="false"><img src="${escape(src)}" data-detail-artwork="${escape(item.id)}" data-detail-page="${page}" alt="${escape(item.title)} 第 ${page + 1} 张" loading="lazy" decoding="async"><span>${page + 1} / ${item.pages}</span></button>`;
     }).join("");
     installImages(deck);
