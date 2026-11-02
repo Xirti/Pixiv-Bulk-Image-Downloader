@@ -221,13 +221,15 @@ def _mp4(raw, frames, encoder, output, check):
                 remote_name = frames[index]["file"]
                 name = names.get(remote_name)
                 if name is None:
-                    # Keep JPEG and opaque PNG frames verbatim. Re-encoding
-                    # JPEGs to PNG caused the previous 256 MiB staging failure.
-                    alpha = image.mode in {"RGBA", "LA"} or "transparency" in image.info
-                    name = f"frame{index:06d}." + ("jpg" if image.format == "JPEG" else "png")
-                    needed = len(encoded) if not alpha else image.width * image.height * 4 + 65536
+                    # Keep ordinary frames verbatim. Flatten transparency and
+                    # strip non-default EXIF orientation only when necessary;
+                    # raw pixel geometry must match the previous PNG pipeline.
+                    normalize = (image.mode in {"RGBA", "LA"} or "transparency" in image.info
+                                 or image.getexif().get(274, 1) != 1)
+                    name = f"frame{index:06d}." + ("jpg" if image.format == "JPEG" and not normalize else "png")
+                    needed = len(encoded) if not normalize else image.width * image.height * 4 + 65536
                     _check_frame_space(root, total_bytes, needed)
-                    if alpha:
+                    if normalize:
                         with image.convert("RGBA") as rgba:
                             with Image.new("RGBA", image.size, "white") as background:
                                 background.alpha_composite(rgba)
@@ -264,8 +266,8 @@ def _mp4(raw, frames, encoder, output, check):
         with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(
                 [encoder, "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror",
-                 "-f", "concat", "-safe", "0", "-protocol_whitelist", "file", "-i", "frames.ffconcat",
-                 "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white,format=yuv420p",
+                 "-f", "concat", "-safe", "0", "-protocol_whitelist", "file", "-noautorotate", "-i", "frames.ffconcat",
+                 "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white,setsar=1,format=yuv420p",
                  "-c:v", "libx264", "-bf", "0", "-preset", "veryfast", "-crf", "18", "-threads", "2",
                  "-fps_mode", "vfr", "-enc_time_base", "1:1000", "-video_track_timescale", "1000",
                  "-progress", "encode.progress", "-stats_period", "1",
