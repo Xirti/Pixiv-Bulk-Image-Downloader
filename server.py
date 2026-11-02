@@ -3952,9 +3952,9 @@ class Handler(SimpleHTTPRequestHandler):
                         else {**task["taskOptions"], "groups": chunk["groups"], "context": chunk["context"]})
                 body.update(requestId=chunk["requestId"], queueId=task["id"], scope=scope)
                 # 204 is a probe sentinel, never a successful download receipt.
-                result, status = DOWNLOAD_REQUESTS.run(chunk["requestId"], endpoint, body, lambda: ({}, 204),
-                                                      scope=str(epoch) if authorized else "public", durable_scope=scope,
-                                                      output_root=DOWNLOADS)
+                result, status = DOWNLOAD_REQUESTS.probe(chunk["requestId"], endpoint, body,
+                                                        scope=str(epoch) if authorized else "public", durable_scope=scope,
+                                                        output_root=DOWNLOADS)
                 if status == 202:
                     return self.send_json({"pending": True, "requestId": chunk["requestId"]}, 202)
                 if status == 200:

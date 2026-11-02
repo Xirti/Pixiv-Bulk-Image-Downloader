@@ -126,6 +126,28 @@ class DownloadRequests:
         finally:
             connection.close()
 
+    def probe(
+        self, request_id: str, route: str, body: dict, *, scope: str,
+        durable_scope: str, output_root: Path,
+    ) -> Response:
+        """Inspect a queued legacy request without starting or publishing work.
+
+        A failed attempt from a previous authorization epoch can be inspected
+        again. Active operations and successful receipts retain their identity.
+        """
+        for attempt in range(2):
+            try:
+                return self.run(request_id, route, body, lambda: ({}, 204),
+                                scope=scope, durable_scope=durable_scope, output_root=output_root)
+            except DownloadRequestError as exc:
+                if exc.status != 409:
+                    raise
+                with self._lock:
+                    entry = self._entries.get(request_id)
+                    if attempt or entry is None or entry.active or entry.result is not None:
+                        raise
+                    del self._entries[request_id]
+
     def run(
         self, request_id: object, route: str, body: dict,
         operation: Callable[[], Response], *, scope: str = "", durable_scope: str | None = None,
