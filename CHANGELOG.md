@@ -1,3 +1,13 @@
+## v1.1.4-r3 · 大动图试用
+
+大动图下载与转换试用版，保留原分辨率和原始帧时序。
+
+- 帧包下载和成品发布改为分段读写，默认文件预算提高到 512 MiB。
+- GIF 逐帧编码，减少长动图的内存占用。
+- MP4 直接使用原始压缩帧，减少中间 PNG 膨胀；核验完整帧数并修正变帧时长。
+- 转换失败显示作品 ID，支持调整剩余批次格式并继续，保留已完成进度。
+- 补齐跨窗口参数冲突检查、编码取消和临时文件清理。
+
 # Changelog
 
 All notable changes are documented here. The project follows Semantic Versioning.

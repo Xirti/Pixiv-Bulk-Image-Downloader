@@ -1,3 +1,5 @@
+> 本地试用：v1.1.4-r3 · 大动图下载与转换。
+
 # MOKU Lite - Pixiv Tag Gallery
 
 <p align="center">
@@ -12,7 +14,7 @@ R2 同步完善下载收尾、详情与选择状态、历史迁移及异常数�
 
 ## 开始使用
 
-从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.4-r2) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
+从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
 
 需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU.exe.config` 也一起保留。
 
@@ -109,3 +111,23 @@ powershell -ExecutionPolicy Bypass -File .\make-release.ps1
 ## 许可证与作品使用
 
 MOKU 使用 [MIT License](LICENSE)，是与 Pixiv 无隶属关系的独立项目。作品版权归各自创作者所有，下载和使用时请尊重作者授权及平台规则。
+
+### 大动图试用
+
+大动图下载与转换试用版，保留原分辨率和原始帧时序。
+
+- 帧包下载和成品发布改为分段读写，默认文件预算提高到 512 MiB。
+- GIF 逐帧编码，减少长动图的内存占用。
+- MP4 直接使用原始压缩帧，减少中间 PNG 膨胀；核验完整帧数并修正变帧时长。
+- 转换失败显示作品 ID，支持调整剩余批次格式并继续，保留已完成进度。
+- 补齐跨窗口参数冲突检查、编码取消和临时文件清理。
+
+大动图预算可通过启动前的环境变量调整，修改后重启程序：
+
+| 变量 | 默认值 | 范围 |
+|---|---:|---:|
+| `MOKU_UGOIRA_MAX_MIB`：帧包与成品文件预算 | 512 MiB | 40–4096 MiB |
+| `MOKU_UGOIRA_TEMP_MIB`：解压帧与转换暂存预算 | 2048 MiB | 128–16384 MiB |
+| `MOKU_UGOIRA_TIMEOUT_SECONDS`：每件动图转换时限 | 600 秒 | 30–3600 秒 |
+
+这三个参数分别约束文件大小、临时空间与时间；增大文件预算后也需为临时目录和保存目录预留空间。GIF 保留单帧内存预算，MP4 导出使用本机 PATH 中的 FFmpeg。
