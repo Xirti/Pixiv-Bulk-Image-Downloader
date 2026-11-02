@@ -312,6 +312,14 @@ function savedTaskRequest(task, chunk) {
     : {endpoint: "/api/pixiv/batch-download", body: {...task.taskOptions, groups: chunk.groups, context: chunk.context}, timeout: 900000};
 }
 
+function downloadTaskCheckpoint(task) {
+  return JSON.stringify([task.kind, task.taskOptions, task.completedBatches || 0, task.totalBatches,
+    task.savedCount || 0, task.fileCount || 0, task.skippedCount || 0, task.firstSaved || "",
+    task.conversionFailure?.artworkId || "", task.conversionFailure?.code || "",
+    task.remainingChunks.map(chunk => [chunk.requestId, chunk.pageCount, chunk.context.kind, chunk.context.value,
+      chunk.groups.map(group => [group.id, group.pages])])]);
+}
+
 // Change only the failed/remaining work. Completed files and counters stay put.
 function adjustSavedTask(task) {
   if (!task?.conversionFailure || contextNavigationLocked() || !workspaceSync.ready) return;
@@ -328,6 +336,7 @@ function adjustSavedTask(task) {
   }
   const authorization = downloadAuthorizationRevision;
   const expectedTask = JSON.parse(JSON.stringify(task));
+  const expectedCheckpoint = downloadTaskCheckpoint(task);
   const options = task.kind === "single" ? task.taskOptions.body : task.taskOptions;
   $("#adjustTaskQuality").value = options.quality;
   $("#adjustTaskFormat").innerHTML = downloadFormatOptions([
@@ -352,6 +361,7 @@ function adjustSavedTask(task) {
     $("#adjustTaskCancel").disabled = true;
     modal.oncancel = event => event.preventDefault();
     setBasketSelectionLocked(true);
+    let saveError = null;
     try {
       const updated = {...task, taskOptions: JSON.parse(JSON.stringify(task.taskOptions)), signature: "",
         remainingChunks: task.remainingChunks.map(chunk => ({...chunk, requestId: nextDownloadRequestId()}))};
@@ -367,14 +377,31 @@ function adjustSavedTask(task) {
       pendingTasks.set(task.id, task);
       modal.close();
     } catch (error) {
-      $("#adjustTaskStatus").textContent = error.message || "任务参数保存失败，请重试";
-      return;
+      saveError = error;
     } finally {
       setBasketSelectionLocked(false);
       $("#adjustTaskConfirm").disabled = false;
       $("#adjustTaskCancel").disabled = false;
       modal.oncancel = null;
       renderPendingTasks();
+    }
+    if (saveError) {
+      // A disconnected response can hide a committed edit. Re-read through the
+      // workspace owner, preserving any local basket edits and account checks.
+      await workspaceSync.restore();
+      if (authorization !== downloadAuthorizationRevision) { modal.close(); return; }
+      if (!workspaceSync.ready) {
+        $("#adjustTaskStatus").textContent = "任务状态读取失败，请关闭此窗口并重试本机记录同步。";
+        return;
+      }
+      const latest = pendingTasks.get(task.id);
+      if (!latest || downloadTaskCheckpoint(latest) !== expectedCheckpoint) {
+        modal.close();
+        announceToast(latest ? "任务状态已重新读取，请从任务列表继续或调整。" : "任务已移除，列表已更新。");
+        return;
+      }
+      $("#adjustTaskStatus").textContent = saveError.message || "任务参数保存失败，请重试";
+      return;
     }
     await resumeSavedTask(task);
   };
@@ -1970,7 +1997,7 @@ function prepareDownloadTask(chunks, taskOptions, previousTask) {
     taskOptions: JSON.parse(JSON.stringify(taskOptions)),
     signature,
     authorizationRevision: downloadAuthorizationRevision,
-    remainingChunks: chunks.map((chunk) => ({ ...chunk, requestId: nextDownloadRequestId() })),
+    remainingChunks: chunks.map((chunk) => ({ ...chunk, context: chunk.context || {kind: "tags", value: "原创"}, requestId: nextDownloadRequestId() })),
     savedCount: 0,
     fileCount: 0,
     firstSaved: "",
