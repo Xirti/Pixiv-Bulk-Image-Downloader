@@ -41,6 +41,7 @@ let activeWorkspace = null;
 let workspaceReturn = null;
 let resumableBatchTask = null;
 let resumableSingleTask = null;
+let activeDownload = null;
 let lastKnownLoggedIn = null;
 let lastKnownAuthorizationGeneration = null;
 let downloadAuthorizationRevision = 0;
@@ -271,16 +272,21 @@ function renderPendingTasks() {
   const holder = $("#pendingDownloads");
   if (!holder) return;
   holder.hidden = !pendingTasks.size;
+  const locked = contextNavigationLocked();
   $("#pendingDownloadList").innerHTML = [...pendingTasks.values()].map(task => {
     const options = task.kind === "single" ? task.taskOptions.body : task.taskOptions;
     const title = task.kind === "single" ? `作品 ${options.id}` : "采集篮下载";
-    return `<div class="pending-task"><div><b>${esc(title)} · 剩余 ${task.remainingChunks.length} 批</b><small>${options.quality === "regular" ? "标准预览" : "原图"} · ${esc(options.ugoiraFormat === "source" ? "源格式" : (options.ugoiraFormat || "source").toUpperCase())} · ${esc(options.saveRoot || "默认下载目录")}</small></div>${task.conversionFailure ? `<button type="button" data-adjust-task="${esc(task.id)}">调整参数</button>` : ""}<button type="button" data-resume-task="${esc(task.id)}" ${task.remainingChunks.length ? "" : "disabled"}>继续</button><button type="button" data-remove-task="${esc(task.id)}">移除</button></div>`;
+    const running = activeDownload?.task.id === task.id;
+    return `<div class="pending-task"><div><b>${esc(title)} · ${running ? "下载中 · " : ""}剩余 ${task.remainingChunks.length} 批</b><small>${options.quality === "regular" ? "标准预览" : "原图"} · ${esc(options.ugoiraFormat === "source" ? "源格式" : (options.ugoiraFormat || "source").toUpperCase())} · ${esc(options.saveRoot || "默认下载目录")}</small></div>${task.conversionFailure ? `<button type="button" data-adjust-task="${esc(task.id)}" ${locked ? "disabled" : ""}>调整参数</button>` : ""}${running ? `<button type="button" data-pause-task="${esc(task.id)}" ${activeDownload.pauseRequested ? "disabled" : ""}>${activeDownload.pauseRequested ? "正在暂停…" : "暂停"}</button>` : `<button type="button" data-resume-task="${esc(task.id)}" ${locked || !task.remainingChunks.length ? "disabled" : ""}>继续</button>`}<button type="button" data-remove-task="${esc(task.id)}" ${locked ? "disabled" : ""}>移除</button></div>`;
   }).join("");
   $("#pendingDownloadList").querySelectorAll("[data-resume-task]").forEach(button => {
     button.onclick = () => resumeSavedTask(pendingTasks.get(button.dataset.resumeTask));
   });
   $("#pendingDownloadList").querySelectorAll("[data-adjust-task]").forEach(button => {
     button.onclick = () => adjustSavedTask(pendingTasks.get(button.dataset.adjustTask));
+  });
+  $("#pendingDownloadList").querySelectorAll("[data-pause-task]").forEach(button => {
+    button.onclick = () => pauseDownloadTask(button.dataset.pauseTask);
   });
   $("#pendingDownloadList").querySelectorAll("[data-remove-task]").forEach(button => {
     button.onclick = async () => {
@@ -289,6 +295,31 @@ function renderPendingTasks() {
       catch (error) { $("#pendingDownloadStatus").textContent = error.message; }
     };
   });
+}
+
+async function pauseDownloadTask(id) {
+  const running = activeDownload;
+  if (!running || running.task.id !== id || running.pauseRequested) return;
+  running.pauseRequested = true;
+  renderPendingTasks();
+  try {
+    // The pause can race the initial POST. Retry until its owner is registered
+    // or the local operation ends; never abort the response that confirms the
+    // batch was rolled back or successfully published.
+    while (activeDownload === running && running.chunk) {
+      const result = await fetchJson("/api/pixiv/download/cancel", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({requestId: running.chunk.requestId}),
+      }, 8000);
+      if (result.cancelled) return;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+  } catch (error) {
+    if (activeDownload === running) {
+      running.pauseRequested = false;
+      announceToast(`暂停请求失败：${error.message}。可再次点击暂停。`);
+    }
+  } finally { renderPendingTasks(); }
 }
 
 async function saveDownloadTask(task, expectedTask = null) {
@@ -308,8 +339,8 @@ async function deleteSavedTask(id) {
 
 function savedTaskRequest(task, chunk) {
   return task.kind === "single"
-    ? {endpoint: task.taskOptions.endpoint, body: {...task.taskOptions.body, pages: chunk.groups[0].pages}, timeout: 900000}
-    : {endpoint: "/api/pixiv/batch-download", body: {...task.taskOptions, groups: chunk.groups, context: chunk.context}, timeout: 900000};
+    ? {endpoint: task.taskOptions.endpoint, body: {...task.taskOptions.body, pages: chunk.groups[0].pages}, timeout: 1800000}
+    : {endpoint: "/api/pixiv/batch-download", body: {...task.taskOptions, groups: chunk.groups, context: chunk.context}, timeout: 1800000};
 }
 
 function downloadTaskCheckpoint(task) {
@@ -429,7 +460,7 @@ async function resumeSavedTask(task) {
     showTaskDock("下载完成", summary);
   } catch (error) {
     await rememberConversionFailure(task, error);
-    $("#pendingDownloadStatus").textContent = error.conversionFailure
+    $("#pendingDownloadStatus").textContent = error.paused ? "任务已暂停，已完成批次保留，点击继续后下载。" : error.conversionFailure
       ? `已暂停：${error.message}。作品 ${error.conversionFailure.artworkId} 转换未完成，可调整参数后继续剩余批次。`
       : `已暂停：${error.message}。再次继续会重试失败的这一批。`;
     showTaskDock("下载已暂停", error.message, 8000);
@@ -833,6 +864,7 @@ function attachUgoiraHoverTargets(root) {
 }
 
 function syncSearchScopedControls() {
+  renderPendingTasks();
   const resultActionsDisabled = selection.locked || searchPending || workspaceSync.loading || !resultSelectionEnabled || items.length === 0;
   $("#selectAllPage").disabled = resultActionsDisabled;
   $("#clearPageSelection").disabled = resultActionsDisabled;
@@ -2069,46 +2101,79 @@ function chooseDirectDownload(error) {
 }
 
 async function executeDownloadTask(task, requestForChunk, reportProgress) {
-  delete task.conversionFailure;
-  if (!task.transient && (workspaceSync.ready || task.persisted)) {
-    try {
-      await saveDownloadTask(task);
-      task.persisted = true;
-    } catch (error) {
-      if (!error.taskCapacity || task.persisted || !await chooseDirectDownload(error)) throw error;
-      if (task.authorizationRevision !== downloadAuthorizationRevision) throw new Error("Pixiv 账户状态已变更，请重新确认下载");
-      task.transient = true;
-      task.persisted = false;
-    }
-  }
-  const chunks = task.remainingChunks;
-  for (let index = 0; index < chunks.length; index += 1) {
-    const chunk = chunks[index];
-    reportProgress();
-    const request = requestForChunk(chunk);
-    const data = await fetchDownloadResult(request, chunk, task);
-    if (task.authorizationRevision !== downloadAuthorizationRevision) throw new Error("Pixiv 账户状态已变更，请重新确认下载");
-    task.savedCount += data.pages ?? chunk.pageCount;
-    task.fileCount += data.saved?.length || 0;
-    task.firstSaved ||= data.saved?.[0] || "";
-    task.cleanupPending ||= Boolean(data.cleanupPending);
-    task.historyWarning ||= Boolean(data.historyWarning);
-    task.catalogWarning ||= Boolean(data.catalogWarning);
-    task.stateWarning ||= Boolean(data.recoveryWarning);
-    task.skippedCount += data.skippedPages || 0;
-    historyView.refresh();
-    task.completedBatches += 1;
-    // Advance only after publication succeeds; failures retain this chunk.
-    task.remainingChunks = chunks.slice(index + 1);
-    if (task.persisted) {
-      if (task.remainingChunks.length) await saveDownloadTask(task);
-      else {
-        try { await saveDownloadTask(task); }
-        catch { task.stateWarning = true; }
+  const running = {task, chunk: null, pauseRequested: false, startedAt: performance.now()};
+  activeDownload = running;
+  const paused = () => Object.assign(new Error("下载已暂停，已完成批次保留"), {paused: true});
+  const updateStatus = () => {
+    const elapsed = Math.floor((performance.now() - running.startedAt) / 1000);
+    $("#pendingDownloadStatus").textContent = running.pauseRequested
+      ? "正在暂停并清理当前批次，已完成批次保留…"
+      : `正在下载第 ${task.completedBatches + 1}/${task.totalBatches} 批${running.chunk ? `（${running.chunk.groups.length} 件作品）` : ""} · 已保存 ${savedDownloadPages(task)} 页 · 已用 ${elapsed} 秒。本批完成后统一保存文件。`;
+  };
+  updateStatus();
+  renderPendingTasks();
+  const timer = setInterval(updateStatus, 1000);
+  try {
+    delete task.conversionFailure;
+    if (!task.transient && (workspaceSync.ready || task.persisted)) {
+      try {
+        await saveDownloadTask(task);
+        task.persisted = true;
+      } catch (error) {
+        if (!error.taskCapacity || task.persisted || !await chooseDirectDownload(error)) throw error;
+        if (task.authorizationRevision !== downloadAuthorizationRevision) throw new Error("Pixiv 账户状态已变更，请重新确认下载");
+        task.transient = true;
+        task.persisted = false;
       }
     }
+    const chunks = task.remainingChunks;
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (running.pauseRequested) throw paused();
+      const chunk = chunks[index];
+      running.chunk = chunk;
+      running.startedAt = performance.now();
+      updateStatus();
+      reportProgress();
+      const request = requestForChunk(chunk);
+      let data;
+      try { data = await fetchDownloadResult(request, chunk, task); }
+      catch (error) {
+        if (running.pauseRequested) throw paused();
+        throw error;
+      }
+      if (task.authorizationRevision !== downloadAuthorizationRevision) throw new Error("Pixiv 账户状态已变更，请重新确认下载");
+      task.savedCount += data.pages ?? chunk.pageCount;
+      task.fileCount += data.saved?.length || 0;
+      task.firstSaved ||= data.saved?.[0] || "";
+      task.cleanupPending ||= Boolean(data.cleanupPending);
+      task.historyWarning ||= Boolean(data.historyWarning);
+      task.catalogWarning ||= Boolean(data.catalogWarning);
+      task.stateWarning ||= Boolean(data.recoveryWarning);
+      task.skippedCount += data.skippedPages || 0;
+      historyView.refresh();
+      task.completedBatches += 1;
+      // Advance only after publication succeeds; failures retain this chunk.
+      task.remainingChunks = chunks.slice(index + 1);
+      if (task.persisted) {
+        if (task.remainingChunks.length) await saveDownloadTask(task);
+        else {
+          try { await saveDownloadTask(task); }
+          catch { task.stateWarning = true; }
+        }
+      }
+    }
+    void refreshDownloadedIndicators();
+    $("#pendingDownloadStatus").textContent = "任务已完成。";
+  } catch (error) {
+    $("#pendingDownloadStatus").textContent = error.paused
+      ? "任务已暂停，已完成批次保留，点击继续后下载。"
+      : `已暂停：${error.message}。再次继续会重试失败的这一批。`;
+    throw error;
+  } finally {
+    clearInterval(timer);
+    activeDownload = null;
+    renderPendingTasks();
   }
-  void refreshDownloadedIndicators();
 }
 
 function downloadCompletionWarnings(task) {
@@ -2127,7 +2192,6 @@ function setDownloadButtonState(button, text, disabled) {
 
 function setBasketSelectionLocked(locked) {
   selection.setLocked(locked);
-  $("#pendingDownloadList")?.querySelectorAll("button").forEach(button => { button.disabled = locked; });
   const controls = document.querySelectorAll("[data-select],[data-batch-select],[data-collection-page],[data-open-collection],#selectAllPage,#clearPageSelection,#clearSelection,#basketBack,#basketEntry,#openBasketPicker,#searchForm input,#searchSubmit,#searchForm select,#pagination button");
   controls.forEach((control) => {
     if (locked) {
@@ -2153,7 +2217,7 @@ function downloadPayload(item) {
   return {
     endpoint: "/api/pixiv/download",
     body: { id: item.id, pages: currentDownloadPages(item), ...readDownloadOptions(), context: downloadContext },
-    timeout: 120000,
+    timeout: 1800000,
   };
 }
 
@@ -2367,7 +2431,7 @@ $("#batchDownload").onclick = async () => {
     await executeDownloadTask(task, (chunk) => ({
       endpoint: "/api/pixiv/batch-download",
       body: { groups: chunk.groups, ...taskOptions, context: chunk.context },
-      timeout: 900000,
+      timeout: 1800000,
     }), () => {
       setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
       showTaskDock("批量下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已处理 ${task.savedCount} 张`, 0);
@@ -2383,8 +2447,9 @@ $("#batchDownload").onclick = async () => {
     const retryHint = resumableBatchTask
       ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
       : "账户状态已变更，请重新确认后发起下载。";
-    announceToast(`${prefix}失败：${error.message}。${retryHint}`);
-    showTaskDock("批量下载中断", `${prefix}失败：${error.message}；${retryHint}`, 8000);
+    const message = error.paused ? `下载已暂停，已保存 ${savedDownloadPages(task)} 页。${retryHint}` : `${prefix}失败：${error.message}。${retryHint}`;
+    announceToast(message);
+    showTaskDock(error.paused ? "下载已暂停" : "批量下载中断", message, 8000);
   } finally {
     setDownloadButtonState(button, "下载已勾选图片", false);
     setBasketSelectionLocked(false);
@@ -2506,10 +2571,11 @@ $("#download").onclick = async () => {
     const retryHint = resumableSingleTask
       ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
       : "账户状态已变更，请重新确认后发起下载。";
-    announceToast(`已处理 ${task.savedCount} 页；保存失败：${error.message || "未知错误"}。${retryHint}`);
-    showTaskDock("保存失败", error.message || "未知错误", 8000);
+    announceToast(error.paused ? `下载已暂停，已保存 ${savedDownloadPages(task)} 页。${retryHint}` : `已处理 ${task.savedCount} 页；保存失败：${error.message || "未知错误"}。${retryHint}`);
+    showTaskDock(error.paused ? "下载已暂停" : "保存失败", error.message || "未知错误", 8000);
   } finally {
     singleDownloadPending = false;
+    renderPendingTasks();
     button.textContent = downloadButtonLabel(currentDetailItem);
     syncSearchScopedControls();
     void restoreWorkspaceWhenUnlocked();

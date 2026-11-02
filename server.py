@@ -204,6 +204,7 @@ class LocalThreadingHTTPServer(ThreadingHTTPServer):
     def __init__(self, *args, **kwargs):
         self._download_idle = threading.Condition()
         self._download_jobs: set[threading.Event] = set()
+        self._download_controls: dict[tuple[str, str], threading.Event] = {}
         self._closing_downloads = False
         super().__init__(*args, **kwargs)
 
@@ -219,7 +220,23 @@ class LocalThreadingHTTPServer(ThreadingHTTPServer):
         finally:
             with self._download_idle:
                 self._download_jobs.remove(cancel)
+                for key, registered in list(self._download_controls.items()):
+                    if registered is cancel:
+                        del self._download_controls[key]
                 self._download_idle.notify_all()
+
+    def bind_download_control(self, request_id: str | None, scope: str, cancel: threading.Event) -> None:
+        if request_id is not None:
+            with self._download_idle:
+                self._download_controls[(scope, request_id)] = cancel
+
+    def cancel_download_job(self, request_id: str, scope: str) -> bool:
+        with self._download_idle:
+            cancel = self._download_controls.get((scope, request_id))
+            if cancel is None:
+                return False
+            cancel.set()
+            return True
 
     def server_close(self):
         with self._download_idle:
@@ -872,7 +889,7 @@ def pixiv_request(
     request = urllib.request.Request(url, headers=request_headers)
     last_error = None
     attempt_count = max(1, min(int(attempts), 2))
-    request_timeout = max(1.0, min(float(timeout), 25.0))
+    request_timeout = max(1.0, min(float(timeout), 90.0))
     for attempt in range(attempt_count):
         raise_if_search_cancelled(cancel_event)
         deadline = time.monotonic() + (max_duration if max_duration is not None else request_timeout)
@@ -2369,7 +2386,7 @@ def stage_ugoira_zip(
     # Publication still copies through the existing exclusively owned handles.
     with tempfile.TemporaryFile(dir=staging_root) as source:
         pixiv_request(zip_url, image_only=True, cancel_event=cancel_event,
-                      max_bytes=MAX_UGOIRA_BYTES, output=source, max_duration=300)
+                      max_bytes=MAX_UGOIRA_BYTES, output=source, timeout=90, max_duration=600)
         source.seek(0)
         if not source.read(4).startswith(UGOIRA_ZIP_MAGIC):
             raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
@@ -2438,7 +2455,8 @@ def stage_artwork_pages(
             if not isinstance(page, dict) or quality not in page:
                 raise PixivPolicyError("作品图片信息不完整")
             remote_url = approved_image_url(str(page[quality]), artwork_id)
-            raw, content_type = pixiv_request(remote_url, image_only=True, cancel_event=cancel_event)
+            raw, content_type = pixiv_request(remote_url, image_only=True, cancel_event=cancel_event,
+                                              timeout=60, max_duration=180)
             # Re-check the capability after the network request. Logout can revoke
             # an R-18 token while bytes are in flight; revoked data must not publish.
             if approved_image_url(str(page[quality]), artwork_id) != remote_url:
@@ -3754,6 +3772,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/workspace/recent": (8192, self._post_recent_search),
             "/api/pixiv/search/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/ugoira/cancel": (4096, self._post_cancel_search),
+            "/api/pixiv/download/cancel": (4096, self._post_cancel_download),
             "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
             "/api/pixiv/download": (16384, self._post_pixiv_download),
         }
@@ -3776,6 +3795,10 @@ class Handler(SimpleHTTPRequestHandler):
                         "retryable": True,
                     }, 429
                 try:
+                    # run() has validated the identity and admitted only the
+                    # owning operation; duplicate observers never replace its
+                    # cancellation event.
+                    self.server.bind_download_control(data.get("requestId"), owner_scope, self._download_cancel)
                     ensure_network_opener_current()
                     return route[1](data)
                 finally:
@@ -3846,6 +3869,14 @@ class Handler(SimpleHTTPRequestHandler):
             found = cancel_search_request(request_id)
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
+        return self.send_json({"ok": True, "cancelled": found})
+
+    def _post_cancel_download(self, data: dict):
+        request_id = data.get("requestId")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,96}", request_id):
+            return self.send_json({"error": "下载任务编号无效"}, 400)
+        with SEARCH_SESSION_LOCKS_GUARD:
+            found = self.server.cancel_download_job(request_id, workspace_scope())
         return self.send_json({"ok": True, "cancelled": found})
 
     def _post_select_folder(self, data: dict):
