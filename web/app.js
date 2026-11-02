@@ -299,19 +299,21 @@ function renderPendingTasks() {
 
 async function pauseDownloadTask(id) {
   const running = activeDownload;
-  if (!running || running.task.id !== id || running.pauseRequested) return;
+  if (!running || running.task.id !== id || running.pauseInFlight) return;
   running.pauseRequested = true;
+  running.pauseInFlight = true;
   renderPendingTasks();
   try {
     // The pause can race the initial POST. Retry until its owner is registered
     // or the local operation ends; never abort the response that confirms the
     // batch was rolled back or successfully published.
     while (activeDownload === running && running.chunk) {
+      const requestId = running.chunk.requestId;
       const result = await fetchJson("/api/pixiv/download/cancel", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({requestId: running.chunk.requestId}),
+        body: JSON.stringify({requestId}),
       }, 8000);
-      if (result.cancelled) return;
+      if (result.cancelled) { running.pauseSentForId = requestId; return; }
       await new Promise(resolve => setTimeout(resolve, 300));
     }
   } catch (error) {
@@ -319,7 +321,7 @@ async function pauseDownloadTask(id) {
       running.pauseRequested = false;
       announceToast(`暂停请求失败：${error.message}。可再次点击暂停。`);
     }
-  } finally { renderPendingTasks(); }
+  } finally { running.pauseInFlight = false; renderPendingTasks(); }
 }
 
 async function saveDownloadTask(task, expectedTask = null) {
@@ -344,7 +346,7 @@ function savedTaskRequest(task, chunk) {
 }
 
 function downloadTaskCheckpoint(task) {
-  return JSON.stringify([task.kind, task.taskOptions, task.completedBatches || 0, task.totalBatches,
+  return JSON.stringify([task.kind, task.chunkPolicy || "", task.taskOptions, task.completedBatches || 0, task.totalBatches,
     task.savedCount || 0, task.fileCount || 0, task.skippedCount || 0, task.firstSaved || "",
     task.conversionFailure?.artworkId || "", task.conversionFailure?.code || "",
     task.remainingChunks.map(chunk => [chunk.requestId, chunk.pageCount, chunk.context.kind, chunk.context.value,
@@ -453,7 +455,7 @@ async function resumeSavedTask(task) {
   $("#pendingDownloadStatus").textContent = "正在继续保存的任务…";
   try {
     await executeDownloadTask(task, chunk => savedTaskRequest(task, chunk), () => {
-      showTaskDock("继续下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已处理 ${task.savedCount} 张`, 0);
+      showTaskDock("继续下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${savedDownloadPages(task)} 页`, 0);
     });
     const summary = `任务完成，已保存 ${savedDownloadPages(task)} 页${downloadCompletionWarnings(task)}`;
     announceToast(summary);
@@ -2010,9 +2012,18 @@ function planContextDownloadChunks(groups) {
     if (!buckets.has(key)) buckets.set(key, { context: group.context, groups: [] });
     buckets.get(key).groups.push({ id: group.id, pages: group.pages });
   }
-  return [...buckets.values()].flatMap((bucket) =>
-    planDownloadChunks(bucket.groups).map((chunk) => ({ ...chunk, context: bucket.context }))
-  );
+  return [...buckets.values()].flatMap(bucket => {
+    const chunks = [];
+    let ordinary = [];
+    for (const group of bucket.groups) {
+      if ((selection.get(group.id)?.item.workType || "ugoira") === "ugoira") {
+        if (ordinary.length) { chunks.push(...planDownloadChunks(ordinary)); ordinary = []; }
+        chunks.push(...planDownloadChunks([group]));
+      } else ordinary.push(group);
+    }
+    if (ordinary.length) chunks.push(...planDownloadChunks(ordinary));
+    return chunks.map(chunk => ({...chunk, context: bucket.context}));
+  });
 }
 
 function prepareDownloadTask(chunks, taskOptions, previousTask) {
@@ -2026,6 +2037,7 @@ function prepareDownloadTask(chunks, taskOptions, previousTask) {
   return {
     id: nextDownloadRequestId(),
     kind: taskOptions.endpoint ? "single" : "batch",
+    chunkPolicy: "animation-artwork-v1",
     taskOptions: JSON.parse(JSON.stringify(taskOptions)),
     signature,
     authorizationRevision: downloadAuthorizationRevision,
@@ -2101,19 +2113,46 @@ function chooseDirectDownload(error) {
 }
 
 async function executeDownloadTask(task, requestForChunk, reportProgress) {
-  const running = {task, chunk: null, pauseRequested: false, startedAt: performance.now()};
+  const running = {task, chunk: null, pauseRequested: false, pauseInFlight: false, checking: false, startedAt: performance.now()};
   activeDownload = running;
   const paused = () => Object.assign(new Error("下载已暂停，已完成批次保留"), {paused: true});
   const updateStatus = () => {
     const elapsed = Math.floor((performance.now() - running.startedAt) / 1000);
     $("#pendingDownloadStatus").textContent = running.pauseRequested
       ? "正在暂停并清理当前批次，已完成批次保留…"
+      : running.checking ? `正在核对旧任务进度 · 已用 ${elapsed} 秒…`
       : `正在下载第 ${task.completedBatches + 1}/${task.totalBatches} 批${running.chunk ? `（${running.chunk.groups.length} 件作品）` : ""} · 已保存 ${savedDownloadPages(task)} 页 · 已用 ${elapsed} 秒。本批完成后统一保存文件。`;
   };
   updateStatus();
   renderPendingTasks();
   const timer = setInterval(updateStatus, 1000);
   try {
+    if (task.persisted && !task.chunkPolicy) {
+      running.checking = true;
+      updateStatus();
+      while (true) {
+        const state = await fetchJson("/api/workspace/task/migrate", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({id: task.id, scope: workspaceSync.scope}),
+        }, 30000);
+        if (task.authorizationRevision !== downloadAuthorizationRevision) throw new Error("Pixiv 账户状态已变更，请重新确认下载");
+        if (state.pending) {
+          running.chunk = {requestId: state.requestId};
+          if (running.pauseRequested && !running.pauseInFlight && running.pauseSentForId !== state.requestId) void pauseDownloadTask(task.id);
+          await new Promise(resolve => setTimeout(resolve, 500));
+          continue;
+        }
+        if (state.removed) { pendingTasks.delete(task.id); throw new Error("任务已移除，列表已更新"); }
+        Object.assign(task, state.task);
+        if (task.remainingChunks.length) pendingTasks.set(task.id, task);
+        else pendingTasks.delete(task.id);
+        running.checking = false;
+        running.chunk = null;
+        renderPendingTasks();
+        if (running.pauseRequested && task.remainingChunks.length) throw paused();
+        break;
+      }
+    }
     delete task.conversionFailure;
     if (!task.transient && (workspaceSync.ready || task.persisted)) {
       try {
@@ -2434,7 +2473,7 @@ $("#batchDownload").onclick = async () => {
       timeout: 1800000,
     }), () => {
       setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
-      showTaskDock("批量下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已处理 ${task.savedCount} 张`, 0);
+      showTaskDock("批量下载", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${savedDownloadPages(task)} 页`, 0);
     });
     resumableBatchTask = null;
     const summary = `已保存 ${savedDownloadPages(task)} 张图片，共 ${task.totalBatches} 批${downloadCompletionWarnings(task)}`;
@@ -2443,7 +2482,7 @@ $("#batchDownload").onclick = async () => {
   } catch (error) {
     await rememberConversionFailure(task, error);
     resumableBatchTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
-    const prefix = task.savedCount ? `已处理 ${task.savedCount} 张；后续` : "批量下载";
+    const prefix = task.savedCount ? `已保存 ${savedDownloadPages(task)} 页；后续` : "批量下载";
     const retryHint = resumableBatchTask
       ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
       : "账户状态已变更，请重新确认后发起下载。";
@@ -2559,7 +2598,7 @@ $("#download").onclick = async () => {
       body: { ...request.body, pages: chunk.groups[0].pages },
     }), () => {
       setDownloadButtonState(button, `正在保存第 ${task.completedBatches + 1}/${task.totalBatches} 批…`, true);
-      showTaskDock("正在保存", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已处理 ${task.savedCount} 页`, 0);
+      showTaskDock("正在保存", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${savedDownloadPages(task)} 页`, 0);
     });
     resumableSingleTask = null;
     const summary = `已保存 ${savedDownloadPages(task)} 页，${task.fileCount} 个文件`;
@@ -2571,7 +2610,7 @@ $("#download").onclick = async () => {
     const retryHint = resumableSingleTask
       ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
       : "账户状态已变更，请重新确认后发起下载。";
-    announceToast(error.paused ? `下载已暂停，已保存 ${savedDownloadPages(task)} 页。${retryHint}` : `已处理 ${task.savedCount} 页；保存失败：${error.message || "未知错误"}。${retryHint}`);
+    announceToast(error.paused ? `下载已暂停，已保存 ${savedDownloadPages(task)} 页。${retryHint}` : `已保存 ${savedDownloadPages(task)} 页；保存失败：${error.message || "未知错误"}。${retryHint}`);
     showTaskDock(error.paused ? "下载已暂停" : "保存失败", error.message || "未知错误", 8000);
   } finally {
     singleDownloadPending = false;
