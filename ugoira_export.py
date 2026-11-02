@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import io
 import os
 import re
@@ -51,7 +52,7 @@ class UgoiraCancelledError(PixivPolicyError):
     pass
 
 
-def _frames(raw: bytes | BinaryIO, frames: list[dict], check):
+def _frames(raw: bytes | BinaryIO, frames: list[dict], check, *, preflight=None):
     """Validate the archive once, then hold only the current encoded/decoded frame."""
     from PIL import Image
 
@@ -92,6 +93,8 @@ def _frames(raw: bytes | BinaryIO, frames: list[dict], check):
                 if size is not None and image.size != size:
                     raise UgoiraExportError("动图帧尺寸不一致", "invalid_frames")
                 size = image.size
+                if preflight is not None:
+                    preflight(size)
                 image.load()
                 yield image, encoded, frame["delay"]
 
@@ -111,43 +114,64 @@ class _Output:
 def _gif(raw, frames, output, check):
     from PIL import GifImagePlugin, Image
 
+    def check_memory(size):
+        if size[0] * size[1] * 28 > MAX_GIF_MEMORY:
+            raise UgoiraExportError("GIF 单帧转换需要的内存过多，请选择 MP4、标准或原始帧 ZIP", "memory_limit")
+
     elapsed = rounded = 0
     first = True
-    with closing(_frames(raw, frames, check)) as decoded:
-        for image, _encoded, delay in decoded:
-            if delay < 10:
-                raise UgoiraExportError("GIF 无法准确保存小于 10ms 的帧时长，请选择 MP4 或原始帧 ZIP", "gif_timing")
-            # Peak work now depends on one frame, not the animation's length.
-            if image.width * image.height * 28 > MAX_GIF_MEMORY:
-                raise UgoiraExportError("GIF 单帧转换需要的内存过多，请选择 MP4、标准或原始帧 ZIP", "memory_limit")
-            with image.convert("RGBA") as rgba:
-                with Image.new("RGBA", image.size, "white") as background:
-                    background.alpha_composite(rgba)
-                    with background.convert("RGB") as rgb:
-                        palette = rgb.quantize(colors=255)
-                with palette:
+    pending = None
+    signature = None
+    duration = 0
+
+    def emit(palette, delay):
+        nonlocal first
+        if first:
+            header, _ = GifImagePlugin.getheader(palette, info={
+                "loop": 0, "transparency": 255, "background": 255,
+            })
+            for block in header:
+                output.write(block)
+            first = False
+        for block in GifImagePlugin.getdata(palette, duration=delay,
+                disposal=2, transparency=255, include_color_table=True):
+            output.write(block)
+
+    try:
+        with closing(_frames(raw, frames, check, preflight=check_memory)) as decoded:
+            for image, _encoded, delay in decoded:
+                if delay < 10:
+                    raise UgoiraExportError("GIF 无法准确保存小于 10ms 的帧时长，请选择 MP4 或原始帧 ZIP", "gif_timing")
+                elapsed += delay
+                next_rounded = max(rounded + 10, ((elapsed + 5) // 10) * 10)
+                frame_delay = next_rounded - rounded
+                rounded = next_rounded
+                with image.convert("RGBA") as rgba:
+                    current_signature = hashlib.sha256(rgba.tobytes()).digest()
+                    if pending is not None and current_signature == signature:
+                        # One pending palette coalesces a still pose without
+                        # retaining every frame or quantizing identical pixels.
+                        duration += frame_delay
+                        continue
+                    if pending is not None:
+                        emit(pending, duration)
+                        pending.close()
+                        pending = None
+                    with Image.new("RGBA", image.size, "white") as background:
+                        background.alpha_composite(rgba)
+                        with background.convert("RGB") as rgb:
+                            pending = rgb.quantize(colors=255)
                     with rgba.getchannel("A") as alpha:
                         with alpha.point(lambda value: 255 if value < 128 else 0) as mask:
-                            palette.paste(255, mask=mask)
-                    palette.info["transparency"] = 255
-                    elapsed += delay
-                    next_rounded = max(rounded + 10, ((elapsed + 5) // 10) * 10)
-                    duration = next_rounded - rounded
-                    rounded = next_rounded
-                    if first:
-                        header, _ = GifImagePlugin.getheader(palette, info={
-                            "loop": 0, "transparency": 255, "background": 255,
-                        })
-                        for block in header:
-                            output.write(block)
-                        first = False
-                    # Each frame owns its palette and clears to transparent.
-                    # Pillow's single-frame encoder bounds retained data to a
-                    # frame; save_all would build a second complete frame list.
-                    for block in GifImagePlugin.getdata(palette, duration=duration,
-                            disposal=2, transparency=255, include_color_table=True):
-                        output.write(block)
-    output.write(b";")
+                            pending.paste(255, mask=mask)
+                    pending.info["transparency"] = 255
+                    signature = current_signature
+                    duration = frame_delay
+        emit(pending, duration)
+        output.write(b";")
+    finally:
+        if pending is not None:
+            pending.close()
 
 
 def find_ffmpeg() -> str | None:
@@ -177,6 +201,13 @@ def require_mp4_encoder() -> str:
     return encoder
 
 
+def _check_frame_space(root: Path, total_bytes: int, needed: int) -> None:
+    if total_bytes + needed > MAX_EXPANDED_BYTES:
+        raise UgoiraExportError(f"MP4 中间帧超过 {MAX_EXPANDED_BYTES // (1024 * 1024)} MiB，请选择原始帧 ZIP", "temporary_limit")
+    if shutil.disk_usage(root).free < needed + DISK_RESERVE_BYTES:
+        raise UgoiraExportError("MP4 转换临时磁盘空间不足，请释放空间后继续", "disk_space")
+
+
 def _mp4(raw, frames, encoder, output, check):
     from PIL import Image
 
@@ -195,10 +226,7 @@ def _mp4(raw, frames, encoder, output, check):
                     alpha = image.mode in {"RGBA", "LA"} or "transparency" in image.info
                     name = f"frame{index:06d}." + ("jpg" if image.format == "JPEG" else "png")
                     needed = len(encoded) if not alpha else image.width * image.height * 4 + 65536
-                    if total_bytes + needed > MAX_EXPANDED_BYTES:
-                        raise UgoiraExportError(f"MP4 中间帧超过 {MAX_EXPANDED_BYTES // (1024 * 1024)} MiB，请选择原始帧 ZIP", "temporary_limit")
-                    if shutil.disk_usage(root).free < needed + DISK_RESERVE_BYTES:
-                        raise UgoiraExportError("MP4 转换临时磁盘空间不足，请释放空间后继续", "disk_space")
+                    _check_frame_space(root, total_bytes, needed)
                     if alpha:
                         with image.convert("RGBA") as rgba:
                             with Image.new("RGBA", image.size, "white") as background:
@@ -209,7 +237,26 @@ def _mp4(raw, frames, encoder, output, check):
                         (root / name).write_bytes(encoded)
                     total_bytes += (root / name).stat().st_size
                     names[remote_name] = name
-                lines.extend([f"file '{name}'", "option framerate 1000", f"duration {delay / 1000:.3f}"])
+        if len({Path(name).suffix for name in names.values()}) > 1:
+            # ffconcat requires one codec across segments. Only mixed archives
+            # normalize JPEGs; the common all-JPEG path keeps original bytes.
+            for remote_name, name in names.items():
+                if Path(name).suffix != ".jpg":
+                    continue
+                check()
+                path = root / name
+                previous_size = path.stat().st_size
+                normalized = path.with_suffix(".png")
+                with Image.open(path) as image:
+                    _check_frame_space(root, total_bytes, image.width * image.height * 4 + 65536)
+                    with image.convert("RGB") as rgb:
+                        rgb.save(normalized, format="PNG", compress_level=1)
+                total_bytes += normalized.stat().st_size - previous_size
+                path.unlink()
+                names[remote_name] = normalized.name
+        for frame in frames:
+            name = names[frame["file"]]
+            lines.extend([f"file '{name}'", "option framerate 1000", f"duration {frame['delay'] / 1000:.3f}"])
         lines.extend([f"file '{name}'", "option framerate 1000"])
         (root / "frames.ffconcat").write_text("\n".join(lines) + "\n", encoding="ascii")
         # stderr goes to a file so a noisy/broken encoder cannot grow memory or
