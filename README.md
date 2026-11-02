@@ -1,4 +1,6 @@
-# MOKU Glass Lab R12 · 花里胡哨版 · 动效 MAX
+> 本地试用：v1.1.4-glass-r13 · 大动图下载与转换。
+
+# MOKU Glass Lab R13 · 花里胡哨版 · 动效 MAX
 
 <p align="center">
   <img src="assets/moku-icon.png" width="148" alt="MOKU 猫娘图标">
@@ -6,17 +8,17 @@
 
 MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作品 ID，翻翻预览，把喜欢的画放进采集篮，再挑好图片一起下载。
 
-当前版本：**1.1.4-glass-r12**，动效版 **R12**，发布标记 `v1.1.4-glass-r12`。
+当前版本：**1.1.4-glass-r13**，动效版 **R13**，发布标记 `v1.1.4-glass-r13`。
 
 `main` 现为动效 MAX 主线。原 Lite 版完整保存在 [lite-backup](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/tree/lite-backup)，对应 `v1.1.4-r1`。
 
 **花里胡哨版，谨慎下载———若不喜欢可进入Release页面，下载前一个版本 `MOKU Lite-v1.1.4-r1`**。
 
-清透玻璃、宽边折射、实时点阵背景和鼠标联动标题继续保留。R12 重点完善下载收尾、采集篮同步和多窗口历史记录，减少玻璃重绘时的布局计算。
+清透玻璃、宽边折射、实时点阵背景和鼠标联动标题继续保留。R13 重点完善下载收尾、采集篮同步和多窗口历史记录，减少玻璃重绘时的布局计算。
 
 ## 开始使用
 
-从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.4-glass-r12) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU-Glass-Lab.exe`。便携版直接运行，无需安装 Python。
+从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU-Glass-Lab.exe`。便携版直接运行，无需安装 Python。
 
 需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，保留`MOKU-Glass-Lab.exe.config` 。
 
@@ -102,12 +104,32 @@ python -m pip install -r requirements-build.lock
 powershell -ExecutionPolicy Bypass -File .\make-glass-release.ps1
 ```
 
-便携程序生成在 `dist\MOKU-Glass-Lab`，发布压缩包、校验值和更新说明生成在 `release\v1.1.4-glass-r12`。版本配置与存储说明见 [EXPERIMENT.md](EXPERIMENT.md)。
+便携程序生成在 `dist\MOKU-Glass-Lab`，发布压缩包、校验值和更新说明生成在 `release\v1.1.4-glass-r13`。版本配置与存储说明见 [EXPERIMENT.md](EXPERIMENT.md)。
 
 ## 本版更新
 
-正式版基线为 `1.1.4-r1 Lite`，已归档至 `lite-backup`。当前主线聚焦液态玻璃与点阵交互，R12 完善下载恢复、详情同步和多窗口历史迁移，并减少重复布局计算。更新重点见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，历史记录见 [CHANGELOG](CHANGELOG.md)。
+正式版基线为 `1.1.4-r1 Lite`，已归档至 `lite-backup`。当前主线聚焦液态玻璃与点阵交互，R13 完善下载恢复、详情同步和多窗口历史迁移，并减少重复布局计算。更新重点见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，历史记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可证与作品使用
 
 MOKU 使用 [MIT License](LICENSE)，是与 Pixiv 无隶属关系的独立项目。作品版权归各自创作者所有，下载和使用时请尊重作者授权及平台规则。
+
+### 大动图试用
+
+大动图下载与转换试用版，保留原分辨率和原始帧时序。
+
+- 帧包下载和成品发布改为分段读写，默认文件预算提高到 512 MiB。
+- GIF 逐帧编码，减少长动图的内存占用。
+- MP4 直接使用原始压缩帧，减少中间 PNG 膨胀；核验完整帧数并修正变帧时长。
+- 转换失败显示作品 ID，支持调整剩余批次格式并继续，保留已完成进度。
+- 补齐跨窗口参数冲突检查、编码取消和临时文件清理。
+
+大动图预算可通过启动前的环境变量调整，修改后重启程序：
+
+| 变量 | 默认值 | 范围 |
+|---|---:|---:|
+| `MOKU_UGOIRA_MAX_MIB`：帧包与成品文件预算 | 512 MiB | 40–4096 MiB |
+| `MOKU_UGOIRA_TEMP_MIB`：解压帧与转换暂存预算 | 2048 MiB | 128–16384 MiB |
+| `MOKU_UGOIRA_TIMEOUT_SECONDS`：每件动图转换时限 | 600 秒 | 30–3600 秒 |
+
+这三个参数分别约束文件大小、临时空间与时间；增大文件预算后也需为临时目录和保存目录预留空间。GIF 保留单帧内存预算，MP4 导出使用本机 PATH 中的 FFmpeg。
