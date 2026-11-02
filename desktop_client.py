@@ -341,7 +341,7 @@ def start_desktop(
         desktop_auth_token=desktop_auth_token,
     )
     window = webview.create_window(
-        "MOKU Lite · R3 试用2 — Pixiv 搜图与采集",
+        "MOKU Lite · R3 试用3 — Pixiv 搜图与采集",
         url,
         js_api=api,
         width=1280,
