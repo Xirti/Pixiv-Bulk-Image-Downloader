@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+from typing import BinaryIO
 
 from auth_store import (
     delete_session,
@@ -41,9 +42,9 @@ from folder_picker import select_folder
 from download_requests import DownloadRequestError, DownloadRequests
 from download_history import DownloadHistory, history_path
 from local_catalog import LocalCatalog
-from workspace_store import TaskCapacityError, WorkspaceCapacityError, WorkspaceStore
+from workspace_store import TaskConflictError, TaskCapacityError, WorkspaceCapacityError, WorkspaceStore
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
-from ugoira_export import export_formats, export_ugoira, require_mp4_encoder
+from ugoira_export import MAX_ARCHIVE_BYTES as MAX_UGOIRA_BYTES, UgoiraCancelledError, UgoiraExportError, export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
 from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status, valid_pixiv_id
 from search_service import SearchDateRange, SearchResultIndex, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
@@ -789,7 +790,8 @@ def _read_cancellable_response(
     max_bytes: int,
     cancel_event: threading.Event,
     deadline: float,
-) -> bytes:
+    output: BinaryIO | None = None,
+) -> bytes | int:
     """Read a response while a small watcher can close a blocked socket."""
     watcher_done = threading.Event()
     deadline_reached = threading.Event()
@@ -838,12 +840,15 @@ def _read_cancellable_response(
                 raise
             if not chunk:
                 break
-            chunks.append(chunk)
+            if output is None:
+                chunks.append(chunk)
+            else:
+                output.write(chunk)
             received += len(chunk)
         raise_if_search_cancelled(cancel_event)
         if deadline_reached.is_set() or time.monotonic() >= deadline:
             raise TimeoutError("Pixiv response deadline exceeded")
-        return b"".join(chunks)
+        return b"".join(chunks) if output is None else received
     finally:
         watcher_done.set()
         watcher.join(timeout=0.2)
@@ -853,7 +858,9 @@ def pixiv_request(
     url: str, image_only: bool = False, max_bytes: int = MAX_REMOTE_BYTES,
     session_value: str = "", *, anonymous: bool = False, timeout: float = 25,
     attempts: int = 2, cancel_event: threading.Event | None = None,
+    output: BinaryIO | None = None, max_duration: float | None = None,
 ) -> tuple[bytes, str]:
+    """Read small responses in memory, or stream to a seekable caller-owned file."""
     if not is_allowed_pixiv_url(url, image_only=image_only):
         raise PixivPolicyError("不允许的 Pixiv 地址")
     request_headers = dict(PIXIV_HEADERS)
@@ -868,7 +875,10 @@ def pixiv_request(
     request_timeout = max(1.0, min(float(timeout), 25.0))
     for attempt in range(attempt_count):
         raise_if_search_cancelled(cancel_event)
-        deadline = time.monotonic() + request_timeout
+        deadline = time.monotonic() + (max_duration if max_duration is not None else request_timeout)
+        if output is not None:
+            output.seek(0)
+            output.truncate()
         try:
             with PIXIV_OPENER.open(request, timeout=request_timeout) as response:
                 final_url = response.geturl()
@@ -891,12 +901,14 @@ def pixiv_request(
                     max_bytes=max_bytes,
                     cancel_event=cancel_event or threading.Event(),
                     deadline=deadline,
+                    **({"output": output} if output is not None else {}),
                 )
-                if len(raw) > max_bytes:
+                received = len(raw) if output is None else raw
+                if received > max_bytes:
                     raise PixivPolicyError("远程响应过大")
-                if declared_length is not None and len(raw) != declared_length:
-                    raise http.client.IncompleteRead(raw, declared_length)
-                return raw, content_type
+                if declared_length is not None and received != declared_length:
+                    raise http.client.IncompleteRead(raw if output is None else b"", declared_length - received)
+                return raw if output is None else b"", content_type
         except urllib.error.HTTPError as exc:
             if not should_retry_status(exc.code) or attempt == attempt_count - 1:
                 raise
@@ -2344,36 +2356,53 @@ def stage_ugoira_zip(
     *, authorization_epoch: int | None = None, ugoira_format: str = "source",
     cancel_event: threading.Event | None = None,
 ) -> list[PublishedFileOwnership]:
-    if ugoira_format == "mp4":
-        require_mp4_encoder()
     artwork_id = str(item.get("id") or "")
+    if ugoira_format == "mp4":
+        try:
+            require_mp4_encoder()
+        except UgoiraExportError as exc:
+            exc.artwork_id = artwork_id
+            raise
     meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch, cancel_event=cancel_event)
     zip_url = str(meta["originalSrc"] if quality == "original" else meta["src"])
-    raw, _content_type = pixiv_request(zip_url, image_only=True, cancel_event=cancel_event)
-    # Re-check the capability after the network request, mirroring the per-page
-    # token re-check: logout during flight must not publish restricted bytes.
-    if item.get("restriction") == "r18" and authorization_epoch is not None:
-        assert_authorization_generation(authorization_epoch)
-    if not raw.startswith(UGOIRA_ZIP_MAGIC):
-        raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
-    stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
-    if ugoira_format != "source":
-        raise_if_search_cancelled(cancel_event)
-        converted = export_ugoira(raw, meta["frames"], ugoira_format)
-        raise_if_search_cancelled(cancel_event)
+    # Temporary files keep large ZIPs and encoded outputs off the Python heap.
+    # Publication still copies through the existing exclusively owned handles.
+    with tempfile.TemporaryFile(dir=staging_root) as source:
+        pixiv_request(zip_url, image_only=True, cancel_event=cancel_event,
+                      max_bytes=MAX_UGOIRA_BYTES, output=source, max_duration=300)
+        source.seek(0)
+        if not source.read(4).startswith(UGOIRA_ZIP_MAGIC):
+            raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
+        source.seek(0)
         if item.get("restriction") == "r18" and authorization_epoch is not None:
             assert_authorization_generation(authorization_epoch)
+        stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
+        if ugoira_format != "source":
+            raise_if_search_cancelled(cancel_event)
+            with tempfile.TemporaryFile(dir=staging_root) as converted:
+                try:
+                    export_ugoira(source, meta["frames"], ugoira_format,
+                                  output=converted, cancel_event=cancel_event)
+                except UgoiraCancelledError:
+                    raise SearchCancelledError("动图转换已取消") from None
+                except UgoiraExportError as exc:
+                    exc.artwork_id = artwork_id
+                    raise
+                raise_if_search_cancelled(cancel_event)
+                if item.get("restriction") == "r18" and authorization_epoch is not None:
+                    assert_authorization_generation(authorization_epoch)
+                converted.seek(0)
+                with owned_staging_batch() as staged:
+                    staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.{ugoira_format}", converted))
+                    return staged
+        manifest = json.dumps(
+            {"mime": meta["mime"], "frames": meta["frames"], "source": zip_url},
+            ensure_ascii=False, indent=2,
+        ).encode("utf-8")
         with owned_staging_batch() as staged:
-            staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.{ugoira_format}", converted))
+            staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.zip", source))
+            staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.frames.json", manifest))
             return staged
-    manifest = json.dumps(
-        {"mime": meta["mime"], "frames": meta["frames"], "source": zip_url},
-        ensure_ascii=False, indent=2,
-    ).encode("utf-8")
-    with owned_staging_batch() as staged:
-        staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.zip", raw))
-        staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.frames.json", manifest))
-        return staged
 
 
 def stage_artwork_pages(
@@ -2758,16 +2787,19 @@ def _own_staged_file(path: Path, final: Path) -> PublishedFileOwnership:
         raise
 
 
-def _write_windows_file_handle(handle: int, raw: bytes) -> None:
+def _write_windows_file_handle(handle: int, raw: bytes | BinaryIO) -> None:
     write_file = ctypes.windll.kernel32.WriteFile
     write_file.argtypes = [
         wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
     ]
     write_file.restype = wintypes.BOOL
-    view = memoryview(raw)
-    for offset in range(0, len(view), 1024 * 1024):
-        chunk = bytes(view[offset:offset + 1024 * 1024])
+    if isinstance(raw, bytes):
+        view = memoryview(raw)
+        chunks = (bytes(view[offset:offset + 1024 * 1024]) for offset in range(0, len(view), 1024 * 1024))
+    else:
+        chunks = iter(lambda: raw.read(1024 * 1024), b"")
+    for chunk in chunks:
         buffer = ctypes.create_string_buffer(chunk)
         written = wintypes.DWORD()
         if not write_file(
@@ -2786,7 +2818,7 @@ def _write_windows_file_handle(handle: int, raw: bytes) -> None:
 def _create_owned_staged_file(
     staging_root: Path,
     final: Path,
-    raw: bytes,
+    raw: bytes | BinaryIO,
 ) -> PublishedFileOwnership:
     """Create, write, verify, and retain one zero-share staging file object."""
     create_file = ctypes.windll.kernel32.CreateFileW
@@ -3838,11 +3870,14 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_save_task(self, data: dict):
         try:
-            task = WORKSPACE_STORE.save_task(data.get("task"), workspace_scope())
+            task = WORKSPACE_STORE.save_task(data.get("task"), workspace_scope(),
+                                             **({"expected": data["expectedTask"]} if "expectedTask" in data else {}))
             return self.send_json({"ok": True, "task": task})
         except TaskCapacityError as exc:
             return self.send_json({"error": str(exc), "taskCapacity": True,
                                    "ownTaskCount": exc.own_count, "otherTaskCount": exc.other_count}, 409)
+        except TaskConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
         except ValueError:
             return self.send_json({"error": "未完成任务数据无效，请重新发起下载"}, 400)
         except (OSError, sqlite3.Error):
@@ -4154,6 +4189,10 @@ class Handler(SimpleHTTPRequestHandler):
         except AuthorizationRevokedError as exc:
             response_payload = {"error": str(exc)}
             response_status = 403
+        except UgoiraExportError as exc:
+            response_payload = {"error": public_pixiv_error("动图转换", exc),
+                                "conversionFailure": {"artworkId": exc.artwork_id, "code": exc.code}}
+            response_status = 422
         except PIXIV_OPERATION_ERRORS as exc:
             response_payload = {
                 "error": public_pixiv_error("批量下载", exc, saving=True),
@@ -4250,6 +4289,10 @@ class Handler(SimpleHTTPRequestHandler):
         except AuthorizationRevokedError as exc:
             response_payload = {"error": str(exc)}
             response_status = 403
+        except UgoiraExportError as exc:
+            response_payload = {"error": public_pixiv_error("动图转换", exc),
+                                "conversionFailure": {"artworkId": exc.artwork_id, "code": exc.code}}
+            response_status = 422
         except PIXIV_OPERATION_ERRORS as exc:
             response_payload = {
                 "error": public_pixiv_error("Pixiv 下载", exc, saving=True),

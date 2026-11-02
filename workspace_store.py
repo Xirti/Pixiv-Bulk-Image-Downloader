@@ -9,6 +9,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+class TaskConflictError(ValueError):
+    pass
+
+
 class WorkspaceCapacityError(ValueError):
     pass
 
@@ -114,7 +118,14 @@ def normalize_task(value: dict) -> dict:
     total = _integer(value.get("totalBatches"), 1, 1000)
     if completed + len(chunks) != total:
         raise ValueError("invalid queue progress")
-    return {"id": _request_id(value.get("id")), "kind": kind, "taskOptions": options,
+    failure = value.get("conversionFailure")
+    if failure is not None:
+        if (not isinstance(failure, dict) or set(failure) != {"artworkId", "code"}
+                or not isinstance(failure["code"], str) or not re.fullmatch(r"[a-z_]{1,40}", failure["code"])):
+            raise ValueError("invalid conversion failure")
+        failure = {"artworkId": _id(failure["artworkId"]), "code": failure["code"]}
+    return {**({"conversionFailure": failure} if failure is not None else {}),
+            "id": _request_id(value.get("id")), "kind": kind, "taskOptions": options,
             "remainingChunks": chunks, "completedBatches": completed, "totalBatches": total,
             "savedCount": _integer(value.get("savedCount", 0), 0, 1000),
             "fileCount": _integer(value.get("fileCount", 0), 0, 2000),
@@ -273,13 +284,21 @@ class WorkspaceStore:
             connection.execute("INSERT OR REPLACE INTO basket VALUES (1,?,?)", (revision + 1, json.dumps(normalized, ensure_ascii=False)))
         return revision + 1
 
-    def save_task(self, value: dict, scope: str) -> dict:
+    def save_task(self, value: dict, scope: str, *, expected: dict | None = None) -> dict:
         task = normalize_task(value)
+        previous = normalize_task(expected) if expected is not None else None
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            old = connection.execute("SELECT scope FROM tasks WHERE id=?", (task["id"],)).fetchone()
+            old = connection.execute("SELECT scope,payload FROM tasks WHERE id=?", (task["id"],)).fetchone()
             if old and old[0] != scope:
                 raise ValueError("task belongs to another account")
+            stored = json.loads(old[1]) if old else None
+            if previous is not None:
+                if previous["id"] != task["id"] or not stored or stored != previous or not stored.get("conversionFailure"):
+                    raise TaskConflictError("任务已在另一个窗口更新，请重新读取后调整")
+            elif stored and (stored["kind"] != task["kind"] or stored["taskOptions"] != task["taskOptions"]):
+                # A stale window must not overwrite an explicitly adjusted task.
+                raise TaskConflictError("任务参数已在另一个窗口调整，请重新读取任务")
             total, own = connection.execute(
                 "SELECT COUNT(*),COALESCE(SUM(scope=?),0) FROM tasks", (scope,),
             ).fetchone()

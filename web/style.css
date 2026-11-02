@@ -245,3 +245,9 @@ body.viewer-open #backTop{top:12px}
 .pending-task small{margin-top:4px;color:var(--muted)}
 .pending-task button{padding:6px 10px;flex-shrink:0}
 #pendingDownloadStatus{font-size:12px;color:var(--muted)}
+
+/* Recover a failed animation without changing completed batches. */
+.pending-task{flex-wrap:wrap}
+.pending-task>div{flex-basis:160px}
+#adjustTaskDialog label{display:grid;gap:8px;margin:14px 0}
+#adjustTaskDialog select{padding:10px;color:var(--ink);background:var(--surface);border:1px solid var(--line)}
