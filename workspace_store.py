@@ -84,6 +84,9 @@ def normalize_task(value: dict) -> dict:
     if not isinstance(value, dict) or value.get("kind") not in ("single", "batch"):
         raise ValueError("invalid queue task")
     kind = value["kind"]
+    policy = value.get("chunkPolicy")
+    if policy is not None and policy != "animation-artwork-v1":
+        raise ValueError("invalid queue chunk policy")
     options = value.get("taskOptions")
     if kind == "single":
         if not isinstance(options, dict) or set(options) != {"endpoint", "body"} or options["endpoint"] != "/api/pixiv/download":
@@ -125,7 +128,9 @@ def normalize_task(value: dict) -> dict:
             raise ValueError("invalid conversion failure")
         failure = {"artworkId": _id(failure["artworkId"]), "code": failure["code"]}
     return {**({"conversionFailure": failure} if failure is not None else {}),
+            **({"chunkPolicy": policy} if policy is not None else {}),
             "id": _request_id(value.get("id")), "kind": kind, "taskOptions": options,
+            "revision": _integer(value.get("revision", 0), 0, 2147483647),
             "remainingChunks": chunks, "completedBatches": completed, "totalBatches": total,
             "savedCount": _integer(value.get("savedCount", 0), 0, 1000),
             "fileCount": _integer(value.get("fileCount", 0), 0, 2000),
@@ -196,6 +201,9 @@ class WorkspaceStore:
                     connection.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, scope TEXT NOT NULL, payload TEXT NOT NULL)")
                     connection.execute("CREATE TABLE IF NOT EXISTS recent (singleton INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
                     connection.execute("PRAGMA user_version=1")
+                # Retain only task identities so a lost initial-save reply
+                # cannot turn a removed task into a new create operation.
+                connection.execute("CREATE TABLE IF NOT EXISTS task_removals (id TEXT PRIMARY KEY) WITHOUT ROWID")
                 yield connection
         finally:
             connection.close()
@@ -284,17 +292,34 @@ class WorkspaceStore:
             connection.execute("INSERT OR REPLACE INTO basket VALUES (1,?,?)", (revision + 1, json.dumps(normalized, ensure_ascii=False)))
         return revision + 1
 
-    def save_task(self, value: dict, scope: str, *, expected: dict | None = None) -> dict:
+    def save_task(self, value: dict, scope: str, *, expected: dict | None = None,
+                  require_existing: bool = False) -> dict:
         task = normalize_task(value)
         previous = normalize_task(expected) if expected is not None else None
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             old = connection.execute("SELECT scope,payload FROM tasks WHERE id=?", (task["id"],)).fetchone()
+            if connection.execute("SELECT 1 FROM task_removals WHERE id=?", (task["id"],)).fetchone():
+                raise TaskConflictError("任务已移除，请重新发起下载")
             if old and old[0] != scope:
                 raise ValueError("task belongs to another account")
-            stored = json.loads(old[1]) if old else None
+            stored = normalize_task(json.loads(old[1])) if old else None
+            if stored:
+                # A lost reply may be retried with the previous version. Exact
+                # state replays are harmless; stale mutations must re-read.
+                if stored["revision"] and {k: v for k, v in task.items() if k != "revision"} == {k: v for k, v in stored.items() if k != "revision"}:
+                    return stored
+                if task["revision"] != stored["revision"]:
+                    raise TaskConflictError("任务进度已在另一个窗口更新，请重新读取任务")
+            elif require_existing or task["revision"] or previous is not None:
+                raise TaskConflictError("任务已移除，请重新读取任务")
+            if stored and stored.get("chunkPolicy") and stored.get("chunkPolicy") != task.get("chunkPolicy"):
+                raise TaskConflictError("任务分批方式已更新，请重新读取任务")
             if previous is not None:
-                if previous["id"] != task["id"] or not stored or stored != previous or not stored.get("conversionFailure"):
+                migration = (stored and not stored.get("chunkPolicy") and task.get("chunkPolicy")
+                             and stored["kind"] == task["kind"] and stored["taskOptions"] == task["taskOptions"])
+                changing_options = stored and (stored["kind"] != task["kind"] or stored["taskOptions"] != task["taskOptions"])
+                if previous["id"] != task["id"] or not stored or stored != previous or (changing_options and not stored.get("conversionFailure") and not migration):
                     raise TaskConflictError("任务已在另一个窗口更新，请重新读取后调整")
             elif stored and (stored["kind"] != task["kind"] or stored["taskOptions"] != task["taskOptions"]):
                 # A stale window must not overwrite an explicitly adjusted task.
@@ -304,12 +329,21 @@ class WorkspaceStore:
             ).fetchone()
             if not old and total >= 20:
                 raise TaskCapacityError(own, total - own)
+            task["revision"] += 1
             connection.execute("INSERT OR REPLACE INTO tasks VALUES (?,?,?)", (task["id"], scope, json.dumps(task, ensure_ascii=False)))
         return task
 
-    def delete_task(self, task_id: str, scope: str) -> bool:
+    def delete_task(self, task_id: str, scope: str, *, revision: int | None = None) -> bool:
         _request_id(task_id)
+        if revision is not None:
+            _integer(revision, 0, 2147483647)
         with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT payload FROM tasks WHERE id=? AND scope=?", (task_id, scope)).fetchone()
+            if row and revision is not None and json.loads(row[0]).get("revision", 0) != revision:
+                raise TaskConflictError("任务已在另一个窗口更新，请重新读取后移除")
+            if row:
+                connection.execute("INSERT OR IGNORE INTO task_removals VALUES (?)", (task_id,))
             cursor = connection.execute("DELETE FROM tasks WHERE id=? AND scope=?", (task_id, scope))
             return cursor.rowcount > 0
 
@@ -320,3 +354,12 @@ class WorkspaceStore:
                 return False
             with self._connection() as connection:
                 return connection.execute("SELECT 1 FROM tasks WHERE id=? AND scope=?", (task_id, scope)).fetchone() is not None
+
+    def get_task(self, task_id: str, scope: str) -> dict | None:
+        _request_id(task_id)
+        with self._lock:
+            if not self.path.exists():
+                return None
+            with self._connection() as connection:
+                row = connection.execute("SELECT payload FROM tasks WHERE id=? AND scope=?", (task_id, scope)).fetchone()
+                return normalize_task(json.loads(row[0])) if row else None

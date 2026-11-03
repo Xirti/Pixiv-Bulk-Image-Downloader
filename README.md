@@ -1,8 +1,4 @@
-> 当前本地包：复查修订 3，界面标记为“试用3”。
-
-> 本地试用：v1.1.4-glass-r13 · 大动图下载与转换。
-
-# MOKU Glass Lab R13 · 花里胡哨版 · 动效 MAX
+# MOKU v1.1.5 · 花里胡哨版 · 动效 MAX
 
 <p align="center">
   <img src="assets/moku-icon.png" width="148" alt="MOKU 猫娘图标">
@@ -10,17 +6,17 @@
 
 MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作品 ID，翻翻预览，把喜欢的画放进采集篮，再挑好图片一起下载。
 
-当前版本：**1.1.4-glass-r13**，动效版 **R13**，发布标记 `v1.1.4-glass-r13`。
+当前版本：**1.1.5** · 动效 MAX，发布标记 `v1.1.5`。
 
-`main` 现为动效 MAX 主线。原 Lite 版完整保存在 [lite-backup](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/tree/lite-backup)，对应 `v1.1.4-r1`。
+`main` 保存花里胡哨版源码，轻量版源码保存在 [lite-backup](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/tree/lite-backup)。两版统一为 `v1.1.5`，在 [同一发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.5) 提供。
 
-**花里胡哨版，谨慎下载———若不喜欢可进入Release页面，下载前一个版本 `MOKU Lite-v1.1.4-r1`**。
+**花里胡哨版 · 动效 MAX，低配置慎入 😂**。下载带 `Glass` 的压缩包体验完整视觉效果，选择带 `Lite` 的压缩包使用简洁界面。
 
-清透玻璃、宽边折射、实时点阵背景和鼠标联动标题继续保留。R13 重点完善下载收尾、采集篮同步和多窗口历史记录，减少玻璃重绘时的布局计算。
+清透玻璃、宽边折射、实时点阵背景和鼠标联动标题继续保留。1.1.5 同步大动图合成、暂停续传、多窗口任务恢复与 HTTPS 连接优化。
 
 ## 开始使用
 
-从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU-Glass-Lab.exe`。便携版直接运行，无需安装 Python。
+从 [MOKU v1.1.5](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.5) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU-Glass-Lab.exe`。便携版直接运行，无需安装 Python。
 
 需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，保留`MOKU-Glass-Lab.exe.config` 。
 
@@ -65,7 +61,7 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 动图可以下载为三种格式：
 
 - 原始帧 ZIP + JSON：保存各帧图片和播放时长，默认使用此格式。
-- GIF：内置转换，可直接下载，保留透明背景；颜色会按 GIF 格式量化。
+- GIF：内置转换，可直接下载，支持透明背景；颜色按 GIF 格式量化，半透明边缘会合成处理。
 - MP4：使用本机 FFmpeg 导出 H.264 视频。安装支持 `libx264` 的 FFmpeg 并加入 PATH 后，重启 MOKU 即可使用。
 
 很短的帧间隔不适合 GIF 时，界面会提示选择 MP4 或原始帧包。静态图片在混合下载中仍保留原来的格式。
@@ -106,19 +102,19 @@ python -m pip install -r requirements-build.lock
 powershell -ExecutionPolicy Bypass -File .\make-glass-release.ps1
 ```
 
-便携程序生成在 `dist\MOKU-Glass-Lab`，发布压缩包、校验值和更新说明生成在 `release\v1.1.4-glass-r13`。版本配置与存储说明见 [EXPERIMENT.md](EXPERIMENT.md)。
+便携程序生成在 `dist\MOKU-Glass-Lab`，发布压缩包、校验值和更新说明生成在 `release\v1.1.5`。版本配置与存储说明见 [EXPERIMENT.md](EXPERIMENT.md)。
 
 ## 本版更新
 
-正式版基线为 `1.1.4-r1 Lite`，已归档至 `lite-backup`。当前主线聚焦液态玻璃与点阵交互，R13 完善下载恢复、详情同步和多窗口历史迁移，并减少重复布局计算。更新重点见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，历史记录见 [CHANGELOG](CHANGELOG.md)。
+当前主线为 `1.1.5` 动效 MAX，沿用液态玻璃与点阵交互，同步 Lite `1.1.4-r3` 的共用业务改进。更新重点见 [RELEASE_NOTES.md](RELEASE_NOTES.md)，历史记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可证与作品使用
 
 MOKU 使用 [MIT License](LICENSE)，是与 Pixiv 无隶属关系的独立项目。作品版权归各自创作者所有，下载和使用时请尊重作者授权及平台规则。
 
-### 大动图试用
+### 大动图下载与合成
 
-大动图下载与转换试用版，保留原分辨率和原始帧时序。
+原图模式使用原始分辨率帧包，GIF/MP4 按所选格式合成，保留原始帧时序。
 
 - 帧包下载和成品发布改为分段读写，默认文件预算提高到 512 MiB。
 - GIF 逐帧编码，减少长动图的内存占用。

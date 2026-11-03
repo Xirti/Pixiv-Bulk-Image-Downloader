@@ -46,6 +46,7 @@ from workspace_store import TaskConflictError, TaskCapacityError, WorkspaceCapac
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from ugoira_export import MAX_ARCHIVE_BYTES as MAX_UGOIRA_BYTES, UgoiraCancelledError, UgoiraExportError, export_formats, export_ugoira, require_mp4_encoder
 from network_config import normalize_loopback_proxy
+from network_transport import PooledOpener, classify_network_error
 from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status, valid_pixiv_id
 from search_service import SearchDateRange, SearchResultIndex, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
@@ -455,6 +456,7 @@ def pixiv_item_for_download(
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
     require_thumb: bool = False,
+    network_timeout: float | None = None,
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     cached = get_cached_pixiv_item(artwork_id)
@@ -469,11 +471,13 @@ def pixiv_item_for_download(
             assert_authorization_generation(authorization_epoch)
         raise_if_search_cancelled(cancel_event)
         return cached
-    if authorization_epoch is None and cancel_event is None:
+    if authorization_epoch is None and cancel_event is None and network_timeout is None:
         return pixiv_detail(artwork_id, allow_r18=allow_r18)
     kwargs = {"authorization_epoch": authorization_epoch}
     if cancel_event is not None:
         kwargs["cancel_event"] = cancel_event
+    if network_timeout is not None:
+        kwargs["network_timeout"] = network_timeout
     return pixiv_detail(artwork_id, allow_r18=allow_r18, **kwargs)
 
 
@@ -601,7 +605,7 @@ class StrictLoopbackProxyHandler(urllib.request.ProxyHandler):
         return self.parent.open(request, timeout=request.timeout)
 
 
-PIXIV_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirectHandler)
+PIXIV_OPENER = PooledOpener(StrictLoopbackProxyHandler({}), NoRedirectHandler())
 PIXIV_PROXY = ""
 PIXIV_NETWORK_FINGERPRINT: tuple[str] | None = None
 PIXIV_NETWORK_CHECKED_AT = 0.0
@@ -784,12 +788,12 @@ def _update_network_opener(*, max_age: float) -> str:
         if fingerprint == PIXIV_NETWORK_FINGERPRINT:
             return PIXIV_PROXY
         proxy_map = {"http": proxy, "https": proxy} if proxy else {}
-        opener = urllib.request.build_opener(
-            StrictLoopbackProxyHandler(proxy_map), NoRedirectHandler,
-        )
+        opener = PooledOpener(StrictLoopbackProxyHandler(proxy_map), NoRedirectHandler())
+        previous = PIXIV_OPENER
         PIXIV_OPENER = opener
         PIXIV_PROXY = proxy
         PIXIV_NETWORK_FINGERPRINT = fingerprint
+        previous.close()
         return proxy
 
 
@@ -886,18 +890,25 @@ def pixiv_request(
         request_headers["Cookie"] = f"PHPSESSID={session_value}"
     elif not image_only and not anonymous:
         request_headers.update(session_cookie_header())
-    request = urllib.request.Request(url, headers=request_headers)
     last_error = None
     attempt_count = max(1, min(int(attempts), 2))
     request_timeout = max(1.0, min(float(timeout), 90.0))
     for attempt in range(attempt_count):
         raise_if_search_cancelled(cancel_event)
+        request = urllib.request.Request(url, headers=request_headers)
+        request._moku_check = lambda: raise_if_search_cancelled(cancel_event)
+        request._moku_phase = "open"
+        request._moku_reused = False
+        with PIXIV_NETWORK_LOCK:
+            opener, proxy = PIXIV_OPENER, PIXIV_PROXY
+        started = time.monotonic()
         deadline = time.monotonic() + (max_duration if max_duration is not None else request_timeout)
+        request._moku_deadline = deadline
         if output is not None:
             output.seek(0)
             output.truncate()
         try:
-            with PIXIV_OPENER.open(request, timeout=request_timeout) as response:
+            with opener.open(request, timeout=request_timeout) as response:
                 final_url = response.geturl()
                 if not is_allowed_pixiv_url(final_url, image_only=image_only):
                     raise PixivPolicyError("Pixiv 重定向到了不允许的地址")
@@ -913,6 +924,7 @@ def pixiv_request(
                         raise PixivPolicyError("Pixiv 返回了无效的 Content-Length") from exc
                     if declared_length < 0 or declared_length > max_bytes:
                         raise PixivPolicyError("远程响应过大")
+                request._moku_phase = "response_body"
                 raw = _read_cancellable_response(
                     response,
                     max_bytes=max_bytes,
@@ -926,12 +938,20 @@ def pixiv_request(
                 if declared_length is not None and received != declared_length:
                     raise http.client.IncompleteRead(raw if output is None else b"", declared_length - received)
                 return raw if output is None else b"", content_type
-        except urllib.error.HTTPError as exc:
-            if not should_retry_status(exc.code) or attempt == attempt_count - 1:
-                raise
-            last_error = exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
-            if attempt == attempt_count - 1:
+        except (OSError, http.client.HTTPException) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            raise_if_search_cancelled(cancel_event)
+            failure = classify_network_error(exc)
+            retryable = should_retry_status(exc.code) if isinstance(exc, urllib.error.HTTPError) else failure.retryable
+            retry = retryable and attempt < attempt_count - 1
+            HTTP_LOG.warning(
+                "Pixiv request failed host=%s route=%s phase=%s attempt=%d/%d kind=%s code=%s ms=%d reused=%s retry=%s",
+                urllib.parse.urlsplit(url).hostname, proxy or "direct-or-tun", request._moku_phase,
+                attempt + 1, attempt_count, failure.kind, failure.code,
+                round((time.monotonic() - started) * 1000), request._moku_reused, retry,
+            )
+            if not retry:
                 raise
             last_error = exc
         if cancel_event is None:
@@ -974,7 +994,7 @@ def search_pixiv_json(url: str, cancel_event: threading.Event | None) -> dict:
     if cancel_event is not None:
         options = {
             "timeout": SEARCH_REMOTE_TIMEOUT_SECONDS,
-            "attempts": 1,
+            "attempts": 2,
             "cancel_event": cancel_event,
         }
     try:
@@ -1029,18 +1049,7 @@ def windows_proxy_state() -> dict:
 
 
 def network_error_kind(exc: Exception) -> str:
-    text = str(exc or "").casefold()
-    if isinstance(exc, PermissionError) or "permission denied" in text or "access is denied" in text or "拒绝访问" in text:
-        return "unavailable"
-    if isinstance(exc, TimeoutError) or "timed out" in text or "timeout" in text or "超时" in text:
-        return "timeout"
-    if "refused" in text or "actively refused" in text or "拒绝" in text:
-        return "refused"
-    if "ssl" in text or "tls" in text or "certificate" in text or "证书" in text:
-        return "tls"
-    if isinstance(exc, urllib.error.HTTPError):
-        return "http"
-    return "unavailable"
+    return classify_network_error(exc).kind
 
 
 NETWORK_DIAGNOSTIC_TARGETS = (
@@ -1062,8 +1071,9 @@ def _run_network_diagnostic_check(target: tuple[str, str, bool]) -> dict:
             "bytes": len(raw), "ms": round((time.monotonic() - started) * 1000),
         }
     except Exception as exc:
+        failure = classify_network_error(exc)
         return {
-            "name": name, "ok": False, "errorKind": network_error_kind(exc),
+            "name": name, "ok": False, "errorKind": failure.kind, "errorCode": failure.code,
             "ms": round((time.monotonic() - started) * 1000),
         }
 
@@ -1093,6 +1103,7 @@ def human_network_summary(state: dict, selected_proxy: str, checks: list[dict]) 
     else:
         route = "直连 / TUN"
     results = {str(row.get("name")): bool(row.get("ok")) for row in checks}
+    failures = {row.get("errorKind") for row in checks if not row.get("ok")}
     pixiv_ok = results.get("pixiv", False)
     cdn_ok = results.get("cdn", False)
     if pixiv_ok and cdn_ok:
@@ -1104,6 +1115,18 @@ def human_network_summary(state: dict, selected_proxy: str, checks: list[dict]) 
     elif state.get("proxyEnabled") and not selected_proxy:
         headline = "系统代理已开启，但 MOKU 无法使用该配置"
         guidance = "MOKU 只接受本机 HTTP 代理入口；请确认代理地址是 127.0.0.1 或 localhost，且端口正在运行。"
+    elif "certificate" in failures:
+        headline = "Pixiv 连接的证书校验失败"
+        guidance = "请检查系统日期和时间，以及本机代理是否使用已受信任的证书。"
+    elif "tls_protocol" in failures:
+        headline = "TLS 协议或本地代理入口异常"
+        guidance = "请核对本机 HTTP 代理的协议和端口，例如 http://127.0.0.1:7890。"
+    elif "dns" in failures:
+        headline = "Pixiv 域名解析失败"
+        guidance = "请检查当前网络或代理的 DNS 配置，再重新检测。"
+    elif selected_proxy and failures.intersection({"tls", "reset", "proxy"}):
+        headline = "当前代理到 Pixiv 的连接异常"
+        guidance = "请检查当前节点到 Pixiv 主站和图片 CDN 的链路，更换可用节点后重新检测。"
     else:
         headline = "当前网络无法连接 Pixiv"
         guidance = "请开启可用的 Windows 系统代理或 TUN 全局模式，再重新检测。"
@@ -2168,12 +2191,16 @@ def pixiv_detail(
     *,
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
+    network_timeout: float | None = None,
 ) -> dict:
     if not artwork_id.isdigit():
         raise PixivPolicyError("无效作品 ID")
     detail_url = f"https://www.pixiv.net/ajax/illust/{artwork_id}?lang=zh"
     pages_url = f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages?lang=zh"
-    if cancel_event is None:
+    if network_timeout is not None:
+        detail = pixiv_json(detail_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or {}
+        pages = pixiv_json(pages_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or []
+    elif cancel_event is None:
         detail = pixiv_json(detail_url).get("body") or {}
         pages = pixiv_json(pages_url).get("body") or []
     else:
@@ -2219,14 +2246,15 @@ def pixiv_ugoira_meta(
     *,
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
+    network_timeout: float | None = None,
 ) -> dict:
     """Fetch the ugoira animation manifest (frame zip URLs and delays)."""
     if authorization_epoch is not None:
         assert_authorization_generation(authorization_epoch)
     try:
         meta = UGOIRA_RESOURCES.get(
-            ("meta", artwork_id, authorization_epoch),
-            lambda event: _fetch_ugoira_meta(artwork_id, authorization_epoch, event),
+            ("meta-download" if network_timeout is not None else "meta", artwork_id, authorization_epoch),
+            lambda event: _fetch_ugoira_meta(artwork_id, authorization_epoch, event, timeout=network_timeout or 25),
             ttl=60, cancel_event=cancel_event,
         )
     except (PreviewCancelledError, SearchCancelledError) as exc:
@@ -2242,8 +2270,8 @@ def pixiv_ugoira_meta(
     return meta
 
 
-def _fetch_ugoira_meta(artwork_id, authorization_epoch, cancel_event) -> dict:
-    body = pixiv_json(build_ugoira_meta_url(artwork_id), cancel_event=cancel_event).get("body") or {}
+def _fetch_ugoira_meta(artwork_id, authorization_epoch, cancel_event, *, timeout=25) -> dict:
+    body = pixiv_json(build_ugoira_meta_url(artwork_id), timeout=timeout, cancel_event=cancel_event).get("body") or {}
     if not isinstance(body, dict):
         raise PixivPolicyError("Pixiv 动图数据格式异常")
     original_src = str(body.get("originalSrc") or "")
@@ -2306,9 +2334,9 @@ PIXIV_OPERATION_ERRORS = (
 
 
 def public_pixiv_error(action: str, exc: Exception, *, saving: bool = False) -> str:
-    if isinstance(exc, (TypeError, ValueError, KeyError)) and not isinstance(
-        exc, (PixivPolicyError, json.JSONDecodeError)
-    ):
+    data_error = isinstance(exc, (TypeError, ValueError, KeyError)) and not isinstance(
+        exc, (PixivPolicyError, json.JSONDecodeError, OSError))
+    if data_error:
         HTTP_LOG.exception("Unexpected %s data-processing failure", action)
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code in {401, 403}:
@@ -2319,20 +2347,28 @@ def public_pixiv_error(action: str, exc: Exception, *, saving: bool = False) -> 
             detail = "Pixiv 暂时返回异常响应"
     elif isinstance(exc, PixivPolicyError):
         detail = str(exc) or "请求不符合安全策略"
-    elif isinstance(exc, (json.JSONDecodeError, UnicodeError, TypeError, ValueError, KeyError)):
+    elif isinstance(exc, (json.JSONDecodeError, UnicodeError)) or data_error:
         detail = "Pixiv 返回的数据格式异常"
     else:
+        failure = classify_network_error(exc)
         labels = {
             "timeout": "连接超时",
             "refused": "连接被拒绝",
-            "tls": "证书或 TLS 连接异常",
+            "tls": "TLS 握手或连接异常",
+            "certificate": "证书校验失败，请检查系统时间和代理证书信任",
+            "tls_protocol": "TLS 协议异常，请检查本地代理协议与端口",
+            "dns": "域名解析失败",
+            "reset": "网络连接被重置或传输中断",
+            "proxy": "本地代理隧道连接失败",
             "http": "Pixiv 暂时返回异常响应",
             "unavailable": "网络连接中断或不可用",
         }
-        detail = labels.get(network_error_kind(exc), "网络连接中断或不可用")
+        detail = labels.get(failure.kind, "网络连接中断或不可用")
+        if failure.code in {"TLS_EOF", "UNEXPECTED_EOF_WHILE_READING"}:
+            detail = "TLS 连接被提前关闭"
         if (
             saving
-            and network_error_kind(exc) == "unavailable"
+            and failure.kind == "unavailable"
             and isinstance(exc, OSError)
             and not isinstance(
                 exc, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException)
@@ -2380,11 +2416,13 @@ def stage_ugoira_zip(
         except UgoiraExportError as exc:
             exc.artwork_id = artwork_id
             raise
-    meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch, cancel_event=cancel_event)
+    HTTP_LOG.info("download artwork=%s stage=animation-metadata", artwork_id)
+    meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch, cancel_event=cancel_event, network_timeout=90)
     zip_url = str(meta["originalSrc"] if quality == "original" else meta["src"])
     # Temporary files keep large ZIPs and encoded outputs off the Python heap.
     # Publication still copies through the existing exclusively owned handles.
     with tempfile.TemporaryFile(dir=staging_root) as source:
+        HTTP_LOG.info("download artwork=%s stage=archive", artwork_id)
         pixiv_request(zip_url, image_only=True, cancel_event=cancel_event,
                       max_bytes=MAX_UGOIRA_BYTES, output=source, timeout=90, max_duration=600)
         source.seek(0)
@@ -2396,6 +2434,7 @@ def stage_ugoira_zip(
         stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
         if ugoira_format != "source":
             raise_if_search_cancelled(cancel_event)
+            HTTP_LOG.info("download artwork=%s stage=convert format=%s frames=%d", artwork_id, ugoira_format, len(meta["frames"]))
             with tempfile.TemporaryFile(dir=staging_root) as converted:
                 try:
                     export_ugoira(source, meta["frames"], ugoira_format,
@@ -3769,6 +3808,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/workspace/basket": (8388608, self._post_save_basket),
             "/api/workspace/task": (4194304, self._post_save_task),
             "/api/workspace/task/delete": (4096, self._post_delete_task),
+            "/api/workspace/task/migrate": (4096, self._post_migrate_task),
             "/api/workspace/recent": (8192, self._post_recent_search),
             "/api/pixiv/search/cancel": (4096, self._post_cancel_search),
             "/api/pixiv/ugoira/cancel": (4096, self._post_cancel_search),
@@ -3795,6 +3835,11 @@ class Handler(SimpleHTTPRequestHandler):
                         "retryable": True,
                     }, 429
                 try:
+                    if data.get("queueId") is not None:
+                        with SEARCH_SESSION_LOCKS_GUARD:
+                            queued = WORKSPACE_STORE.get_task(data["queueId"], owner_scope)
+                            if queued is None or data.get("requestId") != queued["remainingChunks"][0]["requestId"]:
+                                raise DownloadRequestError("任务进度已更新，请重新读取任务", 409)
                     # run() has validated the identity and admitted only the
                     # owning operation; duplicate observers never replace its
                     # cancellation event.
@@ -3901,18 +3946,89 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_save_task(self, data: dict):
         try:
+            update_only = data.get("updateOnly", False)
+            if type(update_only) is not bool:
+                raise ValueError("invalid task update mode")
             task = WORKSPACE_STORE.save_task(data.get("task"), workspace_scope(),
+                                             require_existing=update_only,
                                              **({"expected": data["expectedTask"]} if "expectedTask" in data else {}))
             return self.send_json({"ok": True, "task": task})
         except TaskCapacityError as exc:
             return self.send_json({"error": str(exc), "taskCapacity": True,
                                    "ownTaskCount": exc.own_count, "otherTaskCount": exc.other_count}, 409)
         except TaskConflictError as exc:
-            return self.send_json({"error": str(exc)}, 409)
+            return self.send_json({"error": str(exc), "taskConflict": True}, 409)
         except ValueError:
             return self.send_json({"error": "未完成任务数据无效，请重新发起下载"}, 400)
         except (OSError, sqlite3.Error):
             return self.send_json({"error": "无法保存未完成任务"}, 500)
+
+    def _post_migrate_task(self, data: dict):
+        # Workspace routes hold the authorization guard. A new operation first
+        # claims its request identity, then rechecks queue membership under the
+        # same guard; migration cannot race an old request into publication.
+        try:
+            scope = workspace_scope()
+            task = WORKSPACE_STORE.get_task(data.get("id"), scope)
+            if task is None:
+                return self.send_json({"removed": True})
+            if task.get("chunkPolicy"):
+                return self.send_json({"task": task})
+            authorized, epoch = validated_authorization()
+            updated = {**task, "remainingChunks": [], "chunkPolicy": "animation-artwork-v1"}
+            basket = {row["id"]: row["item"] for row in WORKSPACE_STORE.load(scope)["basket"]}
+            for chunk in task["remainingChunks"]:
+                single = task["kind"] == "single"
+                endpoint = task["taskOptions"]["endpoint"] if single else "/api/pixiv/batch-download"
+                body = ({**task["taskOptions"]["body"], "pages": chunk["groups"][0]["pages"]} if single
+                        else {**task["taskOptions"], "groups": chunk["groups"], "context": chunk["context"]})
+                body.update(requestId=chunk["requestId"], queueId=task["id"], scope=scope)
+                # 204 is a probe sentinel, never a successful download receipt.
+                result, status = DOWNLOAD_REQUESTS.probe(chunk["requestId"], endpoint, body,
+                                                        scope=str(epoch) if authorized else "public", durable_scope=scope,
+                                                        output_root=DOWNLOADS)
+                if status == 202:
+                    return self.send_json({"pending": True, "requestId": chunk["requestId"]}, 202)
+                if status == 200:
+                    updated["completedBatches"] += 1
+                    updated["savedCount"] += result.get("pages", chunk["pageCount"])
+                    updated["fileCount"] += len(result.get("saved", []))
+                    updated["skippedCount"] += result.get("skippedPages", 0)
+                    updated["firstSaved"] = updated["firstSaved"] or next(iter(result.get("saved", [])), "")
+                    if any(group["id"] == updated.get("conversionFailure", {}).get("artworkId") for group in chunk["groups"]):
+                        updated.pop("conversionFailure", None)
+                    continue
+                pieces, ordinary = [], []
+                for group in chunk["groups"]:
+                    if single or basket.get(group["id"], {}).get("workType") not in {"illustration", "manga"}:
+                        if ordinary:
+                            pieces.append(ordinary)
+                            ordinary = []
+                        pieces.append([group])
+                    else:
+                        ordinary.append(group)
+                if ordinary:
+                    pieces.append(ordinary)
+                if len(pieces) == 1:
+                    updated["remainingChunks"].append(chunk)
+                else:
+                    updated["remainingChunks"].extend({"groups": groups, "pageCount": sum(len(g["pages"]) for g in groups),
+                                                        "requestId": secrets.token_hex(16), "context": chunk["context"]}
+                                                       for groups in pieces)
+            updated["totalBatches"] = updated["completedBatches"] + len(updated["remainingChunks"])
+            if updated["remainingChunks"]:
+                updated = WORKSPACE_STORE.save_task(updated, scope, expected=task)
+            else:
+                WORKSPACE_STORE.delete_task(task["id"], scope, revision=task.get("revision", 0))
+            return self.send_json({"task": updated})
+        except DownloadRequestError as exc:
+            return self.send_json({"error": str(exc)}, exc.status)
+        except TaskConflictError as exc:
+            return self.send_json({"error": str(exc), "taskConflict": True}, 409)
+        except ValueError:
+            return self.send_json({"error": "任务迁移数据无效，请重新读取任务"}, 400)
+        except (OSError, sqlite3.Error):
+            return self.send_json({"error": "无法核对旧任务进度"}, 500)
 
     def _post_recent_search(self, data: dict):
         try:
@@ -3925,8 +4041,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_delete_task(self, data: dict):
         try:
-            deleted = WORKSPACE_STORE.delete_task(data.get("id"), workspace_scope())
+            deleted = WORKSPACE_STORE.delete_task(data.get("id"), workspace_scope(), revision=data.get("revision"))
             return self.send_json({"ok": True, "deleted": deleted})
+        except TaskConflictError as exc:
+            return self.send_json({"error": str(exc), "taskConflict": True}, 409)
         except ValueError:
             return self.send_json({"error": "任务编号无效"}, 400)
         except (OSError, sqlite3.Error):
@@ -4166,12 +4284,14 @@ class Handler(SimpleHTTPRequestHandler):
             ) -> None:
                 nonlocal skipped_pages
                 for artwork_id, page_set in normalized.items():
+                    HTTP_LOG.info("download artwork=%s stage=detail", artwork_id)
                     authorized, authorization_epoch = self._download_authorization_snapshot()
                     item = pixiv_item_for_download(
                         artwork_id,
                         allow_r18=authorized,
                         authorization_epoch=authorization_epoch,
                         cancel_event=cancel_event,
+                        network_timeout=90,
                     )
                     if item.get("restriction") == "r18" and not authorized:
                         raise PixivPolicyError("R-18 下载需要有效账户授权")
@@ -4228,6 +4348,7 @@ class Handler(SimpleHTTPRequestHandler):
             response_payload = {
                 "error": public_pixiv_error("批量下载", exc, saving=True),
             }
+            HTTP_LOG.warning("batch download failed category=%s", type(exc).__name__)
             response_status = 502
         return response_payload, response_status
 
@@ -4250,11 +4371,13 @@ class Handler(SimpleHTTPRequestHandler):
 
         try:
             authorized, authorization_epoch = self._download_authorization_snapshot()
+            HTTP_LOG.info("download artwork=%s stage=detail", artwork_id)
             item = pixiv_item_for_download(
                 artwork_id,
                 allow_r18=authorized,
                 authorization_epoch=authorization_epoch,
                 cancel_event=cancel_event,
+                network_timeout=90,
             )
             page_images = item.get("pageImages")
             if not isinstance(page_images, list) or not page_images:

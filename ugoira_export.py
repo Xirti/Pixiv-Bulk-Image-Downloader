@@ -12,7 +12,9 @@ import threading
 import time
 import zipfile
 import zlib
-from contextlib import closing
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import ExitStack, closing
 from pathlib import Path
 from typing import BinaryIO
 
@@ -87,7 +89,7 @@ def _frames(raw: bytes | BinaryIO, frames: list[dict], check, *, preflight=None)
             encoded = archive.read(frame["file"])
             # Read by ZIP entry name, never extract remote paths. CRC and image
             # decoding must both succeed before an output can be published.
-            with Image.open(io.BytesIO(encoded), formats=("JPEG", "PNG")) as image:
+            with closing(Image.open(io.BytesIO(encoded), formats=("JPEG", "PNG"))) as image:
                 if image.width * image.height > MAX_FRAME_PIXELS:
                     raise UgoiraExportError("动图单帧分辨率过大，请选择标准或原始帧 ZIP", "frame_limit")
                 if size is not None and image.size != size:
@@ -111,18 +113,84 @@ class _Output:
         return self.stream.write(data)
 
 
+def _image_work_budget(limit: int) -> int:
+    """Use a bounded share of current memory headroom for image work."""
+    if os.name != "nt":
+        return min(limit, MAX_GIF_MEMORY)
+    import ctypes
+    from ctypes import wintypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", wintypes.DWORD), ("load", wintypes.DWORD)] + [
+            (name, ctypes.c_ulonglong) for name in (
+                "total_physical", "available_physical", "total_commit", "available_commit",
+                "total_virtual", "available_virtual", "reserved")]
+
+    status = MemoryStatus()
+    status.length = ctypes.sizeof(status)
+    query = ctypes.WinDLL("kernel32", use_last_error=True).GlobalMemoryStatusEx
+    query.argtypes = [ctypes.POINTER(MemoryStatus)]
+    query.restype = wintypes.BOOL
+    if not query(ctypes.byref(status)):
+        return 0
+    # Leave the majority of available RAM/commit to the OS and other apps.
+    available = min(status.available_physical, status.available_commit)
+    return min(limit, available // 3)
+
+
+class _GifPaletteJob:
+    """Keep frame inputs and output owned even if executor submission fails."""
+
+    def __init__(self, rgb, mask, buffers, delay, check):
+        self.rgb = rgb
+        self.mask = mask
+        self.buffers = buffers
+        self.delay = delay
+        self.check = check
+        self.palette = None
+        self.future = Future()
+
+    def run(self):
+        with self.buffers:
+            self.check()
+            self.palette = self.rgb.quantize(colors=255)
+            self.check()
+            if self.mask is not None:
+                self.palette.paste(255, mask=self.mask)
+            self.palette.info["transparency"] = 255
+
+    def close(self):
+        self.buffers.close()
+        if self.palette is not None:
+            self.palette.close()
+            self.palette = None
+
+
 def _gif(raw, frames, output, check):
     from PIL import GifImagePlugin, Image
 
     def check_memory(size):
-        if size[0] * size[1] * 28 > MAX_GIF_MEMORY:
+        nonlocal parallel
+        memory = size[0] * size[1] * 28
+        if memory > MAX_GIF_MEMORY:
             raise UgoiraExportError("GIF 单帧转换需要的内存过多，请选择 MP4、标准或原始帧 ZIP", "memory_limit")
+        # Reserve preparation/copy headroom as well as two quantizers. Larger
+        # frames retain the existing single-frame path and admission limit.
+        parallel = len(frames) > 1 and memory * 4 <= parallel_budget and (os.cpu_count() or 1) > 1
 
     elapsed = rounded = 0
     first = True
-    pending = None
     signature = None
-    duration = 0
+    parallel = False
+    parallel_budget = _image_work_budget(MAX_GIF_MEMORY * 4)
+    executor = None
+    jobs = deque()
+    stopped = threading.Event()
+
+    def check_pipeline():
+        check()
+        if stopped.is_set():
+            raise UgoiraCancelledError("动图转换已取消")
 
     def emit(palette, delay):
         nonlocal first
@@ -137,6 +205,17 @@ def _gif(raw, frames, output, check):
                 disposal=2, transparency=255, include_color_table=True):
             output.write(block)
 
+    def emit_next():
+        job = jobs[0]
+        while not job.future.done():
+            check_pipeline()
+            wait((job.future,), timeout=.05)
+        check_pipeline()
+        job.future.result()
+        jobs.popleft()
+        with closing(job):
+            emit(job.palette, job.delay)
+
     try:
         with closing(_frames(raw, frames, check, preflight=check_memory)) as decoded:
             for image, _encoded, delay in decoded:
@@ -146,32 +225,60 @@ def _gif(raw, frames, output, check):
                 next_rounded = max(rounded + 10, ((elapsed + 5) // 10) * 10)
                 frame_delay = next_rounded - rounded
                 rounded = next_rounded
-                with image.convert("RGBA") as rgba:
-                    current_signature = hashlib.sha256(rgba.tobytes()).digest()
-                    if pending is not None and current_signature == signature:
-                        # One pending palette coalesces a still pose without
-                        # retaining every frame or quantizing identical pixels.
-                        duration += frame_delay
-                        continue
-                    if pending is not None:
-                        emit(pending, duration)
-                        pending.close()
-                        pending = None
-                    with Image.new("RGBA", image.size, "white") as background:
-                        background.alpha_composite(rgba)
-                        with background.convert("RGB") as rgb:
-                            pending = rgb.quantize(colors=255)
-                    with rgba.getchannel("A") as alpha:
-                        with alpha.point(lambda value: 255 if value < 128 else 0) as mask:
-                            pending.paste(255, mask=mask)
-                    pending.info["transparency"] = 255
+                opaque = image.mode in {"1", "L", "RGB"} and "transparency" not in image.info
+                with ExitStack() as buffers:
+                    mask = None
+                    with closing(image.convert("RGBA")) as rgba:
+                        current_signature = hashlib.sha256(rgba.tobytes()).digest()
+                        if jobs and current_signature == signature:
+                            # Hash the same RGBA pixels across source modes so
+                            # identical opaque and alpha frames still coalesce.
+                            jobs[-1].delay += frame_delay
+                            continue
+                        if jobs and not parallel:
+                            emit_next()
+                        if not opaque:
+                            with closing(Image.new("RGBA", image.size, "white")) as background:
+                                background.alpha_composite(rgba)
+                                rgb = buffers.enter_context(closing(background.convert("RGB")))
+                            with closing(rgba.getchannel("A")) as alpha:
+                                mask = buffers.enter_context(closing(
+                                    alpha.point(lambda value: 255 if value < 128 else 0)))
+                    # Release RGBA/compositing buffers before palette building.
+                    # Serial RGB sources need no additional copy.
+                    if opaque:
+                        rgb = image
+                        if parallel or image.mode != "RGB":
+                            # The decoder owns its image only until next yield;
+                            # a worker receives an independent pixel buffer.
+                            rgb = buffers.enter_context(closing(image.convert("RGB")))
+                    job = _GifPaletteJob(rgb, mask, buffers, frame_delay, check_pipeline)
+                    jobs.append(job)
+                    job.buffers = buffers.pop_all()
+                    if parallel:
+                        try:
+                            if executor is None:
+                                executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="moku-gif")
+                            job.future = executor.submit(job.run)
+                        except RuntimeError as exc:
+                            raise UgoiraExportError("GIF 并行转换线程启动失败，请稍后重试") from exc
+                    else:
+                        job.run()
+                        job.future.set_result(None)
                     signature = current_signature
-                    duration = frame_delay
-        emit(pending, duration)
+                if len(jobs) == 2:
+                    emit_next()
+        while jobs:
+            emit_next()
         output.write(b";")
     finally:
-        if pending is not None:
-            pending.close()
+        stopped.set()
+        if executor is not None:
+            # Let every submitted job release its inputs, even after a decode,
+            # output or cancellation failure; no worker survives this export.
+            executor.shutdown(wait=True)
+        for job in jobs:
+            job.close()
 
 
 def find_ffmpeg() -> str | None:
@@ -208,9 +315,79 @@ def _check_frame_space(root: Path, total_bytes: int, needed: int) -> None:
         raise UgoiraExportError("MP4 转换临时磁盘空间不足，请释放空间后继续", "disk_space")
 
 
+def _mp4_cpu_threads(size, frame_count: int) -> int:
+    cores = os.cpu_count() or 1
+    # Include encoder reference/lookahead buffers and its fixed runtime cost.
+    memory = size[0] * size[1] * 96 + 32 * 1024 * 1024
+    if cores >= 4 and frame_count >= 8 and memory <= _image_work_budget(1024 * 1024 * 1024):
+        return 4
+    return min(2, cores)
+
+
+def _encode_mp4(root: Path, encoder: str, frame_count: int, check, *, backend: str, threads: int) -> Path:
+    movie = root / "animation.mp4"
+    progress = root / "encode.progress"
+    check()
+    # A CPU retry starts with fresh output and progress after GPU cleanup.
+    movie.unlink(missing_ok=True)
+    progress.unlink(missing_ok=True)
+    codec_options = (
+        ["-c:v", "libx264", "-bf", "0", "-preset", "veryfast", "-crf", "18", "-threads", str(threads)]
+        if backend == "cpu" else
+        ["-c:v", "h264_nvenc", "-bf", "0", "-preset", "p4", "-rc", "vbr", "-cq", "18", "-b:v", "0"]
+    )
+    # File-backed diagnostics keep encoder output bounded by disk headroom.
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(
+            [encoder, "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror",
+             "-threads", "1", "-filter_threads", "1",
+             "-f", "concat", "-safe", "0", "-protocol_whitelist", "file", "-noautorotate", "-i", "frames.ffconcat",
+             "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white,setsar=1,format=yuv420p",
+             *codec_options,
+             "-fps_mode", "vfr", "-enc_time_base", "1:1000", "-video_track_timescale", "1000",
+             "-progress", "encode.progress", "-stats_period", "1",
+             "-fs", str(MAX_ARCHIVE_BYTES + 1),
+             "-movflags", "+faststart", "-f", "mp4", "animation.mp4"],
+            cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=errors, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            while process.poll() is None:
+                check()
+                if shutil.disk_usage(root).free < DISK_RESERVE_BYTES:
+                    raise UgoiraExportError("MP4 编码临时磁盘空间不足，请释放空间后继续", "disk_space")
+                time.sleep(.05)
+            check()
+            if movie.is_file() and movie.stat().st_size > MAX_ARCHIVE_BYTES:
+                raise UgoiraExportError(f"转换文件超过 {MAX_ARCHIVE_BYTES // (1024 * 1024)} MiB，请选择其他格式或原始帧 ZIP", "output_limit")
+            if process.returncode != 0:
+                raise UgoiraExportError("MP4 编码失败，请使用支持 H.264（libx264）的 FFmpeg，或选择 GIF／原始帧 ZIP", "encoder_failed")
+            if movie.is_symlink() or not movie.is_file():
+                raise UgoiraExportError("MP4 编码未生成有效文件", "encoder_failed")
+            if not progress.is_file():
+                raise UgoiraExportError("MP4 编码未返回完整进度，请重试或选择原始帧 ZIP", "encoder_failed")
+            with progress.open("rb") as stream:
+                stream.seek(max(0, progress.stat().st_size - 65536))
+                values = dict(line.split("=", 1) for line in stream.read().decode("ascii", errors="replace").splitlines() if "=" in line)
+            # -fs may stop early with exit zero: verify the original tail frame.
+            if values.get("progress") != "end" or values.get("frame", "").strip() != str(frame_count + 1):
+                raise UgoiraExportError("MP4 未完成全部帧，可能超过文件上限，请选择其他格式或原始帧 ZIP", "output_limit")
+            with movie.open("rb") as stream:
+                if stream.read(8)[4:8] != b"ftyp":
+                    raise UgoiraExportError("MP4 编码未生成有效文件", "encoder_failed")
+            return movie
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+
 def _mp4(raw, frames, encoder, output, check):
     from PIL import Image
 
+    backend = os.environ.get("MOKU_UGOIRA_MP4_ENCODER", "cpu").strip().lower()
+    if backend not in {"cpu", "nvenc"}:
+        raise UgoiraExportError("MP4 编码器配置应为 cpu 或 nvenc")
     with tempfile.TemporaryDirectory(prefix="moku-encode-") as temporary:
         root = Path(temporary)
         lines = ["ffconcat version 1.0"]
@@ -218,6 +395,7 @@ def _mp4(raw, frames, encoder, output, check):
         names = {}
         with closing(_frames(raw, frames, check)) as decoded:
             for index, (image, encoded, delay) in enumerate(decoded):
+                frame_size = image.size
                 remote_name = frames[index]["file"]
                 name = names.get(remote_name)
                 if name is None:
@@ -230,11 +408,12 @@ def _mp4(raw, frames, encoder, output, check):
                     needed = len(encoded) if not normalize else image.width * image.height * 4 + 65536
                     _check_frame_space(root, total_bytes, needed)
                     if normalize:
-                        with image.convert("RGBA") as rgba:
-                            with Image.new("RGBA", image.size, "white") as background:
+                        with closing(image.convert("RGBA")) as rgba:
+                            with closing(Image.new("RGBA", image.size, "white")) as background:
                                 background.alpha_composite(rgba)
-                                with background.convert("RGB") as rgb:
-                                    rgb.save(root / name, format="PNG", compress_level=1)
+                                rgb = background.convert("RGB")
+                        with closing(rgb):
+                            rgb.save(root / name, format="PNG", compress_level=1)
                     else:
                         (root / name).write_bytes(encoded)
                     total_bytes += (root / name).stat().st_size
@@ -249,9 +428,9 @@ def _mp4(raw, frames, encoder, output, check):
                 path = root / name
                 previous_size = path.stat().st_size
                 normalized = path.with_suffix(".png")
-                with Image.open(path) as image:
+                with closing(Image.open(path)) as image:
                     _check_frame_space(root, total_bytes, image.width * image.height * 4 + 65536)
-                    with image.convert("RGB") as rgb:
+                    with closing(image.convert("RGB")) as rgb:
                         rgb.save(normalized, format="PNG", compress_level=1)
                 total_bytes += normalized.stat().st_size - previous_size
                 path.unlink()
@@ -261,55 +440,20 @@ def _mp4(raw, frames, encoder, output, check):
             lines.extend([f"file '{name}'", "option framerate 1000", f"duration {frame['delay'] / 1000:.3f}"])
         lines.extend([f"file '{name}'", "option framerate 1000"])
         (root / "frames.ffconcat").write_text("\n".join(lines) + "\n", encoding="ascii")
-        # stderr goes to a file so a noisy/broken encoder cannot grow memory or
-        # block on a full pipe. Always stop and reap it before temporary cleanup.
-        with tempfile.TemporaryFile() as errors:
-            process = subprocess.Popen(
-                [encoder, "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror",
-                 "-f", "concat", "-safe", "0", "-protocol_whitelist", "file", "-noautorotate", "-i", "frames.ffconcat",
-                 "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white,setsar=1,format=yuv420p",
-                 "-c:v", "libx264", "-bf", "0", "-preset", "veryfast", "-crf", "18", "-threads", "2",
-                 "-fps_mode", "vfr", "-enc_time_base", "1:1000", "-video_track_timescale", "1000",
-                 "-progress", "encode.progress", "-stats_period", "1",
-                 "-fs", str(MAX_ARCHIVE_BYTES + 1),
-                 "-movflags", "+faststart", "-f", "mp4", "animation.mp4"],
-                cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=errors, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+        threads = _mp4_cpu_threads(frame_size, len(frames))
+        if backend == "nvenc":
             try:
-                while process.poll() is None:
-                    check()
-                    if shutil.disk_usage(root).free < DISK_RESERVE_BYTES:
-                        raise UgoiraExportError("MP4 编码临时磁盘空间不足，请释放空间后继续", "disk_space")
-                    time.sleep(.05)
+                movie = _encode_mp4(root, encoder, len(frames), check, backend="nvenc", threads=threads)
+            except UgoiraExportError as exc:
+                if exc.code != "encoder_failed":
+                    raise
                 check()
-                movie = root / "animation.mp4"
-                if movie.is_file() and movie.stat().st_size > MAX_ARCHIVE_BYTES:
-                    raise UgoiraExportError(f"转换文件超过 {MAX_ARCHIVE_BYTES // (1024 * 1024)} MiB，请选择其他格式或原始帧 ZIP", "output_limit")
-                if process.returncode != 0:
-                    raise UgoiraExportError("MP4 编码失败，请使用支持 H.264（libx264）的 FFmpeg，或选择 GIF／原始帧 ZIP", "encoder_failed")
-                if movie.is_symlink() or not movie.is_file():
-                    raise UgoiraExportError("MP4 编码未生成有效文件", "encoder_failed")
-                progress = root / "encode.progress"
-                if not progress.is_file():
-                    raise UgoiraExportError("MP4 编码未返回完整进度，请重试或选择原始帧 ZIP", "encoder_failed")
-                with progress.open("rb") as stream:
-                    stream.seek(max(0, progress.stat().st_size - 65536))
-                    values = dict(line.split("=", 1) for line in stream.read().decode("ascii", errors="replace").splitlines() if "=" in line)
-                # FFmpeg's -fs may stop early with exit code zero. A complete
-                # trailer alone does not prove all original frames were encoded.
-                if values.get("progress") != "end" or values.get("frame", "").strip() != str(len(frames) + 1):
-                    raise UgoiraExportError("MP4 未完成全部帧，可能超过文件上限，请选择其他格式或原始帧 ZIP", "output_limit")
-                with movie.open("rb") as stream:
-                    if stream.read(8)[4:8] != b"ftyp":
-                        raise UgoiraExportError("MP4 编码未生成有效文件", "encoder_failed")
-                    stream.seek(0)
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        output.write(chunk)
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                process.wait()
+                movie = _encode_mp4(root, encoder, len(frames), check, backend="cpu", threads=threads)
+        else:
+            movie = _encode_mp4(root, encoder, len(frames), check, backend="cpu", threads=threads)
+        with movie.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                output.write(chunk)
 
 
 def export_ugoira(raw: bytes | BinaryIO, frames: list[dict], image_format: str, *,
