@@ -2,6 +2,12 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [1.1.5] - 2026-11-03
+
+- 与花里胡哨版统一版本号，在同一发布页提供 Glass 和 Lite 包。
+- 沿用 R3 的大动图合成、暂停续传、多窗口任务与 HTTPS 连接优化。
+- 保留 Lite 界面、资料目录与登录凭据命名。
+
 ## [1.1.4-r3] - 2026-11-02
 
 - 大动图帧包采用分段读写，默认文件预算提升至 512 MiB，减少大文件下载与转换的内存占用。

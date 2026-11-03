@@ -6,13 +6,15 @@
 
 MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作品 ID，翻翻预览，把喜欢的画放进采集篮，再挑好图片一起下载。
 
-当前源码版本：**1.1.4-r3** Lite。
+当前源码版本：**1.1.5** Lite。
 
-R3 改进大动图下载与合成，降低 GIF/MP4 转换开销，完善暂停续传、多窗口任务与网络连接，沿用 Lite 的轻量界面。
+`lite-backup` 保存 Lite 源码，`main` 保存花里胡哨版源码；两个 Windows x64 包都在 [v1.1.5 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.5)。下载带 `Lite` 的压缩包即可。
+
+1.1.5 改进大动图下载与合成，降低 GIF/MP4 转换开销，完善暂停续传、多窗口任务与网络连接，沿用 Lite 的轻量界面。
 
 ## 开始使用
 
-从 [MOKU Lite v1.1.4-r3](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.4-r3) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
+从 [MOKU Lite v1.1.5](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.5) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
 
 需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU.exe.config` 也一起保留。
 
@@ -104,7 +106,7 @@ powershell -ExecutionPolicy Bypass -File .\make-release.ps1
 
 ## 本版更新
 
-当前版本为 `1.1.4-r3 Lite`。大动图合成、暂停续传、任务一致性与网络连接的更新见 [CHANGELOG](CHANGELOG.md)。
+当前版本为 `1.1.5 Lite`。大动图合成、暂停续传、任务一致性与网络连接的更新见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可证与作品使用
 

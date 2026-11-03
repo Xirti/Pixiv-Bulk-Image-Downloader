@@ -56,6 +56,6 @@ jobs:
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: MOKU-Lite-windows-x64
-          path: release/v*-r*/
+          path: release/v*.*.*/
           if-no-files-found: error
           retention-days: 7

@@ -7,7 +7,7 @@ if (-not $SkipBuild) {
   if ($LASTEXITCODE -ne 0) { throw 'Lite build failed' }
 }
 $Tag = (python -B -c 'from edition_profile import RELEASE_TAG; print(RELEASE_TAG)').Trim()
-if ($LASTEXITCODE -ne 0 -or $Tag -notmatch '^v\d+\.\d+\.\d+-r[1-9]\d*$') { throw 'Invalid Lite release tag' }
+if ($LASTEXITCODE -ne 0 -or $Tag -notmatch '^v\d+\.\d+\.\d+$') { throw 'Invalid Lite release tag' }
 $Dist = Join-Path $Root 'dist\MOKU'
 $Exe = Join-Path $Dist 'MOKU.exe'
 python -B build_manifest.py verify (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe

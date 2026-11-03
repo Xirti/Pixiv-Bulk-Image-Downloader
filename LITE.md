@@ -1,8 +1,8 @@
-当前版本：v1.1.4-r3，大动图下载与合成优化。
+当前版本：v1.1.5，大动图下载与合成优化。
 
-# MOKU Lite R3
+# MOKU Lite v1.1.5
 
-基于 v1.1.4-r1（8ac6d6f）移植 main R12 的共用业务修复。保留 Lite 原有 HTML、基础 CSS、主题切换、资料目录和登录凭据命名。
+与花里胡哨版共用下载、合成、任务恢复与网络连接逻辑；源码保存在 `lite-backup`，两版同在 `v1.1.5` 发布页提供。保留 Lite 原有 HTML、基础 CSS、主题切换、资料目录和登录凭据命名。
 
 构建：./build-portable.ps1；打包：./make-release.ps1。
 配置：edition_profile.py。历史与采集篮位于 %LOCALAPPDATA%/MOKU/library。
