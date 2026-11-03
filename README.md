@@ -22,7 +22,7 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 ![Glass Lab R11 日间首页](assets/screenshots/glass-r11-home-light.jpg)
 
-首页提供厚润、清透、柔雾三种材质；日夜视图切散。
+首页提供厚润、清透、柔雾三种材质，支持日夜视图切换。
 
 ## 搜索与筛选
 
