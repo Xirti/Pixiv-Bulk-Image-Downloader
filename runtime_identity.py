@@ -15,6 +15,7 @@ CODE_GENERATION_FILES = (
     'moku_app.py',
     'desktop_client.py',
     'network_config.py',
+    'network_transport.py',
     'pixiv_adapter.py',
     'search_aliases.py',
     'search_service.py',

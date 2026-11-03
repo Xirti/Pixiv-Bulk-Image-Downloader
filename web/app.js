@@ -1,4 +1,5 @@
 let items = [];
+const ARTWORK_DETAIL_TIMEOUT_MS = 60000;
 let activeArtworkId = null;
 let currentPage = 1;
 let pageNumbers = [1];
@@ -174,7 +175,7 @@ const workspaceSync = createWorkspaceSync({
     renderRecentSearches();
     pendingTasks.clear();
     for (const saved of data.tasks || []) {
-      const task = {...saved, persisted: true, authorizationRevision: downloadAuthorizationRevision};
+      const task = {revision: 0, ...saved, persisted: true, authorizationRevision: downloadAuthorizationRevision};
       pendingTasks.set(task.id, task);
     }
     updateSelectionBar();
@@ -271,9 +272,12 @@ async function restoreWorkspaceWhenUnlocked() {
 function renderPendingTasks() {
   const holder = $("#pendingDownloads");
   if (!holder) return;
-  holder.hidden = !pendingTasks.size;
+  const visibleTasks = new Map();
+  if (activeDownload) visibleTasks.set(activeDownload.task.id, activeDownload.task);
+  for (const [id, task] of pendingTasks) if (!visibleTasks.has(id)) visibleTasks.set(id, task);
+  holder.hidden = !visibleTasks.size;
   const locked = contextNavigationLocked();
-  $("#pendingDownloadList").innerHTML = [...pendingTasks.values()].map(task => {
+  $("#pendingDownloadList").innerHTML = [...visibleTasks.values()].map(task => {
     const options = task.kind === "single" ? task.taskOptions.body : task.taskOptions;
     const title = task.kind === "single" ? `作品 ${options.id}` : "采集篮下载";
     const running = activeDownload?.task.id === task.id;
@@ -324,18 +328,41 @@ async function pauseDownloadTask(id) {
   } finally { running.pauseInFlight = false; renderPendingTasks(); }
 }
 
+function forgetTaskRetry(id) {
+  if (resumableSingleTask?.id === id) resumableSingleTask = null;
+  if (resumableBatchTask?.id === id) resumableBatchTask = null;
+}
+
+async function writeTaskState(path, payload, timeout = 12000) {
+  try {
+    return await fetchJson(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)}, timeout);
+  } catch (error) {
+    if (error.taskConflict) {
+      forgetTaskRetry(payload.task?.id ?? payload.id);
+      await workspaceSync.restore();
+    }
+    throw error;
+  }
+}
+
 async function saveDownloadTask(task, expectedTask = null) {
   if (task.transient || (!workspaceSync.ready && !task.persisted)) return;
   if (!task.remainingChunks.length) { await deleteSavedTask(task.id); return; }
-  await fetchJson("/api/workspace/task", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({task, scope: workspaceSync.scope, ...(expectedTask ? {expectedTask} : {})})});
+  const authorization = downloadAuthorizationRevision;
+  const scope = workspaceSync.scope;
+  const result = await writeTaskState("/api/workspace/task", {task, scope, updateOnly: Boolean(task.persisted), ...(expectedTask ? {expectedTask} : {})});
+  if (authorization !== downloadAuthorizationRevision || scope !== workspaceSync.scope) throw new Error("Pixiv 账户状态已变更，请重新读取任务");
+  task.revision = result.task.revision;
   pendingTasks.set(task.id, task);
   renderPendingTasks();
 }
 
 async function deleteSavedTask(id) {
   if (!workspaceSync.ready) return;
-  await fetchJson("/api/workspace/task/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id, scope: workspaceSync.scope})});
+  const revision = pendingTasks.get(id)?.revision ?? 0;
+  await writeTaskState("/api/workspace/task/delete", {id, scope: workspaceSync.scope, revision});
   pendingTasks.delete(id);
+  forgetTaskRetry(id);
   renderPendingTasks();
 }
 
@@ -346,7 +373,7 @@ function savedTaskRequest(task, chunk) {
 }
 
 function downloadTaskCheckpoint(task) {
-  return JSON.stringify([task.kind, task.chunkPolicy || "", task.taskOptions, task.completedBatches || 0, task.totalBatches,
+  return JSON.stringify([task.kind, task.revision || 0, task.chunkPolicy || "", task.taskOptions, task.completedBatches || 0, task.totalBatches,
     task.savedCount || 0, task.fileCount || 0, task.skippedCount || 0, task.firstSaved || "",
     task.conversionFailure?.artworkId || "", task.conversionFailure?.code || "",
     task.remainingChunks.map(chunk => [chunk.requestId, chunk.pageCount, chunk.context.kind, chunk.context.value,
@@ -581,6 +608,7 @@ async function fetchJson(url, options = {}, timeoutMs = 12000) {
       error.requestIdConflict = Boolean(data.requestIdConflict);
       error.basketCapacity = Boolean(data.basketCapacity);
       error.taskCapacity = Boolean(data.taskCapacity);
+      error.taskConflict = Boolean(data.taskConflict);
       error.conversionFailure = data.conversionFailure || null;
       error.ownTaskCount = Number(data.ownTaskCount) || 0;
       error.otherTaskCount = Number(data.otherTaskCount) || 0;
@@ -748,7 +776,7 @@ async function refreshArtworkPreview(rawArtworkId) {
   let task;
   task = (async () => {
     try {
-      const fresh = await fetchJson(`/api/pixiv/artwork/${artworkId}`, { signal: controller.signal }, 18000);
+      const fresh = await fetchJson(`/api/pixiv/artwork/${artworkId}`, { signal: controller.signal }, ARTWORK_DETAIL_TIMEOUT_MS);
       if (
         controller.signal.aborted
         || generation !== viewGeneration
@@ -1478,7 +1506,7 @@ async function select(index) {
 
   try {
     if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)))) {
-      item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, 18000);
+      item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, ARTWORK_DETAIL_TIMEOUT_MS);
       if (controller !== detailController || generation !== viewGeneration) return;
       rememberArtworkDetail(item);
     }
@@ -1946,7 +1974,7 @@ function pumpBasketThumbnails() {
       const id = image.dataset.restoreArtwork;
       const controller = new AbortController();
       basketThumbnailControllers.add(controller);
-      fetchJson(`/api/pixiv/artwork/${id}`, {signal: controller.signal}, 18000).then(fresh => {
+      fetchJson(`/api/pixiv/artwork/${id}`, {signal: controller.signal}, ARTWORK_DETAIL_TIMEOUT_MS).then(fresh => {
         if (controller.signal.aborted || generation !== basketThumbnailWindow || !basketPageOpen() || !batchCandidateItems.some(item => String(item.id) === id) || String(fresh.id) !== id) return;
         rememberArtworkDetail(fresh);
         image.src = fresh.thumb || "";
@@ -2131,10 +2159,7 @@ async function executeDownloadTask(task, requestForChunk, reportProgress) {
       running.checking = true;
       updateStatus();
       while (true) {
-        const state = await fetchJson("/api/workspace/task/migrate", {
-          method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({id: task.id, scope: workspaceSync.scope}),
-        }, 30000);
+        const state = await writeTaskState("/api/workspace/task/migrate", {id: task.id, scope: workspaceSync.scope}, 30000);
         if (task.authorizationRevision !== downloadAuthorizationRevision) throw new Error("Pixiv 账户状态已变更，请重新确认下载");
         if (state.pending) {
           running.chunk = {requestId: state.requestId};
@@ -2370,7 +2395,7 @@ async function openBatchCollection(id) {
   try {
     if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)))) {
       $("#basketTitle").textContent = "正在加载合集详情…";
-      item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, 18000);
+      item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, ARTWORK_DETAIL_TIMEOUT_MS);
       if (controller !== detailController || generation !== viewGeneration) return;
       rememberArtworkDetail(item);
     }
@@ -2481,7 +2506,7 @@ $("#batchDownload").onclick = async () => {
     showTaskDock("批量下载完成", summary, task.historyWarning ? 8000 : 3200);
   } catch (error) {
     await rememberConversionFailure(task, error);
-    resumableBatchTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
+    resumableBatchTask = !error.taskConflict && task.authorizationRevision === downloadAuthorizationRevision ? task : null;
     const prefix = task.savedCount ? `已保存 ${savedDownloadPages(task)} 页；后续` : "批量下载";
     const retryHint = resumableBatchTask
       ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
@@ -2606,7 +2631,7 @@ $("#download").onclick = async () => {
     showTaskDock("保存完成", `${summary}${downloadCompletionWarnings(task)}`, task.historyWarning ? 8000 : 3200);
   } catch (error) {
     await rememberConversionFailure(task, error);
-    resumableSingleTask = task.authorizationRevision === downloadAuthorizationRevision ? task : null;
+    resumableSingleTask = !error.taskConflict && task.authorizationRevision === downloadAuthorizationRevision ? task : null;
     const retryHint = resumableSingleTask
       ? `再次点击只继续剩余 ${task.remainingChunks.length} 批。`
       : "账户状态已变更，请重新确认后发起下载。";
@@ -2683,13 +2708,18 @@ $("#networkCheck").onclick = async () => {
     const errorLabels = {
       timeout: "连接超时",
       refused: "连接被拒绝",
-      tls: "证书或 TLS 错误",
+      tls: "TLS 握手或连接中断",
+      certificate: "证书校验失败",
+      tls_protocol: "TLS 协议或代理端口异常",
+      dns: "域名解析失败",
+      reset: "连接被重置或传输中断",
+      proxy: "代理隧道连接失败",
       http: "HTTP 响应异常",
       unavailable: "无法连接",
     };
     const formatCheck = (label, row) => row?.ok
       ? `${label}：可用${Number.isFinite(row.ms) ? `（${row.ms} ms）` : ""}`
-      : `${label}：不可用（${errorLabels[row?.errorKind] || "无法连接"}）`;
+      : `${label}：不可用（${errorLabels[row?.errorKind] || "无法连接"}${row?.errorCode ? ` · ${row.errorCode}` : ""}）`;
     $("#pixivCheck").textContent = formatCheck("Pixiv 主站", checks.get("pixiv"));
     $("#cdnCheck").textContent = formatCheck("图片线路", checks.get("cdn"));
   } catch (error) {

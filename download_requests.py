@@ -29,6 +29,7 @@ class _Request:
     active: bool
     touched: float
     result: Response | None = None
+    durable_fingerprint: str = ""
 
 
 class DownloadRequests:
@@ -132,21 +133,11 @@ class DownloadRequests:
     ) -> Response:
         """Inspect a queued legacy request without starting or publishing work.
 
-        A failed attempt from a previous authorization epoch can be inspected
-        again. Active operations and successful receipts retain their identity.
+        Inactive attempts can be inspected after reauthorization to the same
+        account. Valid receipts replay; expired receipts return to planning.
         """
-        for attempt in range(2):
-            try:
-                return self.run(request_id, route, body, lambda: ({}, 204),
-                                scope=scope, durable_scope=durable_scope, output_root=output_root)
-            except DownloadRequestError as exc:
-                if exc.status != 409:
-                    raise
-                with self._lock:
-                    entry = self._entries.get(request_id)
-                    if attempt or entry is None or entry.active or entry.result is not None:
-                        raise
-                    del self._entries[request_id]
+        return self.run(request_id, route, body, lambda: ({}, 204),
+                        scope=scope, durable_scope=durable_scope, output_root=output_root)
 
     def run(
         self, request_id: object, route: str, body: dict,
@@ -175,16 +166,21 @@ class DownloadRequests:
             entry = self._entries.get(request_id)
             if entry is not None:
                 if entry.fingerprint != fingerprint:
-                    # A completed receipt can outlive re-login to the same
-                    # account. Active/failed attempts still belong to their epoch.
-                    if not entry.active and entry.result is not None and durable_scope is not None:
+                    # Reauthorization may change only the volatile epoch. Keep
+                    # both account and request content bound to their identity.
+                    if not entry.active and durable_scope is not None and entry.durable_fingerprint == durable_fingerprint:
+                        if entry.result is not None and self._path is None:
+                            return entry.result
                         try:
                             restored = self._read_success(request_id, durable_fingerprint)
                         except (OSError, sqlite3.Error):
                             restored = None
                         if restored is not None:
                             return restored
-                    raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
+                        entry.fingerprint = fingerprint
+                        entry.result = None
+                    else:
+                        raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
                 self._entries.move_to_end(request_id)
                 if entry.active:
                     return {"pending": True, "retryAfterMs": 1000}, 202
@@ -211,7 +207,7 @@ class DownloadRequests:
                     if idle is None:
                         raise DownloadRequestError("下载任务繁忙，请稍后重试", 429)
                     del self._entries[idle]
-                entry = _Request(fingerprint, True, now)
+                entry = _Request(fingerprint, True, now, durable_fingerprint=durable_fingerprint)
                 self._entries[request_id] = entry
 
         result = None

@@ -1,7 +1,3 @@
-> 当前本地包：复查修订 4，界面标记为“试用4”。
-
-> 本地试用：v1.1.4-r3 · 大动图下载与转换。
-
 # MOKU Lite - Pixiv Tag Gallery
 
 <p align="center">
@@ -10,13 +6,13 @@
 
 MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作品 ID，翻翻预览，把喜欢的画放进采集篮，再挑好图片一起下载。
 
-当前源码版本：**1.1.4-r2** Lite。
+当前源码版本：**1.1.4-r3** Lite。
 
-R2 同步完善下载收尾、详情与选择状态、历史迁移及异常数据处理，沿用 Lite 的轻量界面。
+R3 改进大动图下载与合成，降低 GIF/MP4 转换开销，完善暂停续传、多窗口任务与网络连接，沿用 Lite 的轻量界面。
 
 ## 开始使用
 
-从 [Releases](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
+从 [MOKU Lite v1.1.4-r3](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.4-r3) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
 
 需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU.exe.config` 也一起保留。
 
@@ -57,7 +53,7 @@ R2 同步完善下载收尾、详情与选择状态、历史迁移及异常数�
 动图可以下载为三种格式：
 
 - 原始帧 ZIP + JSON：保存各帧图片和播放时长，默认使用此格式。
-- GIF：内置转换，可直接下载，保留透明背景；颜色会按 GIF 格式量化。
+- GIF：内置转换，支持透明背景；颜色按 GIF 格式量化，半透明边缘会合成处理。
 - MP4：使用本机 FFmpeg 导出 H.264 视频。安装支持 `libx264` 的 FFmpeg 并加入 PATH 后，重启 MOKU 即可使用。
 
 很短的帧间隔不适合 GIF 时，界面会提示选择 MP4 或原始帧包。静态图片在混合下载中仍保留原来的格式。
@@ -108,15 +104,15 @@ powershell -ExecutionPolicy Bypass -File .\make-release.ps1
 
 ## 本版更新
 
-当前源码版本是 `1.1.4-r1 Lite`。这次完善了搜索条件超限提示、画师搜索异常记录隔离，以及下载回执损坏后的续传恢复。完整更新见 [CHANGELOG](CHANGELOG.md)。
+当前版本为 `1.1.4-r3 Lite`。大动图合成、暂停续传、任务一致性与网络连接的更新见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可证与作品使用
 
 MOKU 使用 [MIT License](LICENSE)，是与 Pixiv 无隶属关系的独立项目。作品版权归各自创作者所有，下载和使用时请尊重作者授权及平台规则。
 
-### 大动图试用
+### 大动图下载与合成
 
-大动图下载与转换试用版，保留原分辨率和原始帧时序。
+原图模式使用原始分辨率帧包，GIF/MP4 按所选格式合成，保留原始帧时序。
 
 - 帧包下载和成品发布改为分段读写，默认文件预算提高到 512 MiB。
 - GIF 逐帧编码，减少长动图的内存占用。
