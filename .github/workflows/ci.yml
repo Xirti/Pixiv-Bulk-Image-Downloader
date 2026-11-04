@@ -48,7 +48,13 @@ jobs:
           from pathlib import Path
           import build_manifest
           tracked = set(subprocess.check_output(["git", "ls-files", "-z"]).decode("utf-8").split("\0")) - {""}
-          required = set(build_manifest.build_input_files(Path.cwd())) | {".gitignore", ".gitattributes"}
+          documentation = {
+              "assets/readme/mascot.gif",
+              "assets/screenshots/v1.1.1-home.jpg",
+              "assets/screenshots/v1.1.1-basket.jpg",
+              "assets/screenshots/v1.1.1-history.jpg",
+          }
+          required = set(build_manifest.build_input_files(Path.cwd())) | {".gitignore", ".gitattributes"} | documentation
           extra, missing = sorted(tracked - required), sorted(required - tracked)
           if extra or missing:
               raise SystemExit(f"Source inventory mismatch: extra={extra}, missing={missing}")
