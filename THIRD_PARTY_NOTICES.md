@@ -8,7 +8,9 @@ Primary runtime components:
 | --- | ---: | --- | --- |
 | altgraph | 0.17.5 | MIT | https://altgraph.readthedocs.io |
 | bottle | 0.13.4 | MIT | http://bottlepy.org/ |
-| cffi | 2.1.0 | MIT-0 | https://github.com/python-cffi/cffi |
+| cffi | 2.1.1 | MIT-0 | https://github.com/python-cffi/cffi |
+| certifi | 2026.10.23 | MPL-2.0 | https://github.com/certifi/python-certifi |
+| curl_cffi | 0.17.0 | MIT | https://github.com/lexiforest/curl_cffi |
 | clr-loader | 0.3.1 | MIT | https://github.com/pythonnet/clr-loader |
 | packaging | 26.2 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | pefile | 2024.8.26 | MIT | https://github.com/erocarrera/pefile |
@@ -22,7 +24,6 @@ Primary runtime components:
 | pywin32-ctypes | 0.2.3 | BSD-3-Clause | https://github.com/enthought/pywin32-ctypes |
 | setuptools | 83.0.0 | MIT | https://github.com/pypa/setuptools |
 | typing-extensions | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
-| websocket-client | 1.9.0 | Apache-2.0 | https://github.com/websocket-client/websocket-client |
 | CPython | 3.12.10 | PSF License | https://www.python.org/ |
 
 The generated license bundle intentionally covers every distribution in the exact runtime and build lock files. This conservative closure includes build helpers that PyInstaller may analyze or embed, even when they are not direct application imports.
@@ -31,6 +32,5 @@ The generated license bundle intentionally covers every distribution in the exac
 
 Pixiv and artwork displayed or downloaded through MOKU are not third-party software dependencies. Artwork remains the property of its respective creators.
 
-MOKU Lite does not distribute the decorative model brand SVGs from earlier releases.
 
 Optional MP4 export invokes an FFmpeg executable already registered in the user's local PATH. FFmpeg is not included in MOKU's distribution, and MOKU does not install or download it. Its license depends on the user's chosen FFmpeg build.

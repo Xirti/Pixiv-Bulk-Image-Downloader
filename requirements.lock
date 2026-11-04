@@ -7,8 +7,8 @@
 
 bottle==0.13.4 \
     --hash=sha256:045684fbd2764eac9cdeb824861d1551d113e8b683d8d26e296898d3dd99a12e
-cffi==2.1.0 \
-    --hash=sha256:c97f080ea627e2863524c5af3836e2270b5f5dfff1f104392b959f8df0c5d384
+cffi==2.1.1 \
+    --hash=sha256:f53e442b08449d42821fa4a4fba000095af9f62742a500f978a9f557ec44339a
 clr-loader==0.3.1 \
     --hash=sha256:cbad189de20d202a7d621956b0fc38049e13c9bf7ca2923441eff725cd121aa1
 proxy-tools==0.1.0 \
@@ -23,3 +23,8 @@ pywebview==6.2.1 \
     --hash=sha256:9d07275f53894ab4d5e2e0e996227193e7187dec276d9b624dccbce029216b46
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+
+certifi==2026.10.23 \
+    --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
+curl_cffi==0.17.0 \
+    --hash=sha256:4c3993c7df155d622869b82a56adb018440587fd3faffeaf8d01cc016d2e1357

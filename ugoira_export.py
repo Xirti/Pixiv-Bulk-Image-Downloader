@@ -84,21 +84,37 @@ def _frames(raw: bytes | BinaryIO, frames: list[dict], check, *, preflight=None)
                     or entry.file_size > MAX_FRAME_BYTES or entry.compress_size > MAX_FRAME_BYTES):
                 raise UgoiraExportError("动图帧包包含不支持或过大的图片帧", "frame_limit")
         size = None
-        for frame in frames:
-            check()
-            encoded = archive.read(frame["file"])
-            # Read by ZIP entry name, never extract remote paths. CRC and image
-            # decoding must both succeed before an output can be published.
-            with closing(Image.open(io.BytesIO(encoded), formats=("JPEG", "PNG"))) as image:
-                if image.width * image.height > MAX_FRAME_PIXELS:
-                    raise UgoiraExportError("动图单帧分辨率过大，请选择标准或原始帧 ZIP", "frame_limit")
-                if size is not None and image.size != size:
-                    raise UgoiraExportError("动图帧尺寸不一致", "invalid_frames")
-                size = image.size
-                if preflight is not None:
+        image = None
+        previous_encoded = previous_name = None
+        try:
+            for frame in frames:
+                check()
+                # Repeated names refer to the same validated ZIP entry. For
+                # different names, read and verify each entry's CRC before reuse.
+                encoded = previous_encoded if frame["file"] == previous_name else archive.read(frame["file"])
+                if image is None or encoded != previous_encoded:
+                    if image is not None:
+                        image.close()
+                        image = None
+                    image = Image.open(io.BytesIO(encoded), formats=("JPEG", "PNG"))
+                    if image.width * image.height > MAX_FRAME_PIXELS:
+                        raise UgoiraExportError("动图单帧分辨率过大，请选择标准或原始帧 ZIP", "frame_limit")
+                    if size is not None and image.size != size:
+                        raise UgoiraExportError("动图帧尺寸不一致", "invalid_frames")
+                    size = image.size
+                    if preflight is not None:
+                        preflight(size)
+                    image.load()
+                elif preflight is not None:
                     preflight(size)
-                image.load()
+                previous_encoded, previous_name = encoded, frame["file"]
+                # Borrowed, read-only pixels remain alive until the next unique
+                # frame. Palette workers already own independent RGB copies.
                 yield image, encoded, frame["delay"]
+        finally:
+            if image is not None:
+                image.close()
+
 
 
 class _Output:
@@ -181,6 +197,7 @@ def _gif(raw, frames, output, check):
     elapsed = rounded = 0
     first = True
     signature = None
+    previous_image = None
     parallel = False
     parallel_budget = _image_work_budget(MAX_GIF_MEMORY * 4)
     executor = None
@@ -225,6 +242,11 @@ def _gif(raw, frames, output, check):
                 next_rounded = max(rounded + 10, ((elapsed + 5) // 10) * 10)
                 frame_delay = next_rounded - rounded
                 rounded = next_rounded
+                same_decoded = image is previous_image
+                previous_image = image
+                if jobs and same_decoded:
+                    jobs[-1].delay += frame_delay
+                    continue
                 opaque = image.mode in {"1", "L", "RGB"} and "transparency" not in image.info
                 with ExitStack() as buffers:
                     mask = None

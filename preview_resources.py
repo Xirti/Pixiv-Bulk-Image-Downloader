@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextvars import copy_context
 import json
 import threading
 import time
@@ -17,11 +18,23 @@ class PreviewBusyError(RuntimeError):
     pass
 
 
+class _ConsumerCancellation(threading.Event):
+    def __init__(self, lock):
+        super().__init__()
+        self.consumers: dict[object, threading.Event | None] = {}
+        self._consumers_lock = lock
+
+    def is_set(self):
+        with self._consumers_lock:
+            if self.consumers and all(event is not None and event.is_set() for event in self.consumers.values()):
+                self.set()
+            return super().is_set()
+
+
 @dataclass
 class _Load:
     generation: int
-    users: int = 0
-    stop: threading.Event = field(default_factory=threading.Event)
+    stop: _ConsumerCancellation
     done: threading.Event = field(default_factory=threading.Event)
     value: object = None
     error: Exception | None = None
@@ -36,14 +49,15 @@ class PreviewResources:
     daemonized, so cancelled preview work cannot hold application exit open.
     """
 
-    def __init__(self, *, max_bytes: int = 16 * 1024 * 1024) -> None:
+    def __init__(self, *, max_bytes: int = 16 * 1024 * 1024, max_loads: int = 4, max_workers: int = 2) -> None:
         self._max_bytes = max_bytes
+        self._max_loads = max_loads
         self._bytes = 0
         self._generation = 0
         self._cache: OrderedDict[tuple, tuple[float, object, int]] = OrderedDict()
         self._loads: dict[tuple, _Load] = {}
-        self._lock = threading.Lock()
-        self._slots = threading.BoundedSemaphore(2)
+        self._lock = threading.RLock()
+        self._slots = threading.BoundedSemaphore(max_workers)
 
     @staticmethod
     def _check_cancel(event: threading.Event | None) -> None:
@@ -56,6 +70,7 @@ class PreviewResources:
 
     def get(self, key: tuple, load: Callable[[threading.Event], object], *,
             ttl: float, cancel_event: threading.Event | None = None):
+        consumer = object()
         while True:
             self._check_cancel(cancel_event)
             with self._lock:
@@ -70,14 +85,14 @@ class PreviewResources:
                     return self._copy(cached[1])
                 job = self._loads.get(key)
                 if job is None:
-                    if len(self._loads) >= 4:
+                    if len(self._loads) >= self._max_loads:
                         raise PreviewBusyError("动图预览繁忙，请稍后再试")
-                    job = _Load(self._generation)
+                    job = _Load(self._generation, _ConsumerCancellation(self._lock))
                     self._loads[key] = job
-                    threading.Thread(target=self._run, args=(key, job, load, ttl),
+                    threading.Thread(target=copy_context().run, args=(self._run, key, job, load, ttl),
                                      name="moku-preview", daemon=True).start()
                 if not job.stop.is_set():
-                    job.users += 1
+                    job.stop.consumers[consumer] = cancel_event
                     break
             # A fully cancelled load cannot be reused or replaced while its
             # socket is still closing; wait without consuming another worker.
@@ -92,8 +107,8 @@ class PreviewResources:
             return self._copy(job.value)
         finally:
             with self._lock:
-                job.users -= 1
-                if not job.users and not job.done.is_set():
+                del job.stop.consumers[consumer]
+                if not job.stop.consumers and not job.done.is_set():
                     job.stop.set()
 
     def _run(self, key, job, load, ttl):

@@ -422,6 +422,7 @@ def run(argv: list[str] | None = None) -> int:
             httpd.server_close()
         if owns_backend and thread is not None:
             thread.join(timeout=5)
+        server.PIXIV_OPENER.close()
     return 0
 
 

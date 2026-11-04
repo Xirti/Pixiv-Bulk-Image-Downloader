@@ -9,6 +9,8 @@ DISTRIBUTIONS = (
     "altgraph",
     "bottle",
     "cffi",
+    "certifi",
+    "curl_cffi",
     "clr-loader",
     "packaging",
     "pefile",

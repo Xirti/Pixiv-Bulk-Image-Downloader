@@ -38,6 +38,8 @@ PYWEBVIEW_REQUIRED_LOADER_RUNTIMES = (
 )
 ALLOWED_TOP_LEVEL_METADATA = (
     "clr_loader-0.3.1.dist-info",
+    "curl_cffi-0.17.0.dist-info",
+    "certifi-2026.10.23.dist-info",
     "pillow-12.3.0.dist-info",
     "pythonnet-3.1.0.dist-info",
     "pywebview-6.2.1.dist-info",
@@ -68,6 +70,7 @@ def filter_windows_x64(rows):
 pythonnet_datas, pythonnet_binaries, pythonnet_hiddenimports = collect_all('pythonnet')
 clr_datas, clr_binaries, clr_hiddenimports = collect_all('clr_loader')
 webview_datas, webview_binaries, webview_hiddenimports = collect_all('webview')
+curl_datas, curl_binaries, curl_hiddenimports = collect_all('curl_cffi')
 
 pythonnet_datas = filter_windows_x64(pythonnet_datas)
 pythonnet_binaries = filter_windows_x64(pythonnet_binaries)
@@ -81,9 +84,9 @@ webview_hiddenimports = sorted(set(webview_hiddenimports + list(WINDOWS_X64_WEBV
 a = Analysis(
     ['moku_app.py'],
     pathex=[],
-    binaries=pythonnet_binaries + clr_binaries + webview_binaries,
-    datas=[('web', 'web')] + pythonnet_datas + clr_datas + webview_datas,
-    hiddenimports=pythonnet_hiddenimports + clr_hiddenimports + webview_hiddenimports + ['clr'],
+    binaries=pythonnet_binaries + clr_binaries + webview_binaries + curl_binaries,
+    datas=[('web', 'web')] + pythonnet_datas + clr_datas + webview_datas + curl_datas,
+    hiddenimports=pythonnet_hiddenimports + clr_hiddenimports + webview_hiddenimports + curl_hiddenimports + ['clr'],
     hookspath=['build_hooks'],
     hooksconfig={},
     runtime_hooks=[],

@@ -13,6 +13,14 @@ let activeSearchRequestId = null;
 let activeSearchSnapshotId = null;
 let searchRequestSequence = 0;
 let searchGeneration = 0;
+let requestPolicyMode = "safe";
+let requestBlockedKind = "";
+let requestPolicyWaiting = false;
+let lastPageInteraction = performance.now();
+let requestPolicyRevision = 0;
+let requestPolicyReadSequence = 0;
+let requestPolicyRefresh = null;
+let requestCooldownUntil = 0;
 let prefetchTimer = null;
 let prefetchController = null;
 let prefetchRequestId = null;
@@ -48,6 +56,7 @@ let lastKnownAuthorizationGeneration = null;
 let downloadAuthorizationRevision = 0;
 let authStatusGeneration = 0;
 const pendingTasks = new Map();
+let pendingTasksMarkup = null;
 let savedRecentSearches = [];
 const batchCandidateContextByArtwork = new Map();
 const batchCandidateResultPageByArtwork = new Map();
@@ -65,16 +74,119 @@ const detailRefreshAttempts = new Map();
 const staleBasketPreviewIds = new Set();
 const downloadedPages = new Map();
 let basketThumbnailObserver = null;
+let basketCardSizeObserver = null;
 const basketThumbnailControllers = new Set();
 let basketThumbnailQueue = [];
 let basketThumbnailWindow = 0;
+let detailImageIdleTimer = null;
 
 const $ = (selector) => document.querySelector(selector);
+const windowControls = $("#windowControls");
+const openDialogs = [];
+let windowStateTimer = null;
+let windowActionRevision = 0;
+
+function showAppDialog(modal) {
+  if (modal.open) return;
+  modal.showModal();
+  openDialogs.push(modal);
+  // Keep native window controls reachable above the modal backdrop.
+  modal.append(windowControls);
+}
+
+function syncWindowState(state) {
+  const button = $("#windowMaximize");
+  button.dataset.maximized = String(state.maximized);
+  const label = state.maximized ? "还原窗口" : "最大化窗口";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
+async function performWindowAction(action) {
+  const revision = ++windowActionRevision;
+  try {
+    const state = await window.pywebview.api.window_action(action);
+    if (!state.ok) throw new Error(state.error || "窗口操作失败，请重试");
+    if (revision === windowActionRevision && action !== "close") syncWindowState(state);
+  } catch (error) {
+    if (revision === windowActionRevision) announceToast(error.message);
+  }
+}
+
+function bindWindowControls() {
+  if (!window.pywebview?.api?.window_action) return;
+  document.documentElement.classList.add("desktop-window");
+  windowControls.hidden = false;
+  void performWindowAction("state");
+  schedulePaginationDockUpdate();
+}
+
+windowControls.querySelectorAll("[data-window-action]").forEach(button => {
+  button.onclick = () => performWindowAction(button.dataset.windowAction);
+});
+document.querySelectorAll(".app-header, .viewer-bar").forEach(header => {
+  const draggable = event => !windowControls.hidden
+    && !event.target.closest("button, a, input, select, textarea, label, [contenteditable]");
+  header.addEventListener("mousedown", event => {
+    if (event.button === 0 && event.detail === 1 && draggable(event)) {
+      event.preventDefault();
+      void performWindowAction("drag");
+    }
+  });
+  header.addEventListener("dblclick", event => {
+    if (event.button === 0 && draggable(event)) void performWindowAction("toggle-maximize");
+  });
+});
+window.addEventListener("pywebviewready", bindWindowControls);
+window.addEventListener("resize", () => {
+  clearTimeout(windowStateTimer);
+  windowStateTimer = setTimeout(() => {
+    if (!windowControls.hidden) void performWindowAction("state");
+  }, 100);
+});
 const grid = $("#grid");
 const gallery = $("#gallery");
 const searchButton = $("#searchSubmit");
 const cancelSearchButton = $("#cancelSearch");
 document.documentElement.classList.add("conservative");
+
+const searchInput = $("#tag");
+const searchKind = $("#searchKind");
+const searchHelp = $("#searchHelp");
+const tagSearchHelp = searchHelp.textContent;
+const searchPrefixPattern = /^\s*(pid|uid|author)\s*[:：]\s*/i;
+const searchPlaceholders = {
+  tags: "输入标签，多个标签用 ; 分隔",
+  pid: "输入作品 ID",
+  uid: "输入画师 ID",
+  author: "输入画师名称",
+};
+
+function syncSearchKind() {
+  const match = searchInput.value.match(searchPrefixPattern);
+  const kind = match ? match[1].toLowerCase() : "tags";
+  if (searchKind.value !== kind) {
+    searchKind.value = kind;
+    searchKind.dispatchEvent(new Event("input", {bubbles: true}));
+  }
+  searchInput.placeholder = searchPlaceholders[kind];
+  searchHelp.textContent = kind === "tags" ? tagSearchHelp
+    : kind === "author" ? "按画师名称寻找作品；也可以直接输入 author:画师名。"
+    : `填写 Pixiv 的纯数字${kind === "pid" ? "作品" : "画师"} ID；也可以直接粘贴带 ${kind}: 前缀的内容。`;
+}
+
+searchKind.onchange = () => {
+  const match = searchInput.value.match(searchPrefixPattern);
+  const text = match ? searchInput.value.slice(match[0].length) : searchInput.value;
+  const prefix = searchKind.value === "tags" ? "" : `${searchKind.value}:`;
+  searchInput.value = prefix + text;
+  syncSearchKind();
+  searchInput.focus();
+  searchInput.setSelectionRange(prefix.length, searchInput.value.length);
+};
+searchInput.addEventListener("input", event => { if (!event.isComposing) syncSearchKind(); });
+searchInput.addEventListener("compositionend", syncSearchKind);
+syncSearchKind();
 
 function readSearchFilters() {
   return {
@@ -136,6 +248,7 @@ function restoreSearch(row) {
   if (contextNavigationLocked()) return;
   const filters = row.filters;
   $("#tag").value = row.tag;
+  syncSearchKind();
   $("#safety").value = lastKnownLoggedIn === true ? filters.mode : "safe";
   $("#workType").value = filters.workType;
   $("#includeAi").checked = Boolean(filters.includeAi);
@@ -162,7 +275,9 @@ const esc = (value) => String(value).replace(
   /[&<>"']/g,
   (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char],
 );
-const historyView = createDownloadHistoryView({ fetchJson: (url, options) => fetchJson(url, options) });
+const historyView = createDownloadHistoryView({
+  fetchJson: (url, options) => fetchJson(url, options), showDialog: showAppDialog,
+});
 
 const workspaceSync = createWorkspaceSync({
   request: (url, options) => fetchJson(url, options),
@@ -190,6 +305,7 @@ const workspaceSync = createWorkspaceSync({
       ? (state.error.basketCapacity ? `选择尚未保存：${state.error.message}` : `本机记录暂未同步：${state.error.message}。当前选择已保留。`) : "";
     $("#workspaceRetry").disabled = state.loading || selection.locked || singleDownloadPending;
     syncSearchScopedControls();
+    if (state.ready && !state.loading) scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
   },
   onScopeChanged: () => {
     downloadAuthorizationRevision++;
@@ -231,7 +347,7 @@ function restoreBasketView(rows) {
   syncResultSelectionControls();
   const syncPages = (root, item) => {
     root.querySelectorAll("[data-collection-page]").forEach(box => {
-      box.checked = Boolean(selection.get(item?.id)?.pages.has(Number(box.dataset.collectionPage)));
+      box.checked = selection.isPageSelected(item?.id, Number(box.dataset.collectionPage));
     });
     if (item) bindCollectionPageInputs(root, item);
   };
@@ -277,12 +393,15 @@ function renderPendingTasks() {
   for (const [id, task] of pendingTasks) if (!visibleTasks.has(id)) visibleTasks.set(id, task);
   holder.hidden = !visibleTasks.size;
   const locked = contextNavigationLocked();
-  $("#pendingDownloadList").innerHTML = [...visibleTasks.values()].map(task => {
+  const markup = [...visibleTasks.values()].map(task => {
     const options = task.kind === "single" ? task.taskOptions.body : task.taskOptions;
     const title = task.kind === "single" ? `作品 ${options.id}` : "采集篮下载";
     const running = activeDownload?.task.id === task.id;
     return `<div class="pending-task"><div><b>${esc(title)} · ${running ? "下载中 · " : ""}剩余 ${task.remainingChunks.length} 批</b><small>${options.quality === "regular" ? "标准预览" : "原图"} · ${esc(options.ugoiraFormat === "source" ? "源格式" : (options.ugoiraFormat || "source").toUpperCase())} · ${esc(options.saveRoot || "默认下载目录")}</small></div>${task.conversionFailure ? `<button type="button" data-adjust-task="${esc(task.id)}" ${locked ? "disabled" : ""}>调整参数</button>` : ""}${running ? `<button type="button" data-pause-task="${esc(task.id)}" ${activeDownload.pauseRequested ? "disabled" : ""}>${activeDownload.pauseRequested ? "正在暂停…" : "暂停"}</button>` : `<button type="button" data-resume-task="${esc(task.id)}" ${locked || !task.remainingChunks.length ? "disabled" : ""}>继续</button>`}<button type="button" data-remove-task="${esc(task.id)}" ${locked ? "disabled" : ""}>移除</button></div>`;
   }).join("");
+  if (markup === pendingTasksMarkup) return;
+  pendingTasksMarkup = markup;
+  $("#pendingDownloadList").innerHTML = markup;
   $("#pendingDownloadList").querySelectorAll("[data-resume-task]").forEach(button => {
     button.onclick = () => resumeSavedTask(pendingTasks.get(button.dataset.resumeTask));
   });
@@ -305,6 +424,7 @@ async function pauseDownloadTask(id) {
   const running = activeDownload;
   if (!running || running.task.id !== id || running.pauseInFlight) return;
   running.pauseRequested = true;
+  if (running.cooldownUntil) { renderPendingTasks(); return; }
   running.pauseInFlight = true;
   renderPendingTasks();
   try {
@@ -360,10 +480,11 @@ async function saveDownloadTask(task, expectedTask = null) {
 async function deleteSavedTask(id) {
   if (!workspaceSync.ready) return;
   const revision = pendingTasks.get(id)?.revision ?? 0;
-  await writeTaskState("/api/workspace/task/delete", {id, scope: workspaceSync.scope, revision});
+  const result = await writeTaskState("/api/workspace/task/delete", {id, scope: workspaceSync.scope, revision});
   pendingTasks.delete(id);
   forgetTaskRetry(id);
   renderPendingTasks();
+  if (result.pauseWarning) announceToast(result.pauseWarning);
 }
 
 function savedTaskRequest(task, chunk) {
@@ -465,7 +586,7 @@ function adjustSavedTask(task) {
     }
     await resumeSavedTask(task);
   };
-  modal.showModal();
+  showAppDialog(modal);
 }
 
 async function rememberConversionFailure(task, error) {
@@ -567,12 +688,39 @@ function waitForPromiseOrAbort(promise, signal) {
   });
 }
 
+function responseError(payload, status) {
+  const data = payload !== null && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+  const error = new Error(data.error || `请求失败（HTTP ${status}）`);
+  error.errorKind = data.errorKind;
+  error.retryAfterSeconds = data.retryAfterSeconds;
+  if (["verification_required", "authentication_required"].includes(data.errorKind)) {
+    requestPolicyReadSequence++;
+    requestBlockedKind = data.errorKind;
+    requestPolicyWaiting = true;
+    cancelSearchPrefetch();
+  } else if (data.errorKind === "upstream_rate_limit") {
+    requestPolicyReadSequence++;
+    requestPolicyWaiting = true;
+    requestCooldownUntil = Math.max(requestCooldownUntil, Date.now() + data.retryAfterSeconds * 1000);
+    cancelSearchPrefetch();
+  }
+  error.requestIdConflict = Boolean(data.requestIdConflict);
+  error.basketCapacity = Boolean(data.basketCapacity);
+  error.taskCapacity = Boolean(data.taskCapacity);
+  error.taskConflict = Boolean(data.taskConflict);
+  error.conversionFailure = data.conversionFailure || null;
+  error.ownTaskCount = Number(data.ownTaskCount) || 0;
+  error.otherTaskCount = Number(data.otherTaskCount) || 0;
+  return error;
+}
+
 async function fetchJson(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
   // Detail reads use the same bounded cancellation registry as search reads.
   const detailRequestId = /^\/api\/pixiv\/artwork\/\d+(?:\?|$)/.test(url) ? nextSearchRequestId() : null;
   if (detailRequestId) {
     url += `${url.includes("?") ? "&" : "?"}requestId=${encodeURIComponent(detailRequestId)}`;
+    cancelSearchPrefetch();
     controller.signal.addEventListener("abort", () => { void notifySearchCancellation(detailRequestId); }, {once: true});
   }
   const upstream = options.signal;
@@ -603,17 +751,7 @@ async function fetchJson(url, options = {}, timeoutMs = 12000) {
     } catch {
       throw new Error("服务返回了无法解析的数据");
     }
-    if (!response.ok) {
-      const error = new Error(data.error || `请求失败（HTTP ${response.status}）`);
-      error.requestIdConflict = Boolean(data.requestIdConflict);
-      error.basketCapacity = Boolean(data.basketCapacity);
-      error.taskCapacity = Boolean(data.taskCapacity);
-      error.taskConflict = Boolean(data.taskConflict);
-      error.conversionFailure = data.conversionFailure || null;
-      error.ownTaskCount = Number(data.ownTaskCount) || 0;
-      error.otherTaskCount = Number(data.otherTaskCount) || 0;
-      throw error;
-    }
+    if (!response.ok) throw responseError(data, response.status);
     return data;
   } catch (error) {
     if (timedOut) {
@@ -675,22 +813,37 @@ function currentPageNeedsMoreResults() {
   return activeSearchContext.kind !== "pid" && searchHasMore && items.length < 36;
 }
 
-function scheduleSearchPrefetch(tag, page, filters, generation) {
-  if (!searchHasMore || currentPageNeedsMoreResults() || preloadedThrough >= page + 3 || activeSearchContext.kind === "pid") return;
+function searchPrefetchPaused() {
+  return !resultSelectionEnabled || searchPending || detailController || detailRefreshes.size
+    || selection.locked || singleDownloadPending || workspaceSync.loading || activeDownload
+    || requestBlockedKind || activeWorkspace || basketPageOpen() || document.hidden
+    || requestPolicyMode === "safe" || Date.now() < requestCooldownUntil;
+}
+
+function scheduleSearchPrefetch(tag, page, filters, generation, ahead = 1, intent = false) {
+  if (ahead === 1 && !intent && preloadedThrough >= page + 1) ahead = 3;
+  clearTimeout(prefetchTimer);
+  prefetchTimer = null;
+  if (searchPrefetchPaused() || prefetchController || !searchHasMore || currentPageNeedsMoreResults() || preloadedThrough >= page + ahead || activeSearchContext.kind === "pid") return;
   const snapshotId = activeSearchSnapshotId;
   prefetchTimer = setTimeout(async () => {
     prefetchTimer = null;
-    if (document.hidden || generation !== searchGeneration || currentPage !== page) return;
+    if (searchPrefetchPaused() || generation !== searchGeneration || currentPage !== page) return;
+    if (!intent && performance.now() - lastPageInteraction < 1800) {
+      scheduleSearchPrefetch(tag, page, filters, generation, ahead);
+      return;
+    }
     const controller = new AbortController();
     const requestId = nextSearchRequestId();
     prefetchController = controller;
     prefetchRequestId = requestId;
     const query = new URLSearchParams({
       tag, page: String(page), mode: filters.mode, workType: filters.workType,
-      includeAi: String(filters.includeAi), fuzzy: String(filters.fuzzy), requestId, prefetch: "true",
+      includeAi: String(filters.includeAi), fuzzy: String(filters.fuzzy), requestId, prefetch: "true", prefetchAhead: String(ahead),
       startDate: filters.startDate || "", endDate: filters.endDate || "",
       snapshotId,
     });
+    let extendPrefetch = false;
     try {
       const data = await fetchJson(`/api/pixiv/search?${query}`, {signal: controller.signal}, 60000);
       if (controller.signal.aborted || generation !== searchGeneration || currentPage !== page) return;
@@ -699,6 +852,7 @@ function scheduleSearchPrefetch(tag, page, filters, generation) {
       firstAvailablePage = Number(pageNumbers[0]) || page;
       preloadedThrough = Number(data.preloadedThrough) || page;
       searchHasMore = Boolean(data.hasMore);
+      extendPrefetch = ahead === 1 && searchHasMore && preloadedThrough < page + 3;
       // Metadata only: keep the current DOM, selection and image capabilities.
       renderPagination();
       renderCacheStatus();
@@ -709,9 +863,25 @@ function scheduleSearchPrefetch(tag, page, filters, generation) {
       if (prefetchController === controller) {
         prefetchController = null;
         prefetchRequestId = null;
+        if (extendPrefetch && generation === searchGeneration && currentPage === page) {
+          scheduleSearchPrefetch(tag, page, filters, generation, 3);
+        }
       }
     }
-  }, 650);
+  }, intent ? 120 : 2000 + Math.random() * 500);
+}
+
+for (const eventName of ["pointerover", "focusin"]) {
+  $("#pagination").addEventListener(eventName, event => {
+    const button = event.target.closest("button[data-page]");
+    if (button && !button.disabled && Number(button.dataset.page) === currentPage + 1) {
+      scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration, 1, true);
+    }
+  });
+}
+
+for (const eventName of ["pointermove", "pointerdown", "scroll", "keydown"]) {
+  document.addEventListener(eventName, () => { lastPageInteraction = performance.now(); }, {passive: true, capture: true});
 }
 
 function abortDetailRefreshes() {
@@ -760,6 +930,7 @@ function refreshDetailControls(item, inBasket = basketPageOpen()) {
   $("#download").textContent = downloadButtonLabel(item);
   updateSelectionBar();
   syncResultSelectionControls();
+  syncPreviewResources();
 }
 
 async function refreshArtworkPreview(rawArtworkId) {
@@ -799,7 +970,8 @@ async function refreshArtworkPreview(rawArtworkId) {
         delete img.dataset.detailRefreshAttemptedUrl;
         img.classList.remove("image-unavailable");
         img.closest(".page-select,.deck-card,figure")?.classList.remove("image-unavailable");
-        img.setAttribute("src", source);
+        if (img.hasAttribute("data-suspended-src")) img.dataset.suspendedSrc = source;
+        else img.setAttribute("src", source);
       });
       announceToast("预览授权已刷新");
       return true;
@@ -809,7 +981,10 @@ async function refreshArtworkPreview(rawArtworkId) {
       }
       return false;
     } finally {
-      if (detailRefreshes.get(artworkId)?.promise === task) detailRefreshes.delete(artworkId);
+      if (detailRefreshes.get(artworkId)?.promise === task) {
+        detailRefreshes.delete(artworkId);
+        scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
+      }
     }
   })();
   detailRefreshes.set(artworkId, { controller, promise: task });
@@ -821,6 +996,7 @@ function installImageFallbacks(root = document) {
     if (img.dataset.fallbackReady === "1") return;
     img.dataset.fallbackReady = "1";
     img.addEventListener("error", async () => {
+      if (!img.isConnected || img.hasAttribute("data-suspended-src")) return;
       const artworkId = img.dataset.detailArtwork;
       const basketArtworkId = img.dataset.basketArtwork;
       const failedUrl = img.currentSrc || img.getAttribute?.("src") || img.src || "";
@@ -856,9 +1032,9 @@ async function fetchBytes(url, { signal } = {}, timeoutMs = 30000) {
     controller.signal.throwIfAborted();
     const response = await fetch(url, { headers, signal: controller.signal });
     if (!response.ok) {
-      let data;
+      let data = {};
       try { data = await response.json(); } catch { /* Non-JSON errors retain the status fallback. */ }
-      throw new Error(data?.error || `请求失败（HTTP ${response.status}）`);
+      throw responseError(data, response.status);
     }
     return await response.arrayBuffer();
   } catch (error) {
@@ -879,10 +1055,17 @@ const ugoiraPreview = createUgoiraPreview({
 });
 
 document.addEventListener("visibilitychange", () => {
+  syncPreviewResources();
   if (document.hidden) { ugoiraPreview.stop(); cancelSearchPrefetch(); }
-  else void syncAuthStatus();
+  else void syncAuthStatus().then(() => scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration));
 });
-window.addEventListener("pagehide", () => { ugoiraPreview.clear(); cancelSearchPrefetch(); });
+window.addEventListener("pagehide", () => {
+  ugoiraPreview.clear();
+  cancelSearchPrefetch();
+  stopBasketThumbnails();
+  clearTimeout(detailImageIdleTimer);
+  detailImageIdleTimer = null;
+});
 
 function attachUgoiraHoverTargets(root) {
   root.querySelectorAll("[data-ugoira-preview]").forEach((host) => {
@@ -1016,7 +1199,7 @@ function showSelectionLimitDialog(attemptedPages = 1) {
   const remaining = Math.max(0, MAX_SELECTED_PAGES - selectedPageCount());
   $("#selectionLimitText").textContent = `采集篮最多保存 ${MAX_SELECTED_PAGES} 张图片的下载选择。当前还可加入 ${remaining} 张，本次尝试新增 ${attemptedPages} 张。请先取消部分图片。`;
   const dialog = $("#selectionLimitDialog");
-  if (dialog?.showModal && !dialog.open) dialog.showModal();
+  if (dialog?.showModal && !dialog.open) showAppDialog(dialog);
 }
 
 function renderCacheStatus() {
@@ -1074,7 +1257,6 @@ function selectAllCurrentPage() {
     reportSelectionRejection(result);
     return false;
   }
-  updateSelectionBar();
   $("#pageSelectionStatus").textContent = `已全选当前页 ${items.length} 个作品及其全部图片`;
   render();
   return true;
@@ -1118,6 +1300,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     : { kind: "tags", value: cleanTag };
   const keepGrid = previousView.hadCommittedResults && cleanTag === activeTagQuery
     && JSON.stringify(requestedFilters) === JSON.stringify(activeSearchFilters);
+  let committed = false;
 
   searchPending = true;
   resultSelectionEnabled = false;
@@ -1176,7 +1359,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     renderPagination();
     clearDetail();
     void refreshDownloadedIndicators();
-    scheduleSearchPrefetch(cleanTag, currentPage, requestedFilters, generation);
+    committed = true;
   } catch (error) {
     if (controller.signal.aborted) {
       if (controller === searchController) {
@@ -1214,6 +1397,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
       cancelSearchButton.disabled = false;
       cancelSearchButton.hidden = true;
       syncSearchScopedControls();
+      if (committed) scheduleSearchPrefetch(cleanTag, currentPage, requestedFilters, generation);
     }
   }
 }
@@ -1239,10 +1423,12 @@ function reconcileSelectedArtworkPreviews(freshItems) {
     if (fresh.bookmarks == null) merged.bookmarks = existing.bookmarks ?? null;
     return merged;
   };
+  const updated = [];
   selection.snapshot().forEach(({item}) => {
     const merged = mergePreview(item);
-    if (merged !== item) selection.remember(merged);
+    if (merged !== item) updated.push(merged);
   });
+  selection.rememberMany(updated);
   batchCandidateItems = batchCandidateItems.map(mergePreview);
   freshItems.forEach((item, index) => {
     const detail = selection.get(item.id)?.item;
@@ -1254,7 +1440,6 @@ function render() {
   gallery.classList.add("in");
   grid.className = "grid";
   updateSelectionBar();
-  syncSearchScopedControls();
   if (!items.length) {
     grid.innerHTML = currentPageNeedsMoreResults()
       ? (searchOrderingPending
@@ -1348,15 +1533,17 @@ function updatePaginationDock() {
   const dockOverGallery = galleryRect.top < dockTop && galleryRect.bottom > dockTop;
   dock.classList.toggle("is-visible", hasPagination && !overlayOpen && dockOverGallery);
   const rail = document.querySelector('.page-rail');
-  rail.hidden = !$("#allViewer").hidden;
+  const railHidden = !$("#allViewer").hidden;
+  if (rail.hidden !== railHidden) rail.hidden = railHidden;
   const sections = ['home', 'gallery'];
   const marker = window.innerHeight * .4;
   const active = libraryWorkspaceOpen() ? activeWorkspace
     : basketPageOpen() ? "basket" : activeWorkspace === "download" ? "detail"
     : sections.reduce((current, id) => $(`#${id}`).getBoundingClientRect().top <= marker ? id : current, 'home');
   rail.querySelectorAll('a, button').forEach(link => {
-    if (link.hash === `#${active}` || link.dataset.view === active) link.setAttribute('aria-current', 'location');
-    else link.removeAttribute('aria-current');
+    if (link.hash === `#${active}` || link.dataset.view === active) {
+      if (link.getAttribute('aria-current') !== 'location') link.setAttribute('aria-current', 'location');
+    } else if (link.hasAttribute('aria-current')) link.removeAttribute('aria-current');
   });
 }
 
@@ -1373,19 +1560,77 @@ function updateFloatingChrome() {
   const overlayOpen = surface !== window;
   const scrollOffset = surface === window ? window.scrollY : surface.scrollTop;
   const chromeHeight = $("body > header").getBoundingClientRect().height || 68;
-  document.documentElement.style?.setProperty("--chrome-height", `${chromeHeight}px`);
+  const chromeValue = `${chromeHeight}px`;
+  if (document.documentElement.style.getPropertyValue("--chrome-height") !== chromeValue) {
+    document.documentElement.style.setProperty("--chrome-height", chromeValue);
+  }
   $("#backTop").classList.toggle("is-visible", scrollOffset > 600);
   const entry = $("#basketEntry");
   const count = selection.size;
-  entry.classList.remove("is-visible");
-  document.querySelector('.page-rail').hidden = !$("#allViewer").hidden;
-  $("main").inert = overlayOpen;
-  $("footer").inert = overlayOpen;
+  if (entry.classList.contains("is-visible")) entry.classList.remove("is-visible");
+  const rail = document.querySelector('.page-rail');
+  const railHidden = !$("#allViewer").hidden;
+  if (rail.hidden !== railHidden) rail.hidden = railHidden;
+  if ($("main").inert !== overlayOpen) $("main").inert = overlayOpen;
+  if ($("footer").inert !== overlayOpen) $("footer").inert = overlayOpen;
   for (const id of ["downloadPage", "basketPage", "historyPage", "favoritesPage"]) {
-    $(`#${id}`).inert = overlayOpen && $(`#${id}`) !== surface;
+    const page = $(`#${id}`), inert = overlayOpen && page !== surface;
+    if (page.inert !== inert) page.inert = inert;
   }
-  entry.textContent = `采集篮 ${count} 作品 · ${selectedPageCount()} 张`;
-  entry.disabled = selection.locked || searchPending;
+  const label = `采集篮 ${count} 作品 · ${selectedPageCount()} 张`;
+  if (entry.textContent !== label) entry.textContent = label;
+  const disabled = selection.locked || searchPending;
+  if (entry.disabled !== disabled) entry.disabled = disabled;
+}
+
+// Keep page state intact while releasing media owned by inactive views.
+function syncPreviewResources({releaseIdle = false} = {}) {
+  const surface = activeScrollSurface();
+  const normalVisible = !document.hidden && surface === $("#downloadPage");
+  const basketVisible = !document.hidden && surface === $("#basketPage");
+  if (basketVisible && basketReturnMode === "picker") {
+    if (!basketThumbnailObserver) loadBasketThumbnails();
+  } else if (basketThumbnailObserver || basketThumbnailQueue.length || basketThumbnailControllers.size) {
+    stopBasketThumbnails();
+  }
+  let needsRelease = false;
+  for (const [selector, visible] of [
+    ["#deck, #collectionPages", normalVisible],
+    ["#basketDetailDeck, #basketPages", basketVisible && basketReturnMode === "detail"],
+  ]) {
+    document.querySelectorAll(selector).forEach(root => {
+      if (visible) {
+        const suspended = root.querySelectorAll("img[data-suspended-src]");
+        if (suspended.length) installImageFallbacks(root);
+        suspended.forEach(img => {
+          const source = img.dataset.suspendedSrc;
+          delete img.dataset.suspendedSrc;
+          img.src = source;
+        });
+      } else {
+        root.querySelectorAll("img[src]").forEach(img => {
+          if (releaseIdle) {
+            // Retire the old request owner so its queued errors cannot affect
+            // the image restored on the next visit.
+            const suspended = img.cloneNode(false);
+            suspended.dataset.suspendedSrc = img.getAttribute("src");
+            suspended.removeAttribute("src");
+            delete suspended.dataset.fallbackReady;
+            img.replaceWith(suspended);
+            img.removeAttribute("src");
+          } else needsRelease = true;
+        });
+      }
+    });
+  }
+  clearTimeout(detailImageIdleTimer);
+  detailImageIdleTimer = null;
+  if (needsRelease) {
+    detailImageIdleTimer = setTimeout(() => {
+      detailImageIdleTimer = null;
+      syncPreviewResources({releaseIdle: true});
+    }, 30000);
+  }
 }
 
 function schedulePaginationDockUpdate() {
@@ -1431,8 +1676,11 @@ function setWorkspace(view) {
   activeWorkspace = view;
   for (const name of ["download", "history", "favorites"]) $(`#${name}Page`).hidden = name !== view;
   ugoiraPreview.stop();
+  if (view) cancelSearchPrefetch();
+  else scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
   updatePaginationDock();
   updateFloatingChrome();
+  syncPreviewResources();
 }
 
 function openDownloadPage() {
@@ -1518,7 +1766,10 @@ async function select(index) {
     $("#deck").innerHTML = "";
     announceToast(error.message || "作品详情加载失败");
   } finally {
-    if (controller === detailController) detailController = null;
+    if (controller === detailController) {
+      detailController = null;
+      scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
+    }
   }
 }
 
@@ -1575,6 +1826,7 @@ function renderDetail(item, index, detailContext = activeSearchContext) {
   $("#download").textContent = downloadButtonLabel(item);
   syncSearchScopedControls();
   updateFormatHint();
+  syncPreviewResources();
 }
 
 function syncBasketArtworkMeta() {
@@ -1598,7 +1850,7 @@ function bindCollectionPageInputs(pagesRoot, item) {
       const page = Number(box.dataset.collectionPage);
       const result = selection.setPage(String(item.id), page, box.checked, detailSelectionOrigin(item));
       if (!result.accepted) {
-        box.checked = Boolean(selection.get(item.id)?.pages.has(page));
+        box.checked = selection.isPageSelected(item.id, page);
         if (result.reason !== "locked") reportSelectionRejection(result);
         return;
       }
@@ -1649,7 +1901,11 @@ function renderViewerWindow(item) {
     : "";
   $("#viewerGrid").innerHTML = `${navigation}${pages.slice(start, end).map((page, localIndex) => {
     const pageNo = start + localIndex;
-    return `<figure><img src="${esc(page.regular || page.original || "")}" data-detail-artwork="${esc(item.id)}" data-detail-page="${pageNo}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${String(pageNo + 1).padStart(2, "0")} / ${String(pages.length).padStart(2, "0")}</span></figure>`;
+    // Page dimensions come from normalized detail metadata; reserve space before lazy loading.
+    const size = page.width > 0 && page.height > 0 ? page : item;
+    const width = size.width > 0 && size.height > 0 ? size.width : 1;
+    const height = size.width > 0 && size.height > 0 ? size.height : 1;
+    return `<figure><img src="${esc(page.regular || page.original || "")}" width="${esc(width)}" height="${esc(height)}" data-detail-artwork="${esc(item.id)}" data-detail-page="${pageNo}" alt="${esc(item.title)} 第 ${pageNo + 1} 张" loading="lazy" decoding="async"><span>${String(pageNo + 1).padStart(2, "0")} / ${String(pages.length).padStart(2, "0")}</span></figure>`;
   }).join("")}`;
   installImageFallbacks($("#viewerGrid"));
   $("#viewerGrid").querySelectorAll("[data-viewer-window]:not([disabled])").forEach((button) => {
@@ -1678,8 +1934,10 @@ function openAllViewer() {
   viewerPageOffset = 0;
   renderViewerWindow(item);
   $("#allViewer").hidden = false;
+  ugoiraPreview.stop();
   document.body.classList.add("viewer-open");
   $("#allViewer").scrollTop = 0;
+  syncPreviewResources();
   schedulePaginationDockUpdate();
 }
 
@@ -1691,6 +1949,7 @@ function closeAllViewer() {
   $("#viewerTitle").textContent = "";
   $("#viewerArtist").textContent = "";
   $("#viewerCount").textContent = "";
+  syncPreviewResources();
   schedulePaginationDockUpdate();
 }
 
@@ -1726,6 +1985,7 @@ function basketPageOpen() {
 }
 
 function openBasketPage() {
+  cancelSearchPrefetch();
   if (!basketPageOpen()) {
     // Basket detail uses the active preview identity; keep the normal download
     // view's identity alongside its untouched DOM until the basket is closed.
@@ -1739,6 +1999,7 @@ function openBasketPage() {
   updatePaginationDock();
   updateFloatingChrome();
   syncSearchScopedControls();
+  syncPreviewResources();
 }
 
 function updateBatchDetailSummary() {
@@ -1767,6 +2028,7 @@ function closeBasketPage() {
   basketDetailView.reset();
   ugoiraPreview.stop();
   stopBasketThumbnails();
+  basketCardSizeObserver?.disconnect();
   // Restricted previews must not linger in the hidden basket DOM.
   $("#batchCollections").innerHTML = "";
   $("#basketArtworkDetail").hidden = true;
@@ -1787,11 +2049,13 @@ function closeBasketPage() {
     basketDownloadSnapshot = null;
   }
   $("#collectionPages").querySelectorAll("[data-collection-page]").forEach(box => {
-    box.checked = Boolean(selection.get(currentDetailItem?.id)?.pages.has(Number(box.dataset.collectionPage)));
+    box.checked = selection.isPageSelected(currentDetailItem?.id, Number(box.dataset.collectionPage));
   });
   invalidateDetailView();
   syncSearchScopedControls();
   updateFloatingChrome();
+  syncPreviewResources();
+  scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
 }
 
 function showBasketPane(mode) {
@@ -1799,6 +2063,7 @@ function showBasketPane(mode) {
   basketReturnMode = mode;
   $("#batchCollections").hidden = mode !== "picker";
   $("#basketArtworkDetail").hidden = mode !== "detail";
+  syncPreviewResources();
 }
 
 function ensureDownloadOptionDefaults() {
@@ -1858,24 +2123,24 @@ function syncBasketHeader() {
     $("#batchSummary").textContent = `${selectedPageCount()}/${MAX_SELECTED_PAGES} 张图片已选`;
     return;
   }
-  const selectedCount = chosen.filter((item) => selection.get(item.id)?.pages?.size).length;
+  const selectedCount = chosen.filter((item) => selection.has(item.id)).length;
   $("#batchSummary").textContent = `${selectedCount}/${chosen.length} 个作品已勾选 · ${selectedPageCount()}/${MAX_SELECTED_PAGES} 张`;
 }
 
 function openSelectionBasket() {
   if (contextNavigationLocked()) return;
-  const chosen = selection.snapshot().map(row => row.item).filter((item) => selection.get(item.id)?.pages?.size);
-  if (!chosen.length) {
+  const rows = selection.snapshot();
+  if (!rows.length) {
     $("#pageSelectionStatus").textContent = "请先勾选至少一个作品";
     return;
   }
   invalidateDetailView();
-  batchCandidateItems = chosen;
+  batchCandidateItems = rows.map(row => row.item);
   batchCandidateContextByArtwork.clear();
   batchCandidateResultPageByArtwork.clear();
-  for (const item of chosen) {
-    batchCandidateContextByArtwork.set(item.id, selection.get(item.id)?.context || { ...activeSearchContext });
-    batchCandidateResultPageByArtwork.set(item.id, selection.get(item.id)?.resultPage || currentPage);
+  for (const row of rows) {
+    batchCandidateContextByArtwork.set(row.id, row.context);
+    batchCandidateResultPageByArtwork.set(row.id, row.resultPage);
   }
   basketArtworkOffset = 0;
   ensureDownloadOptionDefaults();
@@ -1887,20 +2152,23 @@ function openSelectionBasket() {
 function applyBasketArtworkSelection(item, box) {
   const accepted = toggleArtworkSelection(item, box.checked, detailSelectionOrigin(item));
   if (!accepted) {
-    box.checked = Boolean(selection.get(item.id)?.pages?.size);
+    box.checked = selection.has(item.id);
     return false;
   }
-  const selectedPages = selection.get(item.id)?.pages;
-  const selected = Boolean(selectedPages?.size);
+  const selectedPages = selection.pageCountFor(item.id);
+  const selected = selectedPages > 0;
   box.checked = selected;
   const card = box.closest(".batch-collection");
   card?.classList.toggle("is-selected", selected);
   const label = card?.querySelector(".batch-card-select");
   label?.setAttribute("aria-label", `${selected ? "取消选择" : "选择"} ${item.title}`);
   const selectionLabel = card?.querySelector(".batch-card-copy small");
-  if (selectionLabel) selectionLabel.textContent = `${item.artist} · 已选 ${selectedPages?.size || 0}/${item.pages} 张`;
+  if (selectionLabel) {
+    selectionLabel.textContent = `${item.artist} · 已选 ${selectedPages}/${item.pages} 张`;
+    selectionLabel.title = selectionLabel.textContent;
+  }
 
-  const selectedCount = batchCandidateItems.filter((candidate) => selection.get(candidate.id)?.pages?.size).length;
+  const selectedCount = batchCandidateItems.filter((candidate) => selection.has(candidate.id)).length;
   $("#batchSummary").textContent = `${selectedCount}/${batchCandidateItems.length} 个作品已勾选 · ${selectedPageCount()}/${MAX_SELECTED_PAGES} 张`;
   syncResultSelectionControls();
   return true;
@@ -1908,6 +2176,7 @@ function applyBasketArtworkSelection(item, box) {
 
 function openBasketArtworkPicker() {
   const chosen = batchCandidateItems;
+  basketCardSizeObserver?.disconnect();
   if (!chosen.length) {
     showBasketPane("picker");
     $("#basketTitle").textContent = "采集篮";
@@ -1923,7 +2192,7 @@ function openBasketArtworkPicker() {
   basketArtworkOffset = start;
   ensureDownloadOptionDefaults();
   showBasketPane("picker");
-  const selectedCount = chosen.filter((item) => selection.get(item.id)?.pages?.size).length;
+  const selectedCount = chosen.filter((item) => selection.has(item.id)).length;
   $("#basketTitle").textContent = "采集篮 · 选择要下载的作品";
   $("#basketModeHint").textContent = "点击作品挑选图片；选好后点下载，进入下载设置。";
   $("#batchSummary").textContent = `${selectedCount}/${chosen.length} 个作品已勾选 · ${selectedPageCount()}/${MAX_SELECTED_PAGES} 张`;
@@ -1931,12 +2200,23 @@ function openBasketArtworkPicker() {
     ? `<div class="pagination basket-window-pagination" style="grid-column:1/-1" aria-label="采集篮作品分页"><button type="button" data-basket-window="${Math.max(0, start - BASKET_ARTWORK_WINDOW)}" ${start === 0 ? "disabled" : ""}>← 前 ${BASKET_ARTWORK_WINDOW} 件</button><span>${start + 1}–${end} / ${chosen.length}</span><button type="button" data-basket-window="${Math.min(lastStart, start + BASKET_ARTWORK_WINDOW)}" ${end >= chosen.length ? "disabled" : ""}>后 ${BASKET_ARTWORK_WINDOW} 件 →</button></div>`
     : "";
   $("#batchCollections").innerHTML = `${navigation}${chosen.slice(start, end).map((item) => {
-    const selectedPages = selection.get(item.id)?.pages;
-    const selected = Boolean(selectedPages?.size);
-    const selectedPagesLabel = `${selectedPages?.size || 0}/${item.pages} 张`;
+    const selectedPages = selection.pageCountFor(item.id);
+    const selected = selectedPages > 0;
+    const selectedPagesLabel = `${selectedPages}/${item.pages} 张`;
     const ugoiraHover = item.workType === "ugoira" ? ` data-ugoira-preview="${esc(String(item.id))}"` : "";
-    return `<article class="batch-collection ${selected ? "is-selected" : ""}" data-batch-artwork="${esc(item.id)}"><label class="batch-card-select" aria-label="${selected ? "取消选择" : "选择"} ${esc(item.title)}"><input type="checkbox" data-batch-select="${esc(item.id)}" ${selected ? "checked" : ""}><span aria-hidden="true">✓</span></label><button class="batch-card-open" type="button" data-open-collection="${esc(item.id)}" aria-label="打开 ${esc(item.title)} 的作品详情并选择图片"><span class="batch-card-cover"${ugoiraHover}><img ${item.thumb ? `src="${esc(item.thumb)}"` : `data-restore-artwork="${esc(item.id)}"`} data-basket-artwork="${esc(item.id)}" alt="${esc(item.title)}" loading="lazy" decoding="async"><span class="batch-page-count" aria-hidden="true">${item.pages}P</span></span><span class="batch-card-copy"><b>${esc(item.title)}</b><small>${esc(item.artist)} · 已选 ${selectedPagesLabel}</small></span></button></article>`;
+    return `<article class="batch-collection ${selected ? "is-selected" : ""}" data-batch-artwork="${esc(item.id)}"><label class="batch-card-select" aria-label="${selected ? "取消选择" : "选择"} ${esc(item.title)}"><input type="checkbox" data-batch-select="${esc(item.id)}" ${selected ? "checked" : ""}><span aria-hidden="true">✓</span></label><button class="batch-card-open" type="button" data-open-collection="${esc(item.id)}" aria-label="打开 ${esc(item.title)} 的作品详情并选择图片"><span class="batch-card-cover"${ugoiraHover}><img ${item.thumb ? `src="${esc(item.thumb)}"` : `data-restore-artwork="${esc(item.id)}"`} data-basket-artwork="${esc(item.id)}" alt="${esc(item.title)}" loading="lazy" decoding="async"><span class="batch-page-count" aria-hidden="true">${item.pages}P</span></span><span class="batch-card-copy"><b title="${esc(item.title)}">${esc(item.title)}</b><small title="${esc(item.artist)} · 已选 ${selectedPagesLabel}">${esc(item.artist)} · 已选 ${selectedPagesLabel}</small></span></button></article>`;
   }).join("")}`;
+  // Derive height from width: measuring the stretched grid row's height would
+  // feed the placeholder back into itself after a resize.
+  basketCardSizeObserver ??= new ResizeObserver(([entry]) => {
+    if (entry.contentRect.width <= 0) return;
+    const holder = $("#batchCollections");
+    const height = `calc(${entry.contentRect.width * 1.25}px + var(--basket-card-copy-height))`;
+    if (holder.style.getPropertyValue("--basket-card-height") !== height) {
+      holder.style.setProperty("--basket-card-height", height);
+    }
+  });
+  basketCardSizeObserver.observe($("#batchCollections .batch-collection"));
   installImageFallbacks($("#batchCollections"));
   loadBasketThumbnails();
   attachUgoiraHoverTargets($("#batchCollections"));
@@ -1962,12 +2242,13 @@ function openBasketArtworkPicker() {
 function stopBasketThumbnails() {
   basketThumbnailWindow++;
   basketThumbnailObserver?.disconnect();
+  basketThumbnailObserver = null;
   basketThumbnailQueue = [];
   basketThumbnailControllers.forEach(controller => controller.abort());
 }
 
 function pumpBasketThumbnails() {
-  if (!basketPageOpen()) return;
+  if (document.hidden || activeScrollSurface() !== $("#basketPage") || basketReturnMode !== "picker") return;
   const generation = basketThumbnailWindow;
   while (basketThumbnailControllers.size < 3 && basketThumbnailQueue.length) {
       const image = basketThumbnailQueue.shift();
@@ -1975,7 +2256,7 @@ function pumpBasketThumbnails() {
       const controller = new AbortController();
       basketThumbnailControllers.add(controller);
       fetchJson(`/api/pixiv/artwork/${id}`, {signal: controller.signal}, ARTWORK_DETAIL_TIMEOUT_MS).then(fresh => {
-        if (controller.signal.aborted || generation !== basketThumbnailWindow || !basketPageOpen() || !batchCandidateItems.some(item => String(item.id) === id) || String(fresh.id) !== id) return;
+        if (controller.signal.aborted || generation !== basketThumbnailWindow || activeScrollSurface() !== $("#basketPage") || basketReturnMode !== "picker" || !batchCandidateItems.some(item => String(item.id) === id) || String(fresh.id) !== id) return;
         rememberArtworkDetail(fresh);
         image.src = fresh.thumb || "";
         image.classList.remove("image-unavailable");
@@ -1983,13 +2264,15 @@ function pumpBasketThumbnails() {
         delete image.dataset.restoreArtwork;
         const card = image.closest(".batch-collection");
         if (card) {
-          const pages = selection.get(id)?.pages.size || 0;
+          const pages = selection.pageCountFor(id);
           card.classList.toggle("is-selected", pages > 0);
           card.querySelector("[data-batch-select]").checked = pages > 0;
           card.querySelector(".batch-card-select").setAttribute("aria-label", `${pages ? "取消选择" : "选择"} ${fresh.title}`);
           card.querySelector(".batch-card-open").setAttribute("aria-label", `打开 ${fresh.title} 的作品详情并选择图片`);
           card.querySelector(".batch-card-copy b").textContent = fresh.title;
           card.querySelector(".batch-card-copy small").textContent = `${fresh.artist} · 已选 ${pages}/${fresh.pages} 张`;
+          card.querySelector(".batch-card-copy small").title = card.querySelector(".batch-card-copy small").textContent;
+          card.querySelector(".batch-card-copy b").title = fresh.title;
           card.querySelector(".batch-page-count").textContent = `${fresh.pages}P`;
           image.alt = fresh.title;
         }
@@ -2007,6 +2290,7 @@ function pumpBasketThumbnails() {
 
 function loadBasketThumbnails() {
   stopBasketThumbnails();
+  if (document.hidden || activeScrollSurface() !== $("#basketPage") || basketReturnMode !== "picker") return;
   if (typeof IntersectionObserver !== "function") return;
   const generation = basketThumbnailWindow;
   basketThumbnailObserver = new IntersectionObserver(entries => {
@@ -2086,10 +2370,26 @@ function nextDownloadRequestId() {
   return globalThis.crypto?.randomUUID?.() || `download-${nextSearchRequestId()}`;
 }
 
+async function waitForDownloadCooldown(task, seconds) {
+  const running = activeDownload;
+  if (!running || running.task !== task) throw new Error("下载状态已更新，请重新读取任务");
+  running.cooldownUntil = performance.now() + seconds * 1000;
+  try {
+    while (performance.now() < running.cooldownUntil) {
+      if (running.pauseRequested) throw Object.assign(new Error("下载已暂停"), {paused: true});
+      if (task.authorizationRevision !== downloadAuthorizationRevision) throw new Error("Pixiv 账户状态已变更，请重新确认下载");
+      if (requestBlockedKind) throw new Error("Pixiv 要求完成登录或页面验证，请处理后继续任务");
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  } finally { running.cooldownUntil = 0; }
+}
+
 async function fetchDownloadResult(request, chunk, task) {
   const body = JSON.stringify({ ...request.body, requestId: chunk.requestId,
     ...(task.persisted ? {queueId: task.id, scope: workspaceSync.scope} : {}) });
   let timeoutRetries = 0;
+  let cooldownRetries = 0;
+  let observeOnly = false;
   while (true) {
     if (task.authorizationRevision !== downloadAuthorizationRevision) {
       throw new Error("Pixiv 账户状态已变更，下载已中断，请重新发起");
@@ -2098,17 +2398,32 @@ async function fetchDownloadResult(request, chunk, task) {
     try {
       data = await fetchJson(request.endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(observeOnly ? {"X-MOKU-Download-Probe": "1"} : {}) },
         body,
       }, request.timeout);
     } catch (error) {
       // A slow local save may outlive the response. Reconnect once using the
       // same identity; the backend returns pending or the completed result.
-      if (error.timedOut && timeoutRetries++ === 0) continue;
+      if (error.errorKind === "upstream_rate_limit" && cooldownRetries++ < 2) {
+        await waitForDownloadCooldown(task, error.retryAfterSeconds);
+        if (activeDownload?.pauseRequested) throw Object.assign(new Error("下载已暂停"), {paused: true});
+        continue;
+      }
+      if (error.timedOut && timeoutRetries++ === 0) {
+        if (activeDownload?.pauseRequested) observeOnly = true;
+        continue;
+      }
       if (error.requestIdConflict) chunk.requestId = nextDownloadRequestId();
       throw error;
     }
+    if (data.inactive) {
+      const paused = Boolean(activeDownload?.pauseRequested);
+      throw Object.assign(new Error(paused ? "下载已暂停，已完成批次保留" : "上一下载尝试已结束，请继续重试此批"), {paused});
+    }
     if (!data.pending) return data;
+    // Once another owner is active, observe its receipt without starting a
+    // replacement operation if it fails or finishes cancellation.
+    observeOnly = true;
     const delay = Math.max(250, Math.min(3000, Number(data.retryAfterMs) || 1000));
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
@@ -2136,18 +2451,20 @@ function chooseDirectDownload(error) {
       }, 0);
     };
     dialog.oncancel = dialog.onclose = () => finish(false);
-    dialog.showModal();
+    showAppDialog(dialog);
   });
 }
 
 async function executeDownloadTask(task, requestForChunk, reportProgress) {
   const running = {task, chunk: null, pauseRequested: false, pauseInFlight: false, checking: false, startedAt: performance.now()};
   activeDownload = running;
+  cancelSearchPrefetch();
   const paused = () => Object.assign(new Error("下载已暂停，已完成批次保留"), {paused: true});
   const updateStatus = () => {
     const elapsed = Math.floor((performance.now() - running.startedAt) / 1000);
     $("#pendingDownloadStatus").textContent = running.pauseRequested
       ? "正在暂停并清理当前批次，已完成批次保留…"
+      : running.cooldownUntil ? `正在等待 Pixiv 限频冷却 · 剩余 ${Math.max(0, Math.ceil((running.cooldownUntil - performance.now()) / 1000))} 秒 · 可点击暂停`
       : running.checking ? `正在核对旧任务进度 · 已用 ${elapsed} 秒…`
       : `正在下载第 ${task.completedBatches + 1}/${task.totalBatches} 批${running.chunk ? `（${running.chunk.groups.length} 件作品）` : ""} · 已保存 ${savedDownloadPages(task)} 页 · 已用 ${elapsed} 秒。本批完成后统一保存文件。`;
   };
@@ -2273,7 +2590,10 @@ function setBasketSelectionLocked(locked) {
   updateFloatingChrome();
   syncSearchScopedControls();
   updatePaginationDock();
-  if (!locked) void restoreWorkspaceWhenUnlocked();
+  if (!locked) {
+    void restoreWorkspaceWhenUnlocked();
+    scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
+  }
 }
 
 function downloadPayload(item) {
@@ -2319,7 +2639,7 @@ function planDownloadChunks(groups) {
 function openCapacityDialog(targetPage) {
   pendingNavigationPage = targetPage;
   const dialog = $("#capacityDialog");
-  if (dialog?.showModal) dialog.showModal();
+  if (dialog?.showModal) showAppDialog(dialog);
 }
 
 function selectionWouldBeEvicted(targetPage) {
@@ -2383,6 +2703,7 @@ function renderBasketArtworkDetail(item) {
   $("#basketViewAll").hidden = item.pages <= visible;
   syncBasketHeader();
   syncBasketArtworkMeta();
+  syncPreviewResources();
 }
 
 async function openBatchCollection(id) {
@@ -2425,7 +2746,7 @@ $("#basketDownload").onclick = () => {
 };
 $("#basketClear").onclick = () => {
   if (contextNavigationLocked() || !batchCandidateItems.length) return;
-  $("#basketClearDialog").showModal();
+  showAppDialog($("#basketClearDialog"));
 };
 $("#basketClearCancel").onclick = () => $("#basketClearDialog").close();
 $("#basketClearConfirm").onclick = () => {
@@ -2648,9 +2969,12 @@ $("#download").onclick = async () => {
 
 async function syncAuthStatus() {
   const generation = ++authStatusGeneration;
+  const policyRevision = requestPolicyRevision;
+  const policySequence = $("#requestMode").disabled ? null : ++requestPolicyReadSequence;
   try {
     const data = await fetchJson("/api/status", {}, 8000);
     if (generation !== authStatusGeneration) return;
+    if (data.requestPolicy && policySequence === requestPolicyReadSequence && policyRevision === requestPolicyRevision && !$("#requestMode").disabled) applyRequestPolicy(data.requestPolicy);
     const logged = Boolean(data.loggedIn);
     const authorizationLost = lastKnownLoggedIn === true && !logged;
     const accountGeneration = Number.isInteger(data.authorizationGeneration) ? data.authorizationGeneration : null;
@@ -2687,8 +3011,114 @@ async function syncAuthStatus() {
   }
 }
 
+function applyRequestPolicy(state) {
+  const previousMode = requestPolicyMode;
+  const wasWaiting = requestPolicyWaiting;
+  requestPolicyMode = state.mode;
+  requestBlockedKind = state.blockedKind || "";
+  requestPolicyWaiting = Boolean(requestBlockedKind || state.cooldownSeconds);
+  $("#requestResume").hidden = !requestBlockedKind;
+  requestCooldownUntil = Date.now() + state.cooldownSeconds * 1000;
+  $("#requestMode").value = state.mode;
+  $("#requestMode").disabled = false;
+  $("#requestPolicyStatus").textContent = requestBlockedKind
+    ? "请求已暂停，请在 Pixiv 官方页面完成登录或验证后继续"
+    : state.cooldownSeconds
+    ? `请求冷却中 · 剩余 ${state.cooldownSeconds} 秒 · 已尝试 ${state.requests} 次`
+    : `${({safe: "安全", normal: "普通", fast: "快速"})[state.mode]}模式 · 下载上限 ${state.downloadWidth || 1} 路 · 排队 ${state.queued} · 活动 ${state.active} · 已尝试 ${state.requests} 次`;
+  if (state.mode === "safe" || state.cooldownSeconds || requestBlockedKind) cancelSearchPrefetch();
+  else if (previousMode === "safe" || wasWaiting) scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
+}
+
+async function changeRequestPolicy(update) {
+  const revision = ++requestPolicyRevision;
+  const sequence = ++requestPolicyReadSequence;
+  $("#requestMode").disabled = true;
+  $("#requestResume").disabled = true;
+  try {
+    const state = await fetchJson("/api/network/policy", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(update),
+    });
+    if (revision === requestPolicyRevision && sequence === requestPolicyReadSequence) applyRequestPolicy(state);
+  } catch (error) {
+    if (revision === requestPolicyRevision) {
+      $("#requestMode").value = requestPolicyMode;
+      $("#requestPolicyStatus").textContent = error.message;
+    }
+  } finally {
+    if (revision === requestPolicyRevision) {
+      $("#requestMode").disabled = false;
+      $("#requestResume").disabled = false;
+      if (sequence !== requestPolicyReadSequence) void refreshRequestPolicy();
+    }
+  }
+}
+
+$("#requestResume").onclick = () => changeRequestPolicy({action: "resume"});
+$("#requestMode").onchange = () => changeRequestPolicy({mode: $("#requestMode").value});
+
+function refreshRequestPolicy() {
+  if (requestPolicyRefresh) return requestPolicyRefresh;
+  if ($("#requestMode").disabled) return Promise.resolve();
+  const revision = requestPolicyRevision;
+  const sequence = ++requestPolicyReadSequence;
+  requestPolicyRefresh = (async () => {
+    try {
+      const state = await fetchJson("/api/network/policy", {}, 5000);
+      if (sequence === requestPolicyReadSequence && revision === requestPolicyRevision && !$("#requestMode").disabled) applyRequestPolicy(state);
+    } catch (error) {
+      if (sequence === requestPolicyReadSequence && revision === requestPolicyRevision && !$("#requestMode").disabled) $("#requestPolicyStatus").textContent = error.message;
+    } finally {
+      requestPolicyRefresh = null;
+    }
+  })();
+  return requestPolicyRefresh;
+}
+
 const helpDialog = $("#helpDialog");
-$("#helpBtn").onclick = () => helpDialog.showModal();
+$("#helpBtn").onclick = () => {
+  showAppDialog(helpDialog);
+  void refreshRequestPolicy();
+};
+const guideTabs = [...helpDialog.querySelectorAll("[data-guide-panel]")];
+function selectGuidePanel(tab) {
+  for (const button of guideTabs) {
+    const selected = button === tab;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    $(`#${button.dataset.guidePanel}`).hidden = !selected;
+  }
+}
+for (const tab of guideTabs) {
+  tab.onclick = () => selectGuidePanel(tab);
+  tab.onkeydown = event => {
+    const index = guideTabs.indexOf(tab);
+    const next = event.key === "ArrowRight" ? (index + 1) % guideTabs.length
+      : event.key === "ArrowLeft" ? (index + guideTabs.length - 1) % guideTabs.length
+      : event.key === "Home" ? 0 : event.key === "End" ? guideTabs.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault();
+    selectGuidePanel(guideTabs[next]);
+    guideTabs[next].focus();
+  };
+}
+helpDialog.addEventListener("close", () => {
+  void fetchJson("/api/ui/guide", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({seen: true})})
+    .catch(error => announceToast(error.message));
+});
+const initialPolicyRevision = requestPolicyRevision;
+const initialPolicySequence = ++requestPolicyReadSequence;
+void fetchJson("/api/network/policy").then(state => {
+  if (initialPolicySequence === requestPolicyReadSequence && initialPolicyRevision === requestPolicyRevision) applyRequestPolicy(state);
+}).catch(error => {
+  if (initialPolicySequence === requestPolicyReadSequence && initialPolicyRevision === requestPolicyRevision) $("#requestPolicyStatus").textContent = error.message;
+}).finally(() => {
+  if (initialPolicyRevision === requestPolicyRevision) $("#requestMode").disabled = false;
+});
+setInterval(() => {
+  if ((!helpDialog.open && !requestPolicyWaiting) || document.hidden || $("#requestMode").disabled) return;
+  void refreshRequestPolicy();
+}, 2000);
 $("#networkCheck").onclick = async () => {
   const button = $("#networkCheck");
   button.disabled = true;
@@ -2717,9 +3147,11 @@ $("#networkCheck").onclick = async () => {
       http: "HTTP 响应异常",
       unavailable: "无法连接",
     };
-    const formatCheck = (label, row) => row?.ok
-      ? `${label}：可用${Number.isFinite(row.ms) ? `（${row.ms} ms）` : ""}`
-      : `${label}：不可用（${errorLabels[row?.errorKind] || "无法连接"}${row?.errorCode ? ` · ${row.errorCode}` : ""}）`;
+    const formatCheck = (label, row) => {
+      if (row?.ok) return `${label}：可用${Number.isFinite(row.ms) ? `（${row.ms} ms）` : ""}`;
+      if (row?.errorKind === "waiting" || row?.errorKind === "paused") return `${label}：暂缓检测（${row.message}）`;
+      return `${label}：不可用（${errorLabels[row?.errorKind] || "无法连接"}${row?.errorCode ? ` · ${row.errorCode}` : ""}）`;
+    };
     $("#pixivCheck").textContent = formatCheck("Pixiv 主站", checks.get("pixiv"));
     $("#cdnCheck").textContent = formatCheck("图片线路", checks.get("cdn"));
   } catch (error) {
@@ -2736,7 +3168,7 @@ $("#networkCheck").onclick = async () => {
 
 const dialog = $("#loginDialog");
 $("#loginBtn").onclick = async () => {
-  dialog.showModal();
+  showAppDialog(dialog);
   await syncAuthStatus();
 };
 $("#authAction").onclick = async () => {
@@ -2765,9 +3197,18 @@ $("#authAction").onclick = async () => {
 document.querySelectorAll(".dialog-close").forEach((button) => {
   button.onclick = () => button.closest("dialog")?.close();
 });
+document.addEventListener("close", event => {
+  const index = openDialogs.indexOf(event.target);
+  if (index === -1) return;
+  openDialogs.splice(index, 1);
+  (openDialogs.at(-1) || document.body).append(windowControls);
+}, true);
 document.querySelectorAll("dialog").forEach((modal) => {
   modal.onclick = (event) => {
-    if (event.target === modal) modal.close();
+    if (event.target !== modal) return;
+    const bounds = modal.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right
+      || event.clientY < bounds.top || event.clientY > bounds.bottom) modal.close();
   };
 });
 
@@ -2782,3 +3223,11 @@ if ("requestIdleCallback" in window) {
 } else {
   setTimeout(async () => { await syncAuthStatus(); await restoreWorkspace(); }, 500);
 }
+
+bindWindowControls();
+void fetchJson("/api/ui/guide").then(state => {
+  if (!state.seen) showAppDialog(helpDialog);
+}).catch(error => {
+  showAppDialog(helpDialog);
+  announceToast(error.message);
+});

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from local_catalog import artifact_file_state
+from download_execution import cancel_download_execution, download_execution
 
 
 Response = tuple[dict, int]
@@ -30,6 +31,8 @@ class _Request:
     touched: float
     result: Response | None = None
     durable_fingerprint: str = ""
+    cancel: threading.Event | None = None
+    scope: str = ""
 
 
 class DownloadRequests:
@@ -139,10 +142,21 @@ class DownloadRequests:
         return self.run(request_id, route, body, lambda: ({}, 204),
                         scope=scope, durable_scope=durable_scope, output_root=output_root)
 
+    def cancel(self, request_id: str, scope: str) -> bool:
+        if self._path is not None:
+            return cancel_download_execution(self._path, request_id, scope)
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is None or not entry.active or entry.scope != scope or entry.cancel is None:
+                return False
+            entry.cancel.set()
+            return True
+
     def run(
         self, request_id: object, route: str, body: dict,
         operation: Callable[[], Response], *, scope: str = "", durable_scope: str | None = None,
         output_root: Path | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Response:
         # Old clients without an ID retain the existing synchronous behaviour.
         if request_id is None and "requestId" not in body:
@@ -209,17 +223,32 @@ class DownloadRequests:
                     del self._entries[idle]
                 entry = _Request(fingerprint, True, now, durable_fingerprint=durable_fingerprint)
                 self._entries[request_id] = entry
+            entry.cancel = cancel_event
+            entry.scope = durable_scope if durable_scope is not None else scope
 
         result = None
         try:
-            result = operation()
-            if result[1] == 200:
-                try:
-                    raw_root = str(body.get("saveRoot") or "").strip()
-                    self._write_success(request_id, durable_fingerprint, result,
-                                        Path(raw_root).expanduser() if raw_root else Path(output_root or "."))
-                except (OSError, sqlite3.Error):
-                    result[0]["recoveryWarning"] = "文件已保存，但重启后可能需要重新检查这批下载"
+            if self._path is None:
+                result = operation()
+            else:
+                with download_execution(self._path, request_id, entry.scope, cancel_event) as owner:
+                    if not owner:
+                        return {"pending": True, "retryAfterMs": 1000}, 202
+                    # A peer may have committed its receipt after our first
+                    # lookup but before mutex acquisition. Recheck as owner.
+                    try:
+                        result = self._read_success(request_id, durable_fingerprint)
+                    except (OSError, sqlite3.Error):
+                        result = None
+                    if result is None:
+                        result = operation()
+                        if result[1] == 200:
+                            try:
+                                raw_root = str(body.get("saveRoot") or "").strip()
+                                self._write_success(request_id, durable_fingerprint, result,
+                                                    Path(raw_root).expanduser() if raw_root else Path(output_root or "."))
+                            except (OSError, sqlite3.Error):
+                                result[0]["recoveryWarning"] = "文件已保存，但重启后可能需要重新检查这批下载"
             return result
         finally:
             # Record publication before the caller tries writing the response:
@@ -227,4 +256,5 @@ class DownloadRequests:
             with self._lock:
                 entry.result = result if result is not None and result[1] == 200 else None
                 entry.active = False
+                entry.cancel = None
                 entry.touched = self._clock()

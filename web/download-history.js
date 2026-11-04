@@ -1,5 +1,5 @@
 /* Download history is loaded on entry, never during application startup. */
-function createDownloadHistoryView({ fetchJson }) {
+function createDownloadHistoryView({ fetchJson, showDialog }) {
   const get = (id) => document.querySelector(`#${id}`);
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -50,7 +50,7 @@ function createDownloadHistoryView({ fetchJson }) {
         const info = `${time} · ${row.quality === "original" ? "原图" : "标准预览"} · ${format} · ${row.files.length} 个文件`;
         return `<article class="history-record"><input type="checkbox" data-select-history="${row.id}" ${selected.has(row.id) ? "checked" : ""} aria-label="选择 ${escape(row.title || "未命名作品")}">
           <h3 title="${escape(work)}">${escape(work)}</h3><p class="history-info">${escape(info)}</p>
-          <span class="history-paths" title="${escape(row.files.join("\n"))}">${escape(row.files[0] || "")}${row.files.length > 1 ? ` · +${row.files.length - 1}` : ""}</span>
+          <span class="history-paths" title="${escape(row.files[0] || "")}">${escape(row.files[0] || "")}${row.files.length > 1 ? ` · +${row.files.length - 1}` : ""}</span>
           <div class="history-record-actions"><button type="button" data-open-history="${row.id}" title="打开保存文件夹">位置</button><button type="button" data-copy-history="${index}" title="复制全部保存路径">复制</button><button type="button" data-delete-history="${row.id}" title="只删除这条记录，不删除文件">删除</button></div></article>`;
       }).join("") || `<p class="empty-state">${query ? "没有匹配记录。" : "还没有下载记录。之后成功下载的作品会显示在这里。"}</p>`;
       get("historyList").querySelectorAll("[data-select-history]").forEach(box => {
@@ -111,7 +111,7 @@ function createDownloadHistoryView({ fetchJson }) {
     get("historyDeleteTitle").textContent = ids === null ? "清空下载历史？" : `删除 ${ids.length} 条记录？`;
     get("historyDeleteText").textContent = "只删除记录，不会删除已下载的文件。删除后无法恢复。";
     get("historyClearConfirm").textContent = ids === null ? "清空记录" : "删除记录";
-    get("historyClearDialog").showModal();
+    showDialog(get("historyClearDialog"));
   }
 
   get("historySelectAll").onchange = () => {

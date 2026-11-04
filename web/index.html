@@ -1,5 +1,5 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MOKU Lite — Pixiv 搜图与采集</title><script src="/theme.js"></script><link rel="stylesheet" href="/style.css"></head><body>
-<header><a class="brand" href="#home">MOKU<span class="edition-label">Lite</span></a><div class="head-actions"><button id="themeToggle" class="icon theme-toggle" type="button" aria-label="切换日夜界面">日夜</button><span id="mode">PIXIV PUBLIC</span><button id="helpBtn" class="help-button" type="button" aria-haspopup="dialog">？ 使用说明</button><button id="loginBtn" class="login-button">登录 Pixiv</button></div></header>
+<header class="app-header"><a class="brand" href="#home">MOKU<span class="edition-label">Lite</span></a><div class="head-actions"><button id="themeToggle" class="icon theme-toggle" type="button" aria-label="切换日夜界面">日夜</button><span id="mode">PIXIV PUBLIC</span><button id="helpBtn" class="help-button" type="button" aria-haspopup="dialog">？ 使用说明</button><button id="loginBtn" class="login-button">登录 Pixiv</button></div></header>
 <aside class="page-rail" aria-label="页面导航">
   <a href="#home" aria-label="搜索" title="搜索" aria-current="location"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z"/></svg></a>
   <a href="#gallery" aria-label="预览选图" title="预览选图"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="15" height="15" rx="3"/><path d="M7 2h12a3 3 0 0 1 3 3v11M3 16l4-4 4 4 3-3 4 4"/><circle cx="13" cy="10" r="1"/></svg></a>
@@ -9,11 +9,11 @@
   <button id="navFavorites" type="button" data-view="favorites" aria-label="收藏（暂未开放）" title="收藏（暂未开放）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v17l-7-4-7 4Z"/></svg></button>
 </aside>
 <main><section class="hero scene" id="home">
-  <div class="home-intro"><p class="eyebrow">MOKU LITE · v1.1.5</p><h1><span class="home-title-text">想找点什么</span><span class="home-title-mark">？</span></h1></div>
+  <div class="home-intro"><p class="eyebrow">MOKU LITE · v1.2.0</p><h1><span class="home-title-text">想找点什么</span><span class="home-title-mark">？</span></h1></div>
   <div class="search-panel liquid reveal delay"><form id="searchForm">
     <label for="tag" class="search-label">输入标签、作品 ID 或画师</label>
-    <div class="search-row"><input id="tag" value="猫耳" placeholder="标签；pid:作品ID；uid:画师ID；author:画师名"><button id="searchSubmit" type="submit">开始寻找 <span>↗</span></button><button id="cancelSearch" class="icon" type="button" aria-label="停止搜索" title="停止搜索" hidden>×</button></div>
-    <p class="search-help">多个标签用 ; 或 ； 分开，结果必须同时包含全部标签；最多 6 个标签，每个最多 60 个字符，标签内部可保留空格。</p>
+    <div class="search-row"><div class="search-input-group"><select id="searchKind" aria-label="搜索方式"><option value="tags">标签</option><option value="pid">作品 ID</option><option value="uid">画师 ID</option><option value="author">画师名称</option></select><input id="tag" value="猫耳" placeholder="输入标签，多个标签用 ; 分隔" aria-describedby="searchHelp"></div><button id="searchSubmit" type="submit">开始寻找 <span>↗</span></button><button id="cancelSearch" class="icon" type="button" aria-label="停止搜索" title="停止搜索" hidden>×</button></div>
+    <p id="searchHelp" class="search-help">多个标签用 ; 或 ； 分开，结果必须同时包含全部标签；最多 6 个标签，每个最多 60 个字符，标签内部可保留空格。</p>
     <div class="filters"><label>作品类型<select id="workType"><option value="all">所有作品类型</option><option value="illustration">插画</option><option value="manga">漫画</option><option value="ugoira">动图</option></select></label><label class="ai-choice"><input id="includeAi" type="checkbox"><span>包含 AI 生成作品</span></label><label class="fuzzy-choice"><input id="fuzzySearch" type="checkbox"><span>模糊 / 二次元别名搜索</span></label><label>安全范围<select id="safety"><option value="safe">公开全年龄</option><option value="r18" disabled>R-18（需账户授权）</option><option value="all" disabled>全部类型（全年龄 + R-18，需授权）</option></select></label></div>
     <div class="date-filter"><label>发布时间<select id="datePreset"><option value="all">不限时间</option><option value="1">今天</option><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="custom">自定义日期</option></select></label>
       <div id="customDates" class="custom-dates" hidden><label>开始日期<input id="startDate" type="date" min="2007-09-10" disabled></label><span aria-hidden="true">—</span><label>结束日期<input id="endDate" type="date" min="2007-09-10" disabled></label></div>
@@ -38,5 +38,40 @@
 <dialog id="taskCapacityDialog" class="capacity-dialog"><h2>未完成任务已满</h2><p id="taskCapacityText"></p><div class="dialog-actions"><button id="taskCapacityDirect" type="button">本次直接下载</button><button id="taskCapacityManage" type="button">返回清理任务</button><button id="taskCapacityCancel" type="button">取消</button></div></dialog>
 <button id="backTop" class="floating-chip back-top" type="button" aria-label="回到顶部" title="回到顶部">↑</button>
 <div class="floating-stack"><button id="basketEntry" class="floating-chip" type="button">采集篮</button><div id="workspaceNotice" class="workspace-notice" role="status" hidden><span id="workspaceNoticeText"></span><button id="workspaceRetry" type="button">重试保存</button></div><div id="taskDock" class="task-dock" role="status" aria-live="polite"><b id="taskDockTitle"></b><span id="taskDockText"></span></div></div>
-<dialog id="helpDialog" class="help-dialog"><button class="dialog-close icon" type="button" aria-label="关闭使用说明">×</button><p class="eyebrow">MOKU OFFLINE GUIDE</p><h2>使用说明</h2><p class="guide-lead">这份说明随 MOKU 离线保存。打开和阅读不会连接 Pixiv；只有点击“检测网络”才会发起匿名连通测试。</p><div class="guide-sections"><section><h3>快速开始</h3><p>普通搜索中多个标签用 ; 或 ； 分开，例如“猫；夜景”；每件结果都必须同时具有全部输入标签。启用模糊搜索后，也会查找内置的二次元同义标签。输入 <code>pid:作品ID</code> 可直达一件作品；只看某位画师时输入 <code>uid:画师ID</code>，也可输入精确画师名 <code>author:画师名</code>。英文冒号与中文冒号“：”等价。</p></section><section><h3>网络连接</h3><p>开启 Windows 系统代理时，MOKU 使用该电脑当前启用的本机 HTTP 代理；开启 TUN 全局模式时，MOKU 的直连请求由系统路由接管。两者都关闭且无法直连 Pixiv 时，搜索会失败。</p><p class="guide-boundary">检测只匿名访问 Pixiv 主站和图片线路，不发送 Cookie；不会修改 Windows 系统代理，不会自动启动 VPN，也不会扫描本机端口。</p><div class="network-card" aria-live="polite"><div class="network-heading"><b id="networkHeadline">尚未检测</b><span id="networkRoute">当前路线：待检测</span></div><p id="networkGuidance">遇到连接问题时，可在这里检查当前系统代理或 TUN 路径是否能访问 Pixiv。</p><div class="network-checks"><span id="pixivCheck">Pixiv 主站：待检测</span><span id="cdnCheck">图片线路：待检测</span></div><button id="networkCheck" type="button">检测网络</button></div></section><section><h3>登录与隐私</h3><p>密码、验证码和 2FA 只在 Pixiv 官方页面输入。选择保持登录时，登录状态加密保存在 Windows 凭据管理器，不保存在网页里。不支持 R-18G。</p></section><section><h3>搜索与分页</h3><p>每页显示 36 件作品，结果不足时可继续加载本页；旧页仍可回退重新加载。图片在打开对应页面时加载。</p></section><section><h3>日间与夜间</h3><p>右上角可切换全局主题，搜索、详情、采集篮、下载与弹窗同步换色。首次跟随系统主题，当前窗口刷新会保留选择。</p></section><section><h3>下载与文件</h3><p>默认以原图清晰度保存到 MOKU 的 downloads 文件夹，也可选择其他文件夹。标准清晰度是 Pixiv 缩小预览，动图为 600px 帧包。多页作品可逐页勾选；请尊重作者版权、作品用途和 Pixiv 平台规则。</p></section><section><h3>SHA-256</h3><p>SHA-256 是 MOKU.exe 的单向文件指纹，不包含账号、Cookie、路径或身份信息。可用 <code>Get-FileHash .\MOKU.exe -Algorithm SHA256</code> 与 SHA256.txt 核对。</p></section><section><h3>常见问题</h3><p><b>主站可用但图片失败：</b>代理可能没有覆盖 i.pximg.net。<br><b>复制到其他电脑：</b>请复制完整 MOKU 文件夹，并在目标电脑安装 WebView2 Runtime。<br><b>系统代理关闭：</b>若未开启 TUN 且不能直连 Pixiv，MOKU 也无法连接。</p></section></div></dialog><dialog id="loginDialog"><button class="dialog-close icon" aria-label="关闭">×</button><p class="eyebrow">LOCAL ACCOUNT CONNECTION</p><h2>连接 Pixiv</h2><p>为了账户安全，本应用不会要求你在此输入 Pixiv 密码，也不会把 Cookie 或 Token 保存到网页存储。</p><div class="auth-state"><b id="authStateTitle">当前：未授权</b><span id="authStateText">将在 MOKU 桌面登录窗口打开 Pixiv 官方页面；完成登录后会自动连接。</span></div><label class="remember-choice"><input id="rememberLogin" type="checkbox" checked><span>在这台电脑保持登录（加密保存到 Windows 凭据管理器）</span></label><button id="authAction">打开桌面登录窗口</button><small>取消勾选时，会话仅保留到本次 MOKU 退出。密码、验证码和2FA只在Pixiv官方页面输入；不支持R-18G。</small></dialog>
+<div id="windowControls" class="window-controls" role="group" aria-label="窗口控制" hidden>
+  <button type="button" data-window-action="minimize" aria-label="最小化" title="最小化"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg></button>
+  <button id="windowMaximize" type="button" data-window-action="toggle-maximize" aria-label="还原窗口" title="还原窗口"><svg viewBox="0 0 16 16" aria-hidden="true"><path class="maximize-icon" d="M3 3h10v10H3Z"/><path class="restore-icon" d="M5 3h8v8M3 5h8v8H3Z"/></svg></button>
+  <button type="button" data-window-action="close" aria-label="退出 MOKU" title="退出 MOKU"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 3 10 10M13 3 3 13"/></svg></button>
+</div>
+<dialog id="helpDialog" class="app-dialog help-dialog" aria-label="使用说明">
+  <button class="dialog-close icon" type="button" aria-label="关闭使用说明">×</button>
+  <div class="guide-tabs" role="tablist" aria-label="使用说明">
+    <button id="guideStartTab" type="button" role="tab" data-guide-panel="guideStart" aria-controls="guideStart" aria-selected="true">快速开始</button>
+    <button id="guideModesTab" type="button" role="tab" data-guide-panel="guideModes" aria-controls="guideModes" aria-selected="false" tabindex="-1">请求模式</button>
+    <button id="guideNetworkTab" type="button" role="tab" data-guide-panel="guideNetwork" aria-controls="guideNetwork" aria-selected="false" tabindex="-1">网络检查</button>
+  </div>
+  <section id="guideStart" class="guide-panel" role="tabpanel" aria-labelledby="guideStartTab">
+    <ol class="guide-steps">
+      <li><b>寻找作品</b><p>选择标签、作品 ID 或画师。多个标签用 ; 分开，模糊搜索支持常见别名。</p></li>
+      <li><b>挑选图片</b><p>勾选作品加入采集篮，多页作品可逐张选择。结果每页显示 36 件。</p></li>
+      <li><b>保存到电脑</b><p>选择目录、清晰度与动图格式后下载。暂停后可继续，已完成批次会保留。</p></li>
+    </ol>
+    <p class="guide-tip">右上角可登录 Pixiv、切换日夜主题。GIF 方便播放，MP4 使用本机 FFmpeg，原始帧 ZIP 保留源数据。</p>
+  </section>
+  <section id="guideModes" class="guide-panel" role="tabpanel" aria-labelledby="guideModesTab" hidden>
+    <div class="guide-mode-list"><p><b>安全</b>首次默认，单路下载，采用较宽松的请求间隔。</p><p><b>普通</b>最多两路下载，自动准备后续搜索页。</p><p><b>快速</b>最多四路下载，提前准备后两件动图帧包。</p></div>
+    <div class="request-settings"><label for="requestMode">当前模式</label><select id="requestMode" disabled><option value="safe">安全模式</option><option value="normal">普通模式</option><option value="fast">快速模式</option></select><p id="requestPolicyStatus" role="status">正在读取请求设置…</p><button id="requestResume" type="button" hidden>已完成官方验证，继续请求</button></div>
+    <p class="guide-tip">设置自动保存，搜索、预览和下载共用。遇到限频会等待冷却，等待期间也可暂停下载。</p>
+  </section>
+  <section id="guideNetwork" class="guide-panel" role="tabpanel" aria-labelledby="guideNetworkTab" hidden>
+    <p class="guide-tip">开启系统代理或 TUN 后，点击检测，分别检查 Pixiv 主站和图片线路。</p>
+    <div class="network-card" aria-live="polite"><div class="network-heading"><b id="networkHeadline">检查 Pixiv 线路</b><span id="networkRoute">等待检测</span></div><p id="networkGuidance">检测使用匿名请求。</p><div class="network-checks"><span id="pixivCheck">Pixiv 主站</span><span id="cdnCheck">图片线路</span></div><button id="networkCheck" type="button">检测网络</button></div>
+    <p class="guide-tip">保存后的图片在下载目录中，历史记录可打开对应文件夹。迁移程序时，复制完整 MOKU 文件夹。</p>
+  </section>
+</dialog>
+<dialog id="loginDialog" class="app-dialog login-dialog" aria-labelledby="loginTitle">
+  <button class="dialog-close icon" type="button" aria-label="关闭登录界面">×</button>
+  <div class="app-dialog-heading"><h2 id="loginTitle">连接 Pixiv</h2><p>在 Pixiv 官方页面完成登录，MOKU 会自动连接。</p></div>
+  <div class="login-content"><div class="auth-state"><b id="authStateTitle">当前未连接</b><span id="authStateText">点击下方按钮打开 Pixiv 登录页面。</span></div><label class="remember-choice"><input id="rememberLogin" type="checkbox" checked><span>在这台电脑保持登录</span></label><button id="authAction" type="button">打开 Pixiv 登录页面</button><p class="guide-tip">密码和验证码在 Pixiv 官方页面输入。保持登录采用 Windows 加密存储，取消勾选则仅保持本次会话。</p></div>
+</dialog>
 <script src="/text-context-menu.js"></script><script src="/ugoira-preview.js"></script><script src="/selection-store.js"></script><script src="/artwork-detail-view.js"></script><script src="/download-history.js"></script><script src="/workspace-sync.js"></script><script src="/app.js"></script></body></html>

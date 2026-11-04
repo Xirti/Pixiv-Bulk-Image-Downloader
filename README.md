@@ -6,19 +6,17 @@
 
 MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作品 ID，翻翻预览，把喜欢的画放进采集篮，再挑好图片一起下载。
 
-当前源码版本：**1.1.5** Lite。
+当前版本：**1.2.0 Lite**。`main` 为 Lite 正式源码。
 
-`lite-backup` 保存 Lite 源码，`main` 保存花里胡哨版源码；两个 Windows x64 包都在 [v1.1.5 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.5)。下载带 `Lite` 的压缩包即可。
+Windows x64 程序在 [v1.2.0 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.2.0)，下载 `MOKU-v1.2.0-Lite-windows-x64.zip`。
 
-1.1.5 改进大动图下载与合成，降低 GIF/MP4 转换开销，完善暂停续传、多窗口任务与网络连接，沿用 Lite 的轻量界面。
+1.2.0 提供三档请求模式，优化大动图合成、批量下载、暂停续传与界面响应，并完善系统窗口行为。
 
 ## 开始使用
 
-从 [MOKU Lite v1.1.5](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.1.5) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
+从 [MOKU Lite v1.2.0](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v1.2.0) 下载 Windows x64 压缩包，完整解压后打开文件夹里的 `MOKU.exe`。便携版直接运行，无需安装 Python。
 
 需要 Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及能够访问 Pixiv 和图片 CDN 的网络。程序文件放在同一个文件夹里，`MOKU.exe.config` 也一起保留。
-
-![MOKU Lite v1.1.1 首页](assets/screenshots/v1.1.1-home.jpg)
 
 ## 搜索与筛选
 
@@ -32,6 +30,18 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 翻页时原来的图片会留在屏幕上，等新页准备好再切换；加载失败也能留在当前页重试。首页保留最近 8 次搜索，点击即可恢复标签、作品类型和日期等条件。作品的收藏数尚未获取时显示「—」，打开详情后可查看。
 
+## 请求模式
+
+首次默认安全模式，在使用说明的“请求模式”页切换，选择自动保存。
+
+| 模式 | 下载并发 | 搜索与准备 |
+| --- | --- | --- |
+| 安全 | 单路 | 较宽松的请求间隔，优先处理前台操作 |
+| 普通 | 自动调整至两路 | 空闲时准备后续页面 |
+| 快速 | 自动调整至四路 | 更多预加载，提前准备动图帧包 |
+
+三档共用下载、暂停续传和文件保存逻辑；遇到限频或临时网络异常会调整等待与并发。连接、预览和下载共用调度。
+
 ## 预览和采集篮
 
 左侧图标栏连接搜索、预览选图、采集篮、下载、历史和收藏入口，鼠标停上去会显示名称。搜索和预览可以上下滚动，采集篮、下载与历史各有独立页面。收藏暂未开放。
@@ -40,11 +50,9 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 采集篮会自动保存在本机。重开软件，之前挑好的作品和页码还在；缩略图在进入采集篮后按需加载。保存遇到问题时，当前选择会留在页面里，点击提示中的「重试保存」即可重新同步；继续改选也会尝试保存。
 
-动图在鼠标悬停时播放，第一次加载先显示首帧，缓存后的预览再次悬停即可播放。右上角提供回到顶部和全局日夜切换，页面、文字与弹窗一起换色。
+动图在鼠标悬停时播放，第一次加载先显示首帧，缓存后的预览再次悬停即可播放。右上角提供窗口控制，顶部提供日夜切换，页面、文字与弹窗一起换色。窗口可拖动贴靠、调整尺寸，最大化保留任务栏。
 
 输入框右键可剪切、复制、粘贴和全选，普通文字也能右键复制，键盘快捷键照常使用。
-
-![MOKU Lite v1.1.1 采集篮（示例作品）](assets/screenshots/v1.1.1-basket.jpg)
 
 ## 下载
 
@@ -72,8 +80,6 @@ MOKU 是一个轻巧的 Windows Pixiv 搜图工具。输入标签、画师或作
 
 记录从使用新版后的成功下载开始累积，重启后保留，最多保存最近 5,000 条。本地历史、文件目录、采集篮和未完成任务保存在 `%LOCALAPPDATA%\MOKU\library`，属于当前 Windows 用户。
 
-![MOKU Lite v1.1.1 下载历史（示例记录）](assets/screenshots/v1.1.1-history.jpg)
-
 ## 登录与网络
 
 点击右上角「登录 Pixiv」，在弹出的 Pixiv 官方页面完成登录。选择保持登录后，下次打开会继续使用已保存的账号会话。
@@ -89,10 +95,6 @@ python -m pip install -r requirements.lock
 python moku_app.py
 ```
 
-## 开发与测试
-
-回归测试和发布验证材料保存在本地工作区。源码构建入口为 `build-portable.ps1`，执行 Python、JavaScript 和 PowerShell 语法检查，并校验分发文件清单与源码指纹。
-
 ## 打包
 
 安装开发依赖后，运行项目自带的发布脚本：
@@ -106,7 +108,7 @@ powershell -ExecutionPolicy Bypass -File .\make-release.ps1
 
 ## 本版更新
 
-当前版本为 `1.1.5 Lite`。大动图合成、暂停续传、任务一致性与网络连接的更新见 [CHANGELOG](CHANGELOG.md)。
+本版更新见 [更新说明](RELEASE_NOTES.md)。
 
 ## 许可证与作品使用
 
@@ -129,5 +131,8 @@ MOKU 使用 [MIT License](LICENSE)，是与 Pixiv 无隶属关系的独立项目
 | `MOKU_UGOIRA_MAX_MIB`：帧包与成品文件预算 | 512 MiB | 40–4096 MiB |
 | `MOKU_UGOIRA_TEMP_MIB`：解压帧与转换暂存预算 | 2048 MiB | 128–16384 MiB |
 | `MOKU_UGOIRA_TIMEOUT_SECONDS`：每件动图转换时限 | 600 秒 | 30–3600 秒 |
+| `MOKU_UGOIRA_MP4_ENCODER`：MP4 编码路径 | `cpu` | `cpu` / `nvenc` |
 
 这三个参数分别约束文件大小、临时空间与时间；增大文件预算后也需为临时目录和保存目录预留空间。GIF 保留单帧内存预算，MP4 导出使用本机 PATH 中的 FFmpeg。
+
+MP4 默认使用 CPU 编码；具备 NVIDIA 显卡和相应 FFmpeg 的环境可选择 `nvenc`。编码器失败时会转入 CPU 路径。

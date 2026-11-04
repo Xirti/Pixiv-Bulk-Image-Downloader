@@ -2,9 +2,9 @@ name: MOKU Lite
 
 "on":
   push:
-    branches: [lite-backup]
+    branches: [main]
   pull_request:
-    branches: [lite-backup]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
       - name: Create isolated build environment
         shell: pwsh
         run: |
-          $ciVenv = Join-Path $env:RUNNER_TEMP 'moku-glass-ci-venv'
+          $ciVenv = Join-Path $env:RUNNER_TEMP 'moku-lite-ci-venv'
           python -m venv $ciVenv
           if ($LASTEXITCODE -ne 0) { throw 'Virtual environment creation failed' }
           (Join-Path $ciVenv 'Scripts') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -43,9 +43,18 @@ jobs:
       - name: Check published source inventory
         shell: pwsh
         run: |
-          $privateFiles = git ls-files -- tests run_tests.py fixture_gallery.py requirements-dev.lock
+          @'
+          import subprocess
+          from pathlib import Path
+          import build_manifest
+          tracked = set(subprocess.check_output(["git", "ls-files", "-z"]).decode("utf-8").split("\0")) - {""}
+          required = set(build_manifest.build_input_files(Path.cwd())) | {".gitignore", ".gitattributes"}
+          extra, missing = sorted(tracked - required), sorted(required - tracked)
+          if extra or missing:
+              raise SystemExit(f"Source inventory mismatch: extra={extra}, missing={missing}")
+          print(f"Published source inventory verified: {len(tracked)} files")
+          '@ | python -B -
           if ($LASTEXITCODE -ne 0) { throw 'Source inventory failed' }
-          if ($privateFiles) { throw "Private validation files remain: $privateFiles" }
       - name: Build release package
         shell: pwsh
         run: |

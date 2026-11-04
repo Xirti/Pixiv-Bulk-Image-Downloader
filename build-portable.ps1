@@ -30,7 +30,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Lite package build failed' }
 $Dist = Join-Path $Root 'dist\MOKU'
 $Exe = Join-Path $Dist 'MOKU.exe'
 Copy-Item -LiteralPath (Join-Path $Root 'MOKU.exe.config') -Destination (Join-Path $Dist 'MOKU.exe.config')
-foreach ($name in @('RELEASE_NOTES.md','LITE.md','LICENSE','PRIVACY.md','SECURITY.md','THIRD_PARTY_NOTICES.md')) {
+foreach ($name in @('RELEASE_NOTES.md','LICENSE','PRIVACY.md','SECURITY.md','THIRD_PARTY_NOTICES.md')) {
   Copy-Item -LiteralPath (Join-Path $Root $name) -Destination (Join-Path $Dist $name)
 }
 python -B generate-third-party-licenses.py (Join-Path $Dist 'THIRD_PARTY_LICENSES.txt')
@@ -41,4 +41,4 @@ python -B build_manifest.py write (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe -
 if ($LASTEXITCODE -ne 0) { throw 'Package fingerprint failed' }
 python -B build_manifest.py verify (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe
 if ($LASTEXITCODE -ne 0) { throw 'Package verification failed' }
-Write-Output "Built MOKU Lite 01: $Exe"
+Write-Output "Built MOKU Lite: $Exe"

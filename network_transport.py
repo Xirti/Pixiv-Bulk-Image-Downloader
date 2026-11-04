@@ -189,6 +189,10 @@ class _HTTPSPool:
                 request._moku_phase = 'connect_tls'
                 connection.connect()
             set_timeout()
+            before_send = getattr(request, '_moku_before_send', None)
+            if before_send is not None:
+                before_send()
+            set_timeout()
             request._moku_phase = 'request'
             connection.request(request.get_method(), request.selector, request.data, headers,
                                encode_chunked=request.has_header('Transfer-encoding'))

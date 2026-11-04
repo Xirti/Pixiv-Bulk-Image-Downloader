@@ -58,7 +58,7 @@
   function close(refocus = false) {
     const current = context;
     context = null;
-    menu.hidden = true;
+    if (!menu.hidden) menu.hidden = true;
     generation++;
     if (refocus && current?.node.isConnected) restore(current);
   }

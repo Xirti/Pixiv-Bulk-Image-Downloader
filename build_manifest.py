@@ -35,6 +35,8 @@ PYWEBVIEW_REQUIRED_LOADER_MARKERS = (
 )
 ALLOWED_TOP_LEVEL_DISTRIBUTION_METADATA = (
     "clr_loader-0.3.1.dist-info",
+    "curl_cffi-0.17.0.dist-info",
+    "certifi-2026.10.23.dist-info",
     "pillow-12.3.0.dist-info",
     "pythonnet-3.1.0.dist-info",
     "pywebview-6.2.1.dist-info",
@@ -53,10 +55,8 @@ BUILD_INPUT_FILES = (
     ".github/workflows/ci.yml",
     "README.md",
     "RELEASE_NOTES.md",
-    "LITE.md",
     "build_manifest.py",
     "generate-third-party-licenses.py",
-    "CHANGELOG.md",
     "PRIVACY.md",
     "SECURITY.md",
     "THIRD_PARTY_NOTICES.md",

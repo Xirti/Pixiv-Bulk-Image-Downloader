@@ -1,11 +1,12 @@
 "use strict";
 
 // Owns every request, decoded frame and playback timer for hover previews.
-globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, cancelRequest = () => {}, hoverDelay = 0 }) {
+globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, cancelRequest = () => {}, hoverDelay = 0, idleDelay = 30000 }) {
   const cache = new Map();
   const maxBytes = 96 * 1024 * 1024;
   let cachedBytes = 0;
   let active = null;
+  let idleTimer = null;
   let decompressionFormat;
 
   function parseZipEntries(buffer) {
@@ -175,10 +176,14 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     clearTimeout(player.timer);
     player.canvas?.remove();
     delete player.host.dataset.ugoiraState;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(clear, idleDelay);
   }
 
   async function start(host, id) {
     stop();
+    clearTimeout(idleTimer);
+    idleTimer = null;
     const requestId = `ugoira_${globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
     const player = { host, requestId, loading: false, controller: new AbortController(), canvas: null, timer: null };
     active = player;
@@ -246,6 +251,8 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
 
   function clear() {
     stop();
+    clearTimeout(idleTimer);
+    idleTimer = null;
     cache.forEach(release);
     cache.clear();
     cachedBytes = 0;

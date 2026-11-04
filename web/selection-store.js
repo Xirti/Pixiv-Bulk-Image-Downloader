@@ -54,6 +54,15 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
     return {accepted: true, count};
   }
 
+  function remember(item) {
+    const latest = rememberMetadata(item, true);
+    if (!latest) return false;
+    const id = String(latest.id), row = records.get(id), count = Number(latest.pages);
+    if (!row) return false;
+    commit(id, latest, new Set([...row.pages].filter(page => page < count)), row);
+    return true;
+  }
+
   return {
     get size() { return records.size; },
     get pageCount() { return pageCount; },
@@ -61,6 +70,8 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
     get archivedCount() { return [...records.values()].filter(row => row.archived).length; },
     setLocked(value) { locked = Boolean(value); },
     has(id) { return records.has(String(id)); },
+    pageCountFor(id) { return records.get(String(id))?.pages.size || 0; },
+    isPageSelected(id, page) { return records.get(String(id))?.pages.has(page) || false; },
     get(id) { return snapshot(records.get(String(id))); },
     snapshot() { return [...records.values()].map(snapshot); },
     choose(items, origin, {fill = false} = {}) {
@@ -120,13 +131,15 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
       return {accepted: true, count};
     },
     remember(item) {
-      const id = idOf(item), row = records.get(id), count = countOf(item);
-      if (count === null) return false;
-      rememberMetadata(item, true);
-      if (!row) return false;
-      commit(id, item, new Set([...row.pages].filter(page => page < count)), row);
-      onChange();
-      return true;
+      const changed = remember(item);
+      if (changed) onChange();
+      return changed;
+    },
+    rememberMany(items) {
+      let count = 0;
+      for (const item of items) if (remember(item)) count++;
+      if (count) onChange();
+      return count;
     },
     restore(rows, {allowOverflow = false} = {}) {
       if (locked || !Array.isArray(rows)) return reject("locked");

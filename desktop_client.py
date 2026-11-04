@@ -18,6 +18,7 @@ import webview
 
 from pixiv_login import LOGIN, select_session_cookie, session_cookie_metadata
 from network_config import normalize_loopback_proxy
+from version import __version__
 
 
 LOG = logging.getLogger("moku.desktop")
@@ -58,6 +59,7 @@ def desktop_auth_request(
     route = {
         "session": "api/desktop/auth/session",
         "logout": "api/desktop/auth/logout",
+        "context": "api/desktop/auth/context",
     }.get(str(action))
     if route is None:
         return {"ok": False, "error": "桌面认证操作无效"}
@@ -140,8 +142,10 @@ class DesktopApi:
         backend_url: str = "",
         desktop_auth_token: str = "",
         auth_request: Callable | None = None,
+        proxy_override: str = "",
     ) -> None:
         self._window = None
+        self._proxy_override = proxy_override
         self._window_factory = window_factory
         self.poll_interval = max(0.0, float(poll_interval))
         self.timeout = max(0.01, float(timeout))
@@ -174,12 +178,25 @@ class DesktopApi:
         except Exception:
             pass
 
+    def _login_network_context(self) -> dict:
+        context = self._auth_request("context", {})
+        if (not isinstance(context, dict) or context.get("ok") is not True
+                or type(context.get("authorizationGeneration")) is not int
+                or context.get("proxySource") not in {"environment", "system"}
+                or not isinstance(context.get("proxy"), str)):
+            raise ValueError("无法读取登录网络状态，请重试")
+        expected_proxy = context["proxy"] if context["proxySource"] == "environment" else ""
+        if expected_proxy != self._proxy_override:
+            raise ValueError("代理设置已变化，请重启 MOKU 后登录")
+        return context
+
     def pixiv_login(self, remember: bool = False) -> dict:
         if not self._login_lock.acquire(blocking=False):
             return {"ok": False, "error": "Pixiv 登录窗口已经打开"}
         login = None
         last_cookie_summary = None
         try:
+            context = self._login_network_context()
             self._clear_shared_cookies()
             self._notify("正在桌面登录窗口中监控 Pixiv 授权状态…")
             login = self._window_factory(
@@ -225,9 +242,17 @@ class DesktopApi:
                     if self.poll_interval:
                         time.sleep(self.poll_interval)
                     continue
+                self._login_network_context()
+                browser_context = None
+                try:
+                    browser_context = login.evaluate_js("({userAgent:navigator.userAgent,languages:Array.from(navigator.languages)})")
+                except Exception:
+                    LOG.warning("Login browser metadata unavailable; continuing session authorization")
                 LOG.info("desktop auth accepted host=www.pixiv.net cookie_shape=eligible")
                 result = self._auth_request(
-                    "session", {"session": value, "remember": bool(remember)},
+                    "session", {"session": value, "remember": bool(remember),
+                                "authorizationGeneration": context["authorizationGeneration"],
+                                "browserContext": browser_context},
                 )
                 if not isinstance(result, dict) or not result.get("ok"):
                     return {
@@ -241,7 +266,7 @@ class DesktopApi:
                 self._notify("Pixiv 账户已连接。")
                 return {"ok": True, "remembered": bool(remember)}
             return {"ok": False, "error": "Pixiv 桌面登录等待超时，请重试"}
-        except DesktopLoginCancelled as exc:
+        except (DesktopLoginCancelled, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
         except Exception:
             return {"ok": False, "error": "Pixiv 桌面登录失败，请重试"}
@@ -259,6 +284,33 @@ class DesktopApi:
         if not isinstance(result, dict):
             return {"ok": False, "error": "MOKU 本机后端响应无效"}
         return result
+
+    def window_action(self, action: str) -> dict:
+        if not isinstance(action, str) or action not in {"state", "drag", "minimize", "toggle-maximize", "close"}:
+            return {"ok": False, "error": "窗口操作无效"}
+        if self._window is None:
+            return {"ok": False, "error": "桌面窗口尚未准备好"}
+        try:
+            from System import Func, Object
+
+            def dispatch():
+                native = self._window.native
+                frame = self._window._native_frame
+                if action == "drag":
+                    frame.drag()
+                elif action == "minimize":
+                    frame.command(0xF020)
+                elif action == "toggle-maximize":
+                    frame.command(0xF120 if frame.maximized else 0xF030)
+                elif action == "close":
+                    native.Close()
+                    return {"ok": True}
+                return {"ok": True, "maximized": frame.maximized}
+
+            return self._window.native.Invoke(Func[Object](dispatch))
+        except Exception:
+            LOG.exception("Desktop window action failed")
+            return {"ok": False, "error": "窗口操作失败，请重试"}
 
     def select_folder(self) -> dict:
         if self._window is None:
@@ -328,6 +380,34 @@ def selected_webview_proxy(proxy: str):
             os.environ[name] = inherited
 
 
+def _fit_main_window(window) -> None:
+    """Set a centred restore size, then fill the monitor work area before first show."""
+    import ctypes
+    from ctypes import wintypes
+    from System.Drawing import Size
+    from System.Windows.Forms import FormStartPosition, FormWindowState, Screen
+    from native_window_frame import NativeWindowFrame
+
+    native = window.native
+    native.WindowState = FormWindowState.Normal
+    window._native_frame = NativeWindowFrame(native)
+    area = Screen.FromHandle(native.Handle).WorkingArea
+    get_dpi = ctypes.windll.user32.GetDpiForWindow
+    get_dpi.argtypes = [wintypes.HWND]
+    get_dpi.restype = wintypes.UINT
+    dpi = get_dpi(native.Handle.ToInt64())
+    if not dpi:
+        raise ctypes.WinError()
+    scale = dpi / 96.0
+    width = int(min(1180 * scale, area.Width * .88))
+    height = int(min(760 * scale, area.Height * .88))
+    native.StartPosition = FormStartPosition.Manual
+    native.MinimumSize = Size(min(int(480 * scale), width), min(int(360 * scale), height))
+    native.SetBounds(area.X + (area.Width - width) // 2,
+                     area.Y + (area.Height - height) // 2, width, height)
+    native.WindowState = FormWindowState.Maximized
+
+
 def start_desktop(
     url: str,
     storage_path: Path,
@@ -336,27 +416,33 @@ def start_desktop(
     *,
     desktop_auth_token: str = "",
 ) -> None:
+    environment_proxy = normalize_loopback_proxy(os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or "")
+    native_override = environment_proxy if environment_proxy == normalize_loopback_proxy(proxy) else ""
     api = DesktopApi(
+        proxy_override=native_override,
         backend_url=url,
         desktop_auth_token=desktop_auth_token,
     )
+    webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = True
     window = webview.create_window(
-        "MOKU Lite v1.1.5 — Pixiv 搜图与采集",
+        f"MOKU Lite v{__version__} — Pixiv 搜图与采集",
         url,
         js_api=api,
-        width=1280,
-        height=820,
-        min_size=(900, 620),
+        width=1180,
+        height=760,
+        min_size=(480, 360),
         resizable=True,
         background_color="#fbf7ed",
         text_select=True,
+        frameless=True,
+        easy_drag=False,
+        maximized=True,
     )
+    window.events.before_show += _fit_main_window
     api._window = window
     storage_path.mkdir(parents=True, exist_ok=True)
     # Windows proxy selection remains dynamic in the native browser. Only an
     # explicit environment proxy needs bridging: WebView2 ignores HTTPS_PROXY.
-    environment_proxy = normalize_loopback_proxy(os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or "")
-    native_override = environment_proxy if environment_proxy == normalize_loopback_proxy(proxy) else ""
     with selected_webview_proxy(native_override):
         if startup is None:
             webview.start(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
