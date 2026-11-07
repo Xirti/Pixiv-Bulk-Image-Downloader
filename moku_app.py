@@ -351,7 +351,16 @@ def launch_desktop(
 def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--serve-only", action="store_true")
+    parser.add_argument("--pixiv-account-callback")
     options, _unknown = parser.parse_known_args(argv)
+
+    if options.pixiv_account_callback:
+        from account_authorization import deliver_callback
+        try:
+            deliver_callback(options.pixiv_account_callback)
+            return 0
+        except Exception:
+            return 1  # Never put callback query parameters into a fatal dialog or log.
 
     no_browser = options.serve_only or os.environ.get("MOKU_NO_BROWSER") == "1"
 
@@ -422,6 +431,9 @@ def run(argv: list[str] | None = None) -> int:
             httpd.server_close()
         if owns_backend and thread is not None:
             thread.join(timeout=5)
+        server.ACCOUNT_AUTH.close()
+        server.ACCOUNTS.close()
+        server.APP_GALLERY.clear()
         server.PIXIV_OPENER.close()
     return 0
 

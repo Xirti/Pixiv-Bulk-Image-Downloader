@@ -1,18 +1,24 @@
 /* Global semantic palette: backgrounds and foregrounds switch together. */
 :root{
-  color-scheme:dark;--bg:#161616;--ink:#ecebe6;--muted:#aeaca6;--line:#484641;
-  --surface:#21211f;--surface-2:#2a2926;--field:transparent;--search-field:#30302c;--badge:#252420;
-  --accent:#f0ece3;--accent-dim:#c8c0ad;--moon:#e9e4d9;--action-fill:#eee9dd;--on-accent:#29261f;
-  --shadow:rgba(0,0,0,.18);--radius:14px;--radius-sm:10px;--control-height:42px;--focus-ring:0 0 0 3px var(--line);
+  color-scheme:dark;--bg:#18181b;--ink:#f4f4f5;--muted:#a1a1aa;--line:#ffffff17;
+  --surface:#202023;--surface-2:#2a2a2e;--field:#242427;--search-field:#242427;--badge:#242427;
+  --accent:#e4e4e7;--accent-dim:#a1a1aa;--moon:#e4e4e7;--action-fill:#f4f4f5;--on-accent:#18181b;
+  --shadow:rgba(0,0,0,.22);--radius:14px;--radius-sm:8px;--control-height:36px;
+  --focus:#97aac4;--focus-ring:0 0 0 3px #97aac433;--hover:#ffffff0d;--selected:#ffffff14;
+  --rail-bg:#1d1d20;--glass:#202023ed;--success:#63b98a;--danger:#e4757c;
+  --ui-ease:cubic-bezier(.23,1,.32,1);--ui-speed:160ms;
 }
 :root[data-theme=light]{
-  color-scheme:light;--bg:#faf9f6;--ink:#292923;--muted:#67675e;--line:#d8d6cf;
-  --surface:#fff;--surface-2:#f0efea;--search-field:#eeece5;--badge:#fbfbf9;--accent:#365548;--accent-dim:#66615a;
-  --moon:#385c4c;--action-fill:#365548;--on-accent:#fff;--shadow:rgba(40,40,30,.06);
+  color-scheme:light;--bg:#fff;--ink:#202024;--muted:#71717a;--line:#00000014;
+  --surface:#fafafa;--surface-2:#f1f1f3;--field:#fff;--search-field:#f7f7f8;--badge:#fff;
+  --accent:#27272a;--accent-dim:#71717a;--moon:#3f3f46;--action-fill:#27272a;--on-accent:#fafafa;
+  --shadow:rgba(0,0,0,.07);--focus:#7388a3;--focus-ring:0 0 0 3px #7388a326;
+  --hover:#00000005;--selected:#0000000a;--rail-bg:#f7f7f8;--glass:#ffffffed;--success:#278358;--danger:#bf434e;
 }
 *{box-sizing:border-box}
 .text-context-menu{position:fixed;z-index:10000;display:grid;gap:2px;width:196px;max-width:calc(100vw - 16px);padding:6px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);box-shadow:0 8px 28px var(--shadow);user-select:none}
 .text-context-menu[hidden],.text-menu-notice[hidden]{display:none}
+.page-context-menu{width:132px}
 .text-context-menu button{display:flex;justify-content:space-between;align-items:center;gap:24px;margin:0;min-height:36px;padding:8px 12px;border:0;border-radius:6px;background:transparent;color:var(--ink);font-size:13px;text-align:left}
 .text-context-menu button:not(:disabled):hover,.text-context-menu button:focus-visible{background:var(--surface-2);outline:1px solid var(--line)}
 .text-context-menu small{color:var(--muted);font-size:11px}

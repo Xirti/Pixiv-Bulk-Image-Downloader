@@ -1,0 +1,87 @@
+/* Search and account collection cards share geometry; basket cards keep their own. */
+html{overflow-x:clip}
+#grid,[data-account-grid],[data-account-own-grid]{gap:14px;isolation:isolate;overflow-anchor:none}
+#grid.gallery-deformed,[data-account-grid].gallery-deformed,[data-account-own-grid].gallery-deformed{transition:padding-bottom var(--gallery-motion,350ms) var(--gallery-ease,cubic-bezier(.4,0,.2,1))}
+.gallery-card{min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--surface);overflow:hidden;contain:layout style;transition-property:transform,width,height;transition-duration:var(--gallery-motion,350ms);transition-timing-function:var(--gallery-ease,cubic-bezier(.4,0,.2,1))}
+.gallery-card .poster{display:block;position:relative;width:100%;padding:0;border:0;border-radius:0;aspect-ratio:4/3;cursor:pointer}
+.gallery-card .meta{display:block;height:52px;padding:6px 10px;overflow:hidden}
+.gallery-card .meta h3,.gallery-card .gallery-author{display:block;width:100%;max-width:100%;font-size:13px;line-height:20px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;margin:0}
+.gallery-card .meta h3{font-weight:700}
+.gallery-card .gallery-author{min-height:0;padding:0;border:0;border-radius:0;background:none;color:var(--muted);font-weight:400;text-align:left;cursor:pointer}
+.gallery-card .gallery-author:hover{text-decoration:underline;color:var(--ink)}
+.gallery-card .card-select{display:grid;place-items:center;left:8px;top:8px;width:30px;height:30px;padding:0;z-index:6;cursor:pointer}
+.gallery-card .card-select input{margin:0;width:17px;height:17px;accent-color:var(--moon)}
+.gallery-page-count{position:absolute;top:3px;right:3px;z-index:4;display:grid;place-items:center;min-width:24px;height:24px;padding:0 6px;border:1px solid rgba(255,255,255,.45);border-radius:6px;background:rgba(16,21,29,.76);color:#f5f7fa;backdrop-filter:blur(9px) saturate(135%);box-shadow:0 1px 5px rgba(0,0,0,.3);font-size:13px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;pointer-events:none}
+:root[data-theme=light] .gallery-page-count{background:rgba(255,255,255,.86);color:#182230;border-color:rgba(24,34,48,.4);box-shadow:0 1px 5px rgba(0,0,0,.2)}
+.gallery-card .poster:focus-visible,.gallery-card .gallery-author:focus-visible{outline:3px solid var(--moon);outline-offset:-3px}
+.gallery-deformed .gallery-card .poster{height:calc(100% - 52px);aspect-ratio:auto}
+.gallery-card.gallery-expanded{z-index:5;box-shadow:0 16px 36px var(--shadow)}
+.gallery-card .poster img.gallery-preview{position:absolute;left:50%;top:50%;max-width:none;max-height:none;z-index:1;transform-origin:center;transition:transform var(--gallery-motion,350ms) var(--gallery-ease,cubic-bezier(.4,0,.2,1));pointer-events:none}
+.gallery-card .ugoira-preview{z-index:2}
+
+/* Single and basket downloads share settings geometry; image detail stays independent. */
+#downloadPage .detail{grid-template-columns:clamp(300px,34%,380px) minmax(0,1fr);gap:clamp(24px,3vw,44px);padding:28px clamp(20px,4vw,56px) 44px}
+#downloadPage .detail-info h2{font-size:28px;line-height:1.35;overflow-wrap:anywhere}
+#downloadPage .description{font-size:13px;max-height:180px;overflow:auto}
+#downloadPage .detail dl div{padding:7px 0;font-size:13px}
+#downloadPage .tags{gap:5px}
+#downloadPage .tags span{padding:4px 7px;font-size:12px}
+#downloadPage .save-settings{margin-top:16px;padding:10px}
+.image-stage.deck{display:grid;place-items:center;position:relative;width:100%;height:clamp(280px,46vh,440px);padding:18px 56px 36px;gap:0}
+.image-stack{position:relative;width:100%;height:100%;max-width:680px;perspective:1000px;isolation:isolate;transition:width 350ms cubic-bezier(.4,0,.2,1),height 350ms cubic-bezier(.4,0,.2,1)}
+.image-stage .stage-card{position:absolute;inset:0;width:100%;height:100%;min-width:0;padding:0;flex:none;transition:none;transform-origin:center bottom;background:var(--surface);box-shadow:0 8px 20px var(--shadow)}
+.image-stage .stage-card img{display:block;width:100%;height:100%;object-fit:contain}
+.stage-arrow{position:absolute;top:50%;transform:translateY(-50%);z-index:12;display:grid;place-items:center;width:40px;height:40px;min-height:40px;padding:0;border:1px solid var(--line);border-radius:50%;background:var(--surface);color:var(--ink);font-size:20px;cursor:pointer}
+.stage-arrow:disabled{opacity:.4;cursor:default}
+.stage-prev{left:2px}.stage-next{right:2px}
+#deckHint{display:block;text-align:center;font-size:12px;color:var(--muted);margin:0 0 22px}
+#collectionHeading{font-size:13px;margin:0 0 10px;font-weight:650}
+#collectionPages{grid-template-columns:repeat(auto-fill,minmax(96px,128px));justify-content:start;gap:10px;margin-top:0}
+#collectionPages .page-select{min-width:0}
+#collectionPageMore,#viewAll{font-size:12px;padding:8px 10px}
+dialog.image-viewer{position:fixed;inset:0;width:68vw;height:68dvh;max-width:calc(100vw - 112px);max-height:calc(100dvh - 80px);margin:auto;padding:0;border:0;border-radius:0;background:transparent;color:var(--ink);overflow:visible;box-shadow:none}
+dialog.image-viewer::backdrop{background:rgba(0,0,0,.28);backdrop-filter:blur(9px)}
+dialog.image-viewer[open]{display:grid;place-items:center}
+.image-viewer>img{display:block;width:100%;height:100%;min-height:0;object-fit:contain}
+.image-viewer-toolbar{position:absolute;top:-30px;left:0;right:0;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:var(--muted)}
+.image-viewer-toolbar span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.image-viewer-toolbar button{flex:none;min-height:28px;width:28px;height:28px;margin-right:-28px;padding:0;border:0;border-radius:0;background:none;color:var(--muted);font-size:22px;line-height:1;cursor:pointer;box-shadow:none}
+.image-viewer .stage-arrow{width:40px;height:48px;min-height:48px;padding:0;border:0;border-radius:0;background:none;box-shadow:none;color:color-mix(in srgb,var(--ink) 65%,var(--bg));font:300 34px/1 Arial,sans-serif}
+.image-viewer .stage-prev{left:max(-120px,calc(50% - 50vw + 12px))}.image-viewer .stage-next{right:max(-120px,calc(50% - 50vw + 12px))}
+.image-viewer .stage-arrow:disabled{visibility:hidden}
+.image-viewer-toolbar button:hover,.image-viewer .stage-arrow:hover{color:var(--ink)}
+.image-viewer-footer{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%);width:max(100%,300px);max-width:calc(100vw - 32px);display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:2px 8px;white-space:nowrap;font-size:11px;line-height:14px;color:var(--muted)}
+.image-viewer-footer>[data-stage-original]{justify-self:start}
+.image-viewer-footer>[data-stage-retry]{justify-self:end}
+.image-viewer-footer>[data-stage-status]{grid-column:1/-1;text-align:center}
+.image-viewer-zoom{grid-column:2;grid-row:1;display:flex;align-items:center;height:28px;gap:3px;padding:0 3px;border:1px solid var(--line);border-radius:16px;background:color-mix(in srgb,var(--bg) 76%,transparent);backdrop-filter:blur(14px)}
+.image-viewer-zoom>span{min-width:22px;text-align:center;font-size:11px}
+.image-viewer-footer button{min-height:28px;padding:4px 13px;border:1px solid color-mix(in srgb,var(--ink) 16%,transparent);border-radius:14px;background:color-mix(in srgb,var(--bg) 76%,transparent);backdrop-filter:blur(14px);color:var(--ink);font-size:12px;font-weight:400;box-shadow:0 2px 10px #00000012}
+.image-viewer-footer button:disabled{opacity:.45;cursor:default}
+.image-viewer-zoom>button{width:26px;height:26px;min-height:26px;padding:0;border:0;background:transparent;box-shadow:none;font-size:18px;line-height:1}
+.image-viewer-zoom>button:not(:disabled):hover{background:var(--selected)}
+@media(prefers-reduced-motion:no-preference){dialog.image-viewer[open]{animation:viewer-appear 160ms cubic-bezier(.2,0,.2,1)}@keyframes viewer-appear{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:scale(1)}}}
+.download-progress{display:grid;grid-template-columns:22px minmax(0,1fr) auto;align-items:center;gap:8px;margin:16px 0 8px;min-height:24px}
+.download-progress-track{position:relative;height:12px;border-radius:999px;overflow:hidden;background:var(--surface-2);border:1px solid var(--line)}
+.download-progress-fill{display:block;width:0;height:100%;border-radius:inherit;background:var(--moon);transition:width 240ms cubic-bezier(.3,0,.2,1)}
+.download-progress[data-state="error"] .download-progress-fill{background:#d46e68}
+.download-progress-count{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.download-progress[data-state="running"] .download-progress-track::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(115deg,transparent 0 8px,color-mix(in srgb,var(--bg) 25%,transparent) 8px 16px);background-size:24px 24px;animation:download-stripes 800ms linear infinite}
+@keyframes download-stripes{to{background-position:24px 0}}
+.floating-stack>.pending-downloads{width:min(320px,calc(100vw - var(--rail-width) - 32px));max-height:40vh;overflow:auto;overscroll-behavior:contain;margin:0;padding:9px 12px;border-radius:10px;box-shadow:0 8px 24px var(--shadow);animation:task-notice-in 180ms ease-out}
+@keyframes task-notice-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.floating-stack>.pending-downloads summary{font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
+.floating-stack>.pending-downloads p{font-size:12px;color:var(--muted);margin:8px 0 0}
+.floating-stack .pending-task small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-dock{max-width:min(320px,calc(100vw - var(--rail-width) - 32px));padding:9px 12px}
+.task-dock span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+@media(max-width:900px){#downloadPage .detail{grid-template-columns:minmax(0,1fr);padding:24px}.image-stage.deck{height:clamp(280px,48vh,440px)}}
+@media(max-width:600px){#downloadPage .detail{padding:20px 16px}.image-stage.deck{padding-left:46px;padding-right:46px}}
+@media(prefers-reduced-motion:reduce){#grid.gallery-deformed,.gallery-card,.gallery-card .poster img.gallery-preview,.image-stack,.download-progress-fill{transition:none!important}.download-progress-track::after,.floating-stack>.pending-downloads{animation:none!important}}
+
+#batchPanel h2{font-size:24px;line-height:1.4;margin:6px 0 12px}
+#batchPanel .basket-note{font-size:12px;line-height:1.8;color:var(--muted)}
+#batchEntryPane{padding:28px;border:1px solid var(--line);border-radius:16px;background:var(--surface);min-height:260px}
+#batchEntryPane h2{font-size:23px;margin:8px 0 22px}
+.batch-download-overview{display:flex;gap:32px;padding:18px 0 24px;border-bottom:1px solid var(--line);margin-bottom:20px;font-size:12px;color:var(--muted)}
+.batch-download-overview b{display:block;font-size:32px;font-weight:650;line-height:1.4;color:var(--ink)}

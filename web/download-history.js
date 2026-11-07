@@ -169,6 +169,6 @@ function createDownloadHistoryView({ fetchJson, showDialog }) {
   return {
     open: () => load(),
     close: () => { generation += 1; controller?.abort(); controller = null; selected.clear(); loading = false; },
-    refresh: () => { if (!get("historyPage").hidden) load(); },
+    refresh: () => { if (!get("historyPage").hidden) return load(); },
   };
 }

@@ -228,7 +228,12 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
             else { player.waiting = true; return; }
           }
           const { bitmap, delay } = entry.frames[index];
-          const scale = Math.max(canvas.width / bitmap.width, canvas.height / bitmap.height);
+          const currentWidth = Math.max(1, Math.round(host.clientWidth * ratio));
+          const currentHeight = Math.max(1, Math.round(host.clientHeight * ratio));
+          if (canvas.width !== currentWidth) canvas.width = currentWidth;
+          if (canvas.height !== currentHeight) canvas.height = currentHeight;
+          const fit = host.closest(".gallery-expanded") ? Math.min : Math.max;
+          const scale = fit(canvas.width / bitmap.width, canvas.height / bitmap.height);
           const width = bitmap.width * scale;
           const height = bitmap.height * scale;
           context.clearRect(0, 0, canvas.width, canvas.height);

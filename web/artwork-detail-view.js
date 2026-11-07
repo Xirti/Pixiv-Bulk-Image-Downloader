@@ -1,68 +1,27 @@
 "use strict";
 
 // One renderer/interaction owner; the two entry points supply only their DOM.
-globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, installImages}) {
-  let lockedPage = null;
-  const cards = () => [...deck.querySelectorAll(".deck-card")];
-  function reset() {
-    lockedPage = null;
-    cards().forEach(card => {
-      card.classList.remove("deck-preview", "deck-locked", "deck-inert");
-      card.setAttribute("aria-pressed", "false");
-    });
-  }
-  function toggle(card) {
-    const page = Number(card.dataset.page);
-    if (lockedPage !== null && lockedPage !== page) return;
-    if (lockedPage === page) {
-      reset();
-      hint.textContent = "已取消固定；轻移鼠标预览，点击一张可再次固定";
-      return;
-    }
-    lockedPage = page;
-    cards().forEach(row => {
-      const selected = Number(row.dataset.page) === page;
-      row.classList.remove("deck-preview");
-      row.classList.toggle("deck-locked", selected);
-      row.classList.toggle("deck-inert", !selected);
-      row.setAttribute("aria-pressed", String(selected));
-    });
-    hint.textContent = `已固定第 ${page + 1} 张；其他牌保持不动，再点当前牌取消`;
-  }
+globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, installImages, stage = null}) {
+  let current=null;
+  const actions=document.createElement("div");actions.className="cloud-detail-actions";
+  fields.Tags.after(actions);
+  function reset(){current=null;actions.replaceChildren();stage.reset();}
   function render(item, fallback = () => "", {preserve = false} = {}) {
-    const pinned = preserve ? lockedPage : null;
-    reset();
+    current=item;actions.innerHTML=cloudActionButton("bookmark",item.id,true)+(item.userId?cloudActionButton("follow",item.userId,true):"");
     fields.Title.textContent = item.title;
     fields.WorkType.hidden = item.workType !== "ugoira";
     fields.Desc.textContent = item.description;
     fields.Artist.textContent = item.artist;
+    if(item.userId){
+      const link=document.createElement("a");link.href=`#artist/${item.userId}`;link.dataset.artistId=item.userId;
+      link.className="text-link";link.textContent=item.artist;fields.Artist.replaceChildren(link);
+    }
     fields.Size.textContent = `${item.width} × ${item.height} px`;
     fields.Bookmarks.textContent = item.bookmarks == null ? "暂未获取" : Number(item.bookmarks).toLocaleString();
     fields.Date.textContent = item.date;
-    fields.Tags.innerHTML = (item.tags || []).map(tag => `<span>#${escape(tag)}</span>`).join("");
-    const visible = Math.min(item.pages, 4), middle = (visible - 1) / 2;
-    deck.innerHTML = Array.from({length: visible}, (_, page) => {
-      const delta = page - middle;
-      const image = item.pageImages?.[page];
-      const src = image?.regular || image?.original || item.thumb || fallback(page);
-      return `<button class="deck-card" data-page="${page}" style="--i:${page};--angle:${delta * 3.2}deg;--lift:${Math.abs(delta) * 4}px" aria-label="第 ${page + 1} 张" aria-pressed="false"><img src="${escape(src)}" data-detail-artwork="${escape(item.id)}" data-detail-page="${page}" alt="${escape(item.title)} 第 ${page + 1} 张" loading="lazy" decoding="async"><span>${page + 1} / ${item.pages}</span></button>`;
-    }).join("");
-    installImages(deck);
-    cards().forEach(card => {
-      card.onmouseenter = () => {
-        if (lockedPage !== null) return;
-        reset();
-        card.classList.add("deck-preview");
-      };
-      card.onmouseleave = () => { if (lockedPage === null) reset(); };
-      card.onclick = () => toggle(card);
-    });
-    hint.textContent = item.pages > visible
-      ? `预览前 ${visible} 张，共 ${item.pages} 张；点击一张固定，再点一次取消`
-      : "轻移鼠标预览；点击一张固定，再点一次取消";
-    const pinnedCard = cards().find(card => Number(card.dataset.page) === pinned);
-    if (pinnedCard) toggle(pinnedCard);
-    return visible;
+    fields.Tags.innerHTML = (item.tags || []).map(tag => `<a href="#tag/${encodeURIComponent(tag)}" data-tag-name="${escape(tag)}">#${escape(tag)}</a>`).join("");
+    return stage.render(item, {preserve});
   }
-  return {render, reset};
+  return {render, reset, snapshot:()=>({item:current,stagePage:stage.state().page}), suspend: () => stage?.suspend(), setVisible: value => stage?.setVisible(value), clear: () => {current=null;actions.replaceChildren();stage.clear();},
+    restorePage:index=>stage?.restorePage(index), state:()=>stage?.state() || {page:0}};
 };

@@ -56,3 +56,18 @@ MOKU-*-RELEASE-SUMMARY.md
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local account data, diagnostic captures, and workspace-only material
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.har
+*.dmp
+/runtime/
+/validation/
+/本地验证/
+/维护手册/
+/宣传视频/
+/.codex/
+/.agents/

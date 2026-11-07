@@ -1,5 +1,5 @@
 """Lite edition identity; preserve its original storage and login namespace."""
-RELEASE_TAG = "v1.2.0"
+RELEASE_TAG = "v2.0.0"
 DATA_FOLDER = "MOKU"
 CREDENTIAL_TARGET = "MOKU.Pixiv.PHPSESSID"
 MUTEX_NAME = r"Local\MOKU.PixivTagGallery.Backend.v1"

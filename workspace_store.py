@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from pathlib import Path
 
 
@@ -127,7 +127,15 @@ def normalize_task(value: dict) -> dict:
                 or not isinstance(failure["code"], str) or not re.fullmatch(r"[a-z_]{1,40}", failure["code"])):
             raise ValueError("invalid conversion failure")
         failure = {"artworkId": _id(failure["artworkId"]), "code": failure["code"]}
-    return {**({"conversionFailure": failure} if failure is not None else {}),
+    selection_key=value.get("selectionKey")
+    if selection_key is not None:
+        if not isinstance(selection_key,str) or len(selection_key)>100000:raise ValueError("invalid progress identity")
+        groups=json.loads(selection_key)
+        if not isinstance(groups,list) or len(groups)>1000:raise ValueError("invalid progress identity")
+        for group in groups:
+            if not isinstance(group,dict) or set(group)!={"id","pages"}:raise ValueError("invalid progress identity")
+            _id(group["id"]);_pages(group["pages"])
+    return {**({"selectionKey":selection_key} if selection_key is not None else {}),**({"conversionFailure": failure} if failure is not None else {}),
             **({"chunkPolicy": policy} if policy is not None else {}),
             "id": _request_id(value.get("id")), "kind": kind, "taskOptions": options,
             "revision": _integer(value.get("revision", 0), 0, 2147483647),
@@ -194,8 +202,12 @@ class WorkspaceStore:
         try:
             with connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in {0, 1}:
+                if version not in {0, 1, 2}:
                     raise ValueError("unsupported workspace schema")
+                if version == 1:
+                    backup=self.path.with_name(self.path.stem+".v1-backup.sqlite3")
+                    if not backup.exists():
+                        with closing(sqlite3.connect(backup)) as destination:connection.backup(destination)
                 if version == 0:
                     connection.execute("CREATE TABLE IF NOT EXISTS basket (singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL)")
                     connection.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, scope TEXT NOT NULL, payload TEXT NOT NULL)")
@@ -204,6 +216,8 @@ class WorkspaceStore:
                 # Retain only task identities so a lost initial-save reply
                 # cannot turn a removed task into a new create operation.
                 connection.execute("CREATE TABLE IF NOT EXISTS task_removals (id TEXT PRIMARY KEY) WITHOUT ROWID")
+                connection.execute("CREATE TABLE IF NOT EXISTS task_chunks (task_id TEXT NOT NULL, ordinal INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(task_id,ordinal)) WITHOUT ROWID")
+                if version != 2:connection.execute("PRAGMA user_version=2")
                 yield connection
         finally:
             connection.close()
@@ -218,13 +232,19 @@ class WorkspaceStore:
                 if row:
                     result["revision"] = row[0]
                     result["basket"] = _visible_basket(json.loads(row[1]), scope)
-                result["tasks"] = [json.loads(row[0]) for row in connection.execute("SELECT payload FROM tasks WHERE scope=? ORDER BY rowid", (scope,))]
+                result["tasks"] = [self._expand_task(connection,json.loads(row[0])) for row in connection.execute("SELECT payload FROM tasks WHERE scope=? ORDER BY rowid", (scope,))]
                 row = connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
                 if row:
                     result["recent"] = [item for owner, item in json.loads(row[0]) if owner in {scope, "public"}]
         return result
 
     def remember_search(self, value: dict, scope: str) -> None:
+        self._update_recent_search(value, scope, remove=False)
+
+    def delete_recent_search(self, value: dict, scope: str) -> None:
+        self._update_recent_search(value, scope, remove=True)
+
+    def _update_recent_search(self, value: dict, scope: str, *, remove: bool) -> None:
         if not isinstance(value, dict) or set(value) != {"tag", "filters"}:
             raise ValueError("invalid recent search")
         tag, filters = value["tag"], value["filters"]
@@ -243,7 +263,9 @@ class WorkspaceStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
             recent = json.loads(row[0]) if row else []
-            recent = [(owner, value)] + [(old_owner, old) for old_owner, old in recent if old != value or old_owner != owner]
+            recent = [(old_owner, old) for old_owner, old in recent if old != value or old_owner != owner]
+            if not remove:
+                recent.insert(0, (owner, value))
             connection.execute("INSERT OR REPLACE INTO recent VALUES (1,?)", (json.dumps(recent[:8], ensure_ascii=False),))
 
     def save_basket(self, rows: list[dict], scope: str, *, revision: int) -> int:
@@ -303,7 +325,7 @@ class WorkspaceStore:
                 raise TaskConflictError("任务已移除，请重新发起下载")
             if old and old[0] != scope:
                 raise ValueError("task belongs to another account")
-            stored = normalize_task(json.loads(old[1])) if old else None
+            stored = self._expand_task(connection,json.loads(old[1])) if old else None
             if stored:
                 # A lost reply may be retried with the previous version. Exact
                 # state replays are harmless; stale mutations must re-read.
@@ -330,8 +352,42 @@ class WorkspaceStore:
             if not old and total >= 20:
                 raise TaskCapacityError(own, total - own)
             task["revision"] += 1
-            connection.execute("INSERT OR REPLACE INTO tasks VALUES (?,?,?)", (task["id"], scope, json.dumps(task, ensure_ascii=False)))
+            connection.execute("DELETE FROM task_chunks WHERE task_id=?",(task["id"],))
+            connection.executemany("INSERT INTO task_chunks VALUES (?,?,?)",[(task["id"],i,json.dumps(chunk,ensure_ascii=False)) for i,chunk in enumerate(task["remainingChunks"])])
+            compact={k:v for k,v in task.items() if k!="remainingChunks"}
+            compact["_cursor"]=0
+            connection.execute("INSERT OR REPLACE INTO tasks VALUES (?,?,?)", (task["id"], scope, json.dumps(compact, ensure_ascii=False)))
         return task
+
+    def _expand_task(self,connection,task):
+        if "_cursor" in task:
+            cursor=task.pop("_cursor")
+            task.pop("_lastRequest",None)
+            task["remainingChunks"]=[json.loads(row[0]) for row in connection.execute("SELECT payload FROM task_chunks WHERE task_id=? AND ordinal>=? ORDER BY ordinal",(task["id"],cursor))]
+        return normalize_task(task)
+
+    def advance_task(self, value, scope):
+        if not isinstance(value,dict) or set(value)!={"id","revision","requestId","progress"}:raise ValueError("invalid checkpoint")
+        task_id=_request_id(value["id"]);request_id=_request_id(value["requestId"])
+        revision=_integer(value["revision"],0,2147483647)
+        progress=value["progress"]
+        if not isinstance(progress,dict) or set(progress)!={"savedCount","fileCount","skippedCount","firstSaved"}:raise ValueError("invalid checkpoint progress")
+        for key,maximum in (("savedCount",1000),("fileCount",2000),("skippedCount",1000)):_integer(progress[key],0,maximum)
+        if not isinstance(progress["firstSaved"],str) or len(progress["firstSaved"])>32768:raise ValueError("invalid checkpoint path")
+        with self._lock,self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row=connection.execute("SELECT payload FROM tasks WHERE id=? AND scope=?",(task_id,scope)).fetchone()
+            if not row:raise TaskConflictError("任务已移除，请重新读取")
+            task=json.loads(row[0])
+            if task.get("_lastRequest")==request_id and task["revision"]==revision+1:return {"revision":task["revision"]}
+            if task["revision"]!=revision or "_cursor" not in task:raise TaskConflictError("任务已更新，请重新读取")
+            chunk=connection.execute("SELECT payload FROM task_chunks WHERE task_id=? AND ordinal=?",(task_id,task["_cursor"])).fetchone()
+            if not chunk or json.loads(chunk[0])["requestId"]!=request_id:raise TaskConflictError("下载回执与任务不符")
+            if any(progress[key]<task[key] for key in ("savedCount","fileCount","skippedCount")):raise ValueError("checkpoint went backwards")
+            task.update(progress);task["completedBatches"]+=1;task["_cursor"]+=1;task["revision"]+=1;task["_lastRequest"]=request_id
+            if task["completedBatches"]>=task["totalBatches"]:raise ValueError("completed task must be removed")
+            connection.execute("UPDATE tasks SET payload=? WHERE id=?",(json.dumps(task,ensure_ascii=False),task_id))
+            return {"revision":task["revision"]}
 
     def delete_task(self, task_id: str, scope: str, *, revision: int | None = None) -> bool:
         _request_id(task_id)
@@ -344,6 +400,7 @@ class WorkspaceStore:
                 raise TaskConflictError("任务已在另一个窗口更新，请重新读取后移除")
             if row:
                 connection.execute("INSERT OR IGNORE INTO task_removals VALUES (?)", (task_id,))
+            if row:connection.execute("DELETE FROM task_chunks WHERE task_id=?",(task_id,))
             cursor = connection.execute("DELETE FROM tasks WHERE id=? AND scope=?", (task_id, scope))
             return cursor.rowcount > 0
 
@@ -355,11 +412,18 @@ class WorkspaceStore:
             with self._connection() as connection:
                 return connection.execute("SELECT 1 FROM tasks WHERE id=? AND scope=?", (task_id, scope)).fetchone() is not None
 
-    def get_task(self, task_id: str, scope: str) -> dict | None:
+    def get_task(self, task_id: str, scope: str, *, head: int | None = None) -> dict | None:
         _request_id(task_id)
         with self._lock:
             if not self.path.exists():
                 return None
             with self._connection() as connection:
                 row = connection.execute("SELECT payload FROM tasks WHERE id=? AND scope=?", (task_id, scope)).fetchone()
-                return normalize_task(json.loads(row[0])) if row else None
+                if not row:return None
+                task=json.loads(row[0])
+                if head is not None and "_cursor" in task:
+                    task["remainingChunks"]=[json.loads(chunk[0]) for chunk in connection.execute(
+                        "SELECT payload FROM task_chunks WHERE task_id=? AND ordinal>=? ORDER BY ordinal LIMIT ?",(task_id,task["_cursor"],head))]
+                    task.pop("_cursor");task.pop("_lastRequest",None)
+                    return task
+                return self._expand_task(connection,task)

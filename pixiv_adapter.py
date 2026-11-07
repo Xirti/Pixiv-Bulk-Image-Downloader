@@ -128,6 +128,23 @@ def bookmark_count(raw: dict[str, Any]) -> int | None:
         return None
 
 
+def small_full_preview_url(url: str) -> str:
+    """Use a bounded, uncropped CDN derivative, never an original or square crop."""
+    parsed = urllib.parse.urlsplit(url)
+    image = re.fullmatch(
+        r"(?:/c/[^/]+)?/(?:img-master|custom-thumb)/"
+        r"(img/\d{4}(?:/\d{2}){5}/\d+(?:-[0-9a-f]{32})?(?:_(?:p\d+|ugoira\d+))?)_"
+        r"(?:square|custom|master)1200\.jpg",
+        parsed.path,
+    )
+    if image is None:
+        raise PixivPolicyError("Pixiv 完整预览地址格式异常")
+    return parsed._replace(
+        path=f"/c/540x540_70/img-master/{image.group(1)}_master1200.jpg",
+        fragment="",
+    ).geturl()
+
+
 def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise PixivPolicyError("invalid artwork data")
@@ -154,7 +171,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
     source_thumb = str(raw.get("url") or "")
     if not is_allowed_pixiv_url(source_thumb, image_only=True):
         raise PixivPolicyError("invalid image host")
-    proxy = "/api/pixiv/image?" + urllib.parse.urlencode({"url": source_thumb})
+    proxy = "/api/pixiv/image?" + urllib.parse.urlencode({"url": small_full_preview_url(source_thumb)})
     raw_tags = raw.get("tags")
     if isinstance(raw_tags, dict):
         raw_tags = raw_tags.get("tags") or raw_tags.get("data") or []
@@ -236,11 +253,11 @@ def _validated_user_id(user_id: str) -> str:
     return clean
 
 
-def build_user_search_url(author: str) -> str:
+def build_user_search_url(author: str, *, page: int = 1) -> str:
     clean = str(author or "").strip()[:60]
     if not clean:
         raise PixivPolicyError("empty Pixiv author name")
-    query = urllib.parse.urlencode({"nick": clean, "s_mode": "s_usr", "lang": "zh"})
+    query = urllib.parse.urlencode({"nick": clean, "s_mode": "s_usr_full", "i": 1, "p": page, "lang": "zh"})
     return f"https://www.pixiv.net/ajax/search/users?{query}"
 
 

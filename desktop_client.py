@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from contextlib import contextmanager
 import threading
 import time
@@ -60,6 +61,9 @@ def desktop_auth_request(
         "session": "api/desktop/auth/session",
         "logout": "api/desktop/auth/logout",
         "context": "api/desktop/auth/context",
+        "app-connect": "api/desktop/auth/app-connect",
+        "app-cancel": "api/desktop/auth/app-cancel",
+        "official-context": "api/desktop/auth/official-context",
     }.get(str(action))
     if route is None:
         return {"ok": False, "error": "桌面认证操作无效"}
@@ -75,7 +79,7 @@ def desktop_auth_request(
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(request, timeout=max(1.0, min(float(timeout), 15.0))) as response:
+        with opener.open(request, timeout=30.0 if action == "app-connect" else max(1.0, min(float(timeout), 15.0))) as response:
             response_raw = response.read(65537)
     except urllib.error.HTTPError as exc:
         response_raw = exc.read(65537)
@@ -278,6 +282,66 @@ class DesktopApi:
                     pass
             self._clear_shared_cookies()
             self._login_lock.release()
+
+    def pixiv_account_login(self) -> dict:
+        result = self._auth_request("app-connect", {})
+        if not isinstance(result, dict) or not result.get("ok"):
+            return {"ok": False, "error": str(result.get("error") or "账号授权暂不可用") if isinstance(result, dict) else "账号授权暂不可用"}
+        url = result.get("authorizeUrl", "")
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.netloc != "app-api.pixiv.net" or parsed.path != "/web/v1/login":
+            return {"ok": False, "error": "授权地址异常"}
+        try:
+            os.startfile(url)
+            return {"ok": True}
+        except OSError:
+            self._auth_request("app-cancel", {"authorizeUrl": url})
+            return {"ok": False, "error": "系统浏览器暂时无法打开，请重试"}
+
+    def pixiv_official_author(self, author: str) -> dict:
+        if not isinstance(author, str) or not re.fullmatch(r"[0-9]{1,30}", author):
+            return {"ok": False, "error": "作者 ID 无效"}
+        if not self._login_lock.acquire(blocking=False):
+            return {"ok": False, "error": "Pixiv 官方窗口已经打开"}
+        official = None
+        try:
+            context = self._login_network_context()
+            account = self._auth_request("official-context", {"author": author})
+            if not account.get("ok"):
+                return account
+            if account["authorizationGeneration"] != context["authorizationGeneration"]:
+                return {"ok": False, "error": "账号已改变，请重试"}
+            official = self._window_factory("MOKU — Pixiv 官方操作", html="<html><body>正在打开 Pixiv……</body></html>",
+                width=1080, height=800, min_size=(720, 600), resizable=True)
+            if not official.events.loaded.wait(25):
+                raise TimeoutError("official_window_timeout")
+            from System import Action
+
+            def restore():
+                core = official.native.webview.CoreWebView2
+                cookie = core.CookieManager.CreateCookie("PHPSESSID", account["session"], ".pixiv.net", "/")
+                cookie.IsSecure = True
+                cookie.IsHttpOnly = True
+                core.CookieManager.AddOrUpdateCookie(cookie)
+                core.Navigate("https://www.pixiv.net/users/" + author)
+
+            official.native.Invoke(Action(restore))
+            # Never expose the native bridge or credentials to the official document.
+            while not official.events.closed.wait(2):
+                current = self._auth_request("context", {})
+                if not current.get("ok") or current.get("authorizationGeneration") != account["authorizationGeneration"]:
+                    return {"ok": False, "error": "账号已改变，官网窗口已关闭"}
+            return {"ok": True}
+        except Exception as error:
+            LOG.error("Official Pixiv window failed (%s)", type(error).__name__)
+            return {"ok": False, "error": "暂时无法打开官方窗口，请重试"}
+        finally:
+            try:
+                if official is not None and not official.events.closed.is_set():
+                    official.destroy()
+            finally:
+                self._clear_shared_cookies()
+                self._login_lock.release()
 
     def pixiv_logout(self) -> dict:
         result = self._auth_request("logout", {})

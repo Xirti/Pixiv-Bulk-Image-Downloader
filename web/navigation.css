@@ -1,0 +1,26 @@
+/* Every workspace reserves a shared caption for native window dragging. */
+:root{--rail-width:56px;--chrome-height:48px}
+body>.app-header{position:fixed;left:var(--rail-width);right:0;top:0;z-index:90}
+.app-header[hidden]{display:none!important}
+body>main[inert],body>footer[inert]{visibility:hidden}
+.page-rail{align-items:center;justify-content:flex-start;gap:8px;padding:8px 4px 12px;z-index:80;overflow-x:hidden}
+.page-rail>a,.page-rail>button{width:36px;height:36px;min-height:36px;border-radius:9px}
+.page-rail svg{width:18px;height:18px;stroke-width:1.7}
+.rail-history{display:flex;align-items:center;justify-content:flex-start;gap:0;align-self:flex-start;margin:0 0 6px}
+.page-rail .rail-history button{width:24px;height:30px;min-height:30px;border-radius:6px}
+.rail-history svg{width:17px;height:17px}
+.page-rail .rail-history button:disabled{opacity:.28;cursor:default;background:none}
+.workspace-page,.basket-page{top:var(--chrome-height)}
+.all-viewer{left:var(--rail-width);top:var(--chrome-height)}
+.all-viewer .viewer-bar{left:var(--rail-width);right:0;top:var(--chrome-height)}
+.desktop-window .workspace-bar,.desktop-window .basket-bar{padding-right:152px;min-height:64px;user-select:none}
+.context-back{display:inline-flex;align-items:center;flex-shrink:0;min-height:30px;width:auto;padding:5px 9px;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:12px;white-space:nowrap;cursor:pointer}
+.context-back:hover{background:var(--surface-2);color:var(--ink)}
+.context-back:disabled{opacity:.45;cursor:default}
+.context-return-dock{position:sticky;top:8px;z-index:12;margin:-42px 0 16px calc(-5vw + 12px);width:max-content;max-width:calc(100% - 12px)}
+.context-return-dock:has(.context-back[hidden]){display:none}
+.gallery-context-back{margin:0;background:color-mix(in srgb,var(--bg) 85%,transparent);backdrop-filter:blur(12px)}
+.workspace-bar,.basket-bar,.all-viewer .viewer-bar{padding-left:12px}
+.context-back[hidden]{display:none}
+@media(max-width:600px){:root{--rail-width:52px}.page-rail{padding-left:2px;padding-right:2px}}
+@media(max-width:600px){.context-return-dock{margin-left:-4px}}
