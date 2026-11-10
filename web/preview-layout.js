@@ -37,9 +37,9 @@
     function reset({immediate=false,slow=false}={}){
       clearTimers();
       if(active<0 || !base)return;
-      const old=cards.map(card=>card.getBoundingClientRect());
       cards[active].classList.remove("adaptive-expanded");cards[active].querySelector(".poster")?.setAttribute("aria-expanded","false");
       if(!immediate){
+        const old=cards.map(card=>card.getBoundingClientRect());
         const visible=old.map((box,i)=>({box,i})).filter(({box})=>box.bottom>60 && box.top<innerHeight);
         const anchor=slow?visible.sort((a,b)=>Math.abs(a.box.top+a.box.height/2-innerHeight/2)-Math.abs(b.box.top+b.box.height/2-innerHeight/2))[0]:{box:old[active],i:active};
         if(anchor){
@@ -143,7 +143,7 @@
     options.grid.addEventListener("moku-card-action",()=>popupClicks.cancel());
     options.grid.addEventListener("click",e=>{if(!e.target.closest(".poster"))popupClicks.cancel();});
     (options.scrollSurface || window).addEventListener("scroll",()=>popupClicks.cancel(),{passive:true});
-    const owner={change(value){popupClicks.cancel();(current==="adaptive"?natural:regular).clear();current=value;mount();}};
+    const owner={change(value){preserveViewport(options.scrollSurface || window,()=>{popupClicks.cancel();(current==="adaptive"?natural:regular).clear();current=value;mount();});}};
     owners.add(owner);
     return {mount(value){popupClicks.cancel();rows=value;mount();},reset(value){popupClicks.cancel();(current==="adaptive"?natural:regular).reset(value);},clear(){popupClicks.cancel();regular.clear();natural.clear();rows=[];}};
   };

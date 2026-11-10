@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# MOKU — Xirti / Aperia
+# Source: https://github.com/Xirti/Pixiv-Bulk-Image-Downloader
 from __future__ import annotations
 
 import json
@@ -20,6 +23,7 @@ import webview
 from pixiv_login import LOGIN, select_session_cookie, session_cookie_metadata
 from network_config import normalize_loopback_proxy
 from version import __version__
+from source_results import web_link
 
 
 LOG = logging.getLogger("moku.desktop")
@@ -64,6 +68,7 @@ def desktop_auth_request(
         "app-connect": "api/desktop/auth/app-connect",
         "app-cancel": "api/desktop/auth/app-cancel",
         "official-context": "api/desktop/auth/official-context",
+        "update-restart": "api/desktop/update-restart",
     }.get(str(action))
     if route is None:
         return {"ok": False, "error": "桌面认证操作无效"}
@@ -79,7 +84,7 @@ def desktop_auth_request(
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(request, timeout=30.0 if action == "app-connect" else max(1.0, min(float(timeout), 15.0))) as response:
+        with opener.open(request, timeout=120.0 if action == "update-restart" else 30.0 if action == "app-connect" else max(1.0, min(float(timeout), 15.0))) as response:
             response_raw = response.read(65537)
     except urllib.error.HTTPError as exc:
         response_raw = exc.read(65537)
@@ -164,6 +169,14 @@ class DesktopApi:
                 payload,
             )
         )
+
+    def restart_update(self) -> dict:
+        if len(webview.windows)>1:
+            return {"ok":False,"error":"请先关闭登录与官网窗口"}
+        result=desktop_auth_request(self._backend_url,self._desktop_auth_token,"update-restart",{},timeout=15)
+        if result.get("ok"):
+            threading.Timer(.4,self._window.destroy).start()
+        return result
 
     def _notify(self, text: str) -> None:
         if self._window is None:
@@ -298,6 +311,25 @@ class DesktopApi:
             self._auth_request("app-cancel", {"authorizeUrl": url})
             return {"ok": False, "error": "系统浏览器暂时无法打开，请重试"}
 
+    def open_source_link(self, value: str) -> dict:
+        destination=web_link(value)
+        if not destination:
+            return {"ok":False,"error":"来源链接无效"}
+        try:
+            os.startfile(destination)
+            return {"ok":True}
+        except OSError:
+            return {"ok":False,"error":"系统浏览器暂时无法打开，可右键复制来源链接"}
+
+    def pixiv_open_artwork(self, identifier: str) -> dict:
+        if not isinstance(identifier,str) or not re.fullmatch(r"[1-9][0-9]{0,29}",identifier):
+            return {"ok":False,"error":"作品 ID 无效"}
+        try:
+            os.startfile("https://www.pixiv.net/artworks/"+identifier)
+            return {"ok":True}
+        except OSError:
+            return {"ok":False,"error":"系统浏览器暂时无法打开，可右键复制官网链接"}
+
     def pixiv_official_author(self, author: str) -> dict:
         if not isinstance(author, str) or not re.fullmatch(r"[0-9]{1,30}", author):
             return {"ok": False, "error": "作者 ID 无效"}
@@ -421,20 +453,22 @@ class DesktopApi:
 
 
 @contextmanager
-def selected_webview_proxy(proxy: str):
+def selected_webview_proxy(proxy: str, *, background_timers: bool = False):
     """Use the backend's selected local proxy for every window in this host."""
-    if not proxy:
+    if not proxy and not background_timers:
         yield
         return
-    clean = normalize_loopback_proxy(proxy)
-    if not clean:
+    clean = normalize_loopback_proxy(proxy) if proxy else ""
+    if proxy and not clean:
         raise ValueError("桌面代理地址无效")
     name = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
     inherited = os.environ.get(name)
-    os.environ[name] = (
-        f"{inherited or ''} --proxy-server={clean} "
-        "--proxy-bypass-list=127.0.0.1;localhost;[::1]"
-    ).strip()
+    arguments = [inherited or ""]
+    if clean:
+        arguments.extend([f"--proxy-server={clean}", "--proxy-bypass-list=127.0.0.1;localhost;[::1]"])
+    if background_timers:
+        arguments.extend(["--disable-background-timer-throttling", "--disable-renderer-backgrounding"])
+    os.environ[name] = " ".join(arguments).strip()
     try:
         yield
     finally:
@@ -454,7 +488,14 @@ def _fit_main_window(window) -> None:
 
     native = window.native
     native.WindowState = FormWindowState.Normal
-    window._native_frame = NativeWindowFrame(native)
+    def browser_navigation(direction):
+        core = native.webview.CoreWebView2
+        if core is None:
+            return False
+        core.PostWebMessageAsJson(json.dumps({"type":"moku-history","direction":direction}))
+        return True
+
+    window._native_frame = NativeWindowFrame(native, browser_navigation=browser_navigation)
     area = Screen.FromHandle(native.Handle).WorkingArea
     get_dpi = ctypes.windll.user32.GetDpiForWindow
     get_dpi.argtypes = [wintypes.HWND]
@@ -489,7 +530,7 @@ def start_desktop(
     )
     webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = True
     window = webview.create_window(
-        f"MOKU Lite v{__version__} — Pixiv 搜图与采集",
+        f"MOKU v{__version__} — Pixiv 搜图与采集",
         url,
         js_api=api,
         width=1180,
@@ -507,7 +548,7 @@ def start_desktop(
     storage_path.mkdir(parents=True, exist_ok=True)
     # Windows proxy selection remains dynamic in the native browser. Only an
     # explicit environment proxy needs bridging: WebView2 ignores HTTPS_PROXY.
-    with selected_webview_proxy(native_override):
+    with selected_webview_proxy(native_override, background_timers=True):
         if startup is None:
             webview.start(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
         else:

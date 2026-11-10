@@ -1,4 +1,11 @@
 # Python caches and local environments
+# Release secrets never belong in this repository (public anchors are Python).
+*.dpapi
+*.pfx
+*.p12
+*.key
+*.pem
+/signing-private/
 __pycache__/
 *.py[cod]
 .venv/

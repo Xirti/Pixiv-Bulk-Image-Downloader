@@ -41,7 +41,7 @@
     const selection = getSelection();
     const node = target.closest("p,h1,h2,h3,h4,dd,dt,code,span,label,a,b,small,strong");
     const selected = selection?.rangeCount && selection.getRangeAt(0).intersectsNode(target) ? selection.toString() : "";
-    const text = selected || node?.textContent.trim();
+    const text = selected || (node?.matches("a[data-copy-link]") ? node.href : node?.textContent.trim());
     return text ? {node:node || target, text, range:selected && selection.rangeCount ? selection.getRangeAt(0).cloneRange() : null, writable:false, focus:document.activeElement} : null;
   }
 

@@ -1,14 +1,17 @@
 "use strict";
 
 // One relationship owner for every card/detail. It never touches download selection or images.
-globalThis.createCloudControls = function ({request,session,login,report,changed,preferencesChanged,official,cachedTags=()=>null,cleared=()=>{},prepareAccount=()=>Promise.resolve(),clearStarted=()=>Promise.resolve()}) {
-  const defaults={bookmarkDefault:"ask",followDefault:"ask",bookmarkLast:"private",followLast:"private",autoSync:true,syncMinutes:"10",saveRoot:"",createFolder:true,previewLayout:"adaptive",previewAction:"expand",previewSize:"large"};
+globalThis.createCloudControls = function ({request,session,login,report,changed,preferencesChanged,official,cachedTags=()=>null,cleared=()=>{},prepareAccount=()=>Promise.resolve(),clearStarted=()=>Promise.resolve(),checkUpdates=()=>Promise.resolve({})}) {
+  const defaults={bookmarkDefault:"ask",followDefault:"ask",bookmarkLast:"private",followLast:"private",autoSync:true,syncMinutes:"10",autoRanking:true,autoFollowing:true,autoRecommended:true,saveRoot:"",createFolder:true,mediaMemory:"normal",previewLayout:"adaptive",previewAction:"expand",previewSize:"large",sensitiveMask:"both",autoLoadPages:false,orderTags:"default",orderAuthor:"default",orderUid:"default",orderPid:"default",orderRecommended:"default",orderRanking:"default",showLoadButton:true,updateDots:true};
   let prefs={...defaults},states={bookmark:new Map(),follow:new Map()},syncState={},owner=null;
   let epoch=0,sessionKey="",settingsPromise=null,prefsLoaded=false,hydration=null,hydrationAgain=false,hydratedKey="",timer=null,syncError="";
   let popup=null,anchor=null,popupVersion=0,readVersion=0,syncBusy=false,lastSyncAttempt=0,syncTurn=0;
   let autoNotBefore=0,syncRequest=null;
   let clearing=false,accountPrepared=false,auxiliaryBusy=false,auxiliaryCompleted=0,auxiliaryError="";
+  let preferenceWrites=Promise.resolve();
+  let updatesBusy=false,lastUpdateCheck=0,updatesRemaining=false;
   const busy=new Set(),manual=new Set(),restart=new Set();
+  const painted=new WeakMap();
   const post=(path,data,timeout=90000)=>request(path,{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({...data,authorizationGeneration:session().generation})},timeout);
   const key=(kind,id)=>`${kind}:${id}`;
@@ -16,15 +19,18 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   const sameEpoch=(revision,generation)=>revision===epoch && generation===session().generation;
 
   function paint(){
+    const logged=session().logged;
     document.querySelectorAll("[data-cloud-kind][data-cloud-id]").forEach(button=>{
       const kind=button.dataset.cloudKind,id=button.dataset.cloudId,state=get(kind,id),pending=busy.has(key(kind,id));
       const self=kind==="follow" && id===owner;
+      const signature=JSON.stringify([kind,id,self,pending,logged,state.known,state.active,state.privacy]);
+      if(painted.get(button)===signature)return;
       button.hidden=self;
       button.disabled=pending;
       button.classList.toggle("is-active",state.active===true);
-      button.classList.toggle("is-unknown",session().logged && !state.known);
+      button.classList.toggle("is-unknown",logged && !state.known);
       button.classList.toggle("is-pending",pending);
-      button.setAttribute("aria-pressed",!state.known && session().logged?"mixed":state.active===true?"true":"false");
+      button.setAttribute("aria-pressed",!state.known && logged?"mixed":state.active===true?"true":"false");
       button.setAttribute("aria-busy",String(pending));
       const name=kind==="bookmark"?"收藏":"关注",privacy=state.privacy==="private"?"私密":state.privacy==="public"?"公开":"";
       button.title=pending?"正在提交云端…":state.known?`${state.active?`已${privacy}${name}，点击管理`:`${name}（云端）`}`:`管理${name}（提交时核对）`;
@@ -33,6 +39,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       if(text){const value=pending?"处理中…":state.active?`已${name}`:name;if(text.textContent!==value)text.textContent=value;}
       const mark=button.querySelector("[data-follow-mark]");
       if(mark && mark.textContent!==(state.active?"√":"＋"))mark.textContent=state.active?"√":"＋";
+      painted.set(button,signature);
     });
   }
   function apply(kind,id,state){states[kind].set(id,state);paint();}
@@ -44,7 +51,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     popup.style.left=`${Math.max(8,Math.min(innerWidth-box.width-8,rect.right-box.width))}px`;
     popup.style.top=`${Math.max(8,Math.min(innerHeight-box.height-8,rect.bottom+8))}px`;
   }
-  function notifySettings(){preferencesChanged({...prefs},{...structuredClone(syncState),error:syncError || auxiliaryError,manual:manual.size>0,preparing:auxiliaryBusy,prepared:auxiliaryCompleted},prefsLoaded);}
+  function notifySettings(){preferencesChanged({...prefs},{...structuredClone(syncState),error:syncError || auxiliaryError,manual:manual.size>0,preparing:auxiliaryBusy,prepared:auxiliaryCompleted,clearing,requesting:syncBusy},prefsLoaded);}
   async function prepareAccountData(options){
     const revision=epoch,generation=session().generation;
     if(auxiliaryBusy || clearing || !session().logged)return;
@@ -68,22 +75,25 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     if(!settingsPromise){let pending;pending=loadPreferences().finally(()=>{if(settingsPromise===pending)settingsPromise=null;});settingsPromise=pending;}
     return settingsPromise;
   }
-  async function savePreferences(patch){
+  function savePreferences(patch){
     const revision=epoch,generation=session().generation;
-    const data=await post("/api/settings",{settings:patch},20000);
-    if(!sameEpoch(revision,generation))throw new Error("账号已改变，请重新打开设置");
-    const wasAutomatic=prefs.autoSync;
-    prefs=data.settings;notifySettings();lastSyncAttempt=0;
-    if(wasAutomatic && !prefs.autoSync)await clearStarted();
-    if(!wasAutomatic && prefs.autoSync){accountPrepared=false;auxiliaryCompleted=0;void tick();}
-    return {...prefs};
+    const pending=preferenceWrites.catch(()=>{}).then(async()=>{
+      if(!sameEpoch(revision,generation))throw new Error("账号已改变，请重新打开设置");
+      const data=await post("/api/settings",{settings:patch},20000);
+      if(!sameEpoch(revision,generation))throw new Error("账号已改变，请重新打开设置");
+      const wasAutomatic=prefs.autoSync;
+      prefs=data.settings;notifySettings();lastSyncAttempt=0;
+      if(wasAutomatic && !prefs.autoSync)await clearStarted();
+      if(!wasAutomatic && prefs.autoSync){accountPrepared=false;auxiliaryCompleted=0;void tick();}
+      return {...prefs};
+    });
+    preferenceWrites=pending;return pending;
   }
   function visibleTargets(){
     const result={bookmark:new Set(),follow:new Set()};
     document.querySelectorAll("[data-cloud-kind][data-cloud-id]").forEach(button=>{
-      if(!button.getClientRects().length)return;
       const box=button.getBoundingClientRect();
-      if(box.bottom < -500 || box.top > innerHeight+500)return;
+      if(box.width===0 || box.height===0 || box.bottom < -500 || box.top > innerHeight+500)return;
       result[button.dataset.cloudKind].add(button.dataset.cloudId);
     });
     return {works:[...result.bookmark].slice(0,100),authors:[...result.follow].slice(0,100)};
@@ -103,7 +113,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
         hydratedKey=queryKey;owner=data.owner;syncState=data.sync;
         for(const kind of ["bookmark","follow"])for(const [id,state] of Object.entries(data.states[kind])){
           const old=get(kind,id);
-          if(!old.touched || !state.touched || state.touched>=old.touched)states[kind].set(id,state);
+          if(!old.touched || state.touched>=old.touched)states[kind].set(id,state);
         }
         paint();notifySettings();
       }catch(error){
@@ -223,7 +233,14 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   }
 
   async function tick(){
-    if(document.hidden || clearing || !session().logged || syncBusy || !prefsLoaded || settingsPromise || Date.now()-lastSyncAttempt<1000)return;
+    if(clearing || !session().logged || !prefsLoaded || settingsPromise)return;
+    if(prefs.autoFollowing && Date.now()>=autoNotBefore && !updatesBusy && Date.now()-lastUpdateCheck>=(updatesRemaining?30000:Number(prefs.syncMinutes)*60000)){
+      updatesBusy=true;lastUpdateCheck=Date.now();const revision=epoch,generation=session().generation;
+      void checkUpdates({continuing:updatesRemaining}).then(result=>{if(sameEpoch(revision,generation))updatesRemaining=Boolean(result.hasMore);})
+        .catch(error=>{if(sameEpoch(revision,generation))report(`新作检查未完成：${error.message}`);})
+        .finally(()=>{if(sameEpoch(revision,generation))updatesBusy=false;});
+    }
+    if(syncBusy || !manual.size && Date.now()-lastSyncAttempt<1000)return;
     if(prefs.autoSync && Date.now()>=autoNotBefore && (!accountPrepared || (Date.now()/1000-auxiliaryCompleted)/60>=Number(prefs.syncMinutes))){
       void prepareAccountData({network:true,refresh:accountPrepared});
     }
@@ -243,8 +260,8 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       if(!sameEpoch(revision,generation))return;
       await hydrate(true);notifySettings();
     }catch(error){
-      if(revision===epoch){syncError=error.message;lastSyncAttempt=Date.now()+55000;notifySettings();}
-    }finally{syncBusy=false;syncRequest=null;if(sameEpoch(revision,generation))setTimeout(()=>{void tick();},1100);}
+      if(revision===epoch){syncError=error.message;lastSyncAttempt=Date.now()+55000;manual.clear();restart.clear();notifySettings();}
+    }finally{syncBusy=false;syncRequest=null;if(sameEpoch(revision,generation)){notifySettings();setTimeout(()=>{void tick();},1100);}}
   }
   async function clearCache(){
     if(!session().logged){login();throw new Error("请先登录后清除当前账号缓存");}
@@ -259,12 +276,13 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       await post("/api/cloud/clear-cache",{},30000);
       if(generation!==session().generation)throw new Error("账号已改变，请重新操作");
       states={bookmark:new Map(),follow:new Map()};syncState={};hydratedKey="";syncError="";auxiliaryError="";
+      lastUpdateCheck=0;updatesRemaining=false;
       auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;
       cleared();paint();notifySettings();report("当前账号缓存已清除");
     }finally{clearing=false;}
   }
   function refresh(){
-    if(clearing)return;
+    if(clearing || manual.size || syncBusy)return;
     if(!session().logged){login();report("请先登录 Pixiv，再同步云端状态");return;}
     for(const kind of ["bookmark","follow"]){manual.add(kind);restart.add(kind);}
     hydratedKey="";lastSyncAttempt=0;syncError="";notifySettings();void hydrate(true);void tick();
@@ -274,6 +292,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     const value=session(),next=JSON.stringify([value.logged,value.generation,value.method]);
     if(next===sessionKey)return;
     sessionKey=next;epoch++;readVersion++;close();busy.clear();manual.clear();restart.clear();
+    updatesBusy=false;lastUpdateCheck=0;updatesRemaining=false;
     void clearStarted();
     auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;auxiliaryError="";
     states={bookmark:new Map(),follow:new Map()};syncState={};owner=null;hydratedKey="";lastSyncAttempt=0;autoNotBefore=0;
@@ -301,7 +320,11 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   },true);
   document.addEventListener("keydown",event=>{if(event.key==="Escape" && popup){event.preventDefault();event.stopPropagation();readVersion++;close();}});
   document.addEventListener("scroll",schedule,true);window.addEventListener("resize",schedule);
-  new MutationObserver(schedule).observe(document.body,{subtree:true,childList:true});
+  new MutationObserver(records=>{
+    const selector="[data-cloud-kind][data-cloud-id]";
+    if(records.some(record=>[...record.addedNodes,...record.removedNodes].some(node=>
+      node.nodeType===1 && (node.matches(selector) || node.querySelector(selector)))))schedule();
+  }).observe(document.body,{subtree:true,childList:true});
   setInterval(()=>{void tick();},5000);
-  return {setSession,hydrate,refresh,clearCache,savePreferences,ready,getPreferences:()=>({...prefs}),getSync:()=>structuredClone(syncState)};
+  return {get busy(){return busy.size>0;},settled:()=>preferenceWrites,setSession,hydrate,refresh,clearCache,savePreferences,ready,getPreferences:()=>({...prefs}),getSync:()=>structuredClone(syncState)};
 };

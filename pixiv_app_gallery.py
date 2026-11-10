@@ -20,14 +20,16 @@ def proxy_image(value):
     return "/api/pixiv/image?" + urlencode({"url": value})
 
 
-def number(raw, key, *, minimum=0):
+def number(raw, key, *, minimum=0, optional=False):
     value = raw.get(key)
     if type(value) is not int or value < minimum:
+        if optional:
+            return None
         raise PixivPolicyError("App 作品字段无效：" + key)
     return value
 
 
-def normalize_work(raw, *, allow_r18=False, detail=False):
+def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True):
     if not isinstance(raw, dict) or raw.get("visible") is not True:
         raise PixivPolicyError("App 作品当前不可见")
     restriction = number(raw, "x_restrict")
@@ -63,7 +65,7 @@ def normalize_work(raw, *, allow_r18=False, detail=False):
         "title": str(raw.get("title") or "未命名作品"), "artist": str(uid.get("name") or "未知画师"), "userId": artist,
         "pages": count, "width": width, "height": height, "tags": list(dict.fromkeys(translated)),
         "date": publication_date(raw.get("create_date")), "sortDate": publication_timestamp(raw.get("create_date")),
-        "bookmarks": number(raw, "total_bookmarks"), "description": html.unescape(re.sub(r"<[^>]+>", " ", str(raw.get("caption") or ""))),
+        "bookmarks": number(raw, "total_bookmarks", optional=not require_bookmarks), "description": html.unescape(re.sub(r"<[^>]+>", " ", str(raw.get("caption") or ""))),
         "workType": "illustration" if kind == "illust" else kind, "aiGenerated": ai == 2, "thumb": thumb,
         "qualities": [{"id":"original","label":"Pixiv 原图","width":width,"height":height},{"id":"regular","label":"Pixiv 常规预览","width":0,"height":0}],
         "formats": [{"id":"source","label":"保留源格式（推荐）"}]}

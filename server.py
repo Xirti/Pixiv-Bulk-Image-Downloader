@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# MOKU — Xirti / Aperia
+# Source: https://github.com/Xirti/Pixiv-Bulk-Image-Downloader
 from __future__ import annotations
 
 import json
@@ -62,15 +65,19 @@ from version import __version__
 
 from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 from artist_service import ArtistService
-from account_pages import AccountPages, ACCOUNT_CACHE_ONLY
+from account_pages import AccountPages, ACCOUNT_CACHE_ONLY, source_body
+from pixiv_adapter import bookmark_count, validate_detail_policy
 from discovery_service import DiscoveryService, DiscoveryInputError
+from popularity_service import PopularityService
 from account_authorization import AccountAuthorization
 from pixiv_account import AccountError
 from auth_method import AuthMethod
-from pixiv_app_gallery import AppGallery
+from pixiv_app_gallery import AppGallery, normalize_work
 from cloud_state import CloudState, validate_preferences
 from cloud_actions import CloudActions, CloudActionError, validate_target, validate_intent
 from web_cloud import WebCloudTransport
+from source_search import SourceSearch, SourceSearchError, MAX_UPLOAD
+from app_updates import AppUpdates, UpdateError
 
 
 ROOT = Path(__file__).resolve().parent
@@ -120,6 +127,8 @@ WORKSPACE_STORE = WorkspaceStore(history_path().with_name("workspace.sqlite3"))
 GUIDE_SEEN_MARKER = history_path().with_name("guide-v1.seen")
 REQUEST_COORDINATOR = RequestCoordinator(history_path().with_name("request-settings.json"), shared=SharedRequestBudget())
 AUTH_METHOD = AuthMethod(history_path().with_name("auth-method.json"))
+SOURCE_SEARCH = SourceSearch(history_path().with_name("source-search"), proxy=lambda: PIXIV_PROXY)
+APP_UPDATES = AppUpdates(history_path().with_name("app-updates.json"))
 DOWNLOAD_AHEAD = DownloadAhead(capacity=2)
 MAX_AHEAD_BYTES = 1024 * 1024 * 1024
 
@@ -519,6 +528,7 @@ def clear_authorized_state(*, force: bool = True) -> bool:
         DETAIL_RESOURCES.clear()
         ARTISTS.clear()
         APP_GALLERY.clear()
+        POPULARITY.invalidate()
         ACCOUNTS.invalidate()
         restricted_sessions = list(SEARCH_SESSIONS)
         with PIXIV_STATE_LOCK:
@@ -1460,6 +1470,36 @@ def check_app_request(generation, cancel_event=None):
 
 APP_GALLERY=AppGallery(lambda path,check:ACCOUNTS.account().request("GET",path,check=check),check_app_request)
 
+def popularity_bookmark_metadata(identifier, mode, generation):
+    ACCOUNTS.check(generation)
+    if AUTH_METHOD.get()=="app":
+        raw=ACCOUNTS.account().request("GET","/v1/illust/detail?"+urllib.parse.urlencode({"illust_id":identifier,"filter":"for_android"}),
+            check=lambda:ACCOUNTS.check(generation))
+        body=normalize_work(raw.get("illust"),allow_r18=mode!="safe",require_bookmarks=False)
+        if body["id"]!=identifier:
+            raise AccountError("invalid_data","收藏数摘要的作品身份不符")
+        return {"bookmarks":body["bookmarks"]}
+    body=source_body(pixiv_json(f"https://www.pixiv.net/ajax/illust/{identifier}?lang=zh"))
+    if str(body.get("id"))!=identifier:
+        raise AccountError("invalid_data","收藏数摘要的作品身份不符")
+    validate_detail_policy(body,allow_r18=mode!="safe")
+    ACCOUNTS.check(generation)
+    return {"bookmarks":bookmark_count(body)}
+
+def popularity_search_metadata(job, generation, cancel_event):
+    ACCOUNTS.check(generation)
+    result=search_pixiv_results(job["query"],job["mode"],job["sourcePage"],job["workType"],job["includeAi"],
+        authorized=True,authorization_epoch=generation,cancel_event=cancel_event,fuzzy=job["fuzzy"],
+        start_date=job["startDate"],end_date=job["endDate"],snapshot_id=job["index"],authorize_images=False)
+    ACCOUNTS.check(generation)
+    return result
+
+
+POPULARITY=PopularityService(pages=ACCOUNTS, context=CLOUD.context, discovery=DISCOVERY,
+    app_get=lambda path,generation:ACCOUNTS.account().request("GET",path,check=lambda:ACCOUNTS.check(generation)),
+    web_get=lambda url:search_pixiv_json(url,None),
+    detail=popularity_bookmark_metadata, search_get=popularity_search_metadata)
+
 
 def reset_search_caches() -> None:
     cancel_all_search_requests()
@@ -2063,6 +2103,7 @@ def search_pixiv_results(
     start_date: str = "",
     end_date: str = "",
     snapshot_id: str = "",
+    authorize_images: bool = True,
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     snapshot_id = parse_search_snapshot_id(snapshot_id)
@@ -2071,7 +2112,8 @@ def search_pixiv_results(
         generation=authorization_generation()
         result=APP_GALLERY.search(tag_query,scope,page,work_type,include_ai,generation=generation,fuzzy=fuzzy,
             start_date=start_date,end_date=end_date,snapshot_id=snapshot_id,cancel_event=cancel_event,prefetch=prefetch)
-        result["items"]=[authorize_item_images(item,authorization_epoch=generation,account_bound=True) for item in result["items"]]
+        if authorize_images:
+            result["items"]=[authorize_item_images(item,authorization_epoch=generation,account_bound=True) for item in result["items"]]
         assert_authorization_generation(generation)
         return result
     if work_type not in {"all", "illustration", "manga", "ugoira"}:
@@ -2350,7 +2392,7 @@ def search_pixiv_results(
                     authorization_epoch=authorization_epoch,
                 )
                 for item in selected
-            ]
+            ] if authorize_images else copy.deepcopy(selected)
             preloaded_through = SEARCH_PAGE_CACHE.preloaded_through(session_key)
         if scope in {"r18", "all"}:
             try:
@@ -3824,7 +3866,7 @@ class Handler(SimpleHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             return False
 
-    def read_json_object(self, max_bytes: int) -> dict:
+    def read_body(self, max_bytes: int) -> bytes:
         if self.headers.get("Transfer-Encoding"):
             raise RequestInputError(400, "请求不支持 Transfer-Encoding")
         lengths = self.headers.get_all("Content-Length") or []
@@ -3844,6 +3886,10 @@ class Handler(SimpleHTTPRequestHandler):
             raise RequestInputError(408, "读取请求正文超时") from exc
         if len(raw) != length:
             raise RequestInputError(400, "请求正文不完整")
+        return raw
+
+    def read_json_object(self, max_bytes: int) -> dict:
+        raw = self.read_body(max_bytes)
         try:
             data = json.loads(raw or b"{}")
         except (UnicodeError, json.JSONDecodeError) as exc:
@@ -3858,7 +3904,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not trusted_local_request(self):
             self.send_json({"error": "请求只允许本机同源界面调用"}, 403)
             return True
-        image_capability = path == "/api/pixiv/image"
+        image_capability = path in {"/api/pixiv/image", "/api/source-search/image"}
         if path != "/api/health" and not image_capability and not valid_request_token(self):
             self.send_json({"error": "请求授权令牌无效"}, 403)
             return True
@@ -3868,6 +3914,20 @@ class Handler(SimpleHTTPRequestHandler):
         request = urllib.parse.urlparse(self.path)
         if self._reject_untrusted_api_get(request.path):
             return
+        if request.path.startswith("/api/source-search/"):
+            try:
+                query = urllib.parse.parse_qs(request.query)
+                if request.path == "/api/source-search/settings":
+                    return self.send_json(SOURCE_SEARCH.settings())
+                if request.path == "/api/source-search/job":
+                    return self.send_json(SOURCE_SEARCH.snapshot(query.get("id", [""])[0]))
+                if request.path == "/api/source-search/image":
+                    return self.send_bytes(SOURCE_SEARCH.image(query.get("token", [""])[0]), "image/jpeg", "private, max-age=900")
+                return self.send_json({"error": "not found"}, 404)
+            except SourceSearchError as exc:
+                return self.send_json({"error": str(exc)}, exc.status)
+            except OSError:
+                return self.send_json({"error": "无法读取搜图配置或凭据，请检查本机权限"}, 500)
         if request.path == "/api/health":
             payload = {
                 "ok": True,
@@ -3881,12 +3941,16 @@ class Handler(SimpleHTTPRequestHandler):
             if health_request_may_disclose_token(self):
                 payload["requestToken"] = REQUEST_TOKEN
             return self.send_json(payload)
+        if request.path == "/api/updates":
+            return self.send_json(APP_UPDATES.snapshot())
         if request.path in {"/api/settings", "/api/cloud/state"}:
             return self._get_cloud(request)
         if request.path.startswith("/api/account/"):
             return self._get_account(request)
         if request.path == "/api/discovery":
             return self._get_discovery(request)
+        if request.path == "/api/popularity":
+            return self._get_popularity(request)
         if request.path == "/api/ui/guide":
             try:
                 return self.send_json({"seen": GUIDE_SEEN_MARKER.is_file()})
@@ -3908,6 +3972,17 @@ class Handler(SimpleHTTPRequestHandler):
                 "network": public_network_state(windows_proxy_state()),
                 "requestPolicy": {**policy, "browserProfile": getattr(PIXIV_OPENER, "profile", "compatibility")},
             })
+        if request.path == "/api/library/statistics":
+            query = urllib.parse.parse_qs(request.query)
+            try:
+                raw_year = query.get("year", [None])[0]
+                year = int(raw_year) if raw_year is not None else None
+                result = DOWNLOAD_HISTORY.statistics(year=year)
+            except ValueError:
+                return self.send_json({"error": "统计年份或记录日期无效"}, 400)
+            except (OSError, sqlite3.Error):
+                return self.send_json({"error": "无法读取本机下载统计，请检查资料目录"}, 500)
+            return self.send_json(result)
         if request.path == "/api/library/history":
             query = urllib.parse.parse_qs(request.query)
             try:
@@ -4086,6 +4161,7 @@ class Handler(SimpleHTTPRequestHandler):
                     with SEARCH_SESSION_LOCKS_GUARD:
                         assert_authorization_generation(generation)
                         DISCOVERY.invalidate()
+                        POPULARITY.invalidate()
                         ACCOUNTS.clear_cache(owner)
                         CLOUD_STATE.clear_account(owner)
                         CLOUD.scans = {key: value for key, value in CLOUD.scans.items() if key[0] != owner}
@@ -4173,6 +4249,47 @@ class Handler(SimpleHTTPRequestHandler):
             if check_token is not None:ACCOUNT_REQUEST_CHECK.reset(check_token)
             if request_id and cancel_event is not None:release_search_request(request_id,cancel_event)
 
+    def _get_popularity(self, request):
+        query=urllib.parse.parse_qs(request.query)
+        request_id=None;cancel_event=None;check_token=None;priority_token=None
+        try:
+            if query.get("includeAi",["true"])[0] not in {"true","false"} or query.get("fuzzy",["false"])[0] not in {"true","false"}:
+                raise ValueError("搜索筛选无效")
+            request_id=parse_search_request_id(query.get("requestId",[""])[0])
+            if request_id:cancel_event=register_search_request(request_id)
+            connected,generation=validated_authorization()
+            if not connected:raise AccountError("reauth","请先连接 Pixiv 账号再准备人气排序")
+            from pixiv_account import ACCOUNT_REQUEST_CHECK
+            def check():
+                raise_if_search_cancelled(cancel_event)
+                assert_authorization_generation(generation)
+            check_token=ACCOUNT_REQUEST_CHECK.set(check)
+            priority_token=REQUEST_PRIORITY.set(1)
+            ensure_network_opener_current()
+            result=POPULARITY.read(generation=generation,kind=query.get("kind",[""])[0],
+                uid=query.get("uid",[""])[0],batch=query.get("batch",[""])[0],mode=query.get("mode",["safe"])[0],
+                work_type=query.get("workType",["all"])[0],include_ai=query.get("includeAi",["true"])[0]=="true",
+                start=query.get("startDate",[""])[0],end=query.get("endDate",[""])[0],
+                index=query.get("index",[""])[0],page=int(query.get("page",["1"])[0]),
+                refresh=query.get("refresh",[""])[0]=="1",query=query.get("query",[""])[0],
+                fuzzy=query.get("fuzzy",["false"])[0]=="true",cancel_event=cancel_event)
+            result["items"]=[authorize_item_images(item,authorization_epoch=generation,account_bound=True) for item in result["items"]]
+            check()
+            return self.send_json(result)
+        except (ValueError,SearchInputError,SearchRequestLimitError) as error:
+            return self.send_json({"error":str(error)},400)
+        except SearchCancelledError:
+            return self.send_json({"cancelled":True},499)
+        except PIXIV_OPERATION_ERRORS as error:
+            return self.send_json({"error":str(error) if isinstance(error,(AccountError,RequestDeferredError)) else "排序元数据读取失败，请重试",
+                "errorKind":getattr(error,"kind","read")},502)
+        except sqlite3.Error:
+            return self.send_json({"error":"排序缓存读写失败，请检查资料目录"},500)
+        finally:
+            if priority_token is not None:REQUEST_PRIORITY.reset(priority_token)
+            if check_token is not None:ACCOUNT_REQUEST_CHECK.reset(check_token)
+            if request_id and cancel_event is not None:release_search_request(request_id,cancel_event)
+
     def _get_account(self, request):
         kind = request.path.removeprefix("/api/account/")
         if kind == "authorization":
@@ -4212,7 +4329,12 @@ class Handler(SimpleHTTPRequestHandler):
             cache_token=ACCOUNT_CACHE_ONLY.set(query.get("cached",[""])[0]=="1")
             priority_token=REQUEST_PRIORITY.set(1 if query.get("background",[""])[0]=="1" else 0)
             result = ACCOUNTS.read(kind, scope=scope, offset=offset, tag=tag, generation=generation,
-                mode=mode, refresh=query.get("refresh", [""])[0] == "1")
+                mode=mode, refresh=query.get("refresh", [""])[0] == "1",
+                check_updates=CLOUD_STATE.preferences(workspace_scope())["autoFollowing"])
+            if kind=="updates" and result.get("authors"):
+                states=CLOUD_STATE.many(result["uid"],AUTH_METHOD.get(),[],list(result["authors"]))["follow"]
+                result["authors"]={author:value for author,value in result["authors"].items()
+                    if not states[author]["known"] or states[author]["active"] and states[author]["privacy"] in {None,scope}}
             if kind in {"following","bookmarks"}:
                 with SEARCH_SESSION_LOCKS_GUARD:
                     assert_authorization_generation(generation)
@@ -4248,17 +4370,32 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_account_seen(self, data):
         author = data.get("author")
-        if not isinstance(author, str) or not valid_pixiv_id(author):
+        authors=data.get("authors")
+        if authors is not None:
+            if not isinstance(authors,dict) or len(authors)>500:
+                return self.send_json({"error":"已读作者列表无效"},400)
+            for identifier,stamp in authors.items():
+                if not valid_pixiv_id(identifier) or not isinstance(stamp,str) or len(stamp)>32:
+                    return self.send_json({"error":"已读作者或时间无效"},400)
+                try:
+                    parsed=datetime.fromisoformat(stamp)
+                    if parsed.tzinfo is None or parsed.astimezone(timezone.utc).isoformat(timespec="seconds")!=stamp:raise ValueError()
+                except ValueError:
+                    return self.send_json({"error":"已读时间无效"},400)
+        elif not isinstance(author, str) or not valid_pixiv_id(author):
             return self.send_json({"error": "作者 ID 无效"}, 400)
         try:
             connected, generation = validated_authorization()
             if not connected:
                 raise AccountError("reauth", "请先连接账号")
-            ACCOUNTS.seen(generation, author)
+            if authors is not None:ACCOUNTS.acknowledge_updates(generation,authors)
+            else:ACCOUNTS.seen(generation, author)
             assert_authorization_generation(generation)
             return self.send_json({"ok": True})
         except PIXIV_OPERATION_ERRORS:
             return self.send_json({"error": "查看状态暂未保存，请重试"}, 502)
+        except sqlite3.Error:
+            return self.send_json({"error":"查看状态未能写入本机缓存，请重试"},500)
 
     def _post_account_callback(self, data):
         try:
@@ -4531,7 +4668,47 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
+        if path.startswith("/api/source-search/"):
+            if path == "/api/source-search/query":
+                authorization_error = None if trusted_local_request(self) and valid_request_token(self) else (403, "请求授权无效")
+            elif path == "/api/source-search/browser":
+                authorization_error = None if trusted_local_request(self) else (403, "只允许本机调用")
+            else:
+                authorization_error = validate_mutating_request(self)
+            if authorization_error:
+                return self.send_json({"error": authorization_error[1]}, authorization_error[0])
+            try:
+                if path == "/api/source-search/query":
+                    raw = self.read_body(MAX_UPLOAD)
+                    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    return self.send_json(SOURCE_SEARCH.start(raw, query.get("mode", [""])[0], f"http://127.0.0.1:{self.server.server_port}"))
+                data = self.read_json_object(1024 * 1024 if path.endswith("/browser") else 4096)
+                if path == "/api/source-search/login":
+                    return self.send_json(SOURCE_SEARCH.open_login(f"http://127.0.0.1:{self.server.server_port}"))
+                if path == "/api/source-search/continue":
+                    identity = data.get("id")
+                    if not isinstance(identity, str):
+                        raise SourceSearchError("查询标识无效")
+                    return self.send_json(SOURCE_SEARCH.continue_api(identity, f"http://127.0.0.1:{self.server.server_port}"))
+                if path == "/api/source-search/browser":
+                    identity = data.get("id")
+                    if not isinstance(identity, str):
+                        raise SourceSearchError("查询标识无效")
+                    return self.send_json(SOURCE_SEARCH.browser(identity, self.headers.get("X-MOKU-Source-Capability", ""), data))
+                if path == "/api/source-search/settings":
+                    return self.send_json(SOURCE_SEARCH.configure(data))
+                if path == "/api/source-search/cancel":
+                    identity = data.get("id")
+                    if not isinstance(identity, str):
+                        raise SourceSearchError("查询标识无效")
+                    return self.send_json(SOURCE_SEARCH.cancel(identity))
+                return self.send_json({"error": "not found"}, 404)
+            except (SourceSearchError, RequestInputError) as exc:
+                return self.send_json({"error": str(exc)}, exc.status)
+            except OSError:
+                return self.send_json({"error": "搜图本机操作失败，请检查资料目录及凭据权限"}, 500)
         desktop_auth_path = path in {
+            "/api/desktop/update-restart",
             "/api/desktop/auth/session",
             "/api/desktop/auth/logout",
             "/api/desktop/auth/context",
@@ -4547,6 +4724,8 @@ class Handler(SimpleHTTPRequestHandler):
         if authorization_error:
             return self.send_json({"error": authorization_error[1]}, authorization_error[0])
         routes = {
+            "/api/updates": (2048, self._post_updates),
+            "/api/desktop/update-restart": (1024, self._post_update_restart),
             "/api/ui/guide": (1024, self._post_guide_seen),
             "/api/network/policy": (1024, self._post_request_policy),
             "/api/settings": (16384, self._post_cloud),
@@ -4562,7 +4741,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/desktop/auth/app-connect": (1024, self._post_desktop_app_connect),
             "/api/desktop/auth/app-cancel": (8192, self._post_desktop_app_cancel),
             "/api/desktop/auth/official-context": (1024, self._post_official_context),
-            "/api/account/seen": (1024, self._post_account_seen),
+            "/api/account/seen": (65536, self._post_account_seen),
             "/api/account/callback": (16384, self._post_account_callback),
             "/api/system/select-folder": (4096, self._post_select_folder),
             "/api/library/history/clear": (4096, self._post_clear_history),
@@ -4592,7 +4771,12 @@ class Handler(SimpleHTTPRequestHandler):
         }
         if is_download_task:
             def download_result() -> tuple[dict, int]:
-                if not DOWNLOAD_TASK_SLOTS.acquire(blocking=False):
+                with APP_UPDATES.gate:
+                    if APP_UPDATES.restarting:
+                        return {"error":"正在重启更新，请稍后再下载"},409
+                    admitted=DOWNLOAD_TASK_SLOTS.acquire(blocking=False)
+                    if admitted:APP_UPDATES.active_downloads+=1
+                if not admitted:
                     return {
                         "error": "下载任务繁忙，请等待当前任务完成后重试",
                         "retryable": True,
@@ -4615,7 +4799,9 @@ class Handler(SimpleHTTPRequestHandler):
                         DOWNLOAD_AHEAD.finish(keep=completed and not self._download_cancel.is_set())
                         REQUEST_PRIORITY.reset(priority_token)
                 finally:
-                    DOWNLOAD_TASK_SLOTS.release()
+                    with APP_UPDATES.gate:
+                        APP_UPDATES.active_downloads-=1
+                        DOWNLOAD_TASK_SLOTS.release()
 
             try:
                 with SEARCH_SESSION_LOCKS_GUARD:
@@ -4658,6 +4844,25 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({"error": "Pixiv 账户状态已变更，请重开窗口或刷新任务"}, 409)
                 return route[1](data)
         return route[1](data)
+
+    def _post_updates(self, data: dict):
+        try:
+            action=data.get("action")
+            if not isinstance(action,str):raise UpdateError("更新操作无效")
+            if action=="configure":result=APP_UPDATES.configure(data.get("options"))
+            elif action=="cancel":result=APP_UPDATES.cancel_download()
+            elif action in {"check","download"}:result=APP_UPDATES.start(action)
+            else:raise UpdateError("更新操作无效")
+            return self.send_json(result)
+        except UpdateError as exc:
+            return self.send_json({"error":str(exc)},400)
+        except OSError:
+            return self.send_json({"error":"无法保存更新设置，请检查资料目录权限"},500)
+
+    def _post_update_restart(self, _data: dict):
+        try:return self.send_json(APP_UPDATES.restart())
+        except UpdateError as exc:return self.send_json({"ok":False,"error":str(exc)},409)
+        except OSError:return self.send_json({"ok":False,"error":"无法准备更新，请检查目录权限和剩余空间"},500)
 
     def _post_guide_seen(self, data: dict):
         if data.get("seen") is not True:
@@ -4880,10 +5085,15 @@ class Handler(SimpleHTTPRequestHandler):
     def _post_recent_search(self, data: dict):
         try:
             action = data.get("action", "remember")
-            if action not in ("remember", "remove"):
+            if action not in ("remember", "remove", "clear"):
                 raise ValueError("invalid recent action")
-            operation = WORKSPACE_STORE.delete_recent_search if action == "remove" else WORKSPACE_STORE.remember_search
-            operation(data.get("search"), workspace_scope())
+            with SEARCH_SESSION_LOCKS_GUARD:
+                scope=workspace_scope()
+                if data.get("scope")!=scope:return self.send_json({"error":"账号状态已改变，请重试"},409)
+                if action=="clear":WORKSPACE_STORE.clear_recent_searches(scope)
+                else:
+                    operation = WORKSPACE_STORE.delete_recent_search if action == "remove" else WORKSPACE_STORE.remember_search
+                    operation(data.get("search"), scope)
             return self.send_json({"ok": True})
         except ValueError:
             return self.send_json({"error": "搜索条件无效"}, 400)

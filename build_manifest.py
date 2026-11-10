@@ -13,6 +13,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 from version import __version__
+from release_security import MANIFEST_SIGNATURE
 
 SCHEMA_VERSION = 3
 MANIFEST_NAME = "BUILD_MANIFEST.json"
@@ -52,8 +53,13 @@ BUILD_INPUT_FILES = (
     "requirements-build.lock",
     "build-portable.ps1",
     "make-release.ps1",
+    "sign-release.py",
+    "sign-windows.ps1",
+    "RELEASE_SIGNING.md",
     ".github/workflows/ci.yml",
     "README.md",
+    "NOTICE.md",
+    "USAGE.md",
     "RELEASE_NOTES.md",
     "build_manifest.py",
     "generate-third-party-licenses.py",
@@ -116,7 +122,7 @@ def distribution_snapshot(distribution_root: Path) -> tuple[dict[str, str], list
         for filename in filenames:
             path = current_path / filename
             relative = path.relative_to(root).as_posix()
-            if relative == MANIFEST_NAME:
+            if relative in {MANIFEST_NAME, MANIFEST_SIGNATURE}:
                 continue
             folded = relative.casefold()
             if any(marker in folded for marker in FORBIDDEN_WINDOWS_X64_DISTRIBUTION_MARKERS):
@@ -174,12 +180,13 @@ def expected_manifest(
     *,
     source_root: Path | None = None,
     distribution_root: Path | None = None,
+    signed: bool = False,
 ) -> dict:
     executable = Path(executable)
     distribution = Path(distribution_root or executable.parent)
     files, directories = distribution_snapshot(distribution)
     return {
-        "schemaVersion": SCHEMA_VERSION,
+        "schemaVersion": 4 if signed else SCHEMA_VERSION,
         "version": __version__,
         "sourceGeneration": source_generation(source_root=source_root),
         "exeSha256": file_sha256(executable),
@@ -194,13 +201,14 @@ def write_manifest(
     *,
     source_root: Path | None = None,
     expected_source_generation: str | None = None,
+    signed: bool = False,
 ) -> None:
     manifest = Path(manifest)
     manifest.parent.mkdir(parents=True, exist_ok=True)
     temporary = manifest.with_suffix(manifest.suffix + ".tmp")
     temporary.unlink(missing_ok=True)
 
-    payload = expected_manifest(executable, source_root=source_root)
+    payload = expected_manifest(executable, source_root=source_root, signed=signed)
     if (
         expected_source_generation is not None
         and payload["sourceGeneration"] != expected_source_generation
@@ -226,7 +234,7 @@ def verify_manifest(
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimeError("BUILD_MANIFEST.json is missing or invalid") from exc
 
-    expected = expected_manifest(executable, source_root=source_root)
+    expected = expected_manifest(executable, source_root=source_root, signed=actual.get("schemaVersion")==4)
     if actual != expected:
         raise RuntimeError(
             "Build manifest does not match the current source and executable; rebuild first"
@@ -239,6 +247,7 @@ def main() -> None:
     parser.add_argument("manifest", type=Path, nargs="?")
     parser.add_argument("executable", type=Path, nargs="?")
     parser.add_argument("--expected-source-generation")
+    parser.add_argument("--signed", action="store_true")
     args = parser.parse_args()
 
     if args.action == "source":
@@ -251,6 +260,7 @@ def main() -> None:
             args.manifest,
             args.executable,
             expected_source_generation=args.expected_source_generation,
+            signed=args.signed,
         )
         print(args.manifest)
     else:

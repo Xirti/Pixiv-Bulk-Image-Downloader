@@ -20,7 +20,13 @@ A useful report includes:
 
 Remove secrets and personal data from logs. MOKU HTTP logs intentionally omit query parameters and request bodies.
 
-## Security boundaries
+## Release authenticity
+
+Signed release builds verify their bundled manifest and managed program files locally at startup. The updater requires Ed25519-signed release metadata and file manifests; SHA-256 alone is not treated as proof of authorship. Missing or invalid signatures stop the update without replacing the working installation. User settings, credentials, caches and downloads are outside the signed component set.
+
+See [RELEASE_SIGNING.md](RELEASE_SIGNING.md) for bootstrap trust, private-key protection, encrypted backups, release steps, key rotation and limitations. Windows Authenticode publisher signing is separate and requires a certificate; an Ed25519 signature does not imply Windows publisher trust. This is integrity and provenance protection, not DRM or a restriction on MIT-licensed modifications.
+
+## Local service boundaries
 
 MOKU is designed for one Windows user on one machine:
 

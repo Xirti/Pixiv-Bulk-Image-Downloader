@@ -1,14 +1,19 @@
 "use strict";
 
 // Keep the loaded image itself; recreating <img src> repeats no-store proxy reads.
-globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Infinity}={}) {
+globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Infinity,reuseDetached=false,priority=0}={}) {
   const pages=new Map();
+  const pending=new Set(),budget=globalThis.mediaBudget;
+  function forget(image){budget?.forget(image);image.remove();}
+  function track(images,identity,image){budget?.track(image,()=>{if(images.get(identity)===image)images.delete(identity);},
+    {priority,busy:()=>pending.has(image)});}
   function drop(key){
-    for(const image of pages.get(key).values())image.remove();
+    for(const image of pages.get(key).values())forget(image);
     pages.delete(key);
   }
-  function park(root){for(const image of root.querySelectorAll("img"))image.remove();}
+  function park(root){for(const image of root.querySelectorAll("img"))image.remove();budget?.schedule();}
   function trim(){
+    for(const [key,images] of pages)if(!images.size)pages.delete(key);
     if(maxImages===Infinity)return;
     let count=[...pages.values()].reduce((total,images)=>total+images.size,0);
     if(count<=maxImages)return;
@@ -16,22 +21,37 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
       .sort((a,b)=>Number(a.image.complete && a.image.naturalWidth>0)-Number(b.image.complete && b.image.naturalWidth>0));
     for(const {images,source,image} of candidates){
       if(count<=maxImages)break;
-      image.remove();images.delete(source);count--;
+      forget(image);images.delete(source);count--;
     }
+    for(const [key,images] of pages)if(!images.size)pages.delete(key);
   }
   function place(images,placeholder,source){
     const identity=placeholder.dataset.previewArtwork || source;
     let image=images.get(identity);
+    if(!image && reuseDetached){
+      for(const previous of pages.values()){
+        const candidate=previous.get(identity);
+        if(candidate && !candidate.isConnected && candidate.complete && candidate.naturalWidth>0){
+          image=candidate;previous.delete(identity);break;
+        }
+      }
+    }
     if(image && ((image.complete && !image.naturalWidth) || image.classList.contains("image-unavailable"))){
-      image.remove();images.delete(identity);image=null;
+      forget(image);images.delete(identity);image=null;
     }
     if(image){
       const previous=(image.getAttribute("src") || "").replace(/[?&]warm=1$/,"");
       if(source && !image.naturalWidth && previous!==source)image.src=source;
+      // Keep runtime listeners, but route retries using the current card's data.
+      for(const field of ["previewArtwork","basketArtwork","restoreArtwork","sourcePreviewImage"]){
+        if(placeholder.dataset[field]===undefined)delete image.dataset[field];
+        else image.dataset[field]=placeholder.dataset[field];
+      }
       image.alt=placeholder.alt;image.className=placeholder.className;placeholder.replaceWith(image);
     }
     else{if(!source)return placeholder;image=placeholder;image.src=source;}
     images.delete(identity);images.set(identity,image);
+    track(images,identity,image);
     return image;
   }
   function mount(root,key){
@@ -47,7 +67,7 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
       used.add(identity);
       place(images,placeholder,source);
     }
-    if(!retainUnused)for(const [source,image] of images)if(!used.has(source)){image.remove();images.delete(source);}
+    if(!retainUnused)for(const [source,image] of images)if(!used.has(source)){forget(image);images.delete(source);}
     trim();
   }
   function assign(key,placeholder,source){
@@ -65,16 +85,17 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
         const item=items[cursor++],identity=String(item.id);
         if(!item.thumb)continue;
         let image=images.get(identity);
-        if(image?.complete && !image.naturalWidth){images.delete(identity);image=null;}
+        if(image?.complete && !image.naturalWidth){forget(image);images.delete(identity);image=null;}
         if(!image){
           image=new Image();image.dataset.previewArtwork=identity;image.alt=item.title;image.decoding="async";
           image.src=item.thumb+(item.thumb.includes("?")?"&":"?")+`warm=${warm}`;images.set(identity,image);
         }
-        const abort=()=>{if(!image.isConnected && !image.complete){image.removeAttribute("src");if(images.get(identity)===image)images.delete(identity);}};
+        pending.add(image);track(images,identity,image);
+        const abort=()=>{if(!image.isConnected && !image.complete){image.removeAttribute("src");if(images.get(identity)===image){forget(image);images.delete(identity);}}};
         signal.addEventListener("abort",abort,{once:true});
         try{await image.decode();}
-        catch(error){if(!signal.aborted && images.get(identity)===image && !image.isConnected)images.delete(identity);}
-        finally{signal.removeEventListener("abort",abort);}
+        catch(error){if(!signal.aborted && images.get(identity)===image && !image.isConnected){forget(image);images.delete(identity);}}
+        finally{pending.delete(image);signal.removeEventListener("abort",abort);budget?.schedule();}
       }
     }
     await Promise.all([worker(),worker()]);

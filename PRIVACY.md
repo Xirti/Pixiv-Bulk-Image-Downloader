@@ -25,7 +25,15 @@ MOKU is a local Windows application. It has no analytics, advertising SDK, crash
 
 ## Network requests
 
-MOKU contacts only the following service hosts during normal use:
+### Experimental image source search (v2.1.0 beta)
+
+- Image source search is optional and runs only after **Upload and find**. MOKU sends an image copy to **SauceNAO**, a third party: EXIF is removed, the longest edge is limited to 1200 pixels, transparency is flattened onto white, and animated images use the first frame. File names and Pixiv credentials are not sent. Matching images may be sensitive; choose what you upload.
+- Guest queries use an isolated official SauceNAO WebView2 window. Verification must be completed manually. Its cookies and browser cache persist in `library/source-search/guest-profile` to retain verification sessions; **Reset guest session** in settings removes this separate profile after its window is closed. It does not share the Pixiv browser profile or native bridge. SauceNAO pages and their verification providers may contact additional hosts as part of the official website.
+- API queries send the user's SauceNAO API Key as an HTTPS URL query parameter to `https://saucenao.com/search.php`, following the provider client protocol. Image bytes use multipart POST. Application logs omit query strings. The independent browser profile may retain a navigation URL containing the Key; clear the official-site session to remove that profile. The key is stored under `MOKU.SauceNAO.ApiKey` in Windows Credential Manager, never returned to page scripts or logs. Removing the key is separate from Pixiv logout. `source-search/settings.json` stores only the chosen query mode.
+- API verification failures offer an explicit continue-API action. The same job retains its prepared image for up to ten minutes. After manual verification, the native WebView2 host posts the image with the Key in the HTTPS URL query using NavigateWithWebResourceRequest. The key is passed only to the isolated native worker through job-scoped loopback IPC and is not interpolated into page scripts or application logs. It is present in the provider request URL. Subsequent Key queries in the current run reuse this browser transport. JSON API responses, including quota fields, are required. A resumed submission may consume quota. Prepared bytes are released on completion, cancellation, expiry or cache clearing. The official window stays open after results and can serve the next guest query. Queries are not automatically retried. At most one is active, and repeat images reuse a bounded 15-minute in-memory result cache. Returned results retain provider metadata, source links and SauceNAO thumbnails, including non-Pixiv sources. Showing or enlarging a result does not fetch Pixiv artwork details. Only an explicit Pixiv result action starts the existing PID search. Other links open in the system browser on user action and use that browser’s own session; Pixiv or SauceNAO credentials are not copied into the link. Thumbnail bytes are fetched only from validated SauceNAO image hosts under a 16 MiB in-memory retention budget; bounded link metadata remains available if thumbnail bytes are evicted. List image nodes share the application media budget, capped locally at 128 retained nodes. Metadata and thumbnail caches disappear on exit or **Clear image-search cache**. Uploaded query bytes are released when a query ends. Guest-site storage is separate and requires the reset action described above.
+- SauceNAO's own retention and processing are governed by its [privacy policy](https://saucenao.com/legal.html). MOKU cannot remove a copy already uploaded to that service; cancelling does not undo an upload or refund query quota.
+
+Pixiv browsing contacts the following service hosts:
 
 - `https://www.pixiv.net` for search, metadata, and the official login page;
 - `https://app-api.pixiv.net` for App-mode search, artwork/artist metadata, account data, bookmark/follow operations, and official browser authorization;
@@ -40,8 +48,18 @@ MOKU may use an enabled loopback HTTP proxy from the current Windows proxy setti
 
 1. Use **Log out** in MOKU.
    Logging out does not erase download history. Use **Clear records** in the history view to delete its metadata; downloaded files and pending download recovery state are not deleted.
-2. Remove `MOKU.Pixiv.PHPSESSID`, `MOKU.Pixiv.AppOAuth`, and any older `MOKU.Pixiv.AppOAuth.Development` from Windows Credential Manager if they remain.
+2. Remove `MOKU.Pixiv.PHPSESSID`, `MOKU.Pixiv.AppOAuth`, `MOKU.SauceNAO.ApiKey`, and any older `MOKU.Pixiv.AppOAuth.Development` from Windows Credential Manager if they remain. Reset the SauceNAO guest session in settings to remove its separate browser storage.
 3. Delete the app's `logs` and `downloads` folders as desired.
 4. Delete `%LOCALAPPDATA%\MOKU` after MOKU is closed to remove runtime descriptors and any stale temporary profiles.
 
 Downloaded artwork may be subject to Pixiv's terms and creator rights. Do not redistribute it without authorization.
+
+SauceNAO website login is optional and separate from the API Key. Login and verification occur in the official website window at `https://saucenao.com/user.php`, sharing the isolated website profile used by source search. MOKU records only an observed signed-in/signed-out status, based on the official page, and does not collect the password. Login alone does not establish API permissions.
+
+## Optional application updates
+
+Settings → About and updates checks public releases in `Xirti/Pixiv-Bulk-Image-Downloader` on GitHub. Manual checking is the default. Optional daily checks run only while MOKU is running, including when its window is hidden. They request release metadata from `api.github.com`; downloads requested by the user use `github.com` and GitHub release CDN hosts (`release-assets.githubusercontent.com`, `objects.githubusercontent.com`). Pixiv/SauceNAO cookies, tokens, searches, artwork and local files are not attached to these requests. GitHub receives ordinary network request information such as the IP address and MOKU version in its User-Agent.
+
+Update channel, automatic-check preference and the last attempt time are stored locally beside the library data. Update packages, the copied helper and one previous binary backup are stored in `.moku-update-<installation-id>` beside the portable application's directory. The package size, SHA-256 and complete build file manifest are checked before replacement; these checks trust the project's GitHub release metadata and are not an independent code signature. Installation requires an explicit restart action and never replaces account databases, downloaded artwork or user configuration. Only program-owned executable/runtime/documentation paths are replaced. Old staged packages are trimmed on startup and after successful downloads; the previous binary backup is retained for recovery.
+
+List-image retention uses a shared estimated decoded-pixel budget (256 MiB normally; 128 MiB in low-memory mode). Connected images and in-flight preparations are protected; therefore this is a retention target, not a cap on total process memory. Cold detached previews may be fetched again when revisited. Persistent account metadata and downloaded images are unaffected. Original-image and animation caches keep their separate limits.

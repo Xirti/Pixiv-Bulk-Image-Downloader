@@ -5,8 +5,9 @@ import json
 import os
 import sqlite3
 import threading
+from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from edition_profile import DATA_FOLDER
@@ -129,6 +130,51 @@ class DownloadHistory:
                     "pages": json.loads(row["pages"]), "files": json.loads(row["files"]),
                 } for row in rows]
         return result
+
+    def statistics(self, *, year: int | None = None) -> dict:
+        """Aggregate retained successful publications without reading file paths.
+
+        Pages/files count save events; artworks are distinct IDs. Deletion and
+        retention affect this view exactly as they affect the history list.
+        """
+        today = datetime.now(timezone.utc).date()
+        if year is not None and (type(year) is not int or not 2000 <= year <= 9998):
+            raise ValueError("invalid statistics year")
+        rows = []
+        with self._lock:
+            if self.path.exists():
+                with self._connection() as connection:
+                    rows = connection.execute("""SELECT artwork_id, artist, work_type,
+                        substr(completed_at, 1, 10) AS day,
+                        json_array_length(pages) AS page_count,
+                        json_array_length(files) AS file_count FROM downloads""").fetchall()
+        daily, artists, types = Counter(), Counter(), Counter()
+        works = set()
+        files = 0
+        for row in rows:
+            day = date.fromisoformat(row["day"])
+            daily[day] += row["page_count"]
+            artists[row["artist"] or "未知画师"] += row["page_count"]
+            types[row["work_type"]] += row["page_count"]
+            works.add(row["artwork_id"])
+            files += row["file_count"]
+        first, last = min(daily, default=None), max(daily, default=None)
+        start = date(year, 1, 1) if year is not None else today - timedelta(days=364)
+        days = (date(year + 1, 1, 1) - start).days if year is not None else 365
+        return {
+            "year": year, "today": today.isoformat(), "limit": self.max_records,
+            "years": sorted({day.year for day in daily} | {today.year} | ({year} if year is not None else set()), reverse=True),
+            "totals": {"pages": sum(daily.values()), "files": files,
+                       "artworks": len(works), "activeDays": len(daily), "records": len(rows)},
+            "firstDay": first.isoformat() if first else None,
+            "lastDay": last.isoformat() if last else None,
+            "calendar": [{"day": (start + timedelta(days=i)).isoformat(),
+                          "pages": daily[start + timedelta(days=i)]} for i in range(days)],
+            "trend": [{"day": (today - timedelta(days=29-i)).isoformat(),
+                       "pages": daily[today - timedelta(days=29-i)]} for i in range(30)],
+            "artists": [{"name": name, "pages": count} for name, count in artists.most_common(6)],
+            "types": [{"type": kind, "pages": count} for kind, count in types.most_common()],
+        }
 
     def delete(self, ids: list[int]) -> int:
         if (not isinstance(ids, list) or not 1 <= len(ids) <= self.max_records

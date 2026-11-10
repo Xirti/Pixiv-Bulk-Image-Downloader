@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# MOKU — Xirti / Aperia
+# Source: https://github.com/Xirti/Pixiv-Bulk-Image-Downloader
 from __future__ import annotations
 
 import argparse
@@ -16,6 +19,57 @@ import time
 import urllib.request
 from ctypes import wintypes
 from pathlib import Path
+
+
+def verify_startup_integrity() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    from release_security import verify_installation
+    from version import __version__
+    try:
+        verify_installation(Path(sys.executable).resolve().parent, __version__)
+    except (OSError, ValueError) as exc:
+        ctypes.windll.user32.MessageBoxW(None,
+            f"程序组件未通过完整性检查：{exc}\n请重新解压官方版本覆盖程序文件，保留个人数据和下载目录。",
+            "MOKU 程序完整性", 0x10)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__" and "--source-guest" in sys.argv:
+    verify_startup_integrity()
+    from source_browser import run as run_source_guest
+    run_source_guest()
+    raise SystemExit(0)
+
+if __name__ == "__main__" and "--apply-update" in sys.argv:
+    verify_startup_integrity()
+    from update_install import run as apply_update
+    try:apply_update(sys.argv[sys.argv.index("--apply-update")+1])
+    except Exception as exc:
+        ctypes.windll.user32.MessageBoxW(None,str(exc),"MOKU 更新未完成",0x10)
+        raise SystemExit(1)
+    raise SystemExit(0)
+
+if __name__ == "__main__" and "--recover-update" in sys.argv:
+    verify_startup_integrity()
+    from update_install import run_recovery
+    offset=sys.argv.index("--recover-update")
+    try:run_recovery(sys.argv[offset+1],int(sys.argv[offset+2]))
+    except Exception as exc:
+        ctypes.windll.user32.MessageBoxW(None,str(exc),"MOKU 恢复未完成",0x10)
+        raise SystemExit(1)
+    raise SystemExit(0)
+
+if __name__ == "__main__" and getattr(sys,"frozen",False) and "--update-confirm" not in sys.argv:
+    from update_install import handoff_recovery
+    try:recovering=handoff_recovery(Path(sys.executable).resolve().parent)
+    except Exception as exc:
+        ctypes.windll.user32.MessageBoxW(None,str(exc),"MOKU 更新恢复",0x30)
+        raise SystemExit(1)
+    if recovering:raise SystemExit(0)
+
+if __name__ == "__main__":
+    verify_startup_integrity()
 
 import server
 from edition_profile import DATA_FOLDER, MUTEX_NAME
@@ -352,6 +406,7 @@ def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--serve-only", action="store_true")
     parser.add_argument("--pixiv-account-callback")
+    parser.add_argument("--update-confirm")
     options, _unknown = parser.parse_known_args(argv)
 
     if options.pixiv_account_callback:
@@ -411,6 +466,14 @@ def run(argv: list[str] | None = None) -> int:
             owns_backend = True
             LOG.info("start pid=%s url=%s instance=%s", os.getpid(), url, server.INSTANCE_ID)
 
+    if options.update_confirm:
+        from update_install import confirm_startup
+        confirm_startup(data_root.resolve(),options.update_confirm)
+    if owns_backend:
+        server.APP_UPDATES.allow_restart=not no_browser
+        server.APP_UPDATES.cleanup()
+        server.APP_UPDATES.start_scheduler()
+
     try:
         if no_browser:
             if not owns_backend:
@@ -432,6 +495,8 @@ def run(argv: list[str] | None = None) -> int:
         if owns_backend and thread is not None:
             thread.join(timeout=5)
         server.ACCOUNT_AUTH.close()
+        server.SOURCE_SEARCH.close()
+        server.APP_UPDATES.close()
         server.ACCOUNTS.close()
         server.APP_GALLERY.clear()
         server.PIXIV_OPENER.close()

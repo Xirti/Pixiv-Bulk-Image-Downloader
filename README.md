@@ -2,18 +2,24 @@
   <img src="assets/readme/mascot.gif" width="128" height="128" alt="MOKU">
 </p>
 
-<h1 align="center">MOKU Lite</h1>
+<h1 align="center">MOKU</h1>
 
 <p align="center">Windows 上的 Pixiv 浏览、云收藏与批量下载工具</p>
 
 <p align="center">
-  <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.0.0">下载 v2.0.0</a> ·
+  <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.0">下载 v2.1.0</a> ·
   <a href="#开始使用">开始使用</a> ·
   <a href="RELEASE_NOTES.md">更新说明</a> ·
   <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/issues">问题反馈</a>
 </p>
 
-按标签、作者或作品 ID 搜索，在推荐、榜单和关注新作中浏览，操作云端收藏与关注，再把选中的图片保存到电脑。`main` 为 Lite 正式源码。
+按标签、作者或作品 ID 搜索，在推荐、榜单和关注新作中浏览，操作云端收藏与关注，再把选中的图片保存到电脑。`main` 为当前正式源码。
+
+当前版本为 **v2.1.0**。搜索可预选排序后直接开始；作者／标签跳转、推荐和榜单默认等待红色按钮，按下后可再次点击中断。设置可恢复进入页面自动加载，各模块分别记住排序方式，关注新作仍进入即加载。收藏数排序支持搜索候选池（最多500件）、榜单、推荐池及作者全部可见作品。实验性 SauceNAO 以图找图从首页进入，游客可手动完成官网验证，也可在账号设置中保存自己的 API Key；图片确认后上传第三方，详情见 [隐私说明](PRIVACY.md)。完整便携包见 [v2.1.0 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.0)。
+
+设置 → **关于与更新** 可检查 GitHub 发行，选择正式／测试通道，手动下载校验后重启替换；每日检查默认关闭。尚未发布到 GitHub 的本地版本不会出现在更新列表中。图片缓存可切换普通／低内存模式，可见图片受保护，持久账号数据仍保留。正式包启用离线完整性检查与 Ed25519 发布签名，更新失败不影响当前版本；发布与密钥管理参见 [发布签名说明](RELEASE_SIGNING.md)。
+
+以图搜图展示 SauceNAO 多来源信息、缩略图与站点链接；明确的 Pixiv 入口进入 PID 搜索，结果页不再后台逐项读取 Pixiv。
 
 ## 功能
 
@@ -21,7 +27,7 @@
 - **发现**：推荐、榜单、关注新作；综合日榜、周榜、月榜、新人榜、原创榜。
 - **两种列表布局**：原比例自适应或规整网格。查看、下载勾选、收藏和关注相互独立。
 - **两种预览方式**：单击画面内放大或图片弹窗，双击进入作品详情；多图逐页查看，动图悬停预览。
-- **我的账号**：资料、关注、粉丝、云收藏、设置。App 授权为默认方式，网页登录为兼容选项，无需两种都登录。
+- **我的账号**：资料、关注、粉丝、云收藏、设置。资料页加入蓝色下载热力图与本机下载统计。App 授权为默认方式，网页登录为兼容选项，无需两种都登录。
 - **云端操作**：公开／私密收藏与关注、收藏标签编辑；本地状态缓存、自动同步与手动同步。
 - **批量下载**：采集篮逐张选图，原图／标准清晰度、目录及分组设置，下载去重、暂停恢复与历史记录。
 - **动图导出**：原始帧 ZIP + JSON、GIF，或使用本机 FFmpeg 导出 MP4。
@@ -31,13 +37,13 @@
 
 **运行环境：** Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及可访问 Pixiv 和图片 CDN 的网络。
 
-1. 在 [v2.0.0 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.0.0) 下载 `MOKU-v2.0.0-Lite-windows-x64.zip`。
+1. 在 [v2.1.0 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.0) 下载 Windows 便携包。
 2. 完整解压，运行 `MOKU/MOKU.exe`。便携包已包含 Python 运行依赖，保留整个程序文件夹。
 3. 在侧栏「我的账号 → 资料」选择 App 授权或网页登录，按官方页面提示完成登录。
 4. 搜索或进入「发现」，查看作品并勾选需要下载的图片。
 5. 在作品详情或采集篮选择保存位置、清晰度和格式，再开始下载。
 
-首次启动展示使用说明；右上角「？ 使用说明」随时可打开。说明分为浏览与预览、账号与下载、模式与网络三栏，窗口尺寸固定，内容区可滚动。
+首次启动展示使用说明；右上角「？ 使用说明」随时可打开。说明分为浏览与预览、账号与下载、模式与网络三栏，窗口尺寸固定，内容区可滚动。底部可查看项目归属、MIT 许可与使用声明。资料页登录管理右侧可手动同步账号状态，无需等待自动同步间隔。
 
 ## 浏览与预览
 
@@ -121,10 +127,10 @@ python moku_app.py
 
 ```powershell
 python -m pip install -r requirements-build.lock
-powershell -ExecutionPolicy Bypass -File .\make-release.ps1
+powershell -ExecutionPolicy Bypass -File .\make-release.ps1 -Development
 ```
 
-便携程序生成在 `dist\MOKU\`，发布压缩包、校验文件和更新说明生成在 `release\v版本号\`。
+便携程序生成在 `dist\MOKU\`，未签名开发包生成在 `release\development-v版本号\`，不会被正式更新器接受。维护者使用仓库外的发布私钥执行 `make-release.ps1 -ReleaseKey '<私钥文件>'`，生成签名正式包；密钥初始化、加密备份与可选 Windows 发布者签名见 [发布签名说明](RELEASE_SIGNING.md)。
 
 ## 问题反馈
 
@@ -132,6 +138,8 @@ powershell -ExecutionPolicy Bypass -File .\make-release.ps1
 
 ## 许可证
 
-本项目使用 [MIT License](LICENSE)。第三方组件见 [许可说明](THIRD_PARTY_NOTICES.md)，本地数据说明见 [隐私说明](PRIVACY.md)。
+本项目由 **Xirti / Aperia** 开发，GitHub 为 [@Xirti](https://github.com/Xirti)，源码与发布入口为 [项目仓库](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader)。
+
+本项目使用 [MIT License](LICENSE)，允许商业使用、修改与再分发；分发软件副本或实质部分时须保留原版权声明与完整许可文本。项目归属见 [NOTICE.md](NOTICE.md)，作品使用与支持创作者的说明见 [USAGE.md](USAGE.md)。第三方组件见 [许可说明](THIRD_PARTY_NOTICES.md)，本地数据说明见 [隐私说明](PRIVACY.md)。
 
 MOKU 是独立开发的 Pixiv 工具。作品版权归各自创作者所有，请按作者授权与平台规则使用。

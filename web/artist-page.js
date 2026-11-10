@@ -6,8 +6,8 @@ globalThis.mokuHasSelectedText = function (element) {
   return selection.rangeCount>0 && !selection.isCollapsed && selection.getRangeAt(0).intersectsNode(element);
 };
 
-globalThis.createArtistPage = function ({root,fetchJson,nextRequestId,cancelRequest,openArtist,openArtwork,onSort,changed,allowed,escape:esc}) {
-  const empty=()=>({kind:"none",userId:null,profile:null,overview:null,profileError:"",overviewError:"",query:"",page:1,candidates:[],hasMore:false,visible:6,sort:"newest",latestIds:[],sortable:false});
+globalThis.createArtistPage = function ({root,fetchJson,nextRequestId,cancelRequest,openArtist,openArtwork,onSort,onLoad,changed,allowed,escape:esc}) {
+  const empty=()=>({kind:"none",userId:null,profile:null,overview:null,profileError:"",overviewError:"",query:"",page:1,candidates:[],hasMore:false,visible:6,sort:"default",sortMessage:"",paused:false,manualLoad:false,busy:false});
   let state=empty(),controller=null,revision=0,requests=new Set(),renderedKey="",renderPending=false,hydrating=null;
   function suspend(){revision++;controller?.abort();controller=null;for(const id of requests)cancelRequest(id);requests.clear();}
   function begin(){suspend();controller=new AbortController();return {generation:revision,signal:controller.signal};}
@@ -34,17 +34,17 @@ globalThis.createArtistPage = function ({root,fetchJson,nextRequestId,cancelRequ
     }else{
       const profile=state.profile || {name:`Pixiv 用户 ${state.userId}`,userId:state.userId,avatar:"",description:"",background:"",region:"",webpage:""};
       const overview=state.overview;
-      root.innerHTML=`${profile.background?`<div class="artist-cover"><img src="${esc(profile.background)}" alt=""></div>`:""}<div class="artist-identity">${avatar(profile)}<p class="eyebrow">ARTIST</p><h1>${esc(profile.name)}</h1><div class="artist-cloud-actions">${cloudActionButton("follow",profile.userId,true)}</div><p class="artist-uid">UID <span>${esc(profile.userId)}</span>${profile.region?` · ${esc(profile.region)}`:""}</p>${overview?`<div class="artist-stats"><span><b>${overview.counts.illusts}</b> 插画／动图</span><span><b>${overview.counts.manga}</b> 漫画</span></div>`:""}${profile.description?`<details class="artist-biography"><summary>${esc(profile.description.split(/\r?\n/).find(line=>line.trim()) || "简介")}</summary><p>${esc(profile.description)}</p></details>`:'<p class="artist-inline-status">'+(state.profileError?esc(state.profileError):state.profile?'暂无简介':'正在读取作者资料…')+'</p>'}${profile.webpage?`<p class="artist-website">${esc(profile.webpage)}</p>`:""}${state.profileError?'<button class="artist-more" data-artist-retry type="button">重试资料</button>':""}</div>${overview?.featured.length?`<section class="artist-featured"><h2>作者精选 <small>${overview.featured.length}</small></h2><div class="artist-featured-grid">${overview.featured.map((item,index)=>`<button type="button" class="artist-featured-card" data-featured="${index}"><img src="${esc(item.thumb)}" alt="${esc(item.title)}"><span>${esc(item.title)}</span></button>`).join("")}</div></section>`:""}${state.overviewError?`<p class="artist-inline-status">${esc(state.overviewError)} <button type="button" class="artist-more" data-artist-retry>重试</button></p>`:""}<div class="artist-works-bar"><h2>作品</h2><label>排序 <select data-artist-sort><option value="newest">最新作品</option><option value="bookmarks" ${state.sortable?"":"disabled"}>当前页按收藏数</option></select></label>${!state.sortable?'<small>收藏排序暂不可用</small>':""}</div>`;
+      root.innerHTML=`${profile.background?`<div class="artist-cover"><img src="${esc(profile.background)}" alt=""></div>`:""}<div class="artist-identity">${avatar(profile)}<p class="eyebrow">ARTIST</p><h1>${esc(profile.name)}</h1><div class="artist-cloud-actions">${cloudActionButton("follow",profile.userId,true)}</div><p class="artist-uid">UID <span>${esc(profile.userId)}</span>${profile.region?` · ${esc(profile.region)}`:""}</p>${overview?`<div class="artist-stats"><span><b>${overview.counts.illusts}</b> 插画／动图</span><span><b>${overview.counts.manga}</b> 漫画</span></div>`:""}${profile.description?`<details class="artist-biography"><summary>${esc(profile.description.split(/\r?\n/).find(line=>line.trim()) || "简介")}</summary><p>${esc(profile.description)}</p></details>`:'<p class="artist-inline-status">'+(state.profileError?esc(state.profileError):state.profile?'暂无简介':state.paused?'点击开始加载作者资料与作品':'正在读取作者资料…')+'</p>'}${profile.webpage?`<p class="artist-website">${esc(profile.webpage)}</p>`:""}${state.profileError?'<button class="artist-more" data-artist-retry type="button">重试资料</button>':""}</div>${overview?.featured.length?`<section class="artist-featured"><h2>作者精选 <small>${overview.featured.length}</small></h2><div class="artist-featured-grid">${overview.featured.map((item,index)=>`<button type="button" class="artist-featured-card" data-featured="${index}"><img src="${esc(item.thumb)}" alt="${esc(item.title)}"><span>${esc(item.title)}</span></button>`).join("")}</div></section>`:""}${state.overviewError?`<p class="artist-inline-status">${esc(state.overviewError)} <button type="button" class="artist-more" data-artist-retry>重试</button></p>`:""}<div class="artist-works-bar"><h2>作品</h2>${popularitySortMarkup("data-artist-sort",state.sort)}<span data-artist-sort-status class="popularity-status" role="status">${esc(state.sortMessage || "")}</span></div>`;
       root.querySelectorAll("[data-featured]").forEach(button=>{button.onclick=()=>{if(allowed())openArtwork(state.overview.featured[Number(button.dataset.featured)]);};});
-      const sort=root.querySelector("[data-artist-sort]");sort.value=state.sort;
-      sort.title=state.sortable?"仅对当前页作品排序":"当前列表未提供完整收藏数，暂不提供收藏排序";
-      sort.onchange=()=>{if(!allowed())return;state.sort=sort.value;onSort();changed();};
+      root.querySelectorAll("[data-artist-sort]").forEach(button=>button.onclick=()=>{if(allowed())onSort(state.sort==="popular"?"default":"popular");});
       root.querySelectorAll("[data-artist-retry]").forEach(button=>{button.onclick=()=>showProfile(state.userId,true);});
     }
     root.querySelectorAll("[data-artist-id]").forEach(link=>{link.onclick=event=>{
       event.preventDefault();event.stopPropagation();if(allowed() && !mokuHasSelectedText(link))openArtist(link.dataset.artistId);
     };});
     root.querySelectorAll("img").forEach(image=>{image.onerror=()=>{image.classList.add("artist-image-unavailable");};});
+    setPopularityLoad(root,state.manualLoad,state.busy,state.loadButtonVisible!==false,Boolean(state.reloadReady));
+    const start=root.querySelector("[data-popularity-start]");if(start)start.onclick=()=>{if(state.busy || allowed())onLoad();};
     changed();
   }
   async function hydrateCandidates(){
@@ -69,12 +69,12 @@ globalThis.createArtistPage = function ({root,fetchJson,nextRequestId,cancelRequ
   }
   function showName(query,data=null){
     begin();state={...empty(),kind:"candidates",query,loading:!data,...(data || {})};render();
-    if(data)void hydrateCandidates();
+    if(data && !state.paused)void hydrateCandidates();
   }
   function showProfile(userId,force=false,refresh=false){
     if(!force && state.kind==="profile" && state.userId===userId && state.profile && state.overview){render();return;}
     const preserve=state.kind==="profile" && state.userId===userId;
-    const {generation,signal}=begin();state=preserve?{...state,profileError:"",overviewError:""}:{...empty(),kind:"profile",userId};render();
+    const {generation,signal}=begin();state=preserve?{...state,profileError:"",overviewError:"",paused:false}:{...empty(),kind:"profile",userId};render();
     for(const kind of ["profile","overview"]){
       if(!force && state[kind])continue;
       request(`/api/pixiv/artist/${userId}${kind==="overview"?"/overview":""}${refresh?"?refresh=1":""}`,signal).then(data=>{
@@ -86,10 +86,19 @@ globalThis.createArtistPage = function ({root,fetchJson,nextRequestId,cancelRequ
     }
   }
   function clear(){suspend();state=empty();render();}
-  function setWorks(rows){state.latestIds=rows.map(item=>item.id);state.sort="newest";state.sortable=rows.length>1 && rows.every(item=>Number.isFinite(item.bookmarks));if(state.kind==="profile")render();}
-  function ordered(rows){const ranks=new Map(state.latestIds.map((id,index)=>[id,index]));return rows.slice().sort(state.sort==="bookmarks"?(a,b)=>b.bookmarks-a.bookmarks:(a,b)=>(ranks.get(a.id)??Infinity)-(ranks.get(b.id)??Infinity));}
-  function restore(snapshot){suspend();state=snapshot?structuredClone(snapshot):empty();render();resume();}
-  function resume(){if(state.kind==="profile" && (!state.profile || !state.overview))showProfile(state.userId);else if(state.kind==="candidates"){begin();void hydrateCandidates();}}
+  function prepareProfile(userId,sort,manualLoad){
+    suspend();state={...empty(),kind:"profile",userId,sort,manualLoad,paused:true,busy:false};render();
+  }
+  function setLoading(manual,busy=false,visible=true,loaded=false){state.manualLoad=manual;state.busy=busy;state.loadButtonVisible=visible;state.reloadReady=loaded;setPopularityLoad(root,manual,busy,visible,loaded);}
+  function setSort(value,message="") {
+    state.sort=value;state.sortMessage=message;
+    setPopularitySort(root,value);
+    const status=root.querySelector("[data-artist-sort-status]");if(status)status.textContent=message;
+    changed();
+  }
+  function setWorks(){setSort("default");}
+  function restore(snapshot){suspend();state=snapshot?structuredClone(snapshot):empty();if(!["default","popular"].includes(state.sort))state.sort="default";render();resume();}
+  function resume(){if(state.paused)return;if(state.kind==="profile" && (!state.profile || !state.overview))showProfile(state.userId);else if(state.kind==="candidates"){begin();void hydrateCandidates();}}
   document.addEventListener("selectionchange",()=>{if(renderPending && !mokuHasSelectedText(root))render();});
-  return {showName,showProfile,clear,suspend,resume,setWorks,ordered,snapshot:()=>structuredClone(state),restore};
+  return {showName,showProfile,prepareProfile,clear,suspend,resume,setWorks,setSort,setLoading,snapshot:()=>structuredClone(state),restore};
 };

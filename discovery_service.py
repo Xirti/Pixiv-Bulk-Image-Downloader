@@ -68,6 +68,18 @@ class DiscoveryService:
             self._epoch += 1
             self._feeds.clear()
 
+    def snapshot(self, batch, *, generation):
+        owner, method = self.context(generation)
+        with self._guard:
+            stored = self._feeds.get((owner, method, batch))
+            result = copy.deepcopy(stored) if stored else None
+        if result is None:
+            result = self.pages.saved_cache.read(owner, method, ["discovery-feed", batch])
+        self.pages.check(generation)
+        if result is None:
+            raise AccountError("cache_miss", "原发现批次已清理，请刷新当前页面")
+        return result
+
     def _check(self, generation, epoch):
         self.pages.check(generation)
         with self._guard:
@@ -82,18 +94,24 @@ class DiscoveryService:
         self._feeds[key]=feed;self._feeds.move_to_end(key)
         while len(self._feeds)>32:self._feeds.popitem(last=False)
 
-    @staticmethod
-    def _response(feed, owner, method, generation, offset, target):
+    def _response(self, feed, owner, method, generation, offset, target):
         items=feed["items"][offset:target]
         has_more=target<len(feed["items"]) or any(feed["paths"].values()) or any(feed["pending"].values())
+        next_offset = offset + len(items) if has_more else None
+        if feed["kind"] == "following" and items:
+            # Join the snapshot to the current following list without changing
+            # source offsets. Relationship changes never become author blocks.
+            states = self.follow_states(owner, method, list({item["userId"] for item in items}))
+            items = [item for item in items if not states.get(item["userId"], {}).get("known") or
+                     states[item["userId"]]["active"] and (feed["scope"] == "all" or
+                     states[item["userId"]].get("privacy") in {None, feed["scope"]})]
         return {"items":copy.deepcopy(items),"uid":owner,"method":method,"batch":feed["batch"],"offset":offset,
-                "nextOffset":offset+len(items) if has_more else None,"edition":feed["edition"],"unavailable":feed["unavailable"],
+                "nextOffset":next_offset,"edition":feed["edition"],"unavailable":feed["unavailable"],
                 "created":feed["created"],"kind":feed["kind"],"scope":feed["scope"],"rankMode":feed["rankMode"],"authorizationGeneration":generation}
 
     @staticmethod
     def _window():
-        # Conservative boundary at the daily 12:00 JST publication window. This
-        # guards continuation, and is deliberately not displayed as an edition date.
+        # Official rankings publish at noon in Japan.
         return int((time.time() - 3 * 3600) // 86400)
 
     def _new(self, kind, scope, mode, rank, method):
@@ -273,6 +291,7 @@ class DiscoveryService:
                     raise AccountError("cache_cleared", "发现缓存已清除，请重新打开")
                 self.pages.saved_cache.save(owner,method,["discovery-feed",feed["batch"]],feed)
                 if not batch or refresh:self.pages.saved_cache.save(owner,method,current_key,feed["batch"])
+                if not stored or refresh:self.pages.saved_cache.retain_discovery(owner,method)
                 self._retain(owner,method,feed,epoch)
             if not items and has_more:raise AccountError("filtered", "当前范围暂未取得可展示作品，再次进入可继续读取，或调整范围")
             return self._response(feed,owner,method,generation,offset,target)

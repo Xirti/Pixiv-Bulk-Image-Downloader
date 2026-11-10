@@ -11,6 +11,7 @@ DISTRIBUTIONS = (
     "cffi",
     "certifi",
     "curl_cffi",
+    "cryptography",
     "clr-loader",
     "packaging",
     "pefile",

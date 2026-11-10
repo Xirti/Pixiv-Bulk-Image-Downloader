@@ -1,6 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from PyInstaller.utils.hooks import collect_all
+import os
+from pathlib import Path
+
+# This policy is embedded in the EXE, not read from a replaceable resource.
+policy = Path(SPECPATH) / 'build' / 'release-policy.py'
+policy.parent.mkdir(parents=True, exist_ok=True)
+policy_source = 'import sys\nsys._moku_signed_build = ' + repr(os.environ.get('MOKU_SIGNED_BUILD') == '1') + '\n'
+if not policy.exists() or policy.read_text(encoding='utf-8') != policy_source:
+    policy.write_text(policy_source, encoding='utf-8')
 
 
 WINDOWS_X64_EXCLUDED_PATHS = (
@@ -89,7 +98,7 @@ a = Analysis(
     hiddenimports=pythonnet_hiddenimports + clr_hiddenimports + webview_hiddenimports + curl_hiddenimports + ['clr'],
     hookspath=['build_hooks'],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(policy)],
     # Pillow helpers also reference NumPy for optional typing/array support.
     # No MOKU conversion path uses arrays; exclude the entire unused closure.
     excludes=['numpy'],

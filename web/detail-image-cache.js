@@ -24,7 +24,7 @@ globalThis.createDetailImageCache=function({fetchBytes,maxBytes=96*1024*1024,max
   function pin(item,page){unpin();pinned=key(item,page);}
   function unpin(){
     const previous=entries.get(pinned);pinned=null;
-    if(previous?.url && Date.now()>=previous.expires)drop(previous);
+    if(previous && (!previous.url || Date.now()>=previous.expires))drop(previous);
   }
   function get(item,page){
     const id=key(item,page);let entry=entries.get(id);

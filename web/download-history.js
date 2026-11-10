@@ -149,6 +149,7 @@ function createDownloadHistoryView({ fetchJson, showDialog }) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(ids === null ? { confirm: true } : { confirm: true, ids }),
       });
+      dispatchEvent(new Event("moku-download-history-changed"));
       if (ids === null) selected.clear();
       else ids.forEach(id => selected.delete(id));
       deleting = false;

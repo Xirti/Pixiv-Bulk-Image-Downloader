@@ -1,5 +1,16 @@
 "use strict";
 
+// Both account-page and settings actions display the same synchronization state.
+globalThis.accountSyncPresentation = function (value,progress,loaded,clearing=false) {
+  const rows=[progress.bookmark,progress.follow].filter(Boolean);
+  const busy=Boolean(progress.manual || progress.preparing || progress.requesting || !progress.error && value.autoSync && rows.some(row=>row.running));
+  const complete=rows.length===2 && rows.every(row=>row.completed);
+  const status=busy?"正在同步…":progress.error?`同步失败：${progress.error}`:complete?
+    `最近同步：${new Date(Math.min(...rows.map(row=>row.completed))*1000).toLocaleString()}`:
+    value.autoSync?"等待首次同步":"自动同步已关闭";
+  return {busy,disabled:!loaded || clearing || Boolean(progress.clearing) || busy,status};
+};
+
 globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,clearCache}) {
   const fields=[...root.querySelectorAll("[data-setting]")],dirty=new Set();
   const status=root.querySelector("[data-settings-status]"),sync=root.querySelector("[data-sync-status]");
@@ -7,7 +18,35 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   const jump=root.querySelector("[data-settings-jump]");
   const syncButton=root.querySelector("[data-settings-sync]");
   const clearButton=root.querySelector("[data-settings-clear-cache]");
-  let saving=false,clearing=false,lastProgress={},saved=null;
+  let saving=false,clearing=false,lastProgress={},saved=null,preferencesLoaded=false;
+  const search=root.querySelector('[data-settings-search]'),heading=root.querySelector('[data-settings-heading]');
+  const categories=[...root.querySelectorAll('[data-settings-category]')],panels=[...root.querySelectorAll('[data-settings-panel]')];
+  let category=root.dataset.settingsCategory || 'general';
+  function showCategory(){
+    const query=search.value.trim().toLocaleLowerCase();let found=false;
+    for(const panel of panels){
+      let matches=false;
+      for(const group of panel.querySelectorAll('.settings-group')){
+        let visible=false;
+        for(const row of group.querySelectorAll('.settings-item')){row.hidden=Boolean(query) && !row.textContent.toLocaleLowerCase().includes(query);visible ||= !row.hidden;}
+        group.hidden=!visible;matches ||= visible;
+      }
+      panel.hidden=query?!matches:panel.dataset.settingsPanel!==category;
+      found ||= !panel.hidden && matches;
+    }
+    categories.forEach(button=>button.setAttribute('aria-current',!query && button.dataset.settingsCategory===category?'page':'false'));
+    heading.textContent=query?'搜索结果':categories.find(button=>button.dataset.settingsCategory===category).textContent;
+    root.querySelector('[data-settings-empty]').hidden=found;
+  }
+  categories.forEach(button=>button.onclick=()=>{
+    category=button.dataset.settingsCategory;root.dataset.settingsCategory=category;search.value='';showCategory();
+    const page=root.closest('.workspace-page');page.scrollTop=Math.min(page.scrollTop,root.offsetTop);
+  });
+  search.addEventListener('input',showCategory);showCategory();
+  function syncDependencies(){
+    const automatic=root.querySelector('[data-setting="autoLoadPages"]'),visible=root.querySelector('[data-setting="showLoadButton"]');
+    visible.disabled=automatic.disabled || !automatic.checked;
+  }
   const valueOf=field=>field.type==="checkbox"?field.checked:field.value.trim();
   function edited(field){
     if(saved && valueOf(field)===saved[field.dataset.setting])dirty.delete(field.dataset.setting);
@@ -28,7 +67,12 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     catch(error){status.textContent=error.message;}
     finally{clearing=false;clearButton.disabled=false;}
   };
-  fields.forEach(field=>field.addEventListener("input",()=>edited(field)));
+  fields.forEach(field=>field.addEventListener("input",()=>{
+    if(field.dataset.setting==='autoLoadPages' && !field.checked){
+      const visible=root.querySelector('[data-setting="showLoadButton"]');visible.checked=true;edited(visible);
+    }
+    edited(field);syncDependencies();
+  }));
   root.querySelector("[data-settings-browse]").onclick=async()=>{
     const field=root.querySelector('[data-setting="saveRoot"]');
     try{const data=await browse(field.value);if(data.cancelled)return;field.value=data.selected;edited(field);}
@@ -44,9 +88,10 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     saving=true;button.disabled=true;jump.disabled=true;fields.forEach(field=>field.disabled=true);
     try{const value=await save(changes);dirty.clear();update(value);status.textContent="设置已保存";}
     catch(error){status.textContent=error.message;report(error.message);}
-    finally{saving=false;button.disabled=false;jump.disabled=false;fields.forEach(field=>field.disabled=false);}
+    finally{saving=false;button.disabled=!preferencesLoaded;jump.disabled=!preferencesLoaded;fields.forEach(field=>field.disabled=!preferencesLoaded);syncDependencies();}
   };
   function update(value,progress=null,loaded=true){
+    preferencesLoaded=loaded;
     if(progress!==null)lastProgress=progress;
     progress=lastProgress;
     button.disabled=!loaded || saving;
@@ -63,13 +108,10 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
       }
     }
     jump.hidden=dirty.size===0;
-    const rows=[progress.bookmark,progress.follow].filter(Boolean),running=rows.some(row=>row.running);
-    const complete=rows.length===2 && rows.every(row=>row.completed);
-    syncButton.disabled=!loaded || clearing || Boolean(progress.manual) || Boolean(progress.preparing) || value.autoSync && running;
-    const label=progress.error?`同步暂未完成：${progress.error}`:progress.preparing || progress.manual || value.autoSync && running?"正在后台准备账号资料与列表…":complete?
-      `${value.autoSync?"":"自动同步已关闭 · "}最近完整同步：${new Date(Math.min(...rows.map(row=>row.completed))*1000).toLocaleString()}`:
-      value.autoSync?"尚未完成首次同步":"自动同步已关闭，可点击立即同步或右键刷新。";
-    if(sync.textContent!==label)sync.textContent=label;
+    syncDependencies();
+    const action=accountSyncPresentation(value,progress,loaded,clearing);
+    syncButton.disabled=action.disabled;
+    if(sync.textContent!==action.status)sync.textContent=action.status;
   }
-  return {update,reset:()=>{dirty.clear();saved=null;status.textContent="";jump.hidden=true;}};
+  return {update,get dirty(){return dirty.size>0 || saving;},reset:()=>{dirty.clear();saved=null;preferencesLoaded=false;status.textContent="";jump.hidden=true;}};
 };

@@ -1,4 +1,4 @@
-name: MOKU Lite
+name: MOKU
 
 "on":
   push:
@@ -27,7 +27,7 @@ jobs:
       - name: Create isolated build environment
         shell: pwsh
         run: |
-          $ciVenv = Join-Path $env:RUNNER_TEMP 'moku-lite-ci-venv'
+          $ciVenv = Join-Path $env:RUNNER_TEMP 'moku-ci-venv'
           python -m venv $ciVenv
           if ($LASTEXITCODE -ne 0) { throw 'Virtual environment creation failed' }
           (Join-Path $ciVenv 'Scripts') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -61,13 +61,13 @@ jobs:
       - name: Build release package
         shell: pwsh
         run: |
-          ./build-portable.ps1
+          ./build-portable.ps1 -Development
           if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
-          ./make-release.ps1 -SkipBuild
+          ./make-release.ps1 -SkipBuild -Development
           if ($LASTEXITCODE -ne 0) { throw 'Release package failed' }
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: MOKU-Lite-windows-x64
-          path: release/v*.*.*/
+          name: MOKU-development-windows-x64
+          path: release/development-v*.*.*/
           if-no-files-found: error
           retention-days: 7

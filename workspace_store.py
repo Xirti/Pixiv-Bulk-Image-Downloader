@@ -244,6 +244,14 @@ class WorkspaceStore:
     def delete_recent_search(self, value: dict, scope: str) -> None:
         self._update_recent_search(value, scope, remove=True)
 
+    def clear_recent_searches(self, scope: str) -> None:
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row=connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
+            recent=json.loads(row[0]) if row else []
+            retained=[(owner,value) for owner,value in recent if owner not in {scope,"public"}]
+            connection.execute("INSERT OR REPLACE INTO recent VALUES(1,?)",(json.dumps(retained,ensure_ascii=False),))
+
     def _update_recent_search(self, value: dict, scope: str, *, remove: bool) -> None:
         if not isinstance(value, dict) or set(value) != {"tag", "filters"}:
             raise ValueError("invalid recent search")

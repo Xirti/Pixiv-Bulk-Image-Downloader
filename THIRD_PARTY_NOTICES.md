@@ -11,6 +11,7 @@ Primary runtime components:
 | cffi | 2.1.1 | MIT-0 | https://github.com/python-cffi/cffi |
 | certifi | 2026.10.23 | MPL-2.0 | https://github.com/certifi/python-certifi |
 | curl_cffi | 0.17.0 | MIT | https://github.com/lexiforest/curl_cffi |
+| cryptography | 50.0.2 | Apache-2.0 OR BSD-3-Clause | https://cryptography.io/ |
 | clr-loader | 0.3.1 | MIT | https://github.com/pythonnet/clr-loader |
 | packaging | 26.2 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | pefile | 2024.8.26 | MIT | https://github.com/erocarrera/pefile |

@@ -1,7 +1,19 @@
-param([switch]$SkipChecks)
+param(
+  [switch]$SkipChecks,
+  [switch]$Development,
+  [string]$ReleaseKey = $env:MOKU_RELEASE_KEY,
+  [string]$CodeSignThumbprint = $env:MOKU_CODESIGN_THUMBPRINT,
+  [uri]$TimestampUrl
+)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $Root
+if (-not $Development) {
+  if (-not $ReleaseKey) { throw 'Signed build requires -ReleaseKey (or MOKU_RELEASE_KEY). Use -Development explicitly for an unsigned local build.' }
+  python -B sign-release.py check-key --key $ReleaseKey
+  if ($LASTEXITCODE -ne 0) { throw 'Release signing key preflight failed' }
+}
+if ($CodeSignThumbprint -and -not $TimestampUrl) { throw 'Windows signing requires -TimestampUrl' }
 if (-not $SkipChecks) {
   $SyntaxSource = @'
 from pathlib import Path
@@ -25,20 +37,45 @@ print(f"Python syntax verified: {len(paths)} files")
 }
 $SourceBefore = (python -B build_manifest.py source).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Source fingerprint failed' }
-python -B -m PyInstaller --noconfirm MOKU.spec
-if ($LASTEXITCODE -ne 0) { throw 'Lite package build failed' }
+$PreviousPolicy = $env:MOKU_SIGNED_BUILD
+try {
+  $env:MOKU_SIGNED_BUILD = $(if ($Development) { '0' } else { '1' })
+  python -B -m PyInstaller --noconfirm MOKU.spec
+  if ($LASTEXITCODE -ne 0) { throw 'Package build failed' }
+} finally {
+  $env:MOKU_SIGNED_BUILD = $PreviousPolicy
+}
 $Dist = Join-Path $Root 'dist\MOKU'
 $Exe = Join-Path $Dist 'MOKU.exe'
 Copy-Item -LiteralPath (Join-Path $Root 'MOKU.exe.config') -Destination (Join-Path $Dist 'MOKU.exe.config')
 foreach ($name in @('RELEASE_NOTES.md','LICENSE','PRIVACY.md','SECURITY.md','THIRD_PARTY_NOTICES.md')) {
   Copy-Item -LiteralPath (Join-Path $Root $name) -Destination (Join-Path $Dist $name)
 }
+$LegalRoot = Join-Path $Dist '_internal\legal'
+New-Item -ItemType Directory -Path $LegalRoot -Force | Out-Null
+foreach ($name in @('NOTICE.md','USAGE.md','RELEASE_SIGNING.md')) {
+  Copy-Item -LiteralPath (Join-Path $Root $name) -Destination (Join-Path $LegalRoot $name)
+}
 python -B generate-third-party-licenses.py (Join-Path $Dist 'THIRD_PARTY_LICENSES.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Third-party notices failed' }
+if ($CodeSignThumbprint) {
+  & (Join-Path $Root 'sign-windows.ps1') -Files @($Exe) -CertificateThumbprint $CodeSignThumbprint -TimestampUrl $TimestampUrl
+} elseif (-not $Development) {
+  Write-Output 'Ed25519 release protection enabled; Windows publisher certificate is not configured.'
+}
 $Hash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash
 [IO.File]::WriteAllText((Join-Path $Dist 'SHA256.txt'), "$Hash  MOKU.exe`r`n", [Text.UTF8Encoding]::new($false))
-python -B build_manifest.py write (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe --expected-source-generation $SourceBefore
+$ManifestOptions = @()
+if (-not $Development) {
+  New-Item -ItemType Directory -Path (Join-Path $Dist '_internal\security') -Force | Out-Null
+  $ManifestOptions = @('--signed')
+}
+python -B build_manifest.py write (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe --expected-source-generation $SourceBefore @ManifestOptions
 if ($LASTEXITCODE -ne 0) { throw 'Package fingerprint failed' }
+if (-not $Development) {
+  python -B sign-release.py sign-manifest --key $ReleaseKey --root $Dist
+  if ($LASTEXITCODE -ne 0) { throw 'Manifest signing failed' }
+}
 python -B build_manifest.py verify (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe
 if ($LASTEXITCODE -ne 0) { throw 'Package verification failed' }
-Write-Output "Built MOKU Lite: $Exe"
+Write-Output "Built MOKU: $Exe"

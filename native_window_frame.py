@@ -32,9 +32,10 @@ class _MinMaxInfo(ctypes.Structure):
 
 
 class NativeWindowFrame:
-    def __init__(self, native) -> None:
+    def __init__(self, native, browser_navigation=None) -> None:
         # Change native styles without rebuilding the existing WebView host.
         self.hwnd = native.Handle.ToInt64()
+        self.browser_navigation = browser_navigation
         self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.comctl32 = ctypes.WinDLL("comctl32", use_last_error=True)
         self.user32.GetDpiForWindow.argtypes = [wintypes.HWND]
@@ -96,6 +97,10 @@ class NativeWindowFrame:
 
     def _window_proc(self, hwnd, message, wparam, lparam, subclass_id, reference) -> int:
         try:
+            if message == 0x0319 and self.browser_navigation:  # WM_APPCOMMAND from mouse drivers.
+                command = (lparam >> 16) & 0x0FFF
+                if command in {1, 2} and self.browser_navigation(-1 if command == 1 else 1):
+                    return 1
             if (message == 0x0047 and (self._was_maximized or self._was_minimized)
                     and not self.maximized and not self.user32.IsIconic(hwnd)):
                 # Windows has chosen the restore/snap rectangle. Keep its bounds

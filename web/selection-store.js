@@ -81,7 +81,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
         const id = idOf(item), count = countOf(item);
         if (!id || count === null) return reject("pages");
         const latest = metadata.get(id) || records.get(id)?.item;
-        const chosen = latest?.pageImages ? latest : item;
+        const chosen = !latest || (!latest.pageImages && item.pageImages) ? item : latest;
         plan.set(id, {item: chosen, count: countOf(chosen)});
       }
       let additional = 0;

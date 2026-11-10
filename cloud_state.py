@@ -10,9 +10,12 @@ import time
 
 
 DEFAULT_MACHINE = {"saveRoot": "", "createFolder": True, "previewLayout":"adaptive",
-                   "previewAction":"expand", "previewSize":"large"}
+                   "previewAction":"expand", "previewSize":"large", "sensitiveMask":"both", "autoLoadPages":False,"showLoadButton":True,
+                   "orderTags":"default", "orderAuthor":"default", "orderUid":"default", "orderPid":"default",
+                   "orderRecommended":"default", "orderRanking":"default", "mediaMemory":"normal"}
 DEFAULT_ACCOUNT = {"bookmarkDefault": "ask", "followDefault": "ask", "bookmarkLast": "private",
-                   "followLast": "private", "autoSync": True, "syncMinutes": "10"}
+                   "followLast": "private", "autoSync": True, "syncMinutes": "10",
+                   "autoRanking": True, "autoFollowing": True, "autoRecommended": True,"updateDots":True}
 
 
 def validate_preferences(raw):
@@ -20,17 +23,23 @@ def validate_preferences(raw):
         raise ValueError("设置项无效")
     result = dict(raw)
     for key, value in raw.items():
-        if key == "previewLayout":
+        if key in {"orderTags","orderAuthor","orderUid","orderPid","orderRecommended","orderRanking"}:
+            valid = isinstance(value,str) and value in {"default","popular"}
+        elif key == "mediaMemory":
+            valid = isinstance(value,str) and value in {"normal","low"}
+        elif key == "previewLayout":
             valid = isinstance(value,str) and value in {"regular","adaptive"}
         elif key == "previewAction":
             valid = isinstance(value,str) and value in {"expand","popup"}
         elif key == "previewSize":
             valid = isinstance(value,str) and value in {"small","medium","large"}
+        elif key == "sensitiveMask":
+            valid = isinstance(value,str) and value in {"off","search","source","both"}
         elif key in {"bookmarkDefault", "followDefault"}:
             valid = isinstance(value, str) and value in {"ask", "public", "private"}
         elif key in {"bookmarkLast", "followLast"}:
             valid = isinstance(value, str) and value in {"public", "private"}
-        elif key in {"autoSync", "createFolder"}:
+        elif key in {"autoSync", "createFolder", "autoRanking", "autoFollowing", "autoRecommended", "autoLoadPages","showLoadButton","updateDots"}:
             valid = type(value) is bool
         elif key == "saveRoot":
             valid = isinstance(value, str) and len(value) <= 4096 and not any(ord(c) < 32 for c in value)
@@ -122,13 +131,16 @@ class CloudState:
     def many(self, owner, method, works, authors):
         result = {"bookmark": {}, "follow": {}}
         with self.lock, closing(self._connect()) as db:
+            scans={row["kind"]:row["completed"] or 0 for row in db.execute(
+                "SELECT kind,json_extract(payload,'$.completed') AS completed FROM scans WHERE owner=? AND method=?",(owner,method))}
             for kind, targets in (("bookmark", works), ("follow", authors)):
-                scan_row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?",
-                                      (owner, method, kind)).fetchone()
-                completed = json.loads(scan_row[0]).get("completed", 0) if scan_row else 0
+                completed=scans.get(kind,0);rows={}
+                for offset in range(0,len(targets),400):
+                    part=targets[offset:offset+400]
+                    query="SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target IN ("+','.join('?' for _ in part)+')'
+                    rows.update((row['target'],row) for row in db.execute(query,(owner,method,kind,*part)))
                 for target in targets:
-                    state = self._decode(db.execute("SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target=?",
-                                                   (owner, method, kind, target)).fetchone())
+                    state = self._decode(rows.get(target))
                     if not state["known"] and completed:
                         state = {"known": True, "active": False, "privacy": None, "tags": [], "touched": completed}
                         state["stamp"] = relationship_stamp(state)

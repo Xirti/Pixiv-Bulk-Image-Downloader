@@ -12,7 +12,8 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     const width=frame?.width || (ownImage?image.naturalWidth:0) || current.item.width || 1;
     const height=frame?.height || (ownImage?image.naturalHeight:0) || current.item.height || 1;
     const fraction={small:.25,medium:1/3,large:2/3}[size];
-    const scale=Math.min(Math.sqrt(innerWidth*innerHeight*fraction/(width*height)),(innerWidth-112)/width,(innerHeight-112)/height);
+    const gutter=Math.min(100,Math.max(56,innerWidth*.07));
+    const scale=Math.min(Math.sqrt(innerWidth*innerHeight*fraction/(width*height)),(innerWidth-gutter*2)/width,(innerHeight-144)/height);
     dialog.style.width=width*scale+"px";dialog.style.height=height*scale+"px";
   }
   function paintSize(){
@@ -28,6 +29,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   });
   function release(context){
     if(!context)return;
+    context.controller.abort();
     for(const entry of context.previews.values())entry.image.removeAttribute("src");
     context.previews.clear();
   }
@@ -54,14 +56,24 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     // The entry records background failure; an explicit visit retries it.
     void preview(context,next,source).catch(error=>{context.preloadError={page:next,error};});
   }
+  function syncPages(context){
+    count.textContent=`${context.page+1} / ${context.item.pages}`;
+    dialog.querySelectorAll("[data-stage-turn]").forEach(button=>button.disabled=context.item.pages<2);
+  }
+  function adoptItem(context,item){
+    context.item=item;
+    const page=Math.min(context.page,item.pages-1);
+    if(page!==context.page){context.page=page;void paint(context,++revision);return false;}
+    syncPages(context);resize();return true;
+  }
   async function detail(context){
     if(context.item.pageImages)return context.item;
-    const request=context.detailRead || (context.detailRead=loadItem(context.item.id));
+    const request=context.detailRead || (context.detailRead=loadItem(context.item.id,{signal:context.controller.signal}));
     let item;
     try{item=await request;}
     finally{if(context.detailRead===request)context.detailRead=null;}
     if(context!==current)return null;
-    context.item=item;return item;
+    return adoptItem(context,item)?item:null;
   }
   function commit(node,page){
     if(node!==image){image.replaceWith(node);image=node;}
@@ -72,12 +84,12 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   }
   async function paint(context=current,version=revision){
     const page=context.page;
+    original.hidden=!context.allowOriginal;
     cache.pin(context.item,page);originalView=false;working="preview";
     image.style.visibility="hidden";displayed=-1;dialog.setAttribute("aria-busy","true");
     status.textContent=`正在加载第 ${page+1} 张…`;retry.hidden=true;
     original.textContent="查看原图";original.disabled=true;
-    count.textContent=`${page+1} / ${context.item.pages}`;
-    dialog.querySelectorAll("[data-stage-turn]").forEach(button=>button.disabled=context.item.pages<2);
+    syncPages(context);
     resize();
     try{
       const initial=page===context.initialPage?context.initialPreview:null;
@@ -94,7 +106,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     }
   }
   async function viewOriginal(){
-    if(!current || working || originalView)return;
+    if(!current || !current.allowOriginal || working || originalView)return;
     const context=current,page=context.page,version=++revision;
     working="original";original.disabled=true;retry.hidden=true;status.textContent="原图加载中…";
     try{
@@ -104,9 +116,10 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
         try{url=await cache.get(item,page);}
         catch(error){
           if(error.status!==403)throw error;
-          const fresh=await loadItem(item.id);
+          const fresh=await loadItem(item.id,{signal:context.controller.signal});
           if(context!==current || version!==revision || !dialog.open)return;
-          context.item=fresh;url=await cache.get(fresh,page);
+          if(!adoptItem(context,fresh))return;
+          url=await cache.get(fresh,page);
         }
       }
       if(context!==current || version!==revision || !dialog.open)return;
@@ -124,10 +137,10 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     current.page=(current.page+direction+current.item.pages)%current.item.pages;
     void paint(current,++revision);
   }
-  function open({owner=null,item,page=0,preview:source=null,onPage=null,onClose=null}){
+  function open({owner=null,item,page=0,preview:source=null,onPage=null,onClose=null,allowOriginal=true}){
     if(dialog.open)dialog.close();
     release(current);revision++;cache.unpin();displayed=-1;
-    current={owner,item,page,initialPage:page,initialPreview:source,previews:new Map(),onPage,onClose,opener:document.activeElement};
+    current={owner,item,page,initialPage:page,initialPreview:source,previews:new Map(),controller:new AbortController(),onPage,onClose,allowOriginal,opener:document.activeElement};
     showDialog(dialog);paintSize();void paint();dialog.querySelector("[data-stage-close]").focus({preventScroll:true});
     // Prepare only the next preview of a multi-page work, never its original.
     if(item.pages>1 && !item.pageImages){

@@ -9,7 +9,10 @@
 .cloud-toggle.is-pending{opacity:.5;cursor:progress}
 .meta>.cloud-toggle[data-cloud-kind=bookmark]{position:absolute;right:3px;top:5px}
 .meta>.cloud-toggle[data-cloud-kind=follow]{position:absolute;right:3px;bottom:3px}
-.cloud-detail-actions{display:flex;align-items:center;gap:8px;margin:12px 0}
+.cloud-detail-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0}
+.official-artwork-link{display:inline-flex;align-items:center;justify-content:center;min-height:32px;padding:5px 9px;border:1px solid var(--frost-edge,var(--line));border-radius:9px;background:var(--frost-fill,var(--surface-2));color:var(--ink);font-size:12px;text-decoration:none;white-space:nowrap;user-select:text}
+.official-artwork-link:hover{background:var(--selected);border-color:var(--muted)}
+.official-artwork-link:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .cloud-toggle.cloud-full{width:auto;height:32px;gap:7px;padding:5px 10px;background:var(--surface-2)!important;border-radius:9px;font-size:12px}
 .cloud-popover{position:fixed;z-index:10005;display:grid;gap:12px;width:292px;max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);overflow:auto;padding:15px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);box-shadow:0 10px 32px var(--shadow);font-size:13px}
 .cloud-popover strong{font-size:14px}
@@ -39,3 +42,12 @@
 .account-settings .request-settings{margin:0}
 .account-settings [data-settings-sync],.account-settings [data-settings-clear-cache]{min-height:32px;padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--ink);font-size:12px}
 .account-tabs{flex-wrap:wrap}
+
+.artwork-encouragement{display:grid;justify-items:start;gap:4px;margin:12px 0 0;color:var(--muted);font-size:12px;line-height:1.7}
+.artwork-encouragement[hidden]{display:none!important}
+.artwork-encouragement .official-artwork-link{min-height:28px;padding:3px 8px;font:inherit;line-height:1.5;cursor:pointer}
+
+.artwork-source-link{color:#89b6ed;text-decoration:none;font-size:12px;line-height:1.7;user-select:text;overflow-wrap:anywhere}
+:root[data-theme=light] .artwork-source-link{color:#2869b2}
+.artwork-source-link:hover{text-decoration:underline}
+.artwork-source-link:focus-visible{outline:2px solid var(--focus);outline-offset:3px;border-radius:3px}
