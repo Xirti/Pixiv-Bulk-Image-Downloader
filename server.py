@@ -4385,13 +4385,13 @@ class Handler(SimpleHTTPRequestHandler):
         elif not isinstance(author, str) or not valid_pixiv_id(author):
             return self.send_json({"error": "作者 ID 无效"}, 400)
         try:
-            connected, generation = validated_authorization()
-            if not connected:
-                raise AccountError("reauth", "请先连接账号")
+            generation = self._cloud_generation(data)
             if authors is not None:ACCOUNTS.acknowledge_updates(generation,authors)
             else:ACCOUNTS.seen(generation, author)
             assert_authorization_generation(generation)
             return self.send_json({"ok": True})
+        except AccountError as error:
+            return self._cloud_error(error)
         except PIXIV_OPERATION_ERRORS:
             return self.send_json({"error": "查看状态暂未保存，请重试"}, 502)
         except sqlite3.Error:

@@ -1935,7 +1935,7 @@ const accountView=createAccountPage({root:$("#accountPage"),request:requestAccou
   openArtwork:(item,origin)=>{accountOrigin=true;void select(-1,item,origin.context);openDownloadPage();},
   installImages:installImageFallbacks,attachUgoira:attachUgoiraHoverTargets,
   report:message=>showTaskDock("账户",message,4000),mode:()=>readSearchFilters().mode,
-  signedIn:()=>lastKnownLoggedIn===true,connectionChanged:syncAppConnection,settingsReady:()=>cloudControls.ready(),
+  signedIn:()=>lastKnownLoggedIn===true,generation:()=>lastKnownAuthorizationGeneration,connectionChanged:syncAppConnection,settingsReady:()=>cloudControls.ready(),
   autoPrepare:()=>cloudControls.getPreferences().autoSync,
   getWork:id=>[currentDetailItem,basketDetailItem,...items,...selection.snapshot()].find(item=>item?.id===id) || null,
   getAuthor:id=>{

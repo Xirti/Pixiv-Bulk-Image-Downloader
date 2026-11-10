@@ -7,7 +7,7 @@
 <p align="center">Windows 上的 Pixiv 浏览、云收藏与批量下载工具</p>
 
 <p align="center">
-  <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.0">下载 v2.1.0</a> ·
+  <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.1">下载 v2.1.1</a> ·
   <a href="#开始使用">开始使用</a> ·
   <a href="RELEASE_NOTES.md">更新说明</a> ·
   <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/issues">问题反馈</a>
@@ -15,7 +15,7 @@
 
 按标签、作者或作品 ID 搜索，在推荐、榜单和关注新作中浏览，操作云端收藏与关注，再把选中的图片保存到电脑。`main` 为当前正式源码。
 
-当前版本为 **v2.1.0**。搜索可预选排序后直接开始；作者／标签跳转、推荐和榜单默认等待红色按钮，按下后可再次点击中断。设置可恢复进入页面自动加载，各模块分别记住排序方式，关注新作仍进入即加载。收藏数排序支持搜索候选池（最多500件）、榜单、推荐池及作者全部可见作品。实验性 SauceNAO 以图找图从首页进入，游客可手动完成官网验证，也可在账号设置中保存自己的 API Key；图片确认后上传第三方，详情见 [隐私说明](PRIVACY.md)。完整便携包见 [v2.1.0 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.0)。
+当前版本为 **v2.1.1**。搜索可预选排序后直接开始；作者／标签跳转、推荐和榜单默认等待红色按钮，按下后可再次点击中断。设置可恢复进入页面自动加载，各模块分别记住排序方式，关注新作仍进入即加载。收藏数排序支持搜索候选池（最多500件）、榜单、推荐池及作者全部可见作品。实验性 SauceNAO 以图找图从首页进入，游客可手动完成官网验证，也可在账号设置中保存自己的 API Key；图片确认后上传第三方，详情见 [隐私说明](PRIVACY.md)。完整便携包见 [v2.1.1 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.1)。
 
 设置 → **关于与更新** 可检查 GitHub 发行，选择正式／测试通道，手动下载校验后重启替换；每日检查默认关闭。尚未发布到 GitHub 的本地版本不会出现在更新列表中。图片缓存可切换普通／低内存模式，可见图片受保护，持久账号数据仍保留。正式包启用离线完整性检查与 Ed25519 发布签名，更新失败不影响当前版本；发布与密钥管理参见 [发布签名说明](RELEASE_SIGNING.md)。
 
@@ -37,7 +37,7 @@
 
 **运行环境：** Windows 10/11 x64、Microsoft Edge WebView2 Runtime，以及可访问 Pixiv 和图片 CDN 的网络。
 
-1. 在 [v2.1.0 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.0) 下载 Windows 便携包。
+1. 在 [v2.1.1 发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/tag/v2.1.1) 下载 Windows 便携包。
 2. 完整解压，运行 `MOKU/MOKU.exe`。便携包已包含 Python 运行依赖，保留整个程序文件夹。
 3. 在侧栏「我的账号 → 资料」选择 App 授权或网页登录，按官方页面提示完成登录。
 4. 搜索或进入「发现」，查看作品并勾选需要下载的图片。

@@ -195,7 +195,7 @@ class AppUpdates:
                     with self.lock:self.state["received"]=received
             if received!=release["size"] or digest.hexdigest()!=release["sha256"]:raise UpdateError("更新包大小或 SHA-256 校验失败")
             with self.lock:self.state["phase"]="verifying"
-            extract_package(archive,job/"MOKU",release["version"],expected_manifest_sha256=metadata["manifestSha256"])
+            extract_package(archive,job/"MOKU",release["version"],expected_manifest_sha256=metadata["manifestSha256"],cancel_event=self.cancel)
             if self.cancel.is_set():raise UpdateError("已取消更新下载")
             archive.unlink();self.bundle=job/"MOKU"
             self.cleanup()

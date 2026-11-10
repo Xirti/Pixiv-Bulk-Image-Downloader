@@ -43,9 +43,15 @@ def sha256(path):
         return hashlib.file_digest(stream,"sha256").hexdigest()
 
 
-def verify_bundle(root, expected_version, *, installed=False, expected_manifest_sha256=None):
+def _check_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise UpdateError("已取消更新下载")
+
+
+def verify_bundle(root, expected_version, *, installed=False, expected_manifest_sha256=None, cancel_event=None):
     """Validate the entire file set and manifest hashes, independent of this build."""
     root=Path(os.path.abspath(root))
+    _check_cancelled(cancel_event)
     if root!=root.resolve():raise UpdateError("程序目录不能经过链接")
     marker=root/"BUILD_MANIFEST.json"
     raw=read_bounded(marker,4*1024*1024)
@@ -65,6 +71,7 @@ def verify_bundle(root, expected_version, *, installed=False, expected_manifest_
         directory,prefix=pending.pop()
         with os.scandir(directory) as entries:
             for entry in entries:
+                _check_cancelled(cancel_event)
                 if installed and not prefix and entry.name not in MANAGED:continue
                 if entry.is_symlink() or getattr(entry.stat(follow_symlinks=False),"st_file_attributes",0)&stat.FILE_ATTRIBUTE_REPARSE_POINT:
                     raise UpdateError("程序组件不允许链接或重解析点")
@@ -75,6 +82,7 @@ def verify_bundle(root, expected_version, *, installed=False, expected_manifest_
                 if len(actual)+len(pending)>MAX_FILES:raise UpdateError("程序组件数超限")
     folded=set()
     for raw,digest in files.items():
+        _check_cancelled(cancel_event)
         relative=safe_relative(raw)
         if relative.casefold() in folded or not isinstance(digest,str) or not re.fullmatch(r"[a-fA-F0-9]{64}",digest):
             raise UpdateError("更新清单存在重复路径或无效摘要")
@@ -90,15 +98,17 @@ def verify_bundle(root, expected_version, *, installed=False, expected_manifest_
     return manifest
 
 
-def extract_package(archive, destination, version, *, expected_manifest_sha256):
+def extract_package(archive, destination, version, *, expected_manifest_sha256, cancel_event=None):
     """Preflight all paths and sizes before creating a file; refuse overwrite."""
     destination=Path(destination)
+    _check_cancelled(cancel_event)
     with zipfile.ZipFile(archive) as source:
         rows=source.infolist()
         if len(rows)>MAX_FILES or sum(row.file_size for row in rows)>MAX_EXPANDED:
             raise UpdateError("更新包解压大小超限")
         seen=set();files=[]
         for row in rows:
+            _check_cancelled(cancel_event)
             if row.filename=="MOKU/" and row.is_dir():continue
             parts=PurePosixPath(row.filename).parts
             if len(parts)<2 or parts[0]!="MOKU":raise UpdateError("更新包根目录应为 MOKU")
@@ -109,7 +119,13 @@ def extract_package(archive, destination, version, *, expected_manifest_sha256):
             if not row.is_dir():files.append((row,name))
         destination.mkdir(parents=True,exist_ok=False)
         for row,name in files:
+            _check_cancelled(cancel_event)
             path=destination/name;path.parent.mkdir(parents=True,exist_ok=True)
             with source.open(row) as reader,path.open("xb") as writer:
-                while chunk:=reader.read(1024*1024):writer.write(chunk)
-    return verify_bundle(destination,version,expected_manifest_sha256=expected_manifest_sha256)
+                while True:
+                    _check_cancelled(cancel_event)
+                    chunk=reader.read(1024*1024)
+                    if not chunk:break
+                    _check_cancelled(cancel_event)
+                    writer.write(chunk)
+    return verify_bundle(destination,version,expected_manifest_sha256=expected_manifest_sha256,cancel_event=cancel_event)

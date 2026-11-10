@@ -34,6 +34,9 @@ def web_link(value):
     except ValueError:
         if (len(host)>253 or not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}",host)
                 or host.endswith((".localhost",".local",".internal",".invalid",".test"))):return ""
+        # Browsers parse numeric-ending hosts as IPv4, including octal/hex
+        # spellings that ipaddress correctly refuses as canonical addresses.
+        if re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]*)",host.rsplit(".",1)[-1]):return ""
     else:
         if not address.is_global:return ""
         host="["+host+"]" if address.version==6 else host

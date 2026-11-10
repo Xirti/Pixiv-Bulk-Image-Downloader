@@ -6,8 +6,8 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   let prefs={...defaults},states={bookmark:new Map(),follow:new Map()},syncState={},owner=null;
   let epoch=0,sessionKey="",settingsPromise=null,prefsLoaded=false,hydration=null,hydrationAgain=false,hydratedKey="",timer=null,syncError="";
   let popup=null,anchor=null,popupVersion=0,readVersion=0,syncBusy=false,lastSyncAttempt=0,syncTurn=0;
-  let autoNotBefore=0,syncRequest=null;
-  let clearing=false,accountPrepared=false,auxiliaryBusy=false,auxiliaryCompleted=0,auxiliaryError="";
+  let autoNotBefore=0,syncRequest=null,syncJob=null,syncVersion=0;
+  let clearing=false,clearJob=null,accountPrepared=false,auxiliaryBusy=false,auxiliaryCompleted=0,auxiliaryError="";
   let preferenceWrites=Promise.resolve();
   let updatesBusy=false,lastUpdateCheck=0,updatesRemaining=false;
   const busy=new Set(),manual=new Set(),restart=new Set();
@@ -100,17 +100,17 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   }
   async function hydrate(force=false){
     paint();
-    if(!session().logged)return;
+    if(clearing || !session().logged)return;
     if(hydration){hydrationAgain ||= force;return hydration;}
     const {works,authors}=visibleTargets();
     const queryKey=JSON.stringify([works,authors]);
     if(!force && queryKey===hydratedKey)return;
-    const revision=epoch,generation=session().generation;
-    hydration=(async()=>{
+    const revision=epoch,generation=session().generation,syncAtStart=syncVersion;
+    const task=(async()=>{
       try{
         const data=await request(`/api/cloud/state?${new URLSearchParams({works:works.join(","),authors:authors.join(",")})}`,{},30000);
         if(!sameEpoch(revision,generation) || data.authorizationGeneration!==generation)return;
-        hydratedKey=queryKey;owner=data.owner;syncState=data.sync;
+        hydratedKey=queryKey;owner=data.owner;if(syncAtStart===syncVersion)syncState=data.sync;
         for(const kind of ["bookmark","follow"])for(const [id,state] of Object.entries(data.states[kind])){
           const old=get(kind,id);
           if(!old.touched || state.touched>=old.touched)states[kind].set(id,state);
@@ -119,8 +119,8 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       }catch(error){
         if(revision===epoch){hydratedKey="";syncError=error.message;lastSyncAttempt=Date.now();notifySettings();}
       }
-    })().finally(()=>{hydration=null;if(hydrationAgain){hydrationAgain=false;void hydrate(true);}});
-    return hydration;
+    })().finally(()=>{if(hydration!==task)return;hydration=null;if(hydrationAgain){hydrationAgain=false;void hydrate(true);}});
+    hydration=task;return task;
   }
   function schedule(){clearTimeout(timer);timer=setTimeout(()=>{void hydrate();position();},100);}
 
@@ -248,12 +248,12 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     const due=candidates.map((_,offset)=>candidates[(syncTurn+offset)%2]).find(candidate=>manual.has(candidate) || prefs.autoSync && now>=autoNotBefore &&
       (syncState[candidate]?.running || !syncState[candidate]?.completed || (now-syncState[candidate].completed*1000)/60000>=Number(prefs.syncMinutes)));
     if(!due)return;
-    syncBusy=true;lastSyncAttempt=now;const revision=epoch,generation=session().generation;
+    syncBusy=true;lastSyncAttempt=now;const revision=epoch,generation=session().generation,job={};syncJob=job;
     try{
       syncRequest=post("/api/cloud/sync",{kind:due,force:restart.has(due)});
       const data=await syncRequest;
       if(!sameEpoch(revision,generation))return;
-      restart.delete(due);syncState[due]=data.sync;syncError="";syncTurn=due==="bookmark"?1:0;
+      restart.delete(due);syncState[due]=data.sync;syncVersion++;syncError="";syncTurn=due==="bookmark"?1:0;
       const preparePage=prefs.autoSync || manual.has(due);
       if(!data.sync.running)manual.delete(due);
       if(preparePage)await prepareAccount({page:data.sync.page,completed:data.sync.running?null:data.sync.pageOffsets});
@@ -261,13 +261,15 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       await hydrate(true);notifySettings();
     }catch(error){
       if(revision===epoch){syncError=error.message;lastSyncAttempt=Date.now()+55000;manual.clear();restart.clear();notifySettings();}
-    }finally{syncBusy=false;syncRequest=null;if(sameEpoch(revision,generation)){notifySettings();setTimeout(()=>{void tick();},1100);}}
+    }finally{if(syncJob===job){syncBusy=false;syncRequest=null;syncJob=null;}if(sameEpoch(revision,generation)){notifySettings();setTimeout(()=>{void tick();},1100);}}
   }
   async function clearCache(){
     if(!session().logged){login();throw new Error("请先登录后清除当前账号缓存");}
-    const generation=session().generation;
-    clearing=true;
-    epoch++;readVersion++;close();manual.clear();restart.clear();busy.clear();
+    if(clearing)throw new Error("正在清除当前账号缓存");
+    const generation=session().generation,job={};
+    clearing=true;clearJob=job;
+    notifySettings();
+    epoch++;readVersion++;close();manual.clear();restart.clear();busy.clear();hydration=null;hydrationAgain=false;
     autoNotBefore=Date.now()+Number(prefs.syncMinutes)*60000;
     try{
       await clearStarted();
@@ -279,7 +281,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       lastUpdateCheck=0;updatesRemaining=false;
       auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;
       cleared();paint();notifySettings();report("当前账号缓存已清除");
-    }finally{clearing=false;}
+    }finally{if(clearJob===job){clearing=false;clearJob=null;notifySettings();}}
   }
   function refresh(){
     if(clearing || manual.size || syncBusy)return;
@@ -292,6 +294,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     const value=session(),next=JSON.stringify([value.logged,value.generation,value.method]);
     if(next===sessionKey)return;
     sessionKey=next;epoch++;readVersion++;close();busy.clear();manual.clear();restart.clear();
+    hydration=null;hydrationAgain=false;syncBusy=false;syncRequest=null;syncJob=null;clearing=false;clearJob=null;
     updatesBusy=false;lastUpdateCheck=0;updatesRemaining=false;
     void clearStarted();
     auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;auxiliaryError="";

@@ -1,7 +1,7 @@
 "use strict";
 
 globalThis.createAccountPage = function ({root,request,escape:esc,allowed,changed,openArtist,openArtwork,
-    choose,selected,canChoose=()=>true,installImages,attachUgoira,report,mode,signedIn,connectionChanged,settingsReady=()=>Promise.resolve(),autoPrepare=()=>true,getWork=()=>null,getAuthor=()=>null,openUpdates=()=>{},statistics=null}) {
+    choose,selected,canChoose=()=>true,installImages,attachUgoira,report,mode,signedIn,generation=()=>null,connectionChanged,settingsReady=()=>Promise.resolve(),autoPrepare=()=>true,getWork=()=>null,getAuthor=()=>null,openUpdates=()=>{},statistics=null}) {
   const header=root.querySelector("[data-account-profile]"),tools=root.querySelector("[data-account-tools]");
   const peopleRoot=root.querySelector("[data-account-people]"),grid=root.querySelector("[data-account-grid]");
   const message=root.querySelector("[data-account-message]"),pagination=root.querySelector("[data-account-pagination]");
@@ -19,6 +19,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   let updatePreferences={detect:true,dots:true},updates={public:{},private:{}},checkingUpdates=null;
   const acknowledged=new Map();
   const pendingUpdateScopes=new Set();
+  let relationVersion=0;
   let scrollFrame=null,restoringScroll=false,restoreTop=null;
   function remember(){if(active && !restoringScroll){state.scroll=root.scrollTop;positions.set(state.view,structuredClone(state));}}
   root.addEventListener("scroll",remember,{passive:true});
@@ -28,9 +29,17 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     const current=pageKey();
     while(cache.size>128){const old=[...cache.keys()].find(identity=>identity!==current);cache.delete(old);}
   }
-  function read(view,params={},options={}){
-    const url=`/api/account/${view}?${new URLSearchParams(params)}`;
-    return reads.read(url,options);
+  async function read(view,params={},options={}){
+    let current=params;
+    for(let attempt=0;attempt<2;attempt++){
+      const version=relationVersion;
+      const value=await reads.read(`/api/account/${view}?${new URLSearchParams(current)}`,options);
+      if(version===relationVersion)return value;
+      // The response predates a confirmed relationship change. Read the
+      // repaired server cache; only this overlapping read needs replacement.
+      current={...params};delete current.refresh;
+    }
+    throw new Error("账号列表仍在更新，请稍后重试");
   }
   function stopBackground(){
     backgroundRevision++;backgroundController.abort();backgroundController=new AbortController();nextReads.clear();
@@ -94,11 +103,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         }
         if(profile.workCount===0){own={items:[]};ownMode=contentMode;}
       }
-      // Lists keep their current contents; the profile can adopt fresh metadata.
+      // Adopt a synchronized visible page while preserving its scroll position.
       if(valid() && active && !pending){
         if(state.view==="home")render();
-        else if(!data && state.view!=="settings"){
-          const available=cache.get(pageKey());if(available){data=available;render();}
+        else if(state.view!=="settings" && (page || refresh || !data)){
+          const available=cache.get(pageKey());if(available && available!==data){data=available;render();}
         }
       }
       if(!document.hidden && (network || page))for(const warm of images){if(!valid())return;await warm();}
@@ -159,12 +168,13 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     checkingUpdates=task;return task;
   }
   async function acknowledge(authors){
-    const version=backgroundRevision;
+    const version=backgroundRevision,auth=generation();
     const entries=Object.entries(authors);
     for(let offset=0;offset<entries.length;offset+=500){
       const part=Object.fromEntries(entries.slice(offset,offset+500));
-      await request('/api/account/seen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({authors:part})});
-      if(version!==backgroundRevision)return;
+      if(version!==backgroundRevision || auth!==generation())return;
+      await request('/api/account/seen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({authors:part,authorizationGeneration:auth})});
+      if(version!==backgroundRevision || auth!==generation())return;
       for(const [id,stamp] of Object.entries(part)){
         acknowledged.set(id,[acknowledged.get(id) || '',stamp].sort().at(-1));
         for(const scope of ['public','private'])if(updates[scope][id]?.latestObserved<=stamp)updates[scope][id].isNew=false;
@@ -372,6 +382,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     cachedTags:()=>tags,prepare,stopBackground,checkUpdates,seenWorks,
     configure(value,loaded){if(!loaded)return;updatePreferences={detect:value.autoFollowing,dots:value.updateDots};syncUpdateDots();},
     cloudChanged:(kind,id,value,previous)=>{
+      relationVersion++;
       if(kind==='follow')for(const scope of ['public','private'])if(!value.active || value.privacy && value.privacy!==scope)delete updates[scope][id];
       const view=kind==="bookmark"?"bookmarks":"following",field=kind==="bookmark"?"items":"people";
       const existing=[...cache.values()].flatMap(page=>page[field] || []).find(row=>row.id===id);
@@ -383,13 +394,28 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         const [type,scope,tag,offset,contentMode]=JSON.parse(key);
         if(type!==view || !page[field])continue;
         const rows=page[field],old=rows.length;
-        const fits=value.active && (value.privacy?value.privacy===scope:rows.some(row=>row.id===id)) && (!tag || !value.tags || value.tags.includes(tag)) &&
-          (kind!=="bookmark" || !record || contentMode==="all" || (contentMode==="r18") === (record.restriction==="r18"));
+        const membership=relation=>{
+          if(!relation?.known)return null;
+          if(!relation.active || relation.privacy && relation.privacy!==scope)return false;
+          if(!relation.privacy && !rows.some(row=>row.id===id))return null;
+          if(kind==="bookmark"){
+            if(tag){if(relation.tags===null)return null;if(!relation.tags.includes(tag))return false;}
+            if(contentMode!=="all"){
+              if(!record)return null;
+              if((contentMode==="r18")!==(record.restriction==="r18"))return false;
+            }
+          }
+          return true;
+        };
+        const previousMember=membership(previous),nextMember=membership(value);
+        const fits=nextMember===true || nextMember===null && rows.some(row=>row.id===id);
         const next=rows.filter(row=>row.id!==id || fits);
         if(fits && !offset && record && !next.some(row=>row.id===id))next.unshift({...record,...(kind==="follow"?{following:true}:{})});
         if(next.length!==old || next.some((row,index)=>row!==rows[index])){
-          page[field]=next;if(Number.isInteger(page.total))page.total+=next.length-old;
+          page[field]=next;
         }
+        const delta=previousMember!==null && nextMember!==null?Number(nextMember)-Number(previousMember):next.length-old;
+        if(delta && Number.isInteger(page.total))page.total=Math.max(0,page.total+delta);
       }
       if(profile && previous?.known && (kind==="follow" || !value.active || value.privacy)){
         const delta=kind==="follow"?Number(value.active)-Number(previous.active):
@@ -398,7 +424,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         if(Number.isInteger(profile[count]))profile[count]=Math.max(0,profile[count]+delta);
         if(delta)renderedHeader=undefined;
       }
-      if(kind==="bookmark" && tags && previous?.known && (!value.active || value.privacy && value.tags!==null)){
+      if(kind==="bookmark" && tags && previous?.known &&
+          (!previous.active || previous.privacy && previous.tags!==null) && (!value.active || value.privacy && value.tags!==null)){
         for(const scope of ["public","private"]){
           const oldTags=previous.active && previous.privacy===scope?previous.tags || []:[];
           const newTags=value.active && value.privacy===scope?value.tags || []:[];

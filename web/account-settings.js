@@ -65,7 +65,7 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     clearing=true;clearButton.disabled=true;status.textContent="正在清除账号缓存…";
     try{await clearCache();status.textContent="账号缓存已清除";}
     catch(error){status.textContent=error.message;}
-    finally{clearing=false;clearButton.disabled=false;}
+    finally{clearing=false;update(saved || {},null,preferencesLoaded);}
   };
   fields.forEach(field=>field.addEventListener("input",()=>{
     if(field.dataset.setting==='autoLoadPages' && !field.checked){

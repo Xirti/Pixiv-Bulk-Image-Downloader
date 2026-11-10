@@ -139,9 +139,12 @@ class AccountCache:
             return json.loads(row[0]) if row else None
 
     def save(self, owner, method, key, value):
+        self.save_many(owner,method,[(key,value)])
+
+    def save_many(self, owner, method, pages):
         with self.lock, closing(self._connect()) as db, db:
-            db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
-                       (owner, method, json.dumps(key), json.dumps(value, ensure_ascii=False)))
+            db.executemany("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
+                [(owner,method,json.dumps(key),json.dumps(value,ensure_ascii=False)) for key,value in pages])
 
     def retain_discovery(self, owner, method, limit=32):
         with self.lock, closing(self._connect()) as db, db:
@@ -248,7 +251,14 @@ class AccountPages:
         with self._lock:
             pending = self._loads.setdefault(key, [threading.RLock(),0]);pending[1]+=1
         try:
-            with pending[0]:return self._load_cached(key, load, refresh)
+            with pending[0]:
+                try:
+                    return self._load_cached(key, load, refresh)
+                except AccountError as error:
+                    if error.kind!="cache_changed":raise
+                    # A write overlapped this first read, so no repaired page
+                    # exists yet. Replace that obsolete response once.
+                    return self._load_cached(key, load)
         finally:
             with self._lock:
                 pending[1]-=1
@@ -378,53 +388,77 @@ class AccountPages:
                 self._cache.pop(memory_key,None)
                 self._versions[memory_key]=self._versions.get(memory_key,0)+1
 
-    def note_relation(self, owner, method, kind, target, before, after):
+    def note_relation(self, owner, method, kind, target, before, after, *, repair=False):
         """Patch cached pages after a confirmed write; do not invalidate unrelated pages."""
-        view, field = ("bookmarks", "items") if kind == "bookmark" else ("following", "people")
-        views=("bookmarks","profile","profile-web","tags","works") if kind=="bookmark" else ("following","followers","profile","profile-web")
-        entries = self.saved_cache.entries(owner, method,views)
-        record = next((row for key,page in entries for row in page.get(field,[]) if row["id"]==target),None)
-        for key,page in entries:
-            changed = False
-            if key[1] == view:
-                scope,offset = key[3:5]
-                fits = after["active"] and (after["privacy"] is None or after["privacy"]==scope)
-                if kind == "bookmark":
-                    tag,mode = key[5:7]
-                    fits = fits and (not tag or after["tags"] is None or tag in after["tags"]) and (
-                        record is None or mode=="all" or (mode=="r18")== (record["restriction"]=="r18"))
-                rows = page[field]
-                updated = [row for row in rows if row["id"]!=target or fits]
-                if fits and offset==0 and record and not any(row["id"]==target for row in updated):updated.insert(0,record)
-                if updated!=rows:
-                    page[field]=updated
-                    if page.get("total") is not None:page["total"]+=len(updated)-len(rows)
+        generation=self.generation()
+        with self._lock:
+            view, field = ("bookmarks", "items") if kind == "bookmark" else ("following", "people")
+            views=("bookmarks","profile","profile-web","tags","works") if kind=="bookmark" else ("following","followers","profile","profile-web")
+            entries = self.saved_cache.entries(owner, method,views)
+            record = next((row for key,page in entries for row in page.get(field,[]) if row["id"]==target),None)
+            patches=[]
+            for key,page in entries:
+                changed = False
+                if key[1] == view:
+                    scope,offset = key[3:5]
+                    rows = page[field]
+                    tag,mode = key[5:7] if kind=="bookmark" else ("","all")
+                    def membership(state):
+                        if not state["active"] or state["privacy"] is not None and state["privacy"]!=scope:return False
+                        if state["privacy"] is None and not any(row["id"]==target for row in rows):return None
+                        if tag:
+                            if state["tags"] is None:return None
+                            if tag not in state["tags"]:return False
+                        if mode!="all":
+                            if record is None:return None
+                            if (mode=="r18")!=(record["restriction"]=="r18"):return False
+                        return True
+                    previous_member,next_member=membership(before),membership(after)
+                    fits = next_member is True or next_member is None and any(row["id"]==target for row in rows)
+                    updated = [row for row in rows if row["id"]!=target or fits]
+                    if fits and offset==0 and record and not any(row["id"]==target for row in updated):updated.insert(0,record)
+                    if updated!=rows:
+                        page[field]=updated
+                        changed=True
+                    # A sweep may return an old row after a newer local write. It
+                    # repairs that page; it is not another relationship transition.
+                    delta=int(next_member)-int(previous_member) if not repair and previous_member is not None and next_member is not None else len(updated)-len(rows)
+                    if delta and page.get("total") is not None:
+                        page["total"]=max(0,page["total"]+delta);changed=True
+                elif key[1]=="followers" and kind=="follow":
+                    for person in page["people"]:
+                        if person["id"]==target and person["following"]!=after["active"]:
+                            person["following"]=after["active"];changed=True
+                elif key[1] in {"profile","profile-web"}:
+                    count = "following" if kind=="follow" else "publicBookmarks"
+                    delta = int(after["active"])-int(before["active"]) if kind=="follow" else (
+                        int(after["active"] and after["privacy"]=="public")-int(before["active"] and before["privacy"]=="public"))
+                    if delta and page.get(count) is not None:page[count]=max(0,page[count]+delta);changed=True
+                elif (key[1]=="tags" and kind=="bookmark" and
+                      all(not state["active"] or state["privacy"] is not None and state["tags"] is not None
+                          for state in (before,after))):
+                    for scope in ("public","private"):
+                        old=set(before["tags"] or []) if before["active"] and before["privacy"]==scope else set()
+                        new=set(after["tags"] or []) if after["active"] and after["privacy"]==scope else set()
+                        for name in old|new:
+                            delta=int(name in new)-int(name in old)
+                            row=next((row for row in page[scope] if row["name"]==name),None)
+                            if row:row["count"]=max(0,row["count"]+delta)
+                            elif delta>0:page[scope].append({"name":name,"count":delta})
+                        page[scope]=[row for row in page[scope] if row["count"]>0]
                     changed=True
-            elif key[1]=="followers" and kind=="follow":
-                for person in page["people"]:
-                    if person["id"]==target and person["following"]!=after["active"]:
-                        person["following"]=after["active"];changed=True
-            elif key[1] in {"profile","profile-web"}:
-                count = "following" if kind=="follow" else "publicBookmarks"
-                delta = int(after["active"])-int(before["active"]) if kind=="follow" else (
-                    int(after["active"] and after["privacy"]=="public")-int(before["active"] and before["privacy"]=="public"))
-                if delta and page.get(count) is not None:page[count]=max(0,page[count]+delta);changed=True
-            elif key[1]=="tags" and kind=="bookmark":
-                for scope in ("public","private"):
-                    old=set(before["tags"] or []) if before["active"] and before["privacy"]==scope else set()
-                    new=set(after["tags"] or []) if after["active"] and after["privacy"]==scope else set()
-                    for name in old|new:
-                        delta=int(name in new)-int(name in old)
-                        row=next((row for row in page[scope] if row["name"]==name),None)
-                        if row:row["count"]=max(0,row["count"]+delta)
-                        elif delta>0:page[scope].append({"name":name,"count":delta})
-                    page[scope]=[row for row in page[scope] if row["count"]>0]
-                changed=True
-            if changed:
-                self.saved_cache.save(owner,method,key,page)
-                memory_key=(self.generation(),*key[1:])
-                with self._lock:
+                if changed:
+                    patches.append((key,page))
+            if patches:
+                self.saved_cache.save_many(owner,method,patches)
+                for key,page in patches:
+                    memory_key=(generation,*key[1:])
+                    self._versions[memory_key]=self._versions.get(memory_key,0)+1
                     if memory_key in self._cache:self._cache[memory_key]=(time.monotonic(),copy.deepcopy(page))
+            patched={(generation,*key[1:]) for key,_ in patches}
+            for key in self._loads:
+                if key not in patched and len(key)>2 and key[0]==generation and key[1] in views and key[2]==owner:
+                    self._versions[key]=self._versions.get(key,0)+1
 
     def web_owner(self, generation):
         def load():

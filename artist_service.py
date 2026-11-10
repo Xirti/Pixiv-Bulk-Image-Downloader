@@ -87,11 +87,13 @@ class ArtistService:
     def __init__(self, fetch):
         self._fetch = fetch
         self._cache = OrderedDict()
+        self._pending = {}
         self._lock = threading.Lock()
 
     def clear(self):
         with self._lock:
             self._cache.clear()
+            self._pending.clear()
 
     def read(self, kind, target, *, generation, page=1, cancel_event=None, refresh=False):
         if kind not in {"profile", "overview", "candidates"}:
@@ -112,16 +114,24 @@ class ArtistService:
             if not refresh and cached and cached[0] > time.monotonic():
                 self._cache.move_to_end(key)
                 return copy.deepcopy(cached[1])
-        payload = self._fetch(url, cancel_event)
-        body = payload.get("body")
-        result = (normalize_artist(body, target) if kind == "profile" else
-                  normalize_overview(body, target) if kind == "overview" else
-                  normalize_candidates(body, target, page))
-        if cancel_event is not None and cancel_event.is_set():
-            raise PixivPolicyError("作者读取已取消")
-        with self._lock:
-            self._cache[key] = (time.monotonic() + 300, copy.deepcopy(result))
-            self._cache.move_to_end(key)
-            while len(self._cache) > 48:
-                self._cache.popitem(last=False)
-        return result
+            pending=object();self._pending[key]=pending
+        try:
+            payload = self._fetch(url, cancel_event)
+            body = payload.get("body")
+            result = (normalize_artist(body, target) if kind == "profile" else
+                      normalize_overview(body, target) if kind == "overview" else
+                      normalize_candidates(body, target, page))
+            if cancel_event is not None and cancel_event.is_set():
+                raise PixivPolicyError("作者读取已取消")
+            with self._lock:
+                if self._pending.get(key) is not pending:
+                    cached=self._cache.get(key)
+                    return copy.deepcopy(cached[1]) if cached else result
+                self._cache[key] = (time.monotonic() + 300, copy.deepcopy(result))
+                self._cache.move_to_end(key)
+                while len(self._cache) > 48:
+                    self._cache.popitem(last=False)
+            return result
+        finally:
+            with self._lock:
+                if self._pending.get(key) is pending:self._pending.pop(key)

@@ -211,8 +211,16 @@ class CloudActions:
     def read(self, generation, kind, target):
         with self.lock:
             owner, method = self.context(generation)
+            previous = self.store.many(owner, method, [target] if kind == "bookmark" else [], [target] if kind == "follow" else [])[kind][target]
             state = self._read(owner, method, kind, target, generation)
-            return self._commit(generation, lambda: self.store.put(owner, method, kind, target, state))
+            return self._commit(generation, lambda: self._record(owner, method, kind, target, previous, state))
+
+    def _record(self, owner, method, kind, target, previous, state):
+        """Use one publication path for verified state and display-cache repairs."""
+        current = self.store.put(owner, method, kind, target, state)
+        repair = not previous["known"] or relationship_stamp(previous)==current["stamp"]
+        self.pages.note_relation(owner, method, kind, target, current if not previous["known"] else previous, current, repair=repair)
+        return current
 
     def _write(self, generation, owner, method, intent, before):
         kind, target, active, privacy = (intent[key] for key in ("kind", "id", "active", "privacy"))
@@ -263,17 +271,18 @@ class CloudActions:
             replay, result = self._commit(generation, lambda: self.store.operation(owner, method, intent["requestId"], signature))
             if replay:
                 # A lost response never causes a second POST. A fresh read repairs the local view.
-                current = self._commit(generation, lambda: self.store.put(owner, method, kind, target, before))
+                current = self._commit(generation, lambda: self._record(owner, method, kind, target, cached, before))
                 return {"state": current, "confirmed": self._matches(intent, before), "replayed": True}
             conflict = before["active"] if intent["expected"] is None else (
                 not cached["known"] or cached.get("stamp") != intent["expected"] or cached["active"] != before["active"] or
                 before["active"] and any(cached.get(field) is not None and before.get(field) is not None and
                     (set(cached[field]) != set(before[field]) if field == "tags" else cached[field] != before[field]) for field in ("privacy", "tags")))
             if conflict:
-                current = self._commit(generation, lambda: self.store.put(owner, method, kind, target, before))
+                current = self._commit(generation, lambda: self._record(owner, method, kind, target, cached, before))
                 raise CloudActionError("conflict", "云端状态已改变，请核对后重新操作", state=current)
             if kind == "bookmark" and intent["active"] and before["active"] and before["tags"] is None and intent["tags"] is not None:
-                raise CloudActionError("tags_unknown", "现有收藏标签尚未完整读取，请先在官网核对，避免覆盖", state=before)
+                current = self._commit(generation, lambda: self._record(owner, method, kind, target, cached, before))
+                raise CloudActionError("tags_unknown", "现有收藏标签尚未完整读取，请先在官网核对，避免覆盖", state=current)
             effective = {**intent, "tags": before["tags"]} if kind=="bookmark" and intent["tags"] is None else intent
             error = None
             needs_write = not self._matches(effective, before)
@@ -288,7 +297,7 @@ class CloudActions:
             except (PixivPolicyError, OSError, TimeoutError) as failure:
                 self.pages.check(generation)
                 raise CloudActionError("unknown", "操作结果尚未确认，请刷新核对；不会自动重复提交", official=method == "web" and kind == "follow") from failure
-            current = self._commit(generation, lambda: self.store.put(owner, method, kind, target, after))
+            current = self._commit(generation, lambda: self._record(owner, method, kind, target, {**before,"known":True}, after))
             confirmed = self._matches(effective, after)
             if not confirmed:
                 official = method == "web" and kind == "follow"
@@ -297,7 +306,6 @@ class CloudActions:
             self._commit(generation, lambda: self.store.finish_operation(owner, method, intent["requestId"], current))
             if intent["active"]:
                 self._commit(generation, lambda: self.store.save_preferences(scope, {kind + "Last": intent["privacy"]}))
-            self._commit(generation, lambda: self.pages.note_relation(owner, method, kind, target, before, current))
             return {"state": current, "confirmed": True}
 
     @staticmethod
@@ -331,6 +339,6 @@ class CloudActions:
                 self._commit(generation,lambda:self.pages.finish_scan(owner,method,kind,offsets,generation))
             # A local write made during this sweep wins over older list responses.
             for target,state in self.store.newer_relations(owner,method,kind,scan["version"]):
-                self._commit(generation,lambda:self.pages.note_relation(owner,method,kind,target,state,state))
+                self._commit(generation,lambda:self.pages.note_relation(owner,method,kind,target,state,state,repair=True))
             self.scans[key] = result
             return {**result,"page":{"kind":kind,"scope":scan["scope"],"offset":scan.get("offset",0)}}

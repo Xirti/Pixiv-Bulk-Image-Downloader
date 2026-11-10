@@ -12,7 +12,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   let background=new AbortController(),preparing=null,networkQueued=false,sessionGeneration=null,preferences=null;
   const reads=createPageReads(request);
   let restoreTop=null,sorting=false,sortProgress="";
-  let viewedData=null;
+  let viewedData=null,followingVersion=0;
   function markViewed(){
     if(!active || document.hidden || pending || !signedIn() || sessionGeneration!==generation() || state.kind!=='following' || !data?.items.length || viewedData===data)return;
     const shown=data;viewedData=shown;
@@ -28,6 +28,26 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   const interaction=createGalleryInteraction({grid,scrollSurface:root,allowed:()=>active && !pending && allowed(),report,
     openArtwork:index=>{const item=data?.items[index];if(item)openArtwork(item,{context:{kind:'pid',value:item.id},resultPage:state.page});},openArtist:item=>openArtist(item.userId)});
   const query=(s,extra={})=>'/api/discovery?'+new URLSearchParams({kind:s.kind,scope:s.scope,mode:s.mode,rank:s.rank,offset:s.offset,batch:s.batch,...extra});
+  async function readPage(target,extra={},options={}){
+    let destination=target,parameters=extra;
+    for(let attempt=0;attempt<2;attempt++){
+      const version=followingVersion;
+      const result=await reads.read(query(destination,parameters),options);
+      if(result.cached===false && attempt)throw new Error('关注新作缓存已清理，请刷新');
+      if(target.kind!=='following' || version===followingVersion || result.cached===false)return result;
+      // Re-filter the same snapshot against the newly synchronized relations.
+      destination={...target,batch:result.batch,offset:result.offset};
+      parameters={cached:'1',...(extra.background?{background:extra.background}:{})};
+    }
+    throw new Error('关注状态仍在更新，请稍后刷新');
+  }
+  function invalidateFollowing(){
+    followingVersion++;
+    for(const key of new Set([...positions.keys(),...latest.keys(),sourceKey(state),sourceKey({...initial(),kind:'following'})])){
+      if(JSON.parse(key)[0]!=='following')continue;
+      sourceVersions.set(key,sourceVersion(key)+1);latest.delete(key);staged.delete(key);attempts.delete(key);followingDirty.add(key);
+    }
+  }
 
   function remember(){
     if(!active || !data)return;
@@ -107,19 +127,19 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     controller?.abort();controller=new AbortController();
     const signal=controller.signal,version=++revision,auth=generation(),destination=structuredClone(state),key=sourceKey(destination);
     if(refresh){sourceVersions.set(key,sourceVersion(key)+1);staged.delete(key);}
-    const old=data;error='';
+    const followAtStart=followingVersion;error='';
     const local=cache.get(pageKey(destination));
     if(local && !refresh){data=local;pending=false;render();prepareNext();return;}
     pending=true;if(!refresh)data=null;render();
     try{
-      const result=await reads.read(query(destination,refresh?{refresh:'1',batch:'',offset:'0',revision:String(version)}:{}),{signal});
+      const result=await readPage(destination,refresh?{refresh:'1',batch:'',offset:'0',revision:String(version)}:{},{signal});
       if(version!==revision || signal.aborted || auth!==generation())return;
       data=result;state={...destination,batch:result.batch,offset:result.offset,...(refresh?{page:1,trail:[]}:{} )};
-      if(refresh){restoreTop=root.scrollTop;followingDirty.delete(key);}
+      if(refresh){restoreTop=root.scrollTop;if(followAtStart===followingVersion)followingDirty.delete(key);}
       savePage(state,result);positions.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});staged.delete(key);
     }catch(problem){
       if(version!==revision || signal.aborted)return;
-      error=problem.message || '发现读取失败，请右键刷新重试';if(refresh)data=old;
+      error=problem.message || '发现读取失败，请右键刷新重试';
       state.waiting=true;
     }finally{if(version===revision && !signal.aborted){pending=false;render();prepareNext();}}
   }
@@ -127,7 +147,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(state.waiting || state.order==='popular' || !active || document.hidden || !autoPrepare() || !data || data.nextOffset==null)return;
     const target={...state,offset:data.nextOffset},key=pageKey(target),signal=background.signal,auth=generation();
     if(cache.has(key) || nextReads.has(key))return;
-    const reading=reads.read(query(target,{background:'1'}),{signal}).then(async result=>{
+    const reading=readPage(target,{background:'1'},{signal}).then(async result=>{
       if(signal.aborted || auth!==generation())return;
       savePage(target,result);await previews.prepare(key,result.items,signal,{warm:'account'});
     }).catch(problem=>{if(!signal.aborted && auth===generation())report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
@@ -177,7 +197,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     pending=true;sortProgress='正在准备作品元数据…';render();
     try{
       // This seed is metadata only. Its default-order images never enter the DOM.
-      const seed=await reads.read(query({...destination,offset:0,batch:refresh?'':destination.batch},refresh?{refresh:'1',revision:String(version)}:{}),{signal});
+      const seed=await readPage({...destination,offset:0,batch:refresh?'':destination.batch},refresh?{refresh:'1',revision:String(version)}:{},{signal});
       if(signal.aborted || version!==revision || auth!==generation())return;
       const normal={...destination,batch:seed.batch,offset:0,page:1,trail:[],order:'default',popularityIndex:'',waiting:false};
       savePage(normal,seed);positions.set(key,{state:normal,data:seed,scroll:root.scrollTop});
@@ -203,7 +223,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(!same)staged.set(key,record);
   }
   async function reconcileFollowing(){
-    const signal=background.signal,auth=generation();
+    const signal=background.signal,auth=generation();let reload=false;
     for(const [key,page] of [...cache]){
       if(page.kind!=='following')continue;
       const [descriptor]=JSON.parse(key);
@@ -211,23 +231,27 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       const target={kind,scope,mode,rank,batch:page.batch,offset:page.offset};
       const version=sourceVersion(descriptor);
       try{
-        const result=await reads.read(query(target,{cached:'1',background:'1'}),{signal});
+        const result=await readPage(target,{cached:'1',background:'1'},{signal});
         if(signal.aborted || auth!==generation())return;
-        if(sourceVersion(descriptor)!==version || result.cached===false)continue;
+        if(sourceVersion(descriptor)!==version)continue;
+        if(result.cached===false){
+          cache.delete(key);
+          for(const collection of [positions,staged,sortViews])for(const [identity,record] of collection)if(record.data===page)collection.delete(identity);
+          if(data===page){controller?.abort();revision++;pending=false;data=null;reload=true;render();}
+          continue;
+        }
         const same=page.items.map(item=>item.id).join(',')===result.items.map(item=>item.id).join(',');
         if(same)continue;
         savePage(target,result);
-        for(const collection of [positions,staged]){
-          const record=collection.get(descriptor);
-          if(record?.data===page)record.data=result;
-        }
+        for(const collection of [positions,staged,sortViews])for(const record of collection.values())if(record.data===page)record.data=result;
         if(data===page){data=result;render();}
       }catch(problem){if(signal.aborted || auth!==generation())return;report(`关注新作状态核对失败：${problem.message}`);return;}
     }
+    if(reload && active && state.kind==='following')await load(true);
   }
   async function prepare({network=false,page=null,completed=null}={}){
     if(!signedIn())return;
-    if(page){if(page.kind==='follow' && completed)await reconcileFollowing();return;}
+    if(page){if(page.kind==='follow' && completed){invalidateFollowing();await reconcileFollowing();}return;}
     if(network && !preferences)return;
     const auth=generation();
     if(sessionGeneration!==auth){clear();sessionGeneration=auth;}
@@ -246,7 +270,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
         try{
           let result=latest.get(key);
           if(!result){
-            result=await reads.read(query(target,{background:'1',cached:'1',batch:'',offset:'0'}),{signal});
+            result=await readPage(target,{background:'1',cached:'1',batch:'',offset:'0'},{signal});
             if(signal.aborted || auth!==generation() || version!==sourceVersion(key))continue;
             if(result.cached===false)result=null;
             else applyPrepared(target,result);
@@ -254,7 +278,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
           if(!network || !preferences || !automatic(target) || !due(target,result) && !followingDirty.has(key))continue;
           if(Date.now()-(attempts.get(key) || 0)<60000)continue;
           attempts.set(key,Date.now());
-          result=await reads.read(query(target,{background:'1',refresh:'1',batch:'',offset:'0'}),{signal});
+          result=await readPage(target,{background:'1',refresh:'1',batch:'',offset:'0'},{signal});
           if(signal.aborted || auth!==generation() || version!==sourceVersion(key))continue;
           followingDirty.delete(key);applyPrepared(target,result);
           if(!document.hidden)await previews.prepare(pageKey({...target,batch:result.batch}),result.items,signal,{warm:'account'});
@@ -271,17 +295,14 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     preparing=task;return task;
   }
   function followingChanged(id,relationship){
+    invalidateFollowing();
     for(const [key,page] of cache){
       if(page.kind!=='following')continue;
       const filtered=page.items.filter(item=>item.userId!==id || relationship.active && (page.scope==='all' || relationship.privacy===page.scope));
       if(filtered.length===page.items.length)continue;
       const updated={...page,items:filtered};cache.set(key,updated);
-      for(const collection of [positions,staged])for(const record of collection.values())if(record.data===page)record.data=updated;
+      for(const collection of [positions,staged,sortViews])for(const record of collection.values())if(record.data===page)record.data=updated;
       if(data===page)data=updated;
-    }
-    for(const key of new Set([...positions.keys(),sourceKey({...initial(),kind:'following'})])){
-      if(JSON.parse(key)[0]!=='following')continue;
-      sourceVersions.set(key,sourceVersion(key)+1);latest.delete(key);staged.delete(key);attempts.delete(key);followingDirty.add(key);
     }
     if(active && state.kind==='following'){render();void load(true);}
   }
