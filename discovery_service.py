@@ -7,12 +7,15 @@ import threading
 import time
 from urllib.parse import urlencode, urlsplit, parse_qs
 import uuid
+import weakref
 
 from account_pages import source_body
 from pixiv_account import AccountError
 from pixiv_adapter import (PixivPolicyError, normalize_search_item, valid_pixiv_id,
-                           small_full_preview_url, publication_date, publication_timestamp)
+                           small_full_preview_url, publication_date, publication_timestamp,
+                           CONTENT_MODES,RESTRICTED_CONTENT,matches_content_mode)
 from pixiv_app_gallery import normalize_work, continuation, proxy_image
+from request_coordinator import checked_lock
 
 RANKS = {"day":"daily", "week":"weekly", "month":"monthly", "week_rookie":"rookie", "week_original":"original"}
 
@@ -60,7 +63,8 @@ class DiscoveryService:
         self.pages, self.context, self.follow_states = pages, context, follow_states
         self._guard = threading.RLock()
         self._feeds = OrderedDict()
-        self._locks = {}
+        # Active readers hold their lock strongly, including while waiting.
+        self._locks = weakref.WeakValueDictionary()
         self._epoch = 0
 
     def invalidate(self):
@@ -156,9 +160,9 @@ class DiscoveryService:
     def _web_batch(self, feed, stream, generation):
         page, kind = feed["paths"][stream], feed["kind"]
         if kind == "recommended":
-            path = "/ajax/discovery/artworks?"+urlencode({"mode":feed["mode"],"limit":18,"lang":"zh"})
+            path = "/ajax/discovery/artworks?"+urlencode({"mode":"r18" if feed["mode"] in RESTRICTED_CONTENT else feed["mode"],"limit":18,"lang":"zh"})
         elif kind == "following":
-            path = "/ajax/follow_latest/illust?"+urlencode({"p":page,"mode":"r18" if feed["mode"]=="r18" else "all","lang":"zh"})
+            path = "/ajax/follow_latest/illust?"+urlencode({"p":page,"mode":"r18" if feed["mode"] in RESTRICTED_CONTENT else "all","lang":"zh"})
         else:
             args = {"mode":RANKS[feed["rankMode"]],"content":"all","format":"json","p":page}
             if feed["edition"]:args["date"] = feed["edition"]
@@ -209,7 +213,7 @@ class DiscoveryService:
             except PixivPolicyError:
                 feed["unavailable"] += 1
                 continue
-            if feed["mode"]=="r18" and item["restriction"]!="r18":continue
+            if not matches_content_mode(item["restriction"],feed["mode"]):continue
             if item["id"] in seen:continue
             if feed["kind"]=="ranking" and method=="app":
                 item["rank"] = feed["sourceCount"]
@@ -230,7 +234,7 @@ class DiscoveryService:
         feed["pending"][stream].extend(result)
 
     def read(self, *, generation, kind="recommended", scope="all", mode="safe", rank="day", offset=0, batch="", refresh=False, cached=False):
-        if kind not in {"recommended","following","ranking"} or scope not in {"all","public","private"} or mode not in {"safe","r18","all"} or rank not in RANKS:
+        if kind not in {"recommended","following","ranking"} or scope not in {"all","public","private"} or mode not in CONTENT_MODES or rank not in RANKS:
             raise DiscoveryInputError("发现参数无效")
         if kind=="ranking" and mode!="safe":
             raise DiscoveryInputError("本版榜单仅提供全年龄范围")
@@ -244,7 +248,7 @@ class DiscoveryService:
         with self._guard:
             epoch = self._epoch
             lock = self._locks.setdefault((owner,method,*descriptor),threading.RLock())
-        with lock:
+        with checked_lock(lock,lambda:self._check(generation,epoch)):
             current_key = ["discovery-current",*descriptor]
             if not batch and not refresh:batch = self.pages.saved_cache.read(owner,method,current_key) or ""
             key = (owner,method,batch)

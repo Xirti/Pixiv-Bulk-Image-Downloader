@@ -6,13 +6,15 @@ import threading
 import time
 from urllib.parse import urlencode, urlsplit, parse_qs
 import uuid
+import weakref
 
 from account_pages import source_body
 from pixiv_account import AccountError
 from pixiv_adapter import (PixivPolicyError, valid_pixiv_id, normalize_search_item,
-    build_user_profile_all_url, build_user_profile_works_url)
+    build_user_profile_all_url, build_user_profile_works_url,CONTENT_MODES,matches_content_mode)
 from pixiv_app_gallery import normalize_work, continuation
 from search_service import parse_search_date_range, parse_search_query, parse_search_tags
+from request_coordinator import checked_lock
 
 CARD_FIELDS = ("id", "source", "userId", "title", "artist", "thumb", "width", "height", "pages",
                "bookmarks", "date", "sortDate", "workType", "restriction", "aiGenerated", "rank", "rankKind")
@@ -25,7 +27,8 @@ class PopularityService:
         self.search_get = search_get
         self.guard = threading.RLock()
         self.jobs = OrderedDict()
-        self.locks = {}
+        # Active readers hold their lock strongly, including while waiting.
+        self.locks = weakref.WeakValueDictionary()
         self.epoch = 0
 
     def invalidate(self):
@@ -77,13 +80,14 @@ class PopularityService:
     def _append(self, job, rows):
         seen = set(job["seen"])
         dates = parse_search_date_range(job["startDate"], job["endDate"])
+        additions = []
         for item in rows:
             if item["id"] in seen:
                 continue
             seen.add(item["id"])
             if job["kind"] == "author" and item["userId"] != job["uid"]:
                 raise AccountError("invalid_data", "作者作品身份与请求不符")
-            if job["mode"] == "r18" and item["restriction"] != "r18":
+            if not matches_content_mode(item["restriction"],job["mode"]):
                 continue
             if job["workType"] != "all" and item["workType"] != job["workType"]:
                 continue
@@ -91,7 +95,8 @@ class PopularityService:
                 continue
             if dates and not dates.contains(item["date"]):
                 continue
-            job["items"].append({key: item[key] for key in CARD_FIELDS if key in item})
+            additions.append({key: item[key] for key in CARD_FIELDS if key in item})
+        job["items"].extend(additions)
         job["seen"] = list(seen)
 
     def _author_batch(self, job, method, generation):
@@ -158,7 +163,7 @@ class PopularityService:
 
     def read(self, *, generation, kind, uid="", batch="", mode="safe", work_type="all", include_ai=True,
              start="", end="", index="", page=1, refresh=False, query="", fuzzy=False, cancel_event=None):
-        if kind not in {"author", "ranking", "recommended", "search"} or mode not in {"safe", "r18", "all"}:
+        if kind not in {"author", "ranking", "recommended", "search"} or mode not in CONTENT_MODES:
             raise ValueError("排序来源无效")
         if work_type not in {"all", "illustration", "manga", "ugoira"} or type(include_ai) is not bool:
             raise ValueError("排序筛选无效")
@@ -181,7 +186,7 @@ class PopularityService:
         with self.guard:
             epoch = self.epoch
             lock = self.locks.setdefault((owner, method, *descriptor), threading.RLock())
-        with lock:
+        with checked_lock(lock,lambda:self._check(generation,epoch)):
             self._check(generation, epoch)
             current_key = ["popularity-current", *descriptor]
             requested_index = index
@@ -246,8 +251,10 @@ class PopularityService:
             total = len(job["items"])
             if job["ready"] and offset >= total and page != 1:
                 raise ValueError("排序页码超出范围")
-            return {"index": job["index"], "ready": job["ready"], "loaded": total, "counted": job["enrichOffset"], "total": total if job["ready"] else None,
+            result = {"index": job["index"], "ready": job["ready"], "loaded": total, "counted": job["enrichOffset"], "total": total if job["ready"] else None,
                     "items": copy.deepcopy(job["items"][offset:offset + 36]) if job["ready"] else [],
                     "page": page, "pages": max(1, (total + 35) // 36) if job["ready"] else None,
                     "created": job["created"], "kind": kind, "limit": 500 if kind == "search" else None,
                     "authorizationGeneration": generation}
+            self._check(generation, epoch)
+            return result

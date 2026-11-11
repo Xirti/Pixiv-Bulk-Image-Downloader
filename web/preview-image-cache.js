@@ -3,8 +3,12 @@
 // Keep the loaded image itself; recreating <img src> repeats no-store proxy reads.
 globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Infinity,reuseDetached=false,priority=0}={}) {
   const pages=new Map();
-  const pending=new Set(),budget=globalThis.mediaBudget;
-  function forget(image){budget?.forget(image);image.remove();}
+  const decoded=new WeakMap();
+  const pending=new Map(),budget=globalThis.mediaBudget;
+  function forget(image){
+    for(const consumer of pending.get(image) || [])consumer.retire();
+    budget?.forget(image);image.removeAttribute("src");image.remove();
+  }
   function track(images,identity,image){budget?.track(image,()=>{if(images.get(identity)===image)images.delete(identity);},
     {priority,busy:()=>pending.has(image)});}
   function drop(key){
@@ -17,7 +21,7 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
     if(maxImages===Infinity)return;
     let count=[...pages.values()].reduce((total,images)=>total+images.size,0);
     if(count<=maxImages)return;
-    const candidates=[...pages.values()].flatMap(images=>[...images].filter(([,image])=>!image.isConnected).map(([source,image])=>({images,source,image})))
+    const candidates=[...pages.values()].flatMap(images=>[...images].filter(([,image])=>!image.isConnected && !pending.has(image)).map(([source,image])=>({images,source,image})))
       .sort((a,b)=>Number(a.image.complete && a.image.naturalWidth>0)-Number(b.image.complete && b.image.naturalWidth>0));
     for(const {images,source,image} of candidates){
       if(count<=maxImages)break;
@@ -81,21 +85,42 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
     let images=pages.get(key);if(!images){images=new Map();pages.set(key,images);}
     let cursor=0;
     async function worker(){
-      while(cursor<Math.min(limit,items.length) && !signal.aborted){
+      while(cursor<Math.min(limit,items.length) && !signal.aborted && pages.get(key)===images){
         const item=items[cursor++],identity=String(item.id);
         if(!item.thumb)continue;
         let image=images.get(identity);
         if(image?.complete && !image.naturalWidth){forget(image);images.delete(identity);image=null;}
+        if(image?.complete && image.naturalWidth>0 && decoded.get(image)===image.src){
+          track(images,identity,image);continue;
+        }
         if(!image){
           image=new Image();image.dataset.previewArtwork=identity;image.alt=item.title;image.decoding="async";
           image.src=item.thumb+(item.thumb.includes("?")?"&":"?")+`warm=${warm}`;images.set(identity,image);
         }
-        pending.add(image);track(images,identity,image);
-        const abort=()=>{if(!image.isConnected && !image.complete){image.removeAttribute("src");if(images.get(identity)===image){forget(image);images.delete(identity);}}};
+        let consumers=pending.get(image);
+        if(!consumers){consumers=new Set();pending.set(image,consumers);}
+        let retire;
+        const stopped=new Promise(resolve=>{retire=resolve;});
+        const consumer={signal,retire};consumers.add(consumer);track(images,identity,image);
+        const abort=()=>{
+          retire();
+          if(!image.isConnected && !image.complete && [...consumers].every(reader=>reader.signal.aborted)
+              && images.get(identity)===image){forget(image);images.delete(identity);}
+        };
         signal.addEventListener("abort",abort,{once:true});
-        try{await image.decode();}
-        catch(error){if(!signal.aborted && images.get(identity)===image && !image.isConnected){forget(image);images.delete(identity);}}
-        finally{pending.delete(image);signal.removeEventListener("abort",abort);budget?.schedule();}
+        const decodingSource=image.src;
+        // Removing src can leave Image.decode() pending in WebView/Chromium.
+        try{await Promise.race([image.decode().then(()=>decoded.set(image,decodingSource)),stopped]);}
+        catch(error){
+          if(!signal.aborted && images.get(identity)===image && !image.isConnected
+              && ![...consumers].some(reader=>reader!==consumer && !reader.signal.aborted)){
+            forget(image);images.delete(identity);
+          }
+        }
+        finally{
+          consumers.delete(consumer);if(!consumers.size)pending.delete(image);
+          signal.removeEventListener("abort",abort);budget?.schedule();
+        }
       }
     }
     await Promise.all([worker(),worker()]);

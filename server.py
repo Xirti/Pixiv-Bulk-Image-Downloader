@@ -66,7 +66,7 @@ from version import __version__
 from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 from artist_service import ArtistService
 from account_pages import AccountPages, ACCOUNT_CACHE_ONLY, source_body
-from pixiv_adapter import bookmark_count, validate_detail_policy
+from pixiv_adapter import bookmark_count, validate_detail_policy, CONTENT_MODES, RESTRICTED_CONTENT, matches_content_mode
 from discovery_service import DiscoveryService, DiscoveryInputError
 from popularity_service import PopularityService
 from account_authorization import AccountAuthorization
@@ -491,7 +491,7 @@ def pixiv_item_for_download(
     if cached is not None and _item_image_tokens_current(
         cached, require_thumb=require_thumb,
     ):
-        if cached.get("restriction") == "r18":
+        if cached.get("restriction") in RESTRICTED_CONTENT:
             if not allow_r18:
                 raise PixivPolicyError("restricted artwork")
             if authorization_epoch is None:
@@ -534,7 +534,7 @@ def clear_authorized_state(*, force: bool = True) -> bool:
         with PIXIV_STATE_LOCK:
             PIXIV_CACHE.clear()
             for token, row in list(IMAGE_TOKENS.items()):
-                if len(row) >= 4 and row[3] in {"r18", "account"}: IMAGE_TOKENS.pop(token, None)
+                if len(row) >= 4 and row[3] in RESTRICTED_CONTENT | {"account"}: IMAGE_TOKENS.pop(token, None)
             for key in list(HISTORY_CACHE):
                 if len(key) >= 2 and key[1] == "r18": HISTORY_CACHE.pop(key, None)
         for session_key in restricted_sessions:
@@ -682,17 +682,17 @@ def prune_search_image_tokens(
 
 
 def image_token_cache_control(row: tuple) -> str:
-    if len(row) >= 4 and row[3] in {"r18", "account"}:
+    if len(row) >= 4 and row[3] in RESTRICTED_CONTENT | {"account"}:
         return "no-store"
     return "no-store" if len(row) >= 6 else "private,max-age=3600"
 
 
 def assert_image_token_authorization(row: tuple) -> None:
-    if len(row) < 4 or row[3] not in {"r18", "account"}:
+    if len(row) < 4 or row[3] not in RESTRICTED_CONTENT | {"account"}:
         return
     epoch = row[6] if len(row) >= 7 else (row[4] if len(row) == 5 else None)
     if not isinstance(epoch, int) or isinstance(epoch, bool):
-        raise AuthorizationRevokedError("R-18 图片授权已失效")
+        raise AuthorizationRevokedError("限制级图片授权已失效")
     assert_authorization_generation(epoch)
 
 
@@ -729,15 +729,15 @@ def _authorize_image_proxy_batch(entries: list[tuple]) -> list[str]:
         ).get("url", [""])[0]
         if not is_allowed_pixiv_url(remote_url, image_only=True):
             raise PixivPolicyError("invalid approved image")
-        if restriction not in {"safe", "r18", "account"}:
+        if restriction not in RESTRICTED_CONTENT | {"safe", "account"}:
             raise PixivPolicyError("invalid image restriction")
         token = secrets.token_urlsafe(24)
         row: tuple = (expires, artwork_id, remote_url, restriction)
         if search_session is not None and search_page is not None:
             row += (search_session, max(1, int(search_page)))
-        if restriction in {"r18", "account"}:
+        if restriction in RESTRICTED_CONTENT | {"account"}:
             if authorization_epoch is None:
-                raise AuthorizationRevokedError("R-18 图片授权已失效")
+                raise AuthorizationRevokedError("限制级图片授权已失效")
             assert_authorization_generation(authorization_epoch)
             # Search metadata retains its historical positions (4 and 5);
             # restricted rows append their account-generation binding last.
@@ -1384,10 +1384,10 @@ def extend_history(
                             candidate = normalize_search_item(raw, allow_r18=allow_r18)
                         except PixivPolicyError:
                             continue
-                        if candidate["restriction"] == "r18":
+                        if candidate["restriction"] in RESTRICTED_CONTENT:
                             break
                     else:
-                        raise PixivPolicyError("账户设置不允许R-18搜索，或Pixiv未返回可用R-18内容")
+                        raise PixivPolicyError("账号设置不允许限制级搜索，或 Pixiv 未返回可用内容")
                 if total > 600 and window["start"] < window["end"]:
                     span = (window["end"] - window["start"]).days
                     mid = window["start"] + timedelta(days=span // 2)
@@ -1418,7 +1418,7 @@ def extend_history(
                 artwork_id = candidate["id"]
                 if artwork_id in state["ids"]: continue
                 if date_range and not date_range.contains(candidate["date"]): continue
-                if mode == "r18" and candidate["restriction"] != "r18": continue
+                if mode == "r18" and candidate["restriction"] not in RESTRICTED_CONTENT: continue
                 state["ids"].add(artwork_id); state["items"].append(raw)
             # date_d bounds publication time, not ID order within one timestamp.
             # Real timestamps let the first batch confirm a useful prefix;
@@ -1478,11 +1478,15 @@ def popularity_bookmark_metadata(identifier, mode, generation):
         body=normalize_work(raw.get("illust"),allow_r18=mode!="safe",require_bookmarks=False)
         if body["id"]!=identifier:
             raise AccountError("invalid_data","收藏数摘要的作品身份不符")
+        if not matches_content_mode(body["restriction"],mode):
+            raise AccountError("source_changed","作品分级已变化，请刷新当前列表")
         return {"bookmarks":body["bookmarks"]}
     body=source_body(pixiv_json(f"https://www.pixiv.net/ajax/illust/{identifier}?lang=zh"))
     if str(body.get("id"))!=identifier:
         raise AccountError("invalid_data","收藏数摘要的作品身份不符")
-    validate_detail_policy(body,allow_r18=mode!="safe")
+    restriction=validate_detail_policy(body,allow_r18=mode!="safe")
+    if not matches_content_mode(restriction,mode):
+        raise AccountError("source_changed","作品分级已变化，请刷新当前列表")
     ACCOUNTS.check(generation)
     return {"bookmarks":bookmark_count(body)}
 
@@ -1593,7 +1597,7 @@ def assert_search_commit_allowed(
     authorization_epoch: int | None,
     cancel_event: threading.Event | None,
 ) -> None:
-    if scope in {"r18", "all"}:
+    if scope in {"r18", "r18g", "all"}:
         assert_authorization_generation(authorization_epoch)
     raise_if_search_cancelled(cancel_event)
     if SEARCH_SESSIONS.get(session_key) is not session:
@@ -1935,12 +1939,12 @@ def search_user_results(
             incoming: list[dict] = []
             for raw in raw_rows:
                 try:
-                    candidate = normalize_search_item(raw, allow_r18=scope in {"r18", "all"})
+                    candidate = normalize_search_item(raw, allow_r18=scope in {"r18", "r18g", "all"})
                 except PixivPolicyError:
                     continue
                 if candidate["userId"] != user_id:
                     continue
-                if scope in {"safe", "r18"} and candidate["restriction"] != scope:
+                if not matches_content_mode(candidate["restriction"],scope):
                     continue
                 if work_type != "all" and candidate["workType"] != work_type:
                     continue
@@ -2015,7 +2019,7 @@ def search_user_results(
                 for item in selected
             ]
             preloaded_through = SEARCH_PAGE_CACHE.preloaded_through(session_key)
-        if scope in {"r18", "all"}:
+        if scope in {"r18", "r18g", "all"}:
             try:
                 assert_authorization_generation(authorization_epoch)
             except AuthorizationRevokedError:
@@ -2030,7 +2034,8 @@ def search_user_results(
             "pages": available_pages[-1] if available_pages else 1,
             "pageNumbers": available_pages, "availablePages": available_pages,
             "preloadedThrough": preloaded_through,
-            "items": authorized_items, "perPage": SEARCH_PER_PAGE, "hasMore": not exhausted,
+            "items": authorized_items, "perPage": SEARCH_PER_PAGE,
+            "hasMore": not exhausted or loaded > page * SEARCH_PER_PAGE,
             "budgetExhausted": budget_exhausted, "truncatedDates": [],
             "workType": work_type, "includeAi": bool(include_ai),
             "mode": "pixiv-user-search",
@@ -2050,7 +2055,7 @@ def search_artwork_result(
     try:
         item = pixiv_item_for_download(
             artwork_id,
-            allow_r18=scope in {"r18", "all"},
+            allow_r18=scope in {"r18", "r18g", "all"},
             authorization_epoch=authorization_epoch,
             cancel_event=network_cancel_event,
             require_thumb=True,
@@ -2286,7 +2291,7 @@ def search_pixiv_results(
                         continue
                     if not include_ai and candidate["aiGenerated"]:
                         continue
-                    if matches_tag_groups(candidate.get("tags") or [], tag_groups):
+                    if matches_content_mode(candidate["restriction"],scope) and matches_tag_groups(candidate.get("tags") or [], tag_groups):
                         incoming.append(candidate)
                         if literal_and and mode not in source_anchors:
                             # Every strict-AND match occurs in each literal tag
@@ -2380,7 +2385,9 @@ def search_pixiv_results(
                 del session["items"][:remove_count]
                 session["baseIndex"] += remove_count
                 session["seen"] = {str(item["id"]) for item in session["items"]}
-            has_more = any(not session["sourceDone"].get(source) for source in sources) or bool(session["identityIndex"].pending_count)
+            has_more = (absolute_result_count > page * SEARCH_PER_PAGE
+                        or any(not session["sourceDone"].get(source) for source in sources)
+                        or bool(session["identityIndex"].pending_count))
             prune_search_image_tokens(
                 session_key, retained_pages=set(available_pages), replace_page=None if prefetch else page,
             )
@@ -2394,7 +2401,7 @@ def search_pixiv_results(
                 for item in selected
             ] if authorize_images else copy.deepcopy(selected)
             preloaded_through = SEARCH_PAGE_CACHE.preloaded_through(session_key)
-        if scope in {"r18", "all"}:
+        if scope in {"r18", "r18g", "all"}:
             try:
                 assert_authorization_generation(authorization_epoch)
             except AuthorizationRevokedError:
@@ -2414,7 +2421,7 @@ def search_pixiv_results(
             "workType": work_type, "includeAi": bool(include_ai), "fuzzy": bool(fuzzy),
             "snapshotId": snapshot_id,
             "mode": "pixiv-authorized-all" if scope == "all" else (
-                "pixiv-authorized-r18" if scope == "r18" else "pixiv-public-history"
+                "pixiv-authorized-" + scope if scope in RESTRICTED_CONTENT else "pixiv-public-history"
             ),
         }
 
@@ -2474,7 +2481,7 @@ def _fetch_pixiv_detail(
     normalized = normalize_detail(detail, pages, allow_r18=allow_r18)
     if normalized.get("id") != artwork_id:
         raise PixivPolicyError("Pixiv 返回的作品 ID 不匹配")
-    restricted = normalized.get("restriction") == "r18"
+    restricted = normalized.get("restriction") in RESTRICTED_CONTENT
     if restricted:
         if authorization_epoch is None:
             raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新打开作品")
@@ -2700,7 +2707,7 @@ def _fetch_ugoira_source(
         if not source.read(4).startswith(UGOIRA_ZIP_MAGIC):
             raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
         source.seek(0)
-        if item.get("restriction") == "r18" and authorization_epoch is not None:
+        if item.get("restriction") in RESTRICTED_CONTENT and authorization_epoch is not None:
             assert_authorization_generation(authorization_epoch)
         yield source, meta, zip_url
 
@@ -2755,7 +2762,7 @@ def _stage_ugoira_source(
                 exc.artwork_id = artwork_id
                 raise
             raise_if_search_cancelled(cancel_event)
-            if item.get("restriction") == "r18" and authorization_epoch is not None:
+            if item.get("restriction") in RESTRICTED_CONTENT and authorization_epoch is not None:
                 assert_authorization_generation(authorization_epoch)
             converted.seek(0)
             with owned_staging_batch() as staged:
@@ -4308,7 +4315,7 @@ class Handler(SimpleHTTPRequestHandler):
             scope = query.get("scope", ["public"])[0]
             tag = query.get("tag", [""])[0]
             mode = query.get("mode", ["safe"])[0]
-            if not 0 <= offset <= 100000 or scope not in {"public", "private"} or len(tag) > 100 or mode not in {"safe", "all", "r18"}:
+            if not 0 <= offset <= 100000 or scope not in {"public", "private"} or len(tag) > 100 or mode not in CONTENT_MODES:
                 raise ValueError("invalid_account_query")
         except ValueError:
             return self.send_json({"error": "账号列表参数无效"}, 400)
@@ -4451,8 +4458,8 @@ class Handler(SimpleHTTPRequestHandler):
             snapshot_id = secrets.token_urlsafe(24)
         search_scope = query.get("mode", ["safe"])[0]
         session_authorized, session_epoch = validated_authorization()
-        if search_scope in {"r18", "all"} and not session_authorized:
-            return self.send_json({"error": "R-18搜索需要先完成Pixiv账户授权"}, 403)
+        if search_scope in {"r18", "r18g", "all"} and not session_authorized:
+            return self.send_json({"error": "限制级搜索需要先完成Pixiv账户授权"}, 403)
         work_type = query.get("workType", ["all"])[0]
         include_ai = query.get("includeAi", ["false"])[0].lower() == "true"
         fuzzy = query.get("fuzzy", ["false"])[0].lower() == "true"
@@ -4469,7 +4476,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             try:
                 authorization_epoch = (
-                    session_epoch if search_scope in {"r18", "all"} else None
+                    session_epoch if search_scope in {"r18", "r18g", "all"} else None
                 )
                 kwargs = {
                     "authorized": session_authorized,
@@ -4576,9 +4583,9 @@ class Handler(SimpleHTTPRequestHandler):
             )
             if item.get("workType") != "ugoira":
                 raise PixivPolicyError("该作品不是动图")
-            restricted = item.get("restriction") == "r18"
+            restricted = item.get("restriction") in RESTRICTED_CONTENT
             if restricted and not authorized:
-                raise PixivPolicyError("R-18 动图预览需要有效账户授权")
+                raise PixivPolicyError("限制级动图预览需要有效账户授权")
             meta = pixiv_ugoira_meta(
                 artwork_id,
                 authorization_epoch=authorization_epoch if restricted else None,
@@ -4659,7 +4666,7 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 assert_image_token_authorization(approved)
             except AuthorizationRevokedError:
-                return self.send_json({"error": "R-18 图片授权已失效"}, 403)
+                return self.send_json({"error": "限制级图片授权已失效"}, 403)
             if not content_type.startswith("image/"):
                 raise PixivPolicyError("Pixiv 返回的不是图片")
             return self.send_bytes(raw, content_type, image_token_cache_control(approved))
@@ -5458,11 +5465,11 @@ class Handler(SimpleHTTPRequestHandler):
                     nonlocal skipped_pages
                     artwork_id, page_set, authorized, authorization_epoch, item = row
                     raise_if_search_cancelled(stop)
-                    if item.get("restriction") == "r18" and not authorized:
-                        raise PixivPolicyError("R-18 下载需要有效账户授权")
-                    if item.get("restriction") == "r18":
+                    if item.get("restriction") in RESTRICTED_CONTENT and not authorized:
+                        raise PixivPolicyError("限制级下载需要有效账户授权")
+                    if item.get("restriction") in RESTRICTED_CONTENT:
                         if authorization_epoch is None:
-                            raise AuthorizationRevokedError("R-18 下载授权已失效")
+                            raise AuthorizationRevokedError("限制级下载授权已失效")
                         restricted_epochs.add(authorization_epoch)
                     skipped = []
                     pages = self._remaining_download_pages(
@@ -5561,11 +5568,11 @@ class Handler(SimpleHTTPRequestHandler):
                 )
             if any(page >= len(page_images) for page in selected_pages):
                 raise PixivPolicyError("图片页码超出范围")
-            if item.get("restriction") == "r18" and not authorized:
-                raise PixivPolicyError("R-18 下载需要有效账户授权")
+            if item.get("restriction") in RESTRICTED_CONTENT and not authorized:
+                raise PixivPolicyError("限制级下载需要有效账户授权")
             restricted_epochs = (
                 {authorization_epoch}
-                if item.get("restriction") == "r18"
+                if item.get("restriction") in RESTRICTED_CONTENT
                 and authorization_epoch is not None
                 else set()
             )

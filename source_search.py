@@ -334,7 +334,10 @@ class SourceSearch:
         try:
             request = self._api_request(job, key)
             with self.lock:
-                if job["state"] == "cancelled":
+                if self.jobs.get(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
+                    return
+                if job["epoch"] != self.epoch:
+                    self._fail(job, "搜图设置已修改，请重新查询")
                     return
                 job.update(state="searching", message="正在向 SauceNAO 查询…")
             with self._opener().open(request, timeout=35) as response:
@@ -355,7 +358,7 @@ class SourceSearch:
             self._fail(job, "搜图连接失败或响应无效；为避免重复消耗额度，请手动重试")
         finally:
             with self.lock:
-                if not job["browserFallback"]:
+                if not job["browserFallback"] and not job["browser"]:
                     job["image"] = b""
 
     def _fail(self, job, message, *, browser_fallback=False):
@@ -365,7 +368,10 @@ class SourceSearch:
 
     def _complete(self, job, candidates, quota):
         with self.lock:
-            if job["state"] == "cancelled":
+            if self.jobs.get(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
+                return
+            if job["epoch"] != self.epoch:
+                self._fail(job, "搜图设置已修改，请重新查询")
                 return
             for row in candidates:
                 source = row.pop("thumbnail")
@@ -383,10 +389,9 @@ class SourceSearch:
             job.update(state="done", message="已找到匹配来源" if candidates else "没有找到匹配来源", candidates=candidates, quota=quota, image=b"")
             if quota.get("short_limit", 0) > 0:
                 self.short_limit = quota["short_limit"]
-            if job["epoch"] == self.epoch:
-                self.cache[(job["mode"], job["hash"])] = (time.monotonic(), candidates, quota)
-                while len(self.cache) > 16:
-                    self.cache.popitem(last=False)
+            self.cache[(job["mode"], job["hash"])] = (time.monotonic(), candidates, quota)
+            while len(self.cache) > 16:
+                self.cache.popitem(last=False)
 
     def browser(self, identity, secret, data):
         with self.lock:

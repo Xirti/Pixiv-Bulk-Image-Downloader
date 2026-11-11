@@ -1,6 +1,6 @@
 "use strict";
 
-globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,signedIn,generation,changed,openArtwork,openArtist,choose,selected,canChoose,installImages,attachUgoira,report,autoPrepare,browse,viewed=()=>{}}) {
+globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,signedIn,generation,changed,openArtwork,openArtist,choose,selected,canChoose,installImages,attachUgoira,report,autoPrepare,browse,viewed=()=>{},backgroundAllowed=()=>true}) {
   const grid=root.querySelector('[data-discovery-grid]'),message=root.querySelector('[data-discovery-message]');
   const next=root.querySelector('[data-discovery-next]'),previous=root.querySelector('[data-discovery-prev]');
   const cache=new Map(),positions=new Map(),staged=new Map(),nextReads=new Map();
@@ -252,7 +252,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   async function prepare({network=false,page=null,completed=null}={}){
     if(!signedIn())return;
     if(page){if(page.kind==='follow' && completed){invalidateFollowing();await reconcileFollowing();}return;}
-    if(network && !preferences)return;
+    if(network && (!preferences || !backgroundAllowed()))return;
     const auth=generation();
     if(sessionGeneration!==auth){clear();sessionGeneration=auth;}
     if(preparing){if(network)networkQueued=true;return preparing;}

@@ -16,7 +16,7 @@ globalThis.renderArtworkCards = function (rows, {escape, selected, maskSensitive
     const count=item.pages>1?`<span class="gallery-page-count" title="共 ${item.pages} 张">${item.pages}</span>`:"";
     const rank=item.rank?`<span class="feed-position" title="${item.rankKind==="official"?"站方名次":"榜单来源序位，非站方名次字段"}">${item.rankKind==="official"?"#":"序位 "}${item.rank}</span>`:"";
     const masked=maskSensitive && item.restriction!=="safe";
-    const mask=masked?sensitiveImageMaskMarkup(item.restriction==="r18"?"敏感内容":"分级待确认"):"";
+    const mask=masked?sensitiveImageMaskMarkup(["r18","r18g"].includes(item.restriction)?"敏感内容":"分级待确认"):"";
     return `<article class="card gallery-card" data-i="${index}" data-sensitive-image="${escape(item.id)}"><label class="card-select"><input type="checkbox" data-select="${index}" ${selected(item.id)?"checked":""} aria-label="勾选 ${escape(item.title)}"></label><button class="poster${masked?" is-sensitive-masked":""}" type="button" aria-expanded="false" aria-label="${escape(item.title)}：单击展开或恢复，双击查看详情；空格展开，Enter 查看详情"${item.workType==="ugoira"?` data-ugoira-preview="${escape(item.id)}"`:""}>${image}${count}${mask}</button><div class="meta"><h3 title="${escape(item.title)}">${rank}${escape(item.title)}</h3>${cloudActionButton("bookmark",item.id)}<a class="gallery-author" href="#artist/${escape(item.userId || "")}" title="${escape(item.artist)}">${escape(item.artist)}</a>${item.userId?cloudActionButton("follow",item.userId):""}</div></article>`;
   }).join("");
 };

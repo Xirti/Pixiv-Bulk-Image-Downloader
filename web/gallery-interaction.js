@@ -2,7 +2,7 @@
 
 function mokuPreviewBounds(scrollSurface) {
   const chrome=parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chrome-height")) || 48;
-  const header=scrollSurface===window?null:scrollSurface.querySelector(":scope > .workspace-bar, :scope > .viewer-bar");
+  const header=scrollSurface===window?null:scrollSurface.querySelector(":scope > .account-top, :scope > .workspace-bar, :scope > .viewer-bar");
   const rail=document.querySelector(".page-rail").getBoundingClientRect();
   const dock=document.querySelector(".pagination-dock.is-visible");
   return {left:rail.right+12,top:Math.max(chrome,header?header.getBoundingClientRect().bottom:0)+12,

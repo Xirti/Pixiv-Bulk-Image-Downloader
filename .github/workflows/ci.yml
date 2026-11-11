@@ -50,6 +50,9 @@ jobs:
           tracked = set(subprocess.check_output(["git", "ls-files", "-z"]).decode("utf-8").split("\0")) - {""}
           documentation = {
               "assets/readme/mascot.gif",
+              "assets/readme/home-light.png",
+              "assets/readme/settings-dark.png",
+              "assets/readme/source-search.png",
           }
           required = set(build_manifest.build_input_files(Path.cwd())) | {".gitignore", ".gitattributes"} | documentation
           extra, missing = sorted(tracked - required), sorted(required - tracked)

@@ -1,6 +1,10 @@
-.account-page{padding-bottom:40px}
+.account-page{padding-bottom:40px;scrollbar-gutter:stable;scroll-padding-top:calc(var(--account-top-height,160px) + 16px)}
+.account-top{position:sticky;top:0;z-index:6;background:var(--bg)}
 .account-page .workspace-bar{position:relative}
-.account-body{max-width:1240px;margin:0 auto;padding:12px 44px 32px}
+.account-body{width:100%;max-width:1240px;margin:0 auto;padding:12px 44px 32px}
+.account-body.account-navigation{display:flow-root;padding-bottom:0}
+.account-body.account-content{padding-top:0}
+.account-page .settings-nav{top:calc(var(--account-top-height,160px) + 16px)}
 .account-profile{position:relative;overflow:hidden;border-radius:24px;background:var(--surface);border:1px solid var(--line);padding:32px 28px 0;isolation:isolate}
 .account-cover{position:absolute;inset:0;width:100%;height:210px;object-fit:cover;opacity:.18;z-index:-1;mask-image:linear-gradient(#000,transparent)}
 .account-identity{text-align:center;max-width:700px;margin:auto}

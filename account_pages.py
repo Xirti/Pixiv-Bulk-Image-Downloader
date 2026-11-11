@@ -16,9 +16,10 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from pixiv_account import AccountError, AppAccount, AppTransport, CredentialVault, ACCOUNT_REQUEST_CHECK
 from pixiv_app_config import CLIENT_CONFIG
 from pixiv_adapter import (PixivPolicyError, normalize_search_item, is_allowed_pixiv_url,
-    build_user_profile_all_url,build_user_profile_works_url,valid_pixiv_id)
+    build_user_profile_all_url,build_user_profile_works_url,valid_pixiv_id,CONTENT_MODES,matches_content_mode)
 from pixiv_app_gallery import normalize_work, artist_profile, continuation
 from artist_service import normalize_artist
+from request_coordinator import checked_lock
 
 ACCOUNT_CACHE_ONLY = ContextVar("account_cache_only", default=False)
 
@@ -251,7 +252,7 @@ class AccountPages:
         with self._lock:
             pending = self._loads.setdefault(key, [threading.RLock(),0]);pending[1]+=1
         try:
-            with pending[0]:
+            with checked_lock(pending[0],lambda:self.check(key[0])):
                 try:
                     return self._load_cached(key, load, refresh)
                 except AccountError as error:
@@ -297,9 +298,9 @@ class AccountPages:
                 current=self._updated_cached(key,method)
                 if current is not None:return current
                 raise AccountError("cache_changed","账号列表已更新，请重新打开页面")
-            self._remember_cache(key,result)
             if persistent:
                 self.saved_cache.save(str(key[2]), method, ["data", *key[1:]], result)
+            self._remember_cache(key,result)
         return result
 
     def _updated_cached(self,key,method):
@@ -332,24 +333,27 @@ class AccountPages:
         """The same scan response supplies relationship state and display pages."""
         view = "bookmarks" if kind == "bookmark" else "following"
         next_offset = offset + len(rows) if next_cursor is not None else None
-        modes = ("safe", "all", "r18") if kind == "bookmark" else ("all",)
+        modes = ("safe", "all", "r18", "r18g") if kind == "bookmark" else ("all",)
         pages = []
         for mode in modes:
             page = self.relation_page(method, kind, rows, offset=offset, next_offset=next_offset, total=total, mode=mode)
             key = (generation, view, owner, scope, offset, "", mode) if kind == "bookmark" else (generation, view, owner, scope, offset)
             pages.append((key, page))
+        stored = [(["data", *key[1:]], page) for key, page in pages]
+        cursor_key = None
+        if method == "app" and next_cursor is not None:
+            path = "/v1/user/bookmarks/illust" if kind == "bookmark" else "/v1/user/following"
+            params = {"user_id":owner, "restrict":scope, "filter":"for_android"}
+            cursor_key = (generation,path,tuple(sorted(params.items())))
+            stored.append((["cursor",path,sorted(params.items()),next_offset],next_cursor))
         with self._lock:
             self.check(generation)
+            self.saved_cache.save_many(owner, method, stored)
             for key, page in pages:
                 self._versions[key]=self._versions.get(key,0)+1
-                self.saved_cache.save(owner, method, ["data", *key[1:]], page)
                 self._remember_cache(key,page)
-            if method == "app" and next_cursor is not None:
-                path = "/v1/user/bookmarks/illust" if kind == "bookmark" else "/v1/user/following"
-                params = {"user_id":owner, "restrict":scope, "filter":"for_android"}
-                cursor_key = (generation,path,tuple(sorted(params.items())))
+            if cursor_key is not None:
                 self._cursors[cursor_key,next_offset] = next_cursor
-                self.saved_cache.save(owner,method,["cursor",path,sorted(params.items()),next_offset],next_cursor)
                 while len(self._cursors)>256:self._cursors.popitem(last=False)
 
     @staticmethod
@@ -362,7 +366,7 @@ class AccountPages:
                     item = normalize_work(row,allow_r18=mode!="safe") if method=="app" else normalize_search_item(row,allow_r18=mode!="safe")
                 except PixivPolicyError:
                     unavailable+=1;continue
-                if mode!="r18" or item["restriction"]=="r18":items.append(item)
+                if matches_content_mode(item["restriction"],mode):items.append(item)
             return {"items":items,"unavailable":unavailable,"total":total if total is not None else len(rows) if offset==0 and next_offset is None else None,"nextOffset":next_offset}
         people=[]
         for row in rows:
@@ -411,7 +415,7 @@ class AccountPages:
                             if tag not in state["tags"]:return False
                         if mode!="all":
                             if record is None:return None
-                            if (mode=="r18")!=(record["restriction"]=="r18"):return False
+                            if not matches_content_mode(record["restriction"],mode):return False
                         return True
                     previous_member,next_member=membership(before),membership(after)
                     fits = next_member is True or next_member is None and any(row["id"]==target for row in rows)
@@ -569,6 +573,7 @@ class AccountPages:
 
     def read(self, kind, *, scope="public", offset=0, tag="", generation, allow_r18=False, refresh=False, mode=None,check_updates=True):
         mode = mode or ("all" if allow_r18 else "safe")
+        if mode not in CONTENT_MODES:raise AccountError("invalid_request", "内容范围无效")
         allow_r18 = mode != "safe"
         profile = self.profile(generation, refresh=refresh and kind == "profile")
         if not profile["connected"] or kind == "profile":
@@ -584,7 +589,7 @@ class AccountPages:
                 raise AccountError("capability","网页登录暂不提供粉丝列表，可在资料中选择 App 授权。")
             result = self._cached((generation, kind, owner, offset), lambda: self._followers(owner, offset), refresh)
         elif kind == "bookmarks":
-            result = self._cached((generation, kind, owner, scope, offset, tag, mode), lambda: self._app_bookmarks(owner,scope,offset,tag,allow_r18,generation) if self.method()=="app" else self._bookmarks(owner, scope, offset, tag, allow_r18), refresh)
+            result = self._cached((generation, kind, owner, scope, offset, tag, mode), lambda: self._app_bookmarks(owner,scope,offset,tag,mode,generation) if self.method()=="app" else self._bookmarks(owner, scope, offset, tag, mode), refresh)
         elif kind == "tags":
             result = self._cached((generation, kind, owner), lambda: self._app_tags() if self.method()=="app" else self._tags(owner), refresh)
         elif kind == "updates":
@@ -598,8 +603,8 @@ class AccountPages:
             result=self._cached((generation,kind,owner,mode),lambda:self._own_works(owner,profile["workCount"],allow_r18,mode),refresh)
         else:
             raise AccountError("invalid_request", "账户页面不存在")
-        if mode=="r18" and "items" in result:
-            result["items"]=[item for item in result["items"] if item["restriction"]=="r18"]
+        if "items" in result:
+            result["items"]=[item for item in result["items"] if matches_content_mode(item["restriction"],mode)]
         self.check(generation)
         return {**result, "connected": True, "uid": owner, "kind": kind, "scope": scope, "offset": offset}
 
@@ -631,7 +636,7 @@ class AccountPages:
                 try:item=normalize_search_item(value,allow_r18=allow_r18)
                 except PixivPolicyError:continue
                 if item["userId"]==owner:rows.append(item)
-        unique={item["id"]:item for item in rows if mode!="r18" or item["restriction"]=="r18"}
+        unique={item["id"]:item for item in rows if matches_content_mode(item["restriction"],mode)}
         return {"items":sorted(unique.values(),key=lambda item:(item["sortDate"],int(item["id"])),reverse=True)[:6]}
 
     def _app_page(self,path,params,offset,generation,rows_key):
@@ -656,9 +661,10 @@ class AccountPages:
         if next_path:
             if next_path==cursor:raise AccountError("cursor","App 续页未前进")
             with self._lock:
+                self.check(generation)
                 if cache_revision!=self._cache_revision:raise AccountError("cache_cleared","账号缓存已清除，请重新打开页面")
-                self._cursors[key,next_offset]=next_path
                 self.saved_cache.save(str(params["user_id"]),self.method(),["cursor",path,sorted(params.items()),next_offset],next_path)
+                self._cursors[key,next_offset]=next_path
                 while len(self._cursors)>256:self._cursors.popitem(last=False)
         return rows,next_offset
 
@@ -666,11 +672,11 @@ class AccountPages:
         rows,next_offset=self._app_page("/v1/user/following",{"user_id":owner,"restrict":scope,"filter":"for_android"},offset,generation,"user_previews")
         return self.relation_page("app","follow",rows,offset=offset,next_offset=next_offset)
 
-    def _app_bookmarks(self,owner,scope,offset,tag,allow_r18,generation):
+    def _app_bookmarks(self,owner,scope,offset,tag,mode,generation):
         params={"user_id":owner,"restrict":scope,"filter":"for_android"}
         if tag:params["tag"]=tag
         rows,next_offset=self._app_page("/v1/user/bookmarks/illust",params,offset,generation,"illusts")
-        return self.relation_page("app","bookmark",rows,offset=offset,next_offset=next_offset,mode="all" if allow_r18 else "safe")
+        return self.relation_page("app","bookmark",rows,offset=offset,next_offset=next_offset,mode=mode)
 
     def _app_tags(self):
         result={}
@@ -727,13 +733,13 @@ class AccountPages:
             next_offset = int(value)
         return {"people": people, "total": len(people) if offset == 0 and next_offset is None else None, "nextOffset": next_offset}
 
-    def _bookmarks(self, owner, scope, offset, tag, allow_r18):
+    def _bookmarks(self, owner, scope, offset, tag, mode):
         body = source_body(self.request_json("https://www.pixiv.net/ajax/user/" + owner + "/illusts/bookmarks?" + urlencode({"tag": tag, "offset": offset, "limit": 36, "rest": "hide" if scope == "private" else "show", "lang": "zh"})))
         rows = body.get("works")
         if not isinstance(rows, list):
             raise AccountError("invalid_data", "收藏作品列表格式异常")
         total = source_total(body.get("total"))
-        return self.relation_page("web","bookmark",rows,offset=offset,next_offset=offset+len(rows) if rows and offset+len(rows)<total else None,total=total,mode="all" if allow_r18 else "safe")
+        return self.relation_page("web","bookmark",rows,offset=offset,next_offset=offset+len(rows) if rows and offset+len(rows)<total else None,total=total,mode=mode)
 
     def _tags(self, owner):
         body = source_body(self.request_json(f"https://www.pixiv.net/ajax/user/{owner}/illusts/bookmark/tags?lang=zh"))

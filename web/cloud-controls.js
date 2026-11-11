@@ -270,7 +270,6 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     clearing=true;clearJob=job;
     notifySettings();
     epoch++;readVersion++;close();manual.clear();restart.clear();busy.clear();hydration=null;hydrationAgain=false;
-    autoNotBefore=Date.now()+Number(prefs.syncMinutes)*60000;
     try{
       await clearStarted();
       if(syncRequest)await Promise.allSettled([syncRequest]);
@@ -280,6 +279,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       states={bookmark:new Map(),follow:new Map()};syncState={};hydratedKey="";syncError="";auxiliaryError="";
       lastUpdateCheck=0;updatesRemaining=false;
       auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;
+      autoNotBefore=Date.now()+Number(prefs.syncMinutes)*60000;
       cleared();paint();notifySettings();report("当前账号缓存已清除");
     }finally{if(clearJob===job){clearing=false;clearJob=null;notifySettings();}}
   }
@@ -329,5 +329,6 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       node.nodeType===1 && (node.matches(selector) || node.querySelector(selector)))))schedule();
   }).observe(document.body,{subtree:true,childList:true});
   setInterval(()=>{void tick();},5000);
-  return {get busy(){return busy.size>0;},settled:()=>preferenceWrites,setSession,hydrate,refresh,clearCache,savePreferences,ready,getPreferences:()=>({...prefs}),getSync:()=>structuredClone(syncState)};
+  return {get busy(){return busy.size>0;},canPrepareBackground:()=>!clearing && Date.now()>=autoNotBefore,
+    settled:()=>preferenceWrites,setSession,hydrate,refresh,clearCache,savePreferences,ready,getPreferences:()=>({...prefs}),getSync:()=>structuredClone(syncState)};
 };

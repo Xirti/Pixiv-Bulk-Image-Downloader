@@ -1585,7 +1585,7 @@ function reconcileSelectedArtworkPreviews(freshItems) {
     if (!Array.isArray(fresh.pageImages)) {
       return {...fresh, ...existing, thumb: fresh.thumb || existing.thumb,
         bookmarks: existing.bookmarks ?? fresh.bookmarks ?? null,
-        restriction: fresh.restriction === "r18" ? "r18" : existing.restriction ?? fresh.restriction};
+        restriction: ["r18","r18g"].includes(fresh.restriction) ? fresh.restriction : existing.restriction ?? fresh.restriction};
     }
     const merged = { ...existing, ...fresh };
     if (fresh.bookmarks == null) merged.bookmarks = existing.bookmarks ?? null;
@@ -1600,7 +1600,10 @@ function reconcileSelectedArtworkPreviews(freshItems) {
   batchCandidateItems = batchCandidateItems.map(mergePreview);
   freshItems.forEach((item, index) => {
     const detail = selection.get(item.id)?.item;
-    if (detail?.pageImages?.length) freshItems[index] = detail;
+    const sameFilters = detail?.pageImages?.length
+      && ["workType","aiGenerated","restriction","date","userId"].every(key=>detail[key]===item[key])
+      && JSON.stringify(detail.tags)===JSON.stringify(item.tags);
+    if (sameFilters) freshItems[index] = detail;
   });
 }
 
@@ -1628,7 +1631,7 @@ function applySensitiveMask(scope) {
     const masked=["search","both"].includes(scope) && item.restriction!=="safe";
     poster.classList.toggle("is-sensitive-masked",masked);
     let overlay=poster.querySelector(".sensitive-image-mask");
-    if(masked && !overlay){poster.insertAdjacentHTML("beforeend",sensitiveImageMaskMarkup(item.restriction==="r18"?"敏感内容":"分级待确认"));overlay=poster.querySelector(".sensitive-image-mask");}
+    if(masked && !overlay){poster.insertAdjacentHTML("beforeend",sensitiveImageMaskMarkup(["r18","r18g"].includes(item.restriction)?"敏感内容":"分级待确认"));overlay=poster.querySelector(".sensitive-image-mask");}
     if(overlay)overlay.hidden=!masked;
   });
   sourceSearchView.setMaskSensitive(["source","both"].includes(scope));
@@ -1786,6 +1789,7 @@ async function changeGallerySort(order){
   galleryDraftOrder=order;browseOptions.choose(galleryPreferenceKind,order);
   if(galleryIntent || galleryLinkedEntry && !browseOptions.automatic() || activeSearchContext.kind==="author"){
     galleryStopRequested=true;cancelGalleryPopularity();cancelActiveSearch();
+    artistPage.suspend();
     if(galleryIntent)galleryIntent.order=order;
     galleryDraftOrder=order;setGallerySort(order,"已选择，点击开始加载");return;
   }
@@ -1873,6 +1877,7 @@ async function openLinkedSearch(tag,returnTarget,options={}){
 async function startGalleryLoad({restoring=false,refresh=false}={}){
   if(searchPending || galleryPopularityController){
     const wanted=galleryDraftOrder;galleryStopRequested=true;
+    artistPage.suspend();
     cancelGalleryPopularity();cancelActiveSearch();galleryDraftOrder=wanted;
     syncSearchSortControl();return;
   }
@@ -1954,7 +1959,8 @@ discoveryView=createDiscoveryPage({root:$("#discoveryPage"),request:requestAccou
   openArtist:id=>{accountOrigin=false;openArtistPage(id);},
   choose:toggleArtworkSelection,selected:id=>selection.has(id),canChoose:()=>!selection.locked && !singleDownloadPending && !workspaceSync.loading,
   installImages:installImageFallbacks,attachUgoira:attachUgoiraHoverTargets,
-  report:message=>showTaskDock("发现",message,4000),browse:browseOptions,autoPrepare:()=>cloudControls.getPreferences().autoSync});
+  report:message=>showTaskDock("发现",message,4000),browse:browseOptions,autoPrepare:()=>cloudControls.getPreferences().autoSync,
+  backgroundAllowed:()=>cloudControls.canPrepareBackground()});
 
 async function openDiscovery(options={},linked=false){
   preparePageNavigation();checkpointNavigation();
@@ -2659,7 +2665,7 @@ function currentDownloadPages(item) {
 const detailHdCache=createDetailImageCache({fetchBytes:(url,options)=>fetchBytes(url,{...options,cache:"no-store"},60000)});
 let previewSizeWrite=Promise.resolve();
 const imageViewer=createImageViewer({dialog:$("#imageViewer"),cache:detailHdCache,showDialog:showAppDialog,report:announceToast,
-  loadItem:(id,options)=>fetchJson(`/api/pixiv/artwork/${id}`,options,ARTWORK_DETAIL_TIMEOUT_MS),
+  loadItem:(id,{refresh=false,...options}={})=>fetchJson(`/api/pixiv/artwork/${id}${refresh?"?refresh=1":""}`,options,ARTWORK_DETAIL_TIMEOUT_MS),
   sizeChanged:value=>{previewSizeWrite=previewSizeWrite.then(()=>cloudControls.savePreferences({previewSize:value})).catch(error=>announceToast(error.message));}});
 globalThis.openListPreview=(item,image)=>{
   if(!item || !image?.naturalWidth){announceToast("预览图尚未加载完成，请稍后再试");return;}
@@ -3839,6 +3845,7 @@ $("#searchForm").onsubmit = async (event) => {
 
 cancelSearchButton.onclick = () => {
   if (!searchController) return;
+  artistPage.suspend();
   cancelSearchButton.disabled = true;
   $("#count").textContent = "正在停止搜索…";
   cancelActiveSearch();
@@ -3950,7 +3957,7 @@ async function syncAuthStatus() {
     if(accountChanged || authorizationLost)settingsView.reset();
     cloudControls.setSession();
     syncAppConnection(appConnection);
-    $("#safety").querySelectorAll('option[value="r18"],option[value="all"]').forEach((option) => { option.disabled = !logged; });
+    $("#safety").querySelectorAll('option[value="r18"],option[value="r18g"],option[value="all"]').forEach((option) => { option.disabled = !logged; });
     if (authorizationLost) handleAuthorizationLoss();
     else if (accountChanged) handleAuthorizationLoss("Pixiv 账户状态已变更");
     if (reloadWorkspace) {

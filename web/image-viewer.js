@@ -66,13 +66,21 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     if(page!==context.page){context.page=page;void paint(context,++revision);return false;}
     syncPages(context);resize();return true;
   }
-  async function detail(context){
-    if(context.item.pageImages)return context.item;
-    const request=context.detailRead || (context.detailRead=loadItem(context.item.id,{signal:context.controller.signal}));
+  async function detail(context,refresh=false){
+    if(context.item.pageImages && !refresh && !context.detailRead)return context.item;
+    if(!context.detailRead || refresh){
+      context.detailVersion=(context.detailVersion || 0)+1;
+      context.detailRead=loadItem(context.item.id,{signal:context.controller.signal,...(refresh?{refresh:true}:{})});
+    }
+    const request=context.detailRead,version=context.detailVersion;
     let item;
     try{item=await request;}
     finally{if(context.detailRead===request)context.detailRead=null;}
-    if(context!==current)return null;
+    if(context!==current || version!==context.detailVersion)return null;
+    if(refresh){
+      for(const entry of context.previews.values())if(entry.image!==image)entry.image.removeAttribute("src");
+      context.previews.clear();context.initialPreview=null;
+    }
     return adoptItem(context,item)?item:null;
   }
   function commit(node,page){
@@ -82,7 +90,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     delete image.dataset.detailArtwork;delete image.dataset.detailPage;delete image.dataset.suspendedSrc;
     image.style.visibility="visible";displayed=page;resize();
   }
-  async function paint(context=current,version=revision){
+  async function paint(context=current,version=revision,refresh=false){
     const page=context.page;
     original.hidden=!context.allowOriginal;
     cache.pin(context.item,page);originalView=false;working="preview";
@@ -92,8 +100,8 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     syncPages(context);
     resize();
     try{
-      const initial=page===context.initialPage?context.initialPreview:null;
-      const item=initial?context.item:await detail(context);
+      const initial=!refresh && !context.detailRead && page===context.initialPage?context.initialPreview:null;
+      const item=initial?context.item:await detail(context,refresh);
       if(context!==current || version!==revision || !dialog.open || !item)return;
       const node=await preview(context,page,initial || item.pageImages?.[page]?.regular || (page===0?item.thumb:""));
       if(context!==current || version!==revision || !dialog.open)return;
@@ -116,9 +124,8 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
         try{url=await cache.get(item,page);}
         catch(error){
           if(error.status!==403)throw error;
-          const fresh=await loadItem(item.id,{signal:context.controller.signal});
-          if(context!==current || version!==revision || !dialog.open)return;
-          if(!adoptItem(context,fresh))return;
+          const fresh=await detail(context,true);
+          if(!fresh || context!==current || version!==revision || !dialog.open)return;
           url=await cache.get(fresh,page);
         }
       }
@@ -153,7 +160,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   }
   function close(){if(dialog.open)dialog.close();}
   dialog.querySelector("[data-stage-close]").onclick=close;
-  original.onclick=()=>void viewOriginal();retry.onclick=()=>{if(current)void paint(current,++revision);};
+  original.onclick=()=>void viewOriginal();retry.onclick=()=>{if(current)void paint(current,++revision,current.item.source==="pixiv");};
   dialog.querySelectorAll("[data-stage-turn]").forEach(button=>button.onclick=()=>turn(Number(button.dataset.stageTurn)));
   dialog.addEventListener("keydown",event=>{
     if(event.key==="ArrowLeft" || event.key==="ArrowRight"){event.preventDefault();turn(event.key==="ArrowRight"?1:-1);}

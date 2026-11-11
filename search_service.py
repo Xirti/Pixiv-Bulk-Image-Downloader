@@ -204,6 +204,8 @@ def parse_search_query(value: str, *, max_length: int = 60) -> SearchQuery:
         return SearchQuery("tags", text or "原创")
     kind = match.group(1).casefold()
     raw_target = match.group(2).strip()
+    if kind == "author" and len(raw_target) > max_length:
+        raise SearchInputError(f"作者名称最多 {max_length} 个字符，可改用 UID 搜索")
     target = raw_target[:max_length]
     if not target:
         raise SearchInputError(f"{kind} 搜索缺少目标")
@@ -290,9 +292,11 @@ def resolve_source_modes(scope: str, *, authorized: bool) -> tuple[str, ...]:
     clean = str(scope or "safe")
     if clean == "safe":
         return ("safe",)
-    if clean == "r18":
+    if clean in {"r18", "r18g"}:
         if not authorized:
-            raise SearchInputError("R-18搜索需要先完成Pixiv账户授权")
+            raise SearchInputError("限制级搜索需要先完成Pixiv账户授权")
+        # The website exposes one adult search stream. Classify its returned
+        # xRestrict values locally while retaining separate scope snapshots.
         return ("r18",)
     if clean == "all":
         if not authorized:

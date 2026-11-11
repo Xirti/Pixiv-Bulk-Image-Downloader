@@ -11,6 +11,7 @@ body{padding-top:var(--chrome-height);font-family:"Segoe UI","Microsoft YaHei UI
 :where(button:not(:disabled):hover){background:var(--selected)}
 :where(button:disabled){cursor:default;opacity:.45}
 :where(input:not([type=checkbox]):not([type=radio]),select){color:var(--ink);background:var(--field);border:1px solid var(--line)}
+select option,select optgroup{color:var(--ink);background-color:var(--surface)}
 :where(input[type=checkbox],input[type=radio]){accent-color:var(--action-fill)}
 button:focus-visible,input:focus-visible,select:focus-visible{border-color:var(--focus);outline:2px solid var(--focus);outline-offset:2px;box-shadow:none}
 button:disabled:focus-visible{outline:none}

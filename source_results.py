@@ -106,7 +106,7 @@ def normalize_candidates(rows):
             links.setdefault(url,{"url":url,"site":"Pixiv","label":"","pixivId":pid})
         if isinstance(row.get("similarity"),bool):raise SourceSearchError("来源相似度无效",502)
         try:similarity=float(row.get("similarity",0))
-        except (TypeError,ValueError):raise SourceSearchError("来源相似度无效",502) from None
+        except (TypeError,ValueError,OverflowError):raise SourceSearchError("来源相似度无效",502) from None
         if not math.isfinite(similarity) or not 0<=similarity<=100:raise SourceSearchError("来源相似度无效",502)
         title,author,index=text(row.get("title")),text(row.get("author"),200),text(row.get("indexName"),120)
         details=row.get("details",[])

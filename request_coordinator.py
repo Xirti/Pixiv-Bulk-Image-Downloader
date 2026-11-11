@@ -23,6 +23,19 @@ from shared_request_budget import RequestDeferredError, SharedRequestBudget, ret
 REQUEST_PRIORITY = ContextVar("pixiv_request_priority", default=0)
 
 
+@contextmanager
+def checked_lock(lock, check):
+    """Wait for shared work while retaining this caller's cancellation checks."""
+    check()
+    while not lock.acquire(timeout=.05):
+        check()
+    try:
+        check()
+        yield
+    finally:
+        lock.release()
+
+
 @dataclass(eq=False)
 class _Ticket:
     priority: int

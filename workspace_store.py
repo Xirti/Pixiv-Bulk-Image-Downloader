@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager, closing
 from pathlib import Path
+from pixiv_adapter import CONTENT_MODES, CONTENT_RESTRICTIONS, RESTRICTED_CONTENT
 
 
 class TaskConflictError(ValueError):
@@ -260,7 +261,7 @@ class WorkspaceStore:
             raise ValueError("invalid recent search")
         if set(filters) != {"mode", "workType", "includeAi", "fuzzy", "startDate", "endDate"}:
             raise ValueError("invalid recent filters")
-        if (filters["mode"] not in ("safe", "r18", "all") or filters["workType"] not in ("all", "illustration", "manga", "ugoira")
+        if (not isinstance(filters["mode"], str) or filters["mode"] not in CONTENT_MODES or filters["workType"] not in ("all", "illustration", "manga", "ugoira")
                 or type(filters["includeAi"]) is not bool or type(filters["fuzzy"]) is not bool
                 or any(not isinstance(filters[key], str) or not re.fullmatch(r"(?:\d{4}-\d{2}-\d{2})?", filters[key]) for key in ("startDate", "endDate"))):
             raise ValueError("invalid recent filters")
@@ -291,9 +292,9 @@ class WorkspaceStore:
             pages = _pages(row.get("pages"))
             raw = row["item"]
             count = _integer(raw.get("pages"), 1, 1000001)
-            if pages[-1] >= count or raw.get("restriction", "safe") not in ("safe", "r18"):
+            if pages[-1] >= count or raw.get("restriction", "safe") not in CONTENT_RESTRICTIONS.values():
                 raise ValueError("invalid basket pages")
-            if raw.get("restriction") == "r18" and scope == "public":
+            if raw.get("restriction") in RESTRICTED_CONTENT and scope == "public":
                 raise ValueError("restricted basket needs account")
             item = {"id": artwork, "source": "pixiv", "pages": count,
                     "title": str(raw.get("title") or "未命名作品")[:1000],
@@ -304,7 +305,7 @@ class WorkspaceStore:
                     "bookmarks": None, "thumb": ""}
             # Thumbnails are fetched again on entry; no expiring capability is stored.
             item.pop("thumb")
-            normalized.append((scope if item["restriction"] == "r18" else "public", {
+            normalized.append((scope if item["restriction"] in RESTRICTED_CONTENT else "public", {
                 "id": artwork, "item": item, "pages": pages, "context": _context(row.get("context")),
                 "resultPage": _integer(row.get("resultPage", 1), 1, 100000), "archived": bool(row.get("archived", True))}))
             total += len(pages)

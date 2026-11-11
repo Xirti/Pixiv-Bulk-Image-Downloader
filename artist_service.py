@@ -30,8 +30,10 @@ def normalize_artist(raw, expected_id=None):
     background = raw.get("background")
     banner = _image(background.get("url")) if isinstance(background, dict) and not background.get("isPrivate") else ""
     region = raw.get("region")
+    name = raw.get("name") or raw.get("userName")
+    name = name.strip()[:120] if isinstance(name, str) else ""
     return {
-        "userId": user_id, "name": _text(raw.get("name") or raw.get("userName"), 120) or f"Pixiv 用户 {user_id}",
+        "userId": user_id, "name": name or f"Pixiv 用户 {user_id}",
         "avatar": _image(raw.get("imageBig") or raw.get("profileImageUrl") or raw.get("image")),
         "background": banner, "description": _text(raw.get("comment") or raw.get("description")),
         "region": _text(region.get("name"), 120) if isinstance(region, dict) else "",

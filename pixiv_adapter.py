@@ -13,6 +13,17 @@ class PixivPolicyError(ValueError):
     pass
 
 
+# The legacy allow_r18 argument authorizes adult ratings. Exact R-18 / R-18G
+# filtering belongs to the requested content mode, after normalization.
+CONTENT_RESTRICTIONS = {0: "safe", 1: "r18", 2: "r18g"}
+RESTRICTED_CONTENT = frozenset({"r18", "r18g"})
+CONTENT_MODES = frozenset({"safe", "all"}) | RESTRICTED_CONTENT
+
+
+def matches_content_mode(restriction: str, mode: str) -> bool:
+    return mode == "all" or restriction == mode
+
+
 def _integer_field(raw: dict[str, Any], field: str, default: int = 0, *, nullable: bool = False) -> int:
     value = raw.get(field, default)
     if nullable and (value is None or value == ""):
@@ -92,9 +103,9 @@ def validate_detail_policy(raw: dict[str, Any], allow_r18: bool = False) -> str:
     required = ["xRestrict", "isUnlisted", "isLoginOnly"]
     if any(field not in raw for field in required): raise PixivPolicyError("missing public policy field")
     restriction = _integer_field(raw, "xRestrict", -1)
-    if restriction not in ({0, 1} if allow_r18 else {0}) or bool(raw["isUnlisted"]): raise PixivPolicyError("restricted artwork")
+    if restriction not in (CONTENT_RESTRICTIONS if allow_r18 else {0}) or bool(raw["isUnlisted"]): raise PixivPolicyError("restricted artwork")
     if bool(raw.get("isMasked", False)) or _integer_field(raw, "visibilityScope") != 0 or bool(raw["isLoginOnly"]): raise PixivPolicyError("non-public artwork")
-    return "r18" if restriction == 1 else "safe"
+    return CONTENT_RESTRICTIONS[restriction]
 
 
 def is_allowed_pixiv_url(url: str, image_only: bool = False) -> bool:
@@ -145,13 +156,22 @@ def small_full_preview_url(url: str) -> str:
     ).geturl()
 
 
+def artwork_classification(raw: dict[str, Any]) -> tuple[str, bool]:
+    kinds = {0: "illustration", 1: "manga", 2: "ugoira"}
+    kind = _integer_field(raw, "illustType", nullable=True)
+    ai = _integer_field(raw, "aiType", 1, nullable=True)
+    if kind not in kinds or ai not in {0, 1, 2}:
+        raise PixivPolicyError("Pixiv 作品类型或 AI 标记无效")
+    return kinds[kind], ai == 2
+
+
 def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise PixivPolicyError("invalid artwork data")
     restriction = _integer_field(raw, "xRestrict", -1)
     if restriction == 0:
         validate_public_policy(raw, detail=False)
-    elif restriction == 1 and allow_r18:
+    elif restriction in {1, 2} and allow_r18:
         # R-18 search rows use the same explicit publication-policy contract as
         # safe rows. Treat an omitted flag as unknown instead of assuming that
         # the work is public.
@@ -185,9 +205,10 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
             normalized_tags.append(clean_tag)
     width = max(0, _integer_field(raw, "width", nullable=True))
     height = max(0, _integer_field(raw, "height", nullable=True))
+    work_type, ai_generated = artwork_classification(raw)
     return {
         "id": artwork_id,
-        "restriction": "r18" if restriction == 1 else "safe",
+        "restriction": CONTENT_RESTRICTIONS[restriction],
         "source": "pixiv",
         "title": str(raw.get("title") or "未命名作品"),
         "artist": str(raw.get("userName") or "未知画师"),
@@ -200,8 +221,8 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
         "date": publication_date(raw.get("createDate")),
         "sortDate": publication_timestamp(raw.get("createDate")),
         "description": _plain_text(raw.get("description")),
-        "workType": {0: "illustration", 1: "manga", 2: "ugoira"}.get(_integer_field(raw, "illustType", nullable=True), "illustration"),
-        "aiGenerated": _integer_field(raw, "aiType", 1, nullable=True) == 2,
+        "workType": work_type,
+        "aiGenerated": ai_generated,
         "thumb": proxy,
         "qualities": [
             {"id": "original", "label": "Pixiv 原图", "width": width, "height": height},
@@ -323,7 +344,7 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
         raise PixivPolicyError("Pixiv 图片页数据不完整，请重新读取作品")
     width = max(0, _integer_field(raw, "width", nullable=True))
     height = max(0, _integer_field(raw, "height", nullable=True))
-    work_type = {0: "illustration", 1: "manga", 2: "ugoira"}.get(_integer_field(raw, "illustType", nullable=True), "illustration")
+    work_type, ai_generated = artwork_classification(raw)
     tag_rows = (raw.get("tags") or {}).get("tags") if isinstance(raw.get("tags"), dict) else []
     if not isinstance(tag_rows, list):
         tag_rows = []
@@ -356,7 +377,7 @@ def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18
         "pages": len(page_images), "width": width, "height": height,
         "bookmarks": bookmark_count(raw), "date": publication_date(raw.get("createDate")),
         "description": _plain_text(raw.get("description") or raw.get("illustComment")),
-        "workType": work_type, "aiGenerated": _integer_field(raw, "aiType", 1, nullable=True) == 2,
+        "workType": work_type, "aiGenerated": ai_generated,
         "thumb": page_images[0]["regular"] or page_images[0]["original"],
         "pageImages": page_images, "qualities": qualities, "formats": formats,
     }

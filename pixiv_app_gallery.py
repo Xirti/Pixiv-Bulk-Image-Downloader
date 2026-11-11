@@ -9,9 +9,11 @@ import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from pixiv_adapter import (PixivPolicyError, valid_pixiv_id, is_allowed_pixiv_url,
-    small_full_preview_url, publication_date, publication_timestamp, matches_tag_groups)
+    small_full_preview_url, publication_date, publication_timestamp, matches_tag_groups,
+    CONTENT_RESTRICTIONS, CONTENT_MODES, matches_content_mode)
 from search_service import (SearchInputError, SearchResultIndex, parse_search_query,
     parse_search_date_range, build_search_tag_groups)
+from request_coordinator import checked_lock
 
 
 def proxy_image(value):
@@ -33,7 +35,7 @@ def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True
     if not isinstance(raw, dict) or raw.get("visible") is not True:
         raise PixivPolicyError("App 作品当前不可见")
     restriction = number(raw, "x_restrict")
-    if number(raw,"restrict") != 0 or restriction not in ({0, 1} if allow_r18 else {0}) or raw.get("is_muted") is True:
+    if number(raw,"restrict") != 0 or restriction not in (CONTENT_RESTRICTIONS if allow_r18 else {0}) or raw.get("is_muted") is True:
         raise PixivPolicyError("App 作品不在当前内容范围")
     uid, artist = raw.get("user"), None
     if isinstance(uid, dict):
@@ -61,7 +63,7 @@ def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True
     ai = raw.get("illust_ai_type")
     if type(ai) is not int or ai not in {0,1,2}:
         raise PixivPolicyError("App AI 标记异常")
-    item = {"id": identifier, "source": "pixiv", "restriction": "r18" if restriction else "safe",
+    item = {"id": identifier, "source": "pixiv", "restriction": CONTENT_RESTRICTIONS[restriction],
         "title": str(raw.get("title") or "未命名作品"), "artist": str(uid.get("name") or "未知画师"), "userId": artist,
         "pages": count, "width": width, "height": height, "tags": list(dict.fromkeys(translated)),
         "date": publication_date(raw.get("create_date")), "sortDate": publication_timestamp(raw.get("create_date")),
@@ -195,36 +197,47 @@ class AppGallery:
             return {'query':target,'page':page,'candidates':[p for p in profiles if p['name'].casefold()==target.casefold()],'hasMore':bool(next_path)}
         if not valid_pixiv_id(target):raise SearchInputError('作者 ID 无效')
         key=(generation,target)
-        with self.lock:
-            entry=self.artist_reads.get(key)
-            if entry is None or (entry['done'].is_set() and (refresh or time.monotonic()-entry['time']>120)):
-                entry={'done':threading.Event(),'time':time.monotonic(),'raw':None,'error':None}
-                self.artist_reads[key]=entry;owner=True
-            else:owner=False
-            self.artist_reads.move_to_end(key)
-            while len(self.artist_reads)>64:self.artist_reads.popitem(last=False)
-        if owner:
-            try:entry['raw']=self.get('/v1/user/detail?'+urlencode({'user_id':target,'filter':'for_android'}),generation,cancel_event)
-            except Exception as error:
-                entry['error']=error
-                with self.lock:
-                    if self.artist_reads.get(key) is entry:self.artist_reads.pop(key)
-                raise
-            finally:entry['done'].set()
-        else:
-            while not entry['done'].wait(.05):self.check(generation,cancel_event)
+        for attempt in range(2):
             self.check(generation,cancel_event)
-            if entry['error'] is not None:raise entry['error']
-        raw=entry['raw']
-        details = raw.get('profile')
-        if not isinstance(details,dict):raise PixivPolicyError('App 作者资料格式异常')
-        profile = artist_profile(raw.get('user'),details)
-        if profile['userId'] != target:raise PixivPolicyError('App 作者身份不匹配')
-        if kind == 'profile':return profile
-        return {'userId':target,'counts':{'illusts':number(details,'total_illusts'),'manga':number(details,'total_manga')},'featured':[]}
+            with self.lock:
+                entry=self.artist_reads.get(key)
+                if entry is None or (entry['done'].is_set() and (refresh or time.monotonic()-entry['time']>120)):
+                    entry={'done':threading.Event(),'time':time.monotonic(),'raw':None,'error':None,'cancel':cancel_event}
+                    self.artist_reads[key]=entry;owner=True
+                else:owner=False
+                self.artist_reads.move_to_end(key)
+                while len(self.artist_reads)>64:self.artist_reads.popitem(last=False)
+            if owner:
+                try:entry['raw']=self.get('/v1/user/detail?'+urlencode({'user_id':target,'filter':'for_android'}),generation,cancel_event)
+                except Exception as error:
+                    entry['error']=error
+                    with self.lock:
+                        if self.artist_reads.get(key) is entry:self.artist_reads.pop(key)
+                    raise
+                finally:entry['done'].set()
+            else:
+                while not entry['done'].wait(.05):self.check(generation,cancel_event)
+                self.check(generation,cancel_event)
+                if entry['error'] is not None:
+                    # A live reader may replace the cancelled owner's GET once.
+                    if attempt==0 and entry['cancel'] is not None and entry['cancel'].is_set():continue
+                    raise entry['error']
+            break
+        try:
+            raw=entry['raw']
+            details = raw.get('profile')
+            if not isinstance(details,dict):raise PixivPolicyError('App 作者资料格式异常')
+            profile = artist_profile(raw.get('user'),details)
+            if profile['userId'] != target:raise PixivPolicyError('App 作者身份不匹配')
+            if kind == 'profile':return profile
+            return {'userId':target,'counts':{'illusts':number(details,'total_illusts'),'manga':number(details,'total_manga')},'featured':[]}
+        except PixivPolicyError:
+            with self.lock:
+                if self.artist_reads.get(key) is entry:self.artist_reads.pop(key)
+            raise
 
     def search(self, tag, scope, page, work_type, include_ai, *, generation, fuzzy=False, start_date='',end_date='',snapshot_id='',cancel_event=None,prefetch=False,**unused):
-        if scope not in {'safe','r18','all'} or work_type not in {'all','illustration','manga','ugoira'}:
+        if scope not in CONTENT_MODES or work_type not in {'all','illustration','manga','ugoira'}:
             raise SearchInputError('搜索范围无效')
         page=max(1,int(page));query=parse_search_query(tag);dates=parse_search_date_range(start_date,end_date)
         groups=build_search_tag_groups(query.value,fuzzy=fuzzy) if query.kind=='tags' else ()
@@ -234,7 +247,7 @@ class AppGallery:
             query=parse_search_query('uid:'+candidates[0]['userId'])
         if query.kind=='pid':
             item=self.detail(query.value,generation=generation,allow_r18=scope!='safe',cancel_event=cancel_event)
-            rows=[item] if (scope!='r18' or item['restriction']=='r18') and (include_ai or not item['aiGenerated']) and (work_type=='all' or item['workType']==work_type) and (not dates or dates.contains(item['date'])) else []
+            rows=[item] if matches_content_mode(item['restriction'],scope) and (include_ai or not item['aiGenerated']) and (work_type=='all' or item['workType']==work_type) and (not dates or dates.contains(item['date'])) else []
             return {'items':rows if page==1 else [],'page':page,'total':len(rows),'perPage':36,'hasMore':False,'availablePages':[1],'preloadedThrough':1,'snapshotId':snapshot_id,'tag':tag}
         key=(generation,query,scope,work_type,include_ai,groups,dates,snapshot_id)
         with self.lock:
@@ -255,7 +268,7 @@ class AppGallery:
                 if old_key!=key and (len(self.sessions)>8 or time.monotonic()-old.touched>1800):
                     old.invalid=True;del self.sessions[old_key]
                     if old.lock.acquire(blocking=False):old.index.close();old.lock.release()
-        with session.lock:
+        with checked_lock(session.lock,lambda:self.check(generation,cancel_event)):
             try:
                 self.check(generation,cancel_event)
                 if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
@@ -273,20 +286,24 @@ class AppGallery:
                     if not isinstance(rows,list):raise PixivPolicyError('App 搜索格式异常')
                     next_path=continuation(raw,urlsplit(path).path)
                     if next_path==path:raise PixivPolicyError('App 续页未前进')
-                    if query.kind=='uid' and next_path and parse_qs(urlsplit(next_path).query).get('user_id')!=[query.value]:
-                        raise PixivPolicyError('App 作者续页身份不匹配')
+                    if query.kind=='uid' and next_path:
+                        next_query=parse_qs(urlsplit(next_path).query)
+                        if next_query.get('user_id')!=[query.value]:raise PixivPolicyError('App 作者续页身份不匹配')
+                        if next_query.get('type',['illust'])!=parse_qs(urlsplit(path).query).get('type',['illust']):
+                            raise PixivPolicyError('App 作者续页作品类型不匹配')
                     normalized=[]
                     for row in rows:
                         try:item=normalize_work(row,allow_r18=scope!='safe')
                         except PixivPolicyError:continue
                         if query.kind=='uid' and item['userId']!=query.value:continue
-                        if scope=='r18' and item['restriction']!='r18':continue
+                        if not matches_content_mode(item['restriction'],scope):continue
                         if work_type!='all' and item['workType']!=work_type:continue
                         if not include_ai and item['aiGenerated']:continue
                         if dates and not dates.contains(item['date']):continue
                         if groups and not matches_tag_groups(item['tags'],groups):continue
                         normalized.append(item)
                     self.check(generation,cancel_event)
+                    if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
                     session.index.add(normalized)
                     source['next']=next_path
                     if rows:
@@ -294,9 +311,10 @@ class AppGallery:
                         source['bound']=(stamp,int(tail['id'])) if stamp and valid_pixiv_id(str(tail.get('id',''))) else None
                     elif next_path:raise PixivPolicyError('App 返回空续页，请刷新重试')
                 self.check(generation,cancel_event)
-                total=session.index.emitted_count;more=bool(session.index.pending_count or any(s['next'] for s in session.sources))
+                total=session.index.emitted_count;more=bool(total>target or session.index.pending_count or any(s['next'] for s in session.sources))
                 rows=session.index.read_results((page-1)*36,page*36)
                 pages=list(range(1,max(1,(total+35)//36)+1))
+                if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
                 return {'items':rows,'tag':tag,'page':page,'total':total,'perPage':36,'hasMore':more,'availablePages':pages,'preloadedThrough':max(pages),'snapshotId':snapshot_id,'budgetExhausted':more and len(rows)<36}
             finally:
                 if session.invalid:session.index.close()
