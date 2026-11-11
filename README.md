@@ -4,7 +4,7 @@
 
 <h1 align="center">MOKU</h1>
 
-<p align="center">Windows 上的 Pixiv 浏览、云收藏与批量下载工具</p>
+<p align="center">Windows 上的 Pixiv 浏览、云收藏与下载管理工具</p>
 
 <p align="center">
   <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest">下载最新版</a> ·
