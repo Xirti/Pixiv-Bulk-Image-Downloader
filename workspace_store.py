@@ -229,6 +229,9 @@ class WorkspaceStore:
             if not self.path.exists():
                 return result
             with self._connection() as connection:
+                # Header, chunks and workspace sections belong to one snapshot,
+                # including while another process updates this database.
+                connection.execute("BEGIN")
                 row = connection.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
                 if row:
                     result["revision"] = row[0]
@@ -427,6 +430,7 @@ class WorkspaceStore:
             if not self.path.exists():
                 return None
             with self._connection() as connection:
+                connection.execute("BEGIN")
                 row = connection.execute("SELECT payload FROM tasks WHERE id=? AND scope=?", (task_id, scope)).fetchone()
                 if not row:return None
                 task=json.loads(row[0])

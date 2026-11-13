@@ -1,5 +1,8 @@
 """One pending system-browser authorization, with a temporary owned URI callback."""
 import base64
+from contextlib import contextmanager
+import ctypes
+from ctypes import wintypes
 import hashlib
 import hmac
 import json
@@ -18,6 +21,35 @@ from download_history import history_path
 from pixiv_account import AccountError
 
 PROTOCOL = r"Software\Classes\pixiv"
+PROTOCOL_MUTEX = "Local\\MOKU.PixivAuthorization." + hashlib.sha256(str(Path.home()).casefold().encode()).hexdigest()[:32]
+
+
+@contextmanager
+def protocol_guard(name=PROTOCOL_MUTEX):
+    """Serialize the shared URI registration, including orphan recovery/cleanup."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateMutexW(None, False, name)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    acquired = False
+    try:
+        result = kernel.WaitForSingleObject(handle, 1000)
+        if result == 258:
+            raise AccountError("authorization_busy", "另一窗口正在处理账号授权，请稍后重试")
+        if result not in (0, 0x80):
+            raise ctypes.WinError(ctypes.get_last_error())
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            kernel.ReleaseMutex(handle)
+        kernel.CloseHandle(handle)
 
 
 def decode_callback(value, state):
@@ -65,7 +97,7 @@ class AccountAuthorization:
 
     def begin(self, port, token, generation):
         self.pages.check(generation)
-        with self.lock:
+        with self.lock, protocol_guard():
             if self.flow:
                 if self.flow["generation"] != generation:
                     raise AccountError("revoked", "账号状态已改变，请重新打开我的账号")
@@ -94,13 +126,21 @@ class AccountAuthorization:
             url = "https://app-api.pixiv.net/web/v1/login?" + urlencode({"code_challenge": challenge,
                 "code_challenge_method": "S256", "client": "pixiv-android", "state": state})
             flow = {"queue": queue.Queue(maxsize=1), "state": state, "command": command, "cancel": threading.Event(),
-                    "generation": generation, "authorizeUrl": url}
+                    "generation": generation, "authorizeUrl": url, "account": account,
+                    "callback": json.dumps({"port": port, "token": token, "command": command, "owner": state})}
             self.flow = flow
             try:
-                callback_file().parent.mkdir(parents=True, exist_ok=True)
-                callback_file().write_text(json.dumps({"port": port, "token": token, "command":command}), encoding="utf-8")
+                path = callback_file()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_name(path.name + "." + state + ".tmp")
+                try:
+                    temporary.write_text(flow["callback"], encoding="utf-8")
+                    temporary.replace(path)
+                finally:
+                    temporary.unlink(missing_ok=True)
                 with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, PROTOCOL) as key:
                     flow["registered"] = True
+                    winreg.SetValueEx(key, "MOKU Owner", 0, winreg.REG_SZ, state)
                     winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:MOKU Pixiv account")
                     winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
                 with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, PROTOCOL + r"\shell\open\command") as key:
@@ -137,7 +177,12 @@ class AccountAuthorization:
                     with self.lock:
                         self._cleanup(flow)
 
-            threading.Thread(target=wait, name="moku-account-auth", daemon=True).start()
+            try:
+                threading.Thread(target=wait, name="moku-account-auth", daemon=True).start()
+            except Exception:
+                self.pages.auth_status = {"pending": False, "error": "账号授权启动失败，请重试"}
+                self._cleanup(flow)
+                raise
             return url
 
     def _recover_owned_callback(self, command):
@@ -183,25 +228,42 @@ class AccountAuthorization:
     def _cleanup(self, flow):
         if self.flow is not flow:
             return
-        current = None
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROTOCOL + r"\shell\open\command") as key:
-                current = winreg.QueryValueEx(key, "")[0]
-        except FileNotFoundError:
-            pass
-        if current == flow["command"] or current is None and flow.get("registered"):
-            for suffix in (r"\shell\open\command", r"\shell\open", r"\shell", ""):
+        with protocol_guard():
+            try:
+                current = owner = None
                 try:
-                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, PROTOCOL + suffix)
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROTOCOL + r"\shell\open\command") as key:
+                        current = winreg.QueryValueEx(key, "")[0]
                 except FileNotFoundError:
                     pass
-        callback_file().unlink(missing_ok=True)
-        self.flow = None
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROTOCOL) as key:
+                        owner = winreg.QueryValueEx(key, "MOKU Owner")[0]
+                except FileNotFoundError:
+                    pass
+                path = callback_file()
+                try:
+                    owned_file = path.read_text(encoding="utf-8") == flow["callback"]
+                except FileNotFoundError:
+                    owned_file = False
+                owned_key = owner == flow["state"] or owner is None and flow.get("registered") and owned_file
+                if owned_key and current in (None, flow["command"]):
+                    for suffix in (r"\shell\open\command", r"\shell\open", r"\shell", ""):
+                        try:
+                            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, PROTOCOL + suffix)
+                        except FileNotFoundError:
+                            pass
+                if owned_file:
+                    path.unlink(missing_ok=True)
+            finally:
+                self.flow = None
 
     def close(self):
         with self.lock:
             if self.flow:
                 self.flow["cancel"].set()
-                self.pages.account().fence()
-                self._cleanup(self.flow)
-                self.pages.auth_status = {"pending": False, "error": ""}
+                self.flow["account"].fence()
+                try:
+                    self._cleanup(self.flow)
+                finally:
+                    self.pages.auth_status = {"pending": False, "error": ""}

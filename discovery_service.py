@@ -290,11 +290,12 @@ class DiscoveryService:
             items = feed["items"][offset:target]
             has_more = target<len(feed["items"]) or any(feed["paths"].values()) or any(feed["pending"].values())
             self._check(generation,epoch)
-            with self._guard:
+            with self.pages.publication(generation), self._guard:
                 if epoch != self._epoch:
                     raise AccountError("cache_cleared", "发现缓存已清除，请重新打开")
-                self.pages.saved_cache.save(owner,method,["discovery-feed",feed["batch"]],feed)
-                if not batch or refresh:self.pages.saved_cache.save(owner,method,current_key,feed["batch"])
+                records = [(["discovery-feed",feed["batch"]],feed)]
+                if not batch or refresh:records.append((current_key,feed["batch"]))
+                self.pages.saved_cache.save_many(owner,method,records)
                 if not stored or refresh:self.pages.saved_cache.retain_discovery(owner,method)
                 self._retain(owner,method,feed,epoch)
             if not items and has_more:raise AccountError("filtered", "当前范围暂未取得可展示作品，再次进入可继续读取，或调整范围")

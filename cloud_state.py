@@ -1,5 +1,5 @@
 """Small durable relationship index; it never stores image data or credentials."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -7,6 +7,11 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
+
+
+class ScanConflictError(ValueError):
+    pass
 
 
 DEFAULT_MACHINE = {"saveRoot": "", "createFolder": True, "previewLayout":"adaptive",
@@ -72,7 +77,8 @@ class CloudState:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
-        db.executescript("""
+        try:
+            db.executescript("""
           CREATE TABLE IF NOT EXISTS preferences(scope TEXT PRIMARY KEY, payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS relations(owner TEXT, method TEXT, kind TEXT, target TEXT,
             active INTEGER NOT NULL, privacy TEXT, tags TEXT, bookmark_id TEXT, touched REAL,
@@ -83,11 +89,26 @@ class CloudState:
             PRIMARY KEY(owner,method,kind,target));
           CREATE TABLE IF NOT EXISTS operations(owner TEXT, method TEXT, request_id TEXT, signature TEXT,
             result TEXT, touched REAL, PRIMARY KEY(owner,method,request_id));
-        """)
+          CREATE INDEX IF NOT EXISTS relations_version ON relations(version);
+          CREATE TABLE IF NOT EXISTS page_repairs(owner TEXT, method TEXT, token TEXT,
+            PRIMARY KEY(owner,method,token));
+            """)
+        except BaseException:
+            db.close()
+            raise
         return db
+
+    @contextmanager
+    def _write(self):
+        # Reserve the SQLite writer before reading a revision or merging a patch.
+        # The Python lock alone cannot serialize another process/store instance.
+        with self.lock, closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            yield db
 
     def preferences(self, scope):
         with self.lock, closing(self._connect()) as db:
+            db.execute("BEGIN")
             values = {}
             for key in ("machine", scope):
                 row = db.execute("SELECT payload FROM preferences WHERE scope=?", (key,)).fetchone()
@@ -97,7 +118,7 @@ class CloudState:
 
     def save_preferences(self, scope, changes):
         # Caller has validated the external patch once.
-        with self.lock, closing(self._connect()) as db, db:
+        with self._write() as db:
             for key, fields in (("machine", DEFAULT_MACHINE), (scope, DEFAULT_ACCOUNT)):
                 patch = {k: v for k, v in changes.items() if k in fields}
                 if not patch:
@@ -131,6 +152,7 @@ class CloudState:
     def many(self, owner, method, works, authors):
         result = {"bookmark": {}, "follow": {}}
         with self.lock, closing(self._connect()) as db:
+            db.execute("BEGIN")
             scans={row["kind"]:row["completed"] or 0 for row in db.execute(
                 "SELECT kind,json_extract(payload,'$.completed') AS completed FROM scans WHERE owner=? AND method=?",(owner,method))}
             for kind, targets in (("bookmark", works), ("follow", authors)):
@@ -154,14 +176,31 @@ class CloudState:
                     json.dumps(state["tags"], ensure_ascii=False) if state.get("tags") is not None else None,
                     state.get("bookmarkId"), time.time(), version))
 
-    def put(self, owner, method, kind, target, state):
-        with self.lock, closing(self._connect()) as db, db:
+    def put(self, owner, method, kind, target, state, *, repair_id=None):
+        with self._write() as db:
             version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM relations").fetchone()[0]
             self._put(db, owner, method, kind, target, state, version)
-        return self.get(owner, method, kind, target)
+            if repair_id is not None:
+                db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, method, repair_id))
+            current = self._decode(db.execute("SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target=?",
+                (owner, method, kind, target)).fetchone())
+        return current
+
+    def queue_page_repair(self, owner, method, token):
+        with self._write() as db:
+            db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, method, token))
+
+    def pending_page_repairs(self, owner, method):
+        with self.lock, closing(self._connect()) as db:
+            return [row[0] for row in db.execute("SELECT token FROM page_repairs WHERE owner=? AND method=?", (owner, method))]
+
+    def finish_page_repairs(self, owner, method, tokens):
+        with self._write() as db:
+            db.executemany("DELETE FROM page_repairs WHERE owner=? AND method=? AND token=?",
+                [(owner, method, token) for token in tokens])
 
     def remember_active(self, owner, method, kind, targets, privacy):
-        with self.lock, closing(self._connect()) as db, db:
+        with self._write() as db:
             scan=db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?",(owner,method,kind)).fetchone()
             if scan and json.loads(scan[0]).get("completed"):
                 return
@@ -171,7 +210,7 @@ class CloudState:
                 if not found:self._put(db,owner,method,kind,target,{"active":True,"privacy":privacy,"tags":None},version)
 
     def operation(self, owner, method, request_id, signature):
-        with self.lock, closing(self._connect()) as db, db:
+        with self._write() as db:
             row = db.execute("SELECT signature,result FROM operations WHERE owner=? AND method=? AND request_id=?",
                              (owner, method, request_id)).fetchone()
             if row:
@@ -183,7 +222,7 @@ class CloudState:
             return False, None
 
     def finish_operation(self, owner, method, request_id, state):
-        with self.lock, closing(self._connect()) as db, db:
+        with self._write() as db:
             db.execute("UPDATE operations SET result=? WHERE owner=? AND method=? AND request_id=?",
                        (json.dumps(state), owner, method, request_id))
 
@@ -193,23 +232,28 @@ class CloudState:
                 "SELECT kind,payload FROM scans WHERE owner=? AND method=?", (owner, method))}
 
     def clear_account(self, owner):
-        with self.lock, closing(self._connect()) as db, db:
-            for table in ("relations", "scans", "scan_seen"):
+        with self._write() as db:
+            for table in ("relations", "scans", "scan_seen", "page_repairs"):
                 db.execute(f"DELETE FROM {table} WHERE owner=?", (owner,))
 
     def begin_scan(self, owner, method, kind):
-        with self.lock, closing(self._connect()) as db, db:
+        with self._write() as db:
             row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", (owner, method, kind)).fetchone()
             old = json.loads(row[0]) if row else {}
             # A new process/read session starts a fresh bounded sweep. Never delete from a partial sweep.
-            state = {"scope": "public", "cursor": "", "offset":0, "positions":{}, "finished":[], "running": True, "completed": old.get("completed", 0),
+            state = {"id": uuid.uuid4().hex, "scope": "public", "cursor": "", "offset":0, "positions":{}, "finished":[], "running": True, "completed": old.get("completed", 0),
                      "started": time.time(), "version": db.execute("SELECT COALESCE(MAX(version),0) FROM relations").fetchone()[0]}
             db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
             db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(state)))
             return state
 
     def scan_page(self, owner, method, kind, scan, items, next_cursor):
-        with self.lock, closing(self._connect()) as db, db:
+        with self._write() as db:
+            row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", (owner, method, kind)).fetchone()
+            current = json.loads(row[0]) if row else None
+            if (current is None or not current["running"] or current.get("id") != scan["id"]
+                    or any(current[key] != scan[key] for key in ("scope", "cursor", "offset"))):
+                raise ScanConflictError("同步批次已更新，请重新同步")
             for target, state in items:
                 db.execute("INSERT OR IGNORE INTO scan_seen VALUES(?,?,?,?)", (owner, method, kind, target))
                 old = db.execute("SELECT version,tags FROM relations WHERE owner=? AND method=? AND kind=? AND target=?",

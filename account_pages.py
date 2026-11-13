@@ -1,6 +1,6 @@
 """Read-only Pixiv account pages and per-account observed-work markers."""
 from collections import OrderedDict
-from contextlib import closing
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 import copy
 from datetime import datetime, timezone
@@ -78,13 +78,18 @@ class VisitStore:
     def _connect(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=3)
-        connection.execute("CREATE TABLE IF NOT EXISTS author_seen (owner TEXT, author TEXT, seen TEXT, observed TEXT, touched REAL, PRIMARY KEY(owner,author))")
-        connection.execute("CREATE TABLE IF NOT EXISTS author_scopes (owner TEXT, scope TEXT, author TEXT, PRIMARY KEY(owner,scope,author))")
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS author_seen (owner TEXT, author TEXT, seen TEXT, observed TEXT, touched REAL, PRIMARY KEY(owner,author))")
+            connection.execute("CREATE TABLE IF NOT EXISTS author_scopes (owner TEXT, scope TEXT, author TEXT, PRIMARY KEY(owner,scope,author))")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     def observe(self, owner, dates, *, scope=None, initial=True):
         markers = {}
         with self.lock, closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
             for author, stamp in dates.items():
                 if scope is not None:
                     connection.execute("INSERT OR IGNORE INTO author_scopes VALUES(?,?,?)", (owner,scope,author))
@@ -130,7 +135,11 @@ class AccountCache:
     def _connect(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=5)
-        connection.execute("CREATE TABLE IF NOT EXISTS cached (owner TEXT, method TEXT, key TEXT, payload TEXT, PRIMARY KEY(owner,method,key))")
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS cached (owner TEXT, method TEXT, key TEXT, payload TEXT, PRIMARY KEY(owner,method,key))")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     def read(self, owner, method, key):
@@ -186,13 +195,22 @@ class AccountCache:
         with self.lock, closing(self._connect()) as db, db:
             db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?",[(owner,method,json.dumps(key)) for key in keys])
 
+    def discard_relations(self, owner, method, views):
+        with self.lock, closing(self._connect()) as db, db:
+            db.execute("DELETE FROM cached WHERE owner=? AND method=? AND (key LIKE ? OR "
+                "(key LIKE ? AND json_extract(key,'$[1]') IN (" + ','.join('?' for _ in views) + ')))',
+                (owner, method, '["cursor",%', '["data",%', *views))
+
 
 class AccountPages:
-    def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web"):
+    def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web", commit_guard=None, stopped=lambda:False):
         self.directory = Path(directory)
         self.request_json, self.request_homepage = request_json, request_homepage
         self.generation, self.coordinator, self.proxy = generation, coordinator, proxy
         self.method = method
+        self.stopped = stopped
+        self._closed = False
+        self.commit_guard = commit_guard if commit_guard is not None else threading.RLock()
         self._account = None
         self._lock = threading.RLock()
         self._cache = OrderedDict()
@@ -206,6 +224,8 @@ class AccountPages:
 
     def account(self):
         with self._lock:
+            if self._closed or self.stopped():
+                raise AccountError("closed", "账号连接已关闭，请重新打开程序")
             if self._account is None:
                 self._account = AppAccount(CredentialVault(), AppTransport(self.directory / "request-settings.json", self.proxy(), coordinator=self.coordinator), CLIENT_CONFIG)
             self._account.transport.proxy = self.proxy()
@@ -213,14 +233,23 @@ class AccountPages:
 
     def check(self, generation):
         ACCOUNT_REQUEST_CHECK.get()()
+        if self._closed or self.stopped():
+            raise AccountError("closed", "应用正在退出，请重新打开")
         if self.generation() != generation:
             raise AccountError("revoked", "账号已改变，请重新打开我的账户")
+
+    @contextmanager
+    def publication(self, generation):
+        """Linearize local publication with account revocation, before module locks."""
+        with checked_lock(self.commit_guard, lambda: self.check(generation)):
+            yield
 
     def invalidate(self):
         with self._lock:
             self._cache_revision += 1
             self._cache.clear()
             self._cursors.clear()
+            self._versions.clear()
             account = self._account
         if account:
             account.fence()
@@ -235,8 +264,15 @@ class AccountPages:
             CredentialVault().delete()
 
     def close(self):
-        if self._account:
-            self._account.transport.close()
+        with self.commit_guard:
+            with self._lock:
+                if self._closed:
+                    return
+                self._closed = True
+                account = self._account
+            self.invalidate()
+        if account is not None:
+            account.transport.close()
 
     def _cached(self, key, load, refresh=False):
         if ACCOUNT_CACHE_ONLY.get():
@@ -278,8 +314,7 @@ class AccountPages:
         if persistent and not refresh:
             cached = self.saved_cache.read(str(key[2]), method, ["data", *key[1:]])
             if cached is not None:
-                self.check(key[0])
-                with self._lock:
+                with self.publication(key[0]), self._lock:
                     if cache_revision!=self._cache_revision:raise AccountError("cache_cleared","账号缓存已清除，请重新打开页面")
                     if version!=self._versions.get(key,0):
                         current=self._updated_cached(key,method)
@@ -290,8 +325,7 @@ class AccountPages:
         if ACCOUNT_CACHE_ONLY.get():
             raise AccountError("cache_miss", "账号数据尚未在本地准备好")
         result = load()
-        self.check(key[0])
-        with self._lock:
+        with self.publication(key[0]), self._lock:
             if cache_revision != self._cache_revision:
                 raise AccountError("cache_cleared", "账号缓存已清除，请重新打开页面")
             if version!=self._versions.get(key,0):
@@ -326,6 +360,7 @@ class AccountPages:
             self._cache_revision += 1
             self._cache = OrderedDict((key, value) for key, value in self._cache.items() if key[1] == "owner")
             self._cursors.clear()
+            self._versions.clear()
             self.saved_cache.clear(owner)
             self.visits.clear(owner)
 
@@ -346,8 +381,7 @@ class AccountPages:
             params = {"user_id":owner, "restrict":scope, "filter":"for_android"}
             cursor_key = (generation,path,tuple(sorted(params.items())))
             stored.append((["cursor",path,sorted(params.items()),next_offset],next_cursor))
-        with self._lock:
-            self.check(generation)
+        with self.publication(generation), self._lock:
             self.saved_cache.save_many(owner, method, stored)
             for key, page in pages:
                 self._versions[key]=self._versions.get(key,0)+1
@@ -355,6 +389,17 @@ class AccountPages:
             if cursor_key is not None:
                 self._cursors[cursor_key,next_offset] = next_cursor
                 while len(self._cursors)>256:self._cursors.popitem(last=False)
+
+    def discard_relation_pages(self, owner, method, generation):
+        """Recover derived pages after an interrupted cross-database publication."""
+        views = {"bookmarks", "following", "followers", "profile", "profile-web", "tags", "works"}
+        with self.publication(generation), self._lock:
+            self.saved_cache.discard_relations(owner, method, views)
+            self._cache_revision += 1
+            self._cache = OrderedDict((key, value) for key, value in self._cache.items()
+                if len(key) < 3 or key[2] != owner or key[1] not in views)
+            self._cursors.clear()
+            self._versions.clear()
 
     @staticmethod
     def relation_page(method, kind, rows, *, offset, next_offset, total=None, mode="safe"):
@@ -382,8 +427,7 @@ class AccountPages:
 
     def finish_scan(self, owner, method, kind, offsets, generation):
         view="bookmarks" if kind=="bookmark" else "following"
-        with self._lock:
-            self.check(generation)
+        with self.publication(generation), self._lock:
             obsolete=[key for key in self.saved_cache.page_keys(owner,method,view) if
                 key[4] not in offsets.get(key[3],[]) or kind=="bookmark" and key[5]]
             self.saved_cache.remove(owner,method,obsolete)
@@ -395,7 +439,7 @@ class AccountPages:
     def note_relation(self, owner, method, kind, target, before, after, *, repair=False):
         """Patch cached pages after a confirmed write; do not invalidate unrelated pages."""
         generation=self.generation()
-        with self._lock:
+        with self.publication(generation), self._lock:
             view, field = ("bookmarks", "items") if kind == "bookmark" else ("following", "people")
             views=("bookmarks","profile","profile-web","tags","works") if kind=="bookmark" else ("following","followers","profile","profile-web")
             entries = self.saved_cache.entries(owner, method,views)
@@ -559,8 +603,7 @@ class AccountPages:
                     if cutoff and canonical<=cutoff:reached=True;continue
                     page_dates[author]=max(page_dates.get(author,""),canonical)
                 cursor=next_path if not initial and not reached and works else None
-                with self._lock:
-                    self.check(generation)
+                with self.publication(generation), self._lock:
                     if revision!=self._cache_revision:raise AccountError("cache_cleared","账号缓存已清理")
                     self.visits.observe(owner,page_dates,scope=feed_scope,initial=initial)
                     self.saved_cache.save(owner,method,scan_key,{"checkpoint":scan.get("checkpoint","") if cursor else head,
@@ -660,8 +703,7 @@ class AccountPages:
         next_offset=offset+max(1,len(rows)) if next_path else None
         if next_path:
             if next_path==cursor:raise AccountError("cursor","App 续页未前进")
-            with self._lock:
-                self.check(generation)
+            with self.publication(generation), self._lock:
                 if cache_revision!=self._cache_revision:raise AccountError("cache_cleared","账号缓存已清除，请重新打开页面")
                 self.saved_cache.save(str(params["user_id"]),self.method(),["cursor",path,sorted(params.items()),next_offset],next_path)
                 self._cursors[key,next_offset]=next_path
@@ -756,10 +798,11 @@ class AccountPages:
         profile = self.profile(generation)
         if not profile["connected"]:
             raise AccountError("reauth", "请先连接账号功能")
-        self.visits.mark_seen(profile["uid"], author)
+        with self.publication(generation):
+            self.visits.mark_seen(profile["uid"], author)
 
     def acknowledge_updates(self,generation,authors):
         profile=self.profile(generation)
         if not profile["connected"]:raise AccountError("reauth","请先连接账号功能")
-        self.check(generation)
-        self.visits.acknowledge(profile["uid"],authors)
+        with self.publication(generation):
+            self.visits.acknowledge(profile["uid"],authors)

@@ -10,8 +10,8 @@ import threading
 import time
 from urllib.parse import urlencode
 
-from curl_cffi.requests import Session
 from curl_cffi.requests.exceptions import RequestException
+from browser_transport import AsyncCurlPool, TransportClosedError
 from auth_store import CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHINE, ERROR_NOT_FOUND, advapi32, persistent_session_disabled
 from request_coordinator import RequestCoordinator, REQUEST_PRIORITY
 from shared_request_budget import SharedRequestBudget
@@ -138,8 +138,8 @@ class AppTransport:
     def __init__(self, settings_path, proxy="", coordinator=None):
         self.coordinator = coordinator or RequestCoordinator(settings_path, shared=SharedRequestBudget())
         self.proxy = proxy
-        self._session = Session(impersonate="chrome152", trust_env=False)
-        self._network_lock = threading.Lock()
+        self._pool = AsyncCurlPool(name="moku-app-network", impersonate="chrome152", max_clients=2,
+            trust_env=False, allow_redirects=False, retry=0)
 
     def request(self, method, path, *, bearer=None, form=None, check=lambda: None):
         token_request = path == "/auth/token"
@@ -153,40 +153,46 @@ class AppTransport:
             headers["Authorization"] = "Bearer " + bearer
         chunks = []
         received = 0
+        callback_error = None
 
         def consume(chunk):
-            nonlocal received
-            check()
-            received += len(chunk)
-            if received > 4 * 1024 * 1024:
-                raise AccountError("response_size", "Pixiv 账号响应过大")
-            chunks.append(chunk)
-            return len(chunk)
+            nonlocal received, callback_error
+            try:
+                check()
+                received += len(chunk)
+                if received > 4 * 1024 * 1024:
+                    raise AccountError("response_size", "Pixiv 账号响应过大")
+                chunks.append(chunk)
+                return len(chunk)
+            except Exception as error:
+                callback_error = error
+                return 0
 
         check()
         priority=0 if token_request else REQUEST_PRIORITY.get()
-        while not self._network_lock.acquire(timeout=.05):
-            check()
-        try:
-            return self._locked_request(method, url, headers, form, check, priority, chunks, consume)
-        finally:
-            self._network_lock.release()
-
-    def _locked_request(self, method, url, headers, form, check, priority, chunks, consume):
         with self.coordinator.slot(False, check, priority=priority):
             for attempt in range(2 if method=="GET" else 1):
                 self.coordinator.before_send(False, check, priority=priority, activity="search")
                 chunks.clear()
+                received = 0
+                callback_error = None
                 try:
-                    response = self._session.request(method, url, headers=headers, data=form, proxy=self.proxy or None,
-                                                     timeout=20, allow_redirects=False, discard_cookies=True, content_callback=consume)
+                    response = self._pool.perform(lambda session: session.request(method, url, headers=headers,
+                        data=form, proxy=self.proxy or None, timeout=20, allow_redirects=False,
+                        discard_cookies=True, content_callback=consume), check=check, deadline=time.monotonic()+20)
                     break
+                except TransportClosedError as error:
+                    raise AccountError("closed", "账号连接已关闭，请重新打开程序") from error
                 except RequestException as error:
+                    if callback_error is not None:
+                        raise callback_error from error
                     check()
                     self.coordinator.failure()
                     if method=="GET" and attempt==0 and int(getattr(error,"code",0)) in {5,6,7,18,28,35,52,55,56}:
                         continue
                     raise AccountError("network", "Pixiv 账号连接暂时失败，请稍后重试；已保存的凭据仍保留") from error
+            if callback_error is not None:
+                raise callback_error
         check()
         if response.status_code == 429:
             raise self.coordinator.limit(response.headers.get("Retry-After"))
@@ -208,7 +214,7 @@ class AppTransport:
         return data
 
     def close(self):
-        self._session.close()
+        self._pool.close()
 
 
 class AppAccount:
@@ -263,8 +269,10 @@ class AppAccount:
         self.transport.coordinator.session_connected()
         return self.snapshot()
 
-    def access(self, force=False):
+    def access(self, force=False, *, rejected=None, expected_epoch=None):
         with self._lock:
+            if expected_epoch is not None:
+                self._check(expected_epoch)
             tokens, epoch = self._tokens, self._epoch
             if tokens is None or self._reauth_required:
                 raise AccountError("reauth", "请先连接 Pixiv 账号")
@@ -274,6 +282,9 @@ class AppAccount:
             with self._lock:
                 self._check(epoch)
                 tokens = self._tokens
+                # Another request may already have replaced the rejected token.
+                if rejected is not None and tokens is not rejected and tokens.expires > self.clock():
+                    return tokens, epoch
                 if not force and tokens.expires - self.clock() > 300:
                     return tokens, epoch
             try:
@@ -296,7 +307,7 @@ class AppAccount:
     def request(self, method, path, *, form=None, expected_epoch=None, check=None):
         check=check or ACCOUNT_REQUEST_CHECK.get()
         check()
-        tokens, epoch = self.access()
+        tokens, epoch = self.access(expected_epoch=expected_epoch)
         if expected_epoch is not None:
             self._check(expected_epoch)
             if epoch != expected_epoch:
@@ -309,13 +320,15 @@ class AppAccount:
         except AccountError as error:
             if error.kind!="reauth":raise
             if method=="GET":
-                tokens, epoch = self.access(force=True)
+                tokens, epoch = self.access(force=True, rejected=tokens, expected_epoch=epoch)
                 try:
                     return self.transport.request(method,path,form=form,bearer=tokens.access,check=current)
                 except AccountError as retry:
                     if retry.kind!="reauth":raise
             with self._lock:
                 self._check(epoch)
+                if self._tokens is not tokens:
+                    raise AccountError("unconfirmed", "会话已更新，请核对本次操作结果后再试")
                 self._reauth_required=True
                 self._refresh_error="Pixiv 登录已失效，请重新授权"
             raise AccountError("reauth","Pixiv 登录已失效，请重新授权")

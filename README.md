@@ -43,7 +43,7 @@
 
 运行环境为 **Windows 10/11 x64**，需要 Microsoft Edge WebView2 Runtime 和可访问 Pixiv 的网络。
 
-1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 下载 `MOKU-v2.1.2-windows-x64.zip`。
+1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 下载 `MOKU-v2.1.3-windows-x64.zip`。
 2. 完整解压，运行 `MOKU/MOKU.exe`。
 3. 打开「我的账号 → 资料」，选择 App 授权或网页登录，完成 Pixiv 登录。
 4. 搜索或进入「发现」，查看作品，将需要下载的图片加入采集篮。

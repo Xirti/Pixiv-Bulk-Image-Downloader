@@ -89,8 +89,12 @@ class PreviewResources:
                         raise PreviewBusyError("动图预览繁忙，请稍后再试")
                     job = _Load(self._generation, _ConsumerCancellation(self._lock))
                     self._loads[key] = job
-                    threading.Thread(target=copy_context().run, args=(self._run, key, job, load, ttl),
-                                     name="moku-preview", daemon=True).start()
+                    try:
+                        threading.Thread(target=copy_context().run, args=(self._run, key, job, load, ttl),
+                                         name="moku-preview", daemon=True).start()
+                    except Exception:
+                        del self._loads[key]
+                        raise
                 if not job.stop.is_set():
                     job.stop.consumers[consumer] = cancel_event
                     break

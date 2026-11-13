@@ -115,6 +115,7 @@ INSTANCE_ID = os.getenv("MOKU_INSTANCE_ID") or secrets.token_hex(16)
 REQUEST_TOKEN = secrets.token_urlsafe(32)
 DESKTOP_AUTH_TOKEN = os.getenv("MOKU_DESKTOP_AUTH_TOKEN") or secrets.token_urlsafe(32)
 DESKTOP_AUTH_HEADER = "X-MOKU-Desktop-Capability"
+BACKEND_STOP = threading.Event()
 FOLDER_PICKER_LOCK = threading.Lock()
 # Single-artwork and batch requests share this process-wide limiter. The HTTP
 # server may create many request threads, but only a small bounded number may
@@ -403,7 +404,7 @@ def cancel_all_search_requests() -> None:
 
 
 def raise_if_search_cancelled(cancel_event: threading.Event | None) -> None:
-    if cancel_event is not None and cancel_event.is_set():
+    if BACKEND_STOP.is_set() or cancel_event is not None and cancel_event.is_set():
         raise SearchCancelledError("搜索已取消")
 
 
@@ -542,6 +543,16 @@ def clear_authorized_state(*, force: bool = True) -> bool:
     return True
 
 
+def stop_pending_work() -> None:
+    """Fence process-owned requests before closing their executors/transports."""
+    with SEARCH_SESSION_LOCKS_GUARD:
+        if BACKEND_STOP.is_set():
+            return
+        BACKEND_STOP.set()
+        cancel_all_search_requests()
+        clear_authorized_state(force=True)
+
+
 def disconnect_authorized_session() -> None:
     # Login, logout, and authorization snapshots share one linearization lock.
     # Otherwise a concurrent login can land between credential deletion and
@@ -566,6 +577,8 @@ def connect_authorized_session(value: str, *, remember: bool) -> None:
     # credential is removed first so a failed replacement cannot resurrect it.
     clean_value = validate_session_value(value)
     with SEARCH_SESSION_LOCKS_GUARD:
+        if BACKEND_STOP.is_set():
+            raise AuthorizationRevokedError("应用正在退出，请重新打开")
         clear_authorized_state(force=True)
         delete_session()
         store_session(clean_value, remember=remember)
@@ -587,6 +600,8 @@ def validated_authorization(force: bool = False) -> tuple[bool, int | None]:
     # removes the credential before taking this guard, then revokes the epoch
     # under it, so it cannot be inserted between these two values.
     with SEARCH_SESSION_LOCKS_GUARD:
+        if BACKEND_STOP.is_set():
+            return False, None
         app = ACCOUNTS.account().snapshot() if AUTH_METHOD.get()=="app" else None
         present = app["connected"] and not app["needsAuthorization"] if app is not None else bool(session_cookie_header())
         if not present:
@@ -1440,7 +1455,8 @@ def extend_history(
 ARTISTS = ArtistService(search_pixiv_json)
 ACCOUNTS = AccountPages(directory=history_path().parent, request_json=pixiv_json,
     request_homepage=lambda: pixiv_request("https://www.pixiv.net/", max_bytes=8*1024*1024)[0].decode("utf-8"),
-    generation=authorization_generation, coordinator=REQUEST_COORDINATOR, proxy=lambda: PIXIV_PROXY,method=AUTH_METHOD.get)
+    generation=authorization_generation, coordinator=REQUEST_COORDINATOR, proxy=lambda: PIXIV_PROXY,method=AUTH_METHOD.get,
+    commit_guard=SEARCH_SESSION_LOCKS_GUARD, stopped=lambda:BACKEND_STOP.is_set())
 ACCOUNT_AUTH = AccountAuthorization(ACCOUNTS)
 CLOUD_STATE = CloudState(history_path().with_name("cloud-state.sqlite3"))
 
@@ -3911,6 +3927,9 @@ class Handler(SimpleHTTPRequestHandler):
         if not trusted_local_request(self):
             self.send_json({"error": "请求只允许本机同源界面调用"}, 403)
             return True
+        if BACKEND_STOP.is_set():
+            self.send_json({"error": "应用正在退出，请重新打开"}, 503)
+            return True
         image_capability = path in {"/api/pixiv/image", "/api/source-search/image"}
         if path != "/api/health" and not image_capability and not valid_request_token(self):
             self.send_json({"error": "请求授权令牌无效"}, 403)
@@ -4335,6 +4354,7 @@ class Handler(SimpleHTTPRequestHandler):
             ensure_network_opener_current()
             cache_token=ACCOUNT_CACHE_ONLY.set(query.get("cached",[""])[0]=="1")
             priority_token=REQUEST_PRIORITY.set(1 if query.get("background",[""])[0]=="1" else 0)
+            CLOUD.recover_pages(generation)
             result = ACCOUNTS.read(kind, scope=scope, offset=offset, tag=tag, generation=generation,
                 mode=mode, refresh=query.get("refresh", [""])[0] == "1",
                 check_updates=CLOUD_STATE.preferences(workspace_scope())["autoFollowing"])
@@ -4674,6 +4694,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(pixiv_error_payload("图片代理", exc), 502)
 
     def do_POST(self):
+        if BACKEND_STOP.is_set():
+            return self.send_json({"error": "应用正在退出，请重新打开"}, 503)
         path = urllib.parse.urlsplit(self.path).path
         if path.startswith("/api/source-search/"):
             if path == "/api/source-search/query":

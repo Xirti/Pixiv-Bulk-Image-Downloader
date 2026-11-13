@@ -115,6 +115,10 @@ class DownloadHistory:
             where = "WHERE title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\' OR artwork_id LIKE ? ESCAPE '\\'" if query else ""
             params = (f"%{query}%",) * 3 if query else ()
             with self._connection() as connection:
+                # A schema migration may already own the transaction. Otherwise
+                # keep the count and page rows in the same read snapshot.
+                if not connection.in_transaction:
+                    connection.execute("BEGIN")
                 total = connection.execute(f"SELECT COUNT(*) FROM downloads {where}", params).fetchone()[0]
                 pages = (total + per_page - 1) // per_page
                 page = min(page, max(1, pages))

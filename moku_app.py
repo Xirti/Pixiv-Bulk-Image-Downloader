@@ -68,6 +68,15 @@ if __name__ == "__main__" and getattr(sys,"frozen",False) and "--update-confirm"
         raise SystemExit(1)
     if recovering:raise SystemExit(0)
 
+if __name__ == "__main__" and "--pixiv-account-callback" in sys.argv:
+    verify_startup_integrity()
+    from account_authorization import deliver_callback
+    try:
+        deliver_callback(sys.argv[sys.argv.index("--pixiv-account-callback")+1])
+    except Exception:
+        raise SystemExit(1)  # Callback parameters must never enter logs or dialogs.
+    raise SystemExit(0)
+
 if __name__ == "__main__":
     verify_startup_integrity()
 
@@ -419,37 +428,52 @@ def run(argv: list[str] | None = None) -> int:
 
     no_browser = options.serve_only or os.environ.get("MOKU_NO_BROWSER") == "1"
 
-    resource_root = runtime_resource_root()
-    data_root = writable_data_root()
-    configure_logging(data_root)
-    configure_server_paths(resource_root, data_root)
-    server.refresh_network_opener()
+    # Register process-owned resources before any fallible startup work.
+    # ExitStack continues cleanup even if a preceding callback raises.
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(server.SEARCH_NETWORK_POOL.shutdown, wait=False, cancel_futures=True)
+        cleanup.callback(lambda: server.PIXIV_OPENER.close())
+        cleanup.callback(server.APP_GALLERY.clear)
+        cleanup.callback(server.ACCOUNTS.close)
+        cleanup.callback(server.APP_UPDATES.close)
+        cleanup.callback(server.SOURCE_SEARCH.close)
+        cleanup.callback(server.ACCOUNT_AUTH.close)
+        cleanup.callback(server.stop_pending_work)
 
-    runtime_dir = runtime_directory()
-    runtime_file = runtime_dir / "backend.json"
-    mutex_name = os.environ.get("MOKU_MUTEX_NAME") or MUTEX_NAME
-    httpd = None
-    thread = None
-    owns_backend = False
+        resource_root = runtime_resource_root()
+        data_root = writable_data_root()
+        configure_logging(data_root)
+        configure_server_paths(resource_root, data_root)
+        server.refresh_network_opener()
 
-    with named_mutex(mutex_name):
-        runtime = load_runtime(runtime_file)
-        url = healthy_runtime(runtime)
-        desktop_auth_token = runtime_desktop_auth_token(runtime) if url else ""
-        if url and not desktop_auth_token:
-            url = None
-        if url:
-            LOG.info("reuse url=%s", url)
-        else:
-            server.INSTANCE_ID = secrets.token_hex(16)
-            server.DESKTOP_AUTH_TOKEN = secrets.token_urlsafe(32)
-            desktop_auth_token = server.DESKTOP_AUTH_TOKEN
-            httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
-            port = int(httpd.server_port)
-            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-            thread.start()
-            url = f"http://127.0.0.1:{port}/"
-            try:
+        runtime_dir = runtime_directory()
+        runtime_file = runtime_dir / "backend.json"
+        mutex_name = os.environ.get("MOKU_MUTEX_NAME") or MUTEX_NAME
+        thread = None
+        owns_backend = False
+
+        with named_mutex(mutex_name):
+            runtime = load_runtime(runtime_file)
+            url = healthy_runtime(runtime)
+            desktop_auth_token = runtime_desktop_auth_token(runtime) if url else ""
+            if url and not desktop_auth_token:
+                url = None
+            if url:
+                LOG.info("reuse url=%s", url)
+            else:
+                server.INSTANCE_ID = secrets.token_hex(16)
+                server.DESKTOP_AUTH_TOKEN = secrets.token_urlsafe(32)
+                desktop_auth_token = server.DESKTOP_AUTH_TOKEN
+                httpd = server.LocalThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+                cleanup.callback(httpd.server_close)
+                port = int(httpd.server_port)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                cleanup.callback(thread.join, timeout=5)
+                # shutdown waits for serve_forever, so register it only after start.
+                cleanup.callback(httpd.shutdown)
+                cleanup.callback(server.stop_pending_work)
+                url = f"http://127.0.0.1:{port}/"
                 wait_ready(url, server.INSTANCE_ID)
                 write_runtime(
                     runtime_file,
@@ -458,48 +482,27 @@ def run(argv: list[str] | None = None) -> int:
                     desktop_auth_token,
                     shareable=no_browser,
                 )
-            except Exception:
-                httpd.shutdown()
-                httpd.server_close()
-                thread.join(timeout=5)
-                raise
-            owns_backend = True
-            LOG.info("start pid=%s url=%s instance=%s", os.getpid(), url, server.INSTANCE_ID)
+                owns_backend = True
+                LOG.info("start pid=%s url=%s instance=%s", os.getpid(), url, server.INSTANCE_ID)
 
-    if options.update_confirm:
-        from update_install import confirm_startup
-        confirm_startup(data_root.resolve(),options.update_confirm)
-    if owns_backend:
-        server.APP_UPDATES.allow_restart=not no_browser
-        server.APP_UPDATES.cleanup()
-        server.APP_UPDATES.start_scheduler()
+        if options.update_confirm:
+            from update_install import confirm_startup
+            confirm_startup(data_root.resolve(),options.update_confirm)
+        if owns_backend:
+            server.APP_UPDATES.allow_restart=not no_browser
+            server.APP_UPDATES.cleanup()
+            server.APP_UPDATES.start_scheduler()
 
-    try:
-        if no_browser:
-            if not owns_backend:
-                return 0
-            while thread and thread.is_alive():
-                thread.join(timeout=3600)
-        else:
-            launch_desktop(
-                url,
-                server.PIXIV_PROXY,
-                desktop_auth_token,
-            )
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if owns_backend and httpd is not None:
-            httpd.shutdown()
-            httpd.server_close()
-        if owns_backend and thread is not None:
-            thread.join(timeout=5)
-        server.ACCOUNT_AUTH.close()
-        server.SOURCE_SEARCH.close()
-        server.APP_UPDATES.close()
-        server.ACCOUNTS.close()
-        server.APP_GALLERY.clear()
-        server.PIXIV_OPENER.close()
+        try:
+            if no_browser:
+                if not owns_backend:
+                    return 0
+                while thread and thread.is_alive():
+                    thread.join(timeout=3600)
+            else:
+                launch_desktop(url, server.PIXIV_PROXY, desktop_auth_token)
+        except KeyboardInterrupt:
+            pass
     return 0
 
 

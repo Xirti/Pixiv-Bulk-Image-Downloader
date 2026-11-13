@@ -42,12 +42,15 @@ class PopularityService:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
 
-    def _save(self, owner, method, job, epoch):
-        with self.guard:
+    def _save(self, owner, method, job, epoch, generation, *, current_key=None):
+        snapshot = copy.deepcopy(job)
+        with self.pages.publication(generation), self.guard:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
-            self.pages.saved_cache.save(owner, method, ["popularity-index", job["index"]], job)
-            self.jobs[owner, method, job["index"]] = job
+            records = [(["popularity-index", job["index"]], snapshot)]
+            if current_key is not None:records.append((current_key, job["index"]))
+            self.pages.saved_cache.save_many(owner, method, records)
+            self.jobs[owner, method, job["index"]] = snapshot
             self.jobs.move_to_end((owner, method, job["index"]))
             while len(self.jobs) > 12:
                 self.jobs.popitem(last=False)
@@ -200,14 +203,15 @@ class PopularityService:
                 raise AccountError("cache_miss", "排序快照已清理，请重新准备")
             if job and job["descriptor"] != descriptor:
                 raise AccountError("source_changed", "排序快照与当前条件不符")
+            if job is not None:
+                job = copy.deepcopy(job)
             if job is None:
                 job = self._new(kind, uid, batch, mode, work_type, include_ai, start, end, method, generation)
                 job["descriptor"] = descriptor
                 if kind == "search":
                     job.update(query=query, fuzzy=fuzzy)
-                with self.guard:
-                    self._save(owner, method, job, epoch)
-                    self.pages.saved_cache.save(owner, method, current_key, job["index"])
+                self._save(owner, method, job, epoch, generation, current_key=current_key)
+                with self.pages.publication(generation), self.guard:
                     self.pages.saved_cache.retain_popularity(owner, method)
             deadline = time.monotonic() + 18
             reads = 0
@@ -246,7 +250,7 @@ class PopularityService:
                         job["items"].sort(key=lambda item: (item["bookmarks"], item.get("sortDate", ""), int(item["id"])), reverse=True)
                         job["ready"] = True
                 self._check(generation, epoch)
-                self._save(owner, method, job, epoch)
+                self._save(owner, method, job, epoch, generation)
             offset = (page - 1) * 36
             total = len(job["items"])
             if job["ready"] and offset >= total and page != 1:

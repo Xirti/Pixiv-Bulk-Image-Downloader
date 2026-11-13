@@ -1,12 +1,14 @@
 """Pixiv cloud reads/writes with account fences, explicit intent and read-back."""
 import hashlib
+from contextlib import contextmanager
 import json
 import re
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from cloud_state import relationship_stamp
+from cloud_state import relationship_stamp, ScanConflictError
 from account_pages import HomepageIdentity, source_body
 from pixiv_account import AccountError
 from pixiv_app_gallery import continuation
@@ -47,6 +49,8 @@ class CloudActions:
     def __init__(self, pages, store, web_post, commit_guard):
         self.pages, self.store, self.web_post, self.commit_guard = pages, store, web_post, commit_guard
         self.lock = threading.RLock()
+        self._repair_guard = threading.Lock()
+        self._active_repairs = set()
         self.scans = {}
 
     def context(self, generation):
@@ -211,16 +215,41 @@ class CloudActions:
     def read(self, generation, kind, target):
         with self.lock:
             owner, method = self.context(generation)
+            self.recover_pages(generation, context=(owner, method))
             previous = self.store.many(owner, method, [target] if kind == "bookmark" else [], [target] if kind == "follow" else [])[kind][target]
             state = self._read(owner, method, kind, target, generation)
             return self._commit(generation, lambda: self._record(owner, method, kind, target, previous, state))
 
     def _record(self, owner, method, kind, target, previous, state):
         """Use one publication path for verified state and display-cache repairs."""
-        current = self.store.put(owner, method, kind, target, state)
-        repair = not previous["known"] or relationship_stamp(previous)==current["stamp"]
-        self.pages.note_relation(owner, method, kind, target, current if not previous["known"] else previous, current, repair=repair)
-        return current
+        with self._page_repair() as repair_id:
+            current = self.store.put(owner, method, kind, target, state, repair_id=repair_id)
+            repair = not previous["known"] or relationship_stamp(previous)==current["stamp"]
+            self.pages.note_relation(owner, method, kind, target, current if not previous["known"] else previous, current, repair=repair)
+            self.store.finish_page_repairs(owner, method, [repair_id])
+            return current
+
+    @contextmanager
+    def _page_repair(self):
+        token = uuid.uuid4().hex
+        with self._repair_guard:
+            self._active_repairs.add(token)
+        try:
+            yield token
+        finally:
+            with self._repair_guard:
+                self._active_repairs.remove(token)
+
+    def recover_pages(self, generation, *, context=None):
+        owner, method = context if context is not None else self.context(generation)
+        # Cached browsing must not wait behind the cloud operation's network lock.
+        # Only abandoned publications need recovery; active scans retain their pages.
+        with self.pages.publication(generation), self._repair_guard:
+            pending = [token for token in self.store.pending_page_repairs(owner, method)
+                if token not in self._active_repairs]
+            if pending:
+                self.pages.discard_relation_pages(owner, method, generation)
+                self.store.finish_page_repairs(owner, method, pending)
 
     def _write(self, generation, owner, method, intent, before):
         kind, target, active, privacy = (intent[key] for key in ("kind", "id", "active", "privacy"))
@@ -262,6 +291,7 @@ class CloudActions:
     def mutate(self, generation, scope, intent):
         with self.lock:
             owner, method = self.context(generation)
+            self.recover_pages(generation, context=(owner, method))
             kind, target = intent["kind"], intent["id"]
             if kind == "follow" and target == owner:
                 raise AccountError("self", "不能关注自己")
@@ -317,6 +347,7 @@ class CloudActions:
     def sync(self, generation, kind, force=False):
         with self.lock:
             owner, method = self.context(generation)
+            self.recover_pages(generation, context=(owner, method))
             key = owner, method, kind, generation
             scan = self.scans.get(key)
             if force or scan is None or not scan["running"]:
@@ -325,20 +356,27 @@ class CloudActions:
                 self.scans[key] = scan
             # Priority 2 is intentionally disabled in safe mode (image prefetch).
             # Relationship synchronization remains paced but usable in that mode.
-            priority = REQUEST_PRIORITY.set(1)
-            try:
-                entries, cursor = self._scan_page(owner, method, kind, scan["scope"], scan["cursor"], generation,
-                    publish=True, offset=scan.get("offset",0))
-            finally:
-                REQUEST_PRIORITY.reset(priority)
-            result = self._commit(generation, lambda: self.store.scan_page(owner, method, kind, scan, entries, cursor))
-            offsets={scope:list(values) for scope,values in scan.get("pageOffsets",{}).items()}
-            offsets.setdefault(scan["scope"],[]).append(scan.get("offset",0))
-            result["pageOffsets"]=offsets
-            if not result["running"]:
-                self._commit(generation,lambda:self.pages.finish_scan(owner,method,kind,offsets,generation))
-            # A local write made during this sweep wins over older list responses.
-            for target,state in self.store.newer_relations(owner,method,kind,scan["version"]):
-                self._commit(generation,lambda:self.pages.note_relation(owner,method,kind,target,state,state,repair=True))
-            self.scans[key] = result
-            return {**result,"page":{"kind":kind,"scope":scan["scope"],"offset":scan.get("offset",0)}}
+            with self._page_repair() as repair_id:
+                priority = REQUEST_PRIORITY.set(1)
+                try:
+                    self._commit(generation, lambda: self.store.queue_page_repair(owner, method, repair_id))
+                    entries, cursor = self._scan_page(owner, method, kind, scan["scope"], scan["cursor"], generation,
+                        publish=True, offset=scan.get("offset",0))
+                finally:
+                    REQUEST_PRIORITY.reset(priority)
+                try:
+                    result = self._commit(generation, lambda: self.store.scan_page(owner, method, kind, scan, entries, cursor))
+                except ScanConflictError:
+                    self.scans.pop(key, None)
+                    raise
+                offsets={scope:list(values) for scope,values in scan.get("pageOffsets",{}).items()}
+                offsets.setdefault(scan["scope"],[]).append(scan.get("offset",0))
+                result["pageOffsets"]=offsets
+                self.scans[key] = result
+                if not result["running"]:
+                    self._commit(generation,lambda:self.pages.finish_scan(owner,method,kind,offsets,generation))
+                # A local write made during this sweep wins over older list responses.
+                for target,state in self.store.newer_relations(owner,method,kind,scan["version"]):
+                    self._commit(generation,lambda:self.pages.note_relation(owner,method,kind,target,state,state,repair=True))
+                self._commit(generation, lambda: self.store.finish_page_repairs(owner, method, [repair_id]))
+                return {**result,"page":{"kind":kind,"scope":scan["scope"],"offset":scan.get("offset",0)}}

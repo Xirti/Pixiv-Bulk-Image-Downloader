@@ -7,7 +7,8 @@ while libcurl is connecting, waiting for headers, or receiving a body.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from dataclasses import dataclass, field
 from email.message import Message
 import http.client
 import logging
@@ -30,44 +31,161 @@ from download_history import history_path
 LOG = logging.getLogger("moku.http")
 
 
-class BrowserTransport:
+class TransportClosedError(ConnectionError):
+    pass
+
+
+@dataclass(eq=False)
+class _AsyncRequest:
+    result: Future = field(default_factory=Future)
+    done: threading.Event = field(default_factory=threading.Event)
+    task: asyncio.Task | None = None
+
+
+class AsyncCurlPool:
+    """Own a native connection pool, its loop, and each operation until settlement."""
+    def __init__(self, *, name="moku-native-network", **session_options):
+        self._lock = threading.Lock()
+        self._active = 0
+        self._retired = False
+        self._session_options = session_options
+        # libcurl needs socket readers; an owned selector loop avoids a second
+        # helper thread on Windows without changing the application's loop policy.
+        self._loop = asyncio.SelectorEventLoop()
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        try:
+            self._thread.start()
+        except BaseException:
+            self._loop.close()
+            raise
+        if not self._ready.wait(5):
+            self._stop_loop()
+            raise RuntimeError("Network event loop did not start")
+        initialization = None
+        coroutine = None
+        try:
+            coroutine = self._create_session()
+            initialization = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+            self._session = initialization.result(timeout=10)
+        except BaseException:
+            if initialization is not None:
+                initialization.cancel()
+            elif coroutine is not None:
+                coroutine.close()
+            self._stop_loop()
+            raise
+
+    def _run(self):
+        try:
+            asyncio.set_event_loop(self._loop)
+            self._ready.set()
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
+
+    async def _create_session(self):
+        return AsyncSession(**self._session_options)
+
+    def _submit(self, job, operation):
+        coroutine = None
+        try:
+            coroutine = operation(self._session)
+            job.task = self._loop.create_task(coroutine)
+            job.task.add_done_callback(lambda task: self._settled(job, task))
+        except BaseException as error:
+            if coroutine is not None:
+                coroutine.close()
+            job.result.set_exception(error)
+            job.done.set()
+
+    @staticmethod
+    def _settled(job, task):
+        try:
+            job.result.set_result(task.result())
+        except asyncio.CancelledError:
+            job.result.set_exception(ConnectionError("Network operation cancelled"))
+        except BaseException as error:
+            job.result.set_exception(error)
+        finally:
+            job.done.set()
+
+    @staticmethod
+    def _cancel(job):
+        if job.task is not None and not job.task.done():
+            job.task.cancel()
+
+    def perform(self, operation, *, check, deadline):
+        check()
+        job = _AsyncRequest()
+        with self._lock:
+            if self._retired:
+                raise TransportClosedError("Native connection pool retired")
+            self._active += 1
+        submitted = False
+        try:
+            self._loop.call_soon_threadsafe(self._submit, job, operation)
+            submitted = True
+            while True:
+                check()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Pixiv response deadline exceeded")
+                try:
+                    return job.result.result(timeout=.05)
+                except FutureTimeoutError:
+                    if job.result.done():
+                        return job.result.result()
+        finally:
+            try:
+                if submitted and not job.done.is_set():
+                    self._loop.call_soon_threadsafe(self._cancel, job)
+                    # A Future may report cancellation before its Task's finally
+                    # releases native handles. Wait for the Task's actual completion.
+                    job.done.wait()
+            finally:
+                with self._lock:
+                    self._active -= 1
+                    close = self._retired and self._active == 0
+                if close:
+                    self._shutdown()
+
+    def _stop_loop(self):
+        if not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            raise RuntimeError("Network event loop did not stop")
+
+    def _shutdown(self):
+        try:
+            asyncio.run_coroutine_threadsafe(self._session.close(), self._loop).result(timeout=5)
+        finally:
+            self._stop_loop()
+
+    def close(self):
+        with self._lock:
+            if self._retired:
+                return
+            self._retired = True
+            close = self._active == 0
+        if close:
+            self._shutdown()
+
+
+class BrowserTransport(AsyncCurlPool):
     def __init__(self, proxy: str = "", *, profile: BrowserProfile | None = None):
         self.proxy = proxy
         self.configuration = profile if profile is not None else load_browser_profile(history_path().with_name("browser-profile.json"))
         self.profile = self.configuration.name
-        self._lock = threading.Lock()
-        self._active = 0
-        self._retired = False
-        self._loop = asyncio.new_event_loop()
-        self._ready = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="moku-browser-network", daemon=True)
-        self._thread.start()
-        self._ready.wait()
-        initialization = asyncio.run_coroutine_threadsafe(self._create_session(), self._loop)
-        try:
-            self._session = initialization.result(timeout=10)
-        except BaseException:
-            initialization.cancel()
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=5)
-            raise
-
-    def _run(self):
-        asyncio.set_event_loop(self._loop)
-        self._ready.set()
-        self._loop.run_forever()
-        self._loop.close()
-
-    async def _create_session(self):
-        return AsyncSession(
-            impersonate=self.profile, max_clients=8, trust_env=False,
+        super().__init__(
+            name="moku-browser-network", impersonate=self.profile, max_clients=8, trust_env=False,
             allow_redirects=False, retry=0,
             extra_fp={"tls_permute_extensions": True},
             curl_options={CurlOpt.SSL_OPTIONS: 16, CurlOpt.MAXCONNECTS: 8},
             curl_infos=[CurlInfo.NUM_CONNECTS],
         )
 
-    async def _transfer(self, url, headers, output, maximum, timeout, duration, check, on_chunk=None):
+    async def _transfer(self, session, url, headers, output, maximum, timeout, duration, check, on_chunk=None):
         chunks = []
         received = 0
         callback_error = None
@@ -97,7 +215,7 @@ class BrowserTransport:
 
         request_headers = self.configuration.headers(url, headers)
         try:
-            response = await self._session.get(
+            response = await session.get(
                 url, headers=request_headers, proxy=self.proxy or None,
                 content_callback=consume, timeout=(timeout, duration),
                 discard_cookies=True, allow_redirects=False,
@@ -154,52 +272,6 @@ class BrowserTransport:
     def fetch(self, url, headers, *, output, maximum, timeout, deadline, check, before_send, on_chunk=None):
         check()
         before_send()
-        with self._lock:
-            if self._retired:
-                raise ConnectionError("Browser connection pool retired")
-            self._active += 1
-        future = None
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._transfer(url, headers, output, maximum, timeout, max(.1, deadline - time.monotonic()), check, on_chunk),
-                self._loop,
-            )
-            while True:
-                check()
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Pixiv response deadline exceeded")
-                try:
-                    return future.result(timeout=.05)
-                except FutureTimeoutError:
-                    if future.done():
-                        return future.result()
-        finally:
-            if future is not None and not future.done():
-                future.cancel()
-                # Fence cancellation before the caller releases its output file.
-                asyncio.run_coroutine_threadsafe(self._fence(), self._loop).result(timeout=5)
-            with self._lock:
-                self._active -= 1
-                close = self._retired and self._active == 0
-            if close:
-                self._shutdown()
-
-    async def _fence(self):
-        # Cancellation is posted before this coroutine. Let the cancelled request
-        # remove its libcurl handle and finish any in-progress Python callback.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
-    def _shutdown(self):
-        asyncio.run_coroutine_threadsafe(self._session.close(), self._loop).result(timeout=5)
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5)
-
-    def close(self):
-        with self._lock:
-            if self._retired:
-                return
-            self._retired = True
-            close = self._active == 0
-        if close:
-            self._shutdown()
+        return self.perform(lambda session: self._transfer(
+            session, url, headers, output, maximum, timeout,
+            max(.1, deadline - time.monotonic()), check, on_chunk), check=check, deadline=deadline)
