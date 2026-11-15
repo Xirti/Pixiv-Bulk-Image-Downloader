@@ -13,7 +13,7 @@ from account_pages import HomepageIdentity, source_body
 from pixiv_account import AccountError
 from pixiv_app_gallery import continuation
 from pixiv_adapter import PixivPolicyError, valid_pixiv_id
-from request_coordinator import REQUEST_PRIORITY
+from request_coordinator import REQUEST_PRIORITY, checked_lock
 
 
 def validate_target(raw):
@@ -79,7 +79,7 @@ class CloudActions:
         self.pages.check(generation)
         return result
 
-    def _scan_page(self, owner, method, kind, scope, cursor, generation, *, publish=False, offset=0):
+    def _scan_page(self, owner, method, kind, scope, cursor, generation, *, publish=False, offset=0, visited=()):
         """Validate one remote page at its adapter boundary; return metadata only."""
         items = []
         if method == "app":
@@ -99,13 +99,11 @@ class CloudActions:
                 if not valid_pixiv_id(target):
                     raise AccountError("invalid_data", "云端关系列表缺少有效 ID，本轮未完成")
                 items.append((target, {"active": True, "privacy": scope, "tags": None}))
-            next_path = continuation(raw, endpoint)
+            next_path = continuation(raw, endpoint, current=path, visited=visited)
             if next_path:
-                # continuation returns a relative path or an approved absolute App URL.
                 parsed_next = urlsplit(next_path)
-                next_path = parsed_next.path + "?" + parsed_next.query
                 values=parse_qs(parsed_next.query)
-                if values.get("user_id")!=[owner] or values.get("restrict")!=[scope] or next_path==path:
+                if values.get("user_id")!=[owner] or values.get("restrict")!=[scope]:
                     raise AccountError("cursor","云端续页账号、范围或位置异常")
                 if not rows:
                     raise AccountError("cursor", "空列表仍返回续页，本轮未完成")
@@ -184,20 +182,14 @@ class CloudActions:
                         break
             return {"active": True, "privacy": privacy, "tags": tags, "bookmarkId": str(bookmark["id"])}
         if method == "app":
-            raw = self._app(generation, "GET", "/v1/user/detail?" + urlencode({"user_id": target, "filter": "for_android"}))
-            user = raw.get("user")
-            if not isinstance(user, dict) or str(user.get("id")) != target or type(user.get("is_followed")) is not bool:
+            raw = self._app(generation, "GET", "/v1/user/follow/detail?" + urlencode({"user_id": target}))
+            detail = raw.get("follow_detail")
+            if not isinstance(detail, dict) or type(detail.get("is_followed")) is not bool:
                 raise AccountError("invalid_data", "关注状态暂时无法确认")
-            active = user["is_followed"]
-            privacy = None
-            if active:
-                cached = self.store.get(owner, method, kind, target)
-                preferred = cached["privacy"] or "private"
-                for scope in (preferred, "public" if preferred == "private" else "private"):
-                    entries, _ = self._scan_page(owner, method, kind, scope, "", generation)
-                    if any(key == target for key, _ in entries):
-                        privacy = scope
-                        break
+            active = detail["is_followed"]
+            privacy = detail.get("restrict") if active else None
+            if active and privacy not in ("public", "private"):
+                raise AccountError("invalid_data", "关注隐私暂时无法确认")
             return {"active": active, "privacy": privacy, "tags": []}
         raw = self._web(generation, f"/ajax/user/{target}?full=1&lang=zh")
         if type(raw.get("isFollowed")) is not bool:
@@ -213,7 +205,7 @@ class CloudActions:
         return {"active": active, "privacy": privacy, "tags": []}
 
     def read(self, generation, kind, target):
-        with self.lock:
+        with checked_lock(self.lock, lambda: self.pages.check(generation)):
             owner, method = self.context(generation)
             self.recover_pages(generation, context=(owner, method))
             previous = self.store.many(owner, method, [target] if kind == "bookmark" else [], [target] if kind == "follow" else [])[kind][target]
@@ -289,7 +281,7 @@ class CloudActions:
                     "bookmarkIds": [before["bookmarkId"]]}, token, False, generation)
 
     def mutate(self, generation, scope, intent):
-        with self.lock:
+        with checked_lock(self.lock, lambda: self.pages.check(generation)):
             owner, method = self.context(generation)
             self.recover_pages(generation, context=(owner, method))
             kind, target = intent["kind"], intent["id"]
@@ -345,7 +337,7 @@ class CloudActions:
                 state.get("tags") is not None and set(state["tags"]) == set(intent["tags"])))
 
     def sync(self, generation, kind, force=False):
-        with self.lock:
+        with checked_lock(self.lock, lambda: self.pages.check(generation)):
             owner, method = self.context(generation)
             self.recover_pages(generation, context=(owner, method))
             key = owner, method, kind, generation
@@ -361,7 +353,7 @@ class CloudActions:
                 try:
                     self._commit(generation, lambda: self.store.queue_page_repair(owner, method, repair_id))
                     entries, cursor = self._scan_page(owner, method, kind, scan["scope"], scan["cursor"], generation,
-                        publish=True, offset=scan.get("offset",0))
+                        publish=True, offset=scan.get("offset",0), visited=scan.get("visitedPaths", {}).get(scan["scope"], []))
                 finally:
                     REQUEST_PRIORITY.reset(priority)
                 try:
@@ -372,6 +364,9 @@ class CloudActions:
                 offsets={scope:list(values) for scope,values in scan.get("pageOffsets",{}).items()}
                 offsets.setdefault(scan["scope"],[]).append(scan.get("offset",0))
                 result["pageOffsets"]=offsets
+                visited = {scope: list(paths) for scope, paths in scan.get("visitedPaths", {}).items()}
+                visited.setdefault(scan["scope"], []).append(scan["cursor"])
+                result["visitedPaths"] = visited
                 self.scans[key] = result
                 if not result["running"]:
                     self._commit(generation,lambda:self.pages.finish_scan(owner,method,kind,offsets,generation))

@@ -100,12 +100,16 @@ class AppUpdates:
         if "automatic" in raw and type(raw["automatic"]) is not bool:raise UpdateError("自动检查设置无效")
         return raw
 
+    def _check_open(self):
+        if self.timer_stop.is_set():raise UpdateError("更新服务已关闭，请重新打开程序")
+
     def snapshot(self):
         with self.lock:return {**copy.deepcopy(self.state),"options":dict(self.options),"installable":self.frozen}
 
     def configure(self, raw):
         patch=self.validate_options(raw)
         with self.lock:
+            self._check_open()
             if self.state["phase"] in {"checking","downloading","verifying","restarting"}:raise UpdateError("请等待当前更新操作结束")
             changed="channel" in patch and patch["channel"]!=self.options["channel"]
             options={**self.options,**patch};self.path.parent.mkdir(parents=True,exist_ok=True)
@@ -117,16 +121,24 @@ class AppUpdates:
 
     def start(self, action):
         with self.lock:
+            self._check_open()
             if self.state["phase"] in {"checking","downloading","verifying","restarting"}:raise UpdateError("更新操作正在进行")
             if action=="download" and (self.state["phase"]!="available" or not self.state["release"]):raise UpdateError("请先检查可用更新")
             if action not in {"check","download"}:raise UpdateError("更新操作无效")
-            if action=="check":self.bundle=None
-            self.cancel.clear();self.state.update(phase="checking" if action=="check" else "downloading",error="",received=0)
             channel=self.options["channel"];release=copy.deepcopy(self.state["release"])
-            self.thread=threading.Thread(target=self._run,args=(action,channel,release),name="moku-updates",daemon=True);self.thread.start()
+            try:
+                worker=threading.Thread(target=self._run,args=(action,channel,release),name="moku-updates",daemon=True)
+                self.cancel.clear()
+                worker.start()
+            except (RuntimeError,OSError) as error:
+                raise UpdateError("无法启动更新任务，请重试") from error
+            self.thread=worker
+            if action=="check":self.bundle=None
+            self.state.update(phase="checking" if action=="check" else "downloading",error="",received=0)
         return self.snapshot()
 
     def _open(self, url):
+        if self.cancel.is_set():raise UpdateError("更新操作已停止")
         return self.opener.open(urllib.request.Request(url,headers={"User-Agent":"MOKU/"+__version__,"Accept":"application/vnd.github+json"}),timeout=20)
 
     def _authenticate_release(self, release, channel):
@@ -217,6 +229,7 @@ class AppUpdates:
     def restart(self):
         """Native host only. Gate download admission until the process exits."""
         with self.gate,self.lock:
+            self._check_open()
             if not self.frozen:raise UpdateError("源码运行不替换文件，请使用便携版")
             if self.active_downloads:raise UpdateError("请等待下载任务完成或中断后再重启更新")
             if not self.allow_restart:raise UpdateError("请关闭共享后端并重新打开 MOKU 桌面窗口后更新")
@@ -268,4 +281,5 @@ class AppUpdates:
             except OSError as exc:LOG.warning("old update staging cleanup deferred: %s",exc)
 
     def close(self):
-        self.timer_stop.set();self.cancel.set()
+        with self.lock:
+            self.timer_stop.set();self.cancel.set()

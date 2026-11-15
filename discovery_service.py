@@ -151,9 +151,11 @@ class DiscoveryService:
         raw = self.pages.account().request("GET", path, check=lambda:self.pages.check(generation))
         if not isinstance(raw, dict) or not isinstance(raw.get("illusts"), list):
             raise AccountError("invalid_data", "发现作品列表格式异常")
-        next_path = continuation(raw, endpoint)
-        if next_path == path:
-            raise AccountError("cursor", "发现续页未前进")
+        visited = feed.setdefault("visitedPaths", {}).setdefault(stream, [])
+        next_path = continuation(raw, endpoint, current=path, visited=visited)
+        if not raw["illusts"] and next_path:
+            raise AccountError("cursor", "发现返回空续页，请刷新后重试")
+        visited.append(path)
         feed["paths"][stream] = next_path
         return raw["illusts"]
 

@@ -191,11 +191,11 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .account-settings [data-settings-jump][hidden]{display:none}
 .account-settings [data-settings-jump]:hover{background:color-mix(in srgb,var(--frost-fill) 88%,var(--ink) 12%)}
 .account-settings .path-picker{margin-top:8px}
-.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic]){appearance:none;-webkit-appearance:none;position:relative;flex:none;width:36px;height:22px;min-height:22px;margin:0;border:1px solid var(--line);border-radius:999px;background:var(--surface-2);cursor:pointer;transition:background-color 180ms ease}
-.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic])::before{content:"";display:block;position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0003;transition:transform 260ms cubic-bezier(.22,1.2,.36,1)}
-.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic]):checked{background:var(--action-fill)}
-.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic]):checked::before{transform:translateX(14px);background:var(--on-accent)}
-.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic]):disabled{opacity:.45;cursor:default}
+.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic],[data-pixiv-setting]){appearance:none;-webkit-appearance:none;position:relative;flex:none;width:36px;height:22px;min-height:22px;margin:0;border:1px solid var(--line);border-radius:999px;background:var(--surface-2);cursor:pointer;transition:background-color 180ms ease}
+.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic],[data-pixiv-setting])::before{content:"";display:block;position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0003;transition:transform 260ms cubic-bezier(.22,1.2,.36,1)}
+.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic],[data-pixiv-setting]):checked{background:var(--action-fill)}
+.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic],[data-pixiv-setting]):checked::before{transform:translateX(14px);background:var(--on-accent)}
+.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic],[data-pixiv-setting]):disabled{opacity:.45;cursor:default}
 
 /* Download geometry is intentionally retained: readable left column, compact picker. */
 #downloadPage .detail-info h2,#basketDetailTitle{font-size:25px;font-weight:600;letter-spacing:-.025em}
@@ -264,11 +264,11 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 @media(forced-colors:active){
   .request-mode-slider #requestMode{opacity:1}
   .request-mode-slider::before,.request-mode-stops{visibility:hidden}
-  .account-settings input[type=checkbox]:is([data-setting],[data-update-automatic]){appearance:auto;-webkit-appearance:auto}
-  .account-settings input[type=checkbox]:is([data-setting],[data-update-automatic])::before{display:none}
+  .account-settings input[type=checkbox]:is([data-setting],[data-update-automatic],[data-pixiv-setting]){appearance:auto;-webkit-appearance:auto}
+  .account-settings input[type=checkbox]:is([data-setting],[data-update-automatic],[data-pixiv-setting])::before{display:none}
   .head-actions .theme-toggle{border-color:ButtonText}
 }
-@media(prefers-reduced-motion:reduce){.theme-orb,.theme-orb>span,.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic])::before,.request-mode-slider::before,.account-tabs::before,.account-privacy::before{transition:none}}
+@media(prefers-reduced-motion:reduce){.theme-orb,.theme-orb>span,.account-settings input[type=checkbox]:is([data-setting],[data-update-automatic],[data-pixiv-setting])::before,.request-mode-slider::before,.account-tabs::before,.account-privacy::before{transition:none}}
 
 .popularity-control{display:inline-flex;align-items:flex-start;gap:0;white-space:nowrap}
 .popularity-choice{display:flex;flex-direction:column;align-items:center;gap:5px}

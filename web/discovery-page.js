@@ -284,6 +284,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
           if(!document.hidden)await previews.prepare(pageKey({...target,batch:result.batch}),result.items,signal,{warm:'account'});
         }catch(problem){
           if(signal.aborted || auth!==generation())return;
+          if(version!==sourceVersion(key))continue;
           if(active && sourceKey(state)===key){error=problem.message;render();}
         }
       }

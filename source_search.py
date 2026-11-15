@@ -97,6 +97,7 @@ class SourceKey:
 class SourceSearch:
     def __init__(self, directory: Path, proxy=lambda: ""):
         self.directory = directory
+        self._closed = False
         self.proxy = proxy
         self.vault = SourceKey()
         self.lock = threading.RLock()
@@ -127,12 +128,17 @@ class SourceSearch:
             else:
                 self.mode = settings["mode"]
 
+    def _check_open(self):
+        if self._closed:
+            raise SourceSearchError("搜图服务已关闭，请重新打开程序", 503)
+
     def settings(self):
         with self.lock:
             return {"mode": self.mode, "keyConfigured": bool(self.vault.read()), "websiteLogin": self.website_login, "error": self.settings_error}
 
     def configure(self, data):
         with self.lock:
+            self._check_open()
             action = data.get("action", "save")
             if not isinstance(action, str) or action not in {"save", "clear", "reset-guest", "remove-key"}:
                 raise SourceSearchError("搜图设置操作无效")
@@ -200,6 +206,7 @@ class SourceSearch:
         image, (width, height) = prepare_image(raw)
         digest = hashlib.sha256(image).hexdigest()
         with self.lock:
+            self._check_open()
             old = self.jobs.get(self.active)
             if old:
                 if old["state"] in {"queued", "searching", "verification"}:
@@ -213,30 +220,35 @@ class SourceSearch:
             cached = self.cache.get((mode, digest))
             if cached and time.monotonic() - cached[0] < 900:
                 job.update(state="done", candidates=cached[1], quota=cached[2], cached=True, message="已复用最近的搜图结果", image=b"")
+            now = time.monotonic()
+            self.requests = [stamp for stamp in self.requests if now - stamp < 30]
+            key = None
+            if job["state"] != "done":
+                if len(self.requests) >= self.short_limit:
+                    job.update(state="error", message="短时间查询较多，请等待 30 秒再试", image=b"")
+                elif mode == "key":
+                    key = self.vault.read()
+                    if not key:
+                        job.update(state="error", message="请先配置 SauceNAO API Key", image=b"")
             self.jobs[identity] = job
             while len(self.jobs) > 8:
                 expired = next(key for key in self.jobs if key not in {identity, self.active, self.browser_identity})
                 del self.jobs[expired]
-            if job["state"] == "done":
-                return self.snapshot(identity)
-            now = time.monotonic()
-            self.requests = [stamp for stamp in self.requests if now - stamp < 30]
-            if len(self.requests) >= self.short_limit:
-                job.update(state="error", message="短时间查询较多，请等待 30 秒再试", image=b"")
+            if job["state"] in {"done", "error"}:
                 return self.snapshot(identity)
             if mode == "key":
-                key = self.vault.read()
-                if not key:
-                    job.update(state="error", message="请先配置 SauceNAO API Key", image=b"")
-                    return self.snapshot(identity)
                 if self.api_browser_preferred:
                     job.update(browser=True, state="verification", message="正在复用 API 验证会话")
                     self.active = identity
                     self._open_browser(job, backend)
                     return self.snapshot(identity)
                 self.active = identity
+                try:
+                    threading.Thread(target=self._query, args=(job, key), daemon=True, name="source-search").start()
+                except (RuntimeError, OSError) as error:
+                    self._fail(job, "无法启动搜图任务，请重试")
+                    raise SourceSearchError(job["message"], 503) from error
                 self.requests.append(now)
-                threading.Thread(target=self._query, args=(job, key), daemon=True, name="source-search").start()
             else:
                 self._open_browser(job, backend)
                 self.active = identity
@@ -261,6 +273,7 @@ class SourceSearch:
 
     def continue_api(self, identity, backend):
         with self.lock:
+            self._check_open()
             job = self.jobs.get(identity)
             if not job or job["mode"] != "key" or not (job["browserFallback"] or job["browser"]) or not job["image"]:
                 raise SourceSearchError("API 验证任务已过期，请重新选择图片查询", 409)
@@ -284,6 +297,7 @@ class SourceSearch:
 
     def open_login(self, backend):
         with self.lock:
+            self._check_open()
             active = self.jobs.get(self.active)
             if active and active["state"] in {"queued", "searching", "verification"}:
                 if active["mode"] == "login":
@@ -395,6 +409,7 @@ class SourceSearch:
 
     def browser(self, identity, secret, data):
         with self.lock:
+            self._check_open()
             job = self.jobs.get(identity)
             if job is None or not secret.isascii() or not secrets.compare_digest(job["secret"], secret) or not job["browser"]:
                 raise SourceSearchError("官网窗口授权无效", 403)
@@ -407,7 +422,7 @@ class SourceSearch:
                 if state not in ("signed-in", "signed-out"):
                     raise SourceSearchError("官网登录状态无效")
                 self.website_login = state
-                if job["mode"] == "login" and state == "signed-in":
+                if job["mode"] == "login" and state == "signed-in" and job["state"] in {"queued", "searching", "verification"}:
                     job.update(state="done", message="SauceNAO 官网已登录")
                 return {"state": job["state"]}
             if action == "api-request":
@@ -465,6 +480,7 @@ class SourceSearch:
 
     def image(self, token):
         with self.lock:
+            self._check_open()
             row = self.thumbnails.get(token)
             if row is None:
                 raise SourceSearchError("候选缩略图已过期", 404)
@@ -493,6 +509,10 @@ class SourceSearch:
 
     def close(self):
         with self.lock:
+            self._closed = True
+            self.cache.clear()
+            self.thumbnails.clear()
+            self.thumbnail_bytes = 0
             for job in self.jobs.values():
                 job["image"] = b""
                 if job["state"] not in {"done", "error"}:

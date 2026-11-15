@@ -144,6 +144,14 @@ class AccountCache:
 
     def read(self, owner, method, key):
         with self.lock, closing(self._connect()) as db:
+            if self._is_display_key(key) or key == ["web-display-settings"]:
+                db.execute("BEGIN")
+                pending = db.execute("SELECT 1 FROM cached WHERE owner=? AND method=? AND key=?",
+                    (owner, method, json.dumps(["web-display-pending"]))).fetchone()
+                if pending:
+                    if key == ["web-display-settings"]:
+                        return None
+                    raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
                              (owner, method, json.dumps(key))).fetchone()
             return json.loads(row[0]) if row else None
@@ -152,7 +160,13 @@ class AccountCache:
         self.save_many(owner,method,[(key,value)])
 
     def save_many(self, owner, method, pages):
+        pages = list(pages)
         with self.lock, closing(self._connect()) as db, db:
+            if any(self._is_display_key(key) for key, _ in pages):
+                db.execute("BEGIN IMMEDIATE")
+                if db.execute("SELECT 1 FROM cached WHERE owner=? AND method=? AND key=?",
+                        (owner, method, json.dumps(["web-display-pending"]))).fetchone():
+                    raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
             db.executemany("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
                 [(owner,method,json.dumps(key),json.dumps(value,ensure_ascii=False)) for key,value in pages])
 
@@ -177,7 +191,40 @@ class AccountCache:
 
     def clear(self, owner):
         with self.lock, closing(self._connect()) as db, db:
-            db.execute("DELETE FROM cached WHERE owner=?", (owner,))
+            db.execute("DELETE FROM cached WHERE owner=? AND key<>?", (owner, json.dumps(["web-display-pending"])))
+
+    @staticmethod
+    def _is_display_key(key):
+        return key[0] in {"discovery-current", "discovery-feed", "popularity-current", "popularity-index"} or (
+            key[0] == "data" and key[1] in {"bookmarks", "works"})
+
+    @staticmethod
+    def _delete_display_pages(db, owner, method):
+        db.execute("DELETE FROM cached WHERE owner=? AND method=? AND "
+            "((json_extract(key,'$[0]')='data' AND json_extract(key,'$[1]') IN ('bookmarks','works')) "
+            "OR json_extract(key,'$[0]') IN ('discovery-current','discovery-feed','popularity-current','popularity-index'))",
+            (owner, method))
+
+    def begin_display_update(self, owner, method):
+        with self.lock, closing(self._connect()) as db, db:
+            db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
+                (owner, method, json.dumps(["web-display-pending"]), json.dumps({"started": time.time()})))
+            db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, json.dumps(["web-display-settings"])))
+            self._delete_display_pages(db, owner, method)
+
+    def display_update_pending(self, owner, method):
+        with self.lock, closing(self._connect()) as db:
+            return db.execute("SELECT 1 FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, json.dumps(["web-display-pending"]))).fetchone() is not None
+
+    def finish_display_update(self, owner, method, state):
+        with self.lock, closing(self._connect()) as db, db:
+            db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
+                (owner, method, json.dumps(["web-display-settings"]), json.dumps(state)))
+            self._delete_display_pages(db, owner, method)
+            db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, json.dumps(["web-display-pending"])))
 
     def entries(self, owner, method, views=None):
         with self.lock, closing(self._connect()) as db:
@@ -253,6 +300,12 @@ class AccountPages:
             account = self._account
         if account:
             account.fence()
+
+    def invalidate_display_views(self):
+        with self._lock:
+            self._cache_revision += 1
+            self._cache = OrderedDict((key, value) for key, value in self._cache.items()
+                if key[1] not in {"bookmarks", "works"})
 
     def disconnect(self):
         self.invalidate()
@@ -693,16 +746,16 @@ class AccountPages:
         raw=self.account().request("GET",cursor)
         rows=raw.get(rows_key)
         if not isinstance(rows,list):raise AccountError("invalid_data","App 列表格式异常")
-        next_path=continuation(raw,path)
+        next_path=continuation(raw,path,current=cursor)
+        if not rows and next_path:raise AccountError("cursor","App 列表返回空续页，请刷新后重试")
         if next_path:
             values=parse_qs(urlsplit(next_path).query)
             if any(values.get(name)!=[params[name]] for name in ("user_id","restrict") if name in params):
                 raise AccountError("cursor","App 续页账号或公开范围不匹配")
             if "tag" in params and "tag" in values and values["tag"]!=[params["tag"]]:
                 raise AccountError("cursor","App 续页收藏标签不匹配")
-        next_offset=offset+max(1,len(rows)) if next_path else None
+        next_offset=offset+len(rows) if next_path else None
         if next_path:
-            if next_path==cursor:raise AccountError("cursor","App 续页未前进")
             with self.publication(generation), self._lock:
                 if cache_revision!=self._cache_revision:raise AccountError("cache_cleared","账号缓存已清除，请重新打开页面")
                 self.saved_cache.save(str(params["user_id"]),self.method(),["cursor",path,sorted(params.items()),next_offset],next_path)

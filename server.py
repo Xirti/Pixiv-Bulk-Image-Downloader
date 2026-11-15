@@ -30,6 +30,7 @@ import winreg
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from contextvars import ContextVar
 from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, replace
@@ -70,12 +71,12 @@ from pixiv_adapter import bookmark_count, validate_detail_policy, CONTENT_MODES,
 from discovery_service import DiscoveryService, DiscoveryInputError
 from popularity_service import PopularityService
 from account_authorization import AccountAuthorization
-from pixiv_account import AccountError
+from pixiv_account import AccountError, ACCOUNT_REQUEST_CHECK
 from auth_method import AuthMethod
 from pixiv_app_gallery import AppGallery, normalize_work
 from cloud_state import CloudState, validate_preferences
 from cloud_actions import CloudActions, CloudActionError, validate_target, validate_intent
-from web_cloud import WebCloudTransport
+from web_cloud import WebCloudTransport, WebDisplaySettings
 from source_search import SourceSearch, SourceSearchError, MAX_UPLOAD
 from app_updates import AppUpdates, UpdateError
 
@@ -294,6 +295,8 @@ AUTHOR_RESOLUTION_CACHE_LOCK = threading.Lock()
 SEARCH_REQUESTS: OrderedDict[str, dict] = OrderedDict()
 SEARCH_REQUESTS_LOCK = threading.Lock()
 AUTHORIZATION_GENERATION = 0
+BROWSING_GENERATION = 0
+BROWSING_REQUEST_GENERATION = ContextVar("browsing_request_generation", default=None)
 AUTHORIZATION_ACTIVE = False
 UGOIRA_RESOURCES = PreviewResources()
 DETAIL_RESOURCES = PreviewResources(max_bytes=8 * 1024 * 1024, max_loads=32, max_workers=4)
@@ -404,6 +407,7 @@ def cancel_all_search_requests() -> None:
 
 
 def raise_if_search_cancelled(cancel_event: threading.Event | None) -> None:
+    check_browsing_request()
     if BACKEND_STOP.is_set() or cancel_event is not None and cancel_event.is_set():
         raise SearchCancelledError("搜索已取消")
 
@@ -414,6 +418,7 @@ def authorization_generation() -> int:
 
 
 def assert_authorization_generation(expected: int | None) -> None:
+    check_browsing_request()
     if expected is None:
         return
     with SEARCH_SESSION_LOCKS_GUARD:
@@ -620,6 +625,7 @@ def auth_status_snapshot() -> dict:
             "authState": "authorized" if session_present else "unauthenticated",
             "authorizationGeneration": AUTHORIZATION_GENERATION,
             "authMethod": AUTH_METHOD.get(),
+            "browsingGeneration": BROWSING_GENERATION,
         }
 
 
@@ -1519,6 +1525,45 @@ POPULARITY=PopularityService(pages=ACCOUNTS, context=CLOUD.context, discovery=DI
     app_get=lambda path,generation:ACCOUNTS.account().request("GET",path,check=lambda:ACCOUNTS.check(generation)),
     web_get=lambda url:search_pixiv_json(url,None),
     detail=popularity_bookmark_metadata, search_get=popularity_search_metadata)
+
+
+def display_settings_changed(owner, generation):
+    global BROWSING_GENERATION
+    with SEARCH_SESSION_LOCKS_GUARD:
+        if generation != AUTHORIZATION_GENERATION or AUTH_METHOD.get() != "web":
+            raise AccountError("revoked", "账号已改变，请重新打开浏览设置。")
+        BROWSING_GENERATION += 1
+        UGOIRA_RESOURCES.clear()
+        DETAIL_RESOURCES.clear()
+        ACCOUNTS.invalidate_display_views()
+        POPULARITY.invalidate()
+        DISCOVERY.invalidate()
+        reset_search_caches()
+        with PIXIV_STATE_LOCK:
+            PIXIV_CACHE.clear()
+            IMAGE_TOKENS.clear()
+
+
+def check_browsing_request():
+    expected = BROWSING_REQUEST_GENERATION.get()
+    if expected is not None and expected != BROWSING_GENERATION:
+        raise AccountError("content_changed", "浏览设置已更新，请重新加载。")
+
+
+@contextmanager
+def browsing_request():
+    with SEARCH_SESSION_LOCKS_GUARD:
+        token = BROWSING_REQUEST_GENERATION.set(BROWSING_GENERATION)
+    check_token = ACCOUNT_REQUEST_CHECK.set(check_browsing_request)
+    try:
+        yield
+    finally:
+        ACCOUNT_REQUEST_CHECK.reset(check_token)
+        BROWSING_REQUEST_GENERATION.reset(token)
+
+
+WEB_DISPLAY_SETTINGS = WebDisplaySettings(ACCOUNTS, CLOUD.context, CLOUD_WEB.post, display_settings_changed,
+    revision=lambda: BROWSING_GENERATION)
 
 
 def reset_search_caches() -> None:
@@ -3937,6 +3982,15 @@ class Handler(SimpleHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        browsing = path.startswith("/api/pixiv/") or path in {"/api/discovery", "/api/popularity"} or (
+            path.startswith("/api/account/") and path != "/api/account/authorization")
+        if browsing:
+            with browsing_request():
+                return self._dispatch_get()
+        return self._dispatch_get()
+
+    def _dispatch_get(self):
         request = urllib.parse.urlparse(self.path)
         if self._reject_untrusted_api_get(request.path):
             return
@@ -3971,6 +4025,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(APP_UPDATES.snapshot())
         if request.path in {"/api/settings", "/api/cloud/state"}:
             return self._get_cloud(request)
+        if request.path == "/api/settings/pixiv":
+            return self._get_display_settings(request)
         if request.path.startswith("/api/account/"):
             return self._get_account(request)
         if request.path == "/api/discovery":
@@ -4162,12 +4218,45 @@ class Handler(SimpleHTTPRequestHandler):
             payload = {"error": str(error), "errorKind": error.kind}
             if isinstance(error, CloudActionError):
                 payload.update(state=error.state, official=error.official)
-            return self.send_json(payload, 409 if error.kind in {"conflict", "revoked"} else 502)
+            return self.send_json(payload, 409 if error.kind in {"conflict", "revoked", "content_changed"} else 502)
         if isinstance(error, ValueError):
             return self.send_json({"error": str(error)}, 400)
         if isinstance(error, PixivPolicyError):
             return self.send_json(pixiv_error_payload("云端操作", error), 502)
         return self.send_json({"error": "无法读取或保存云端状态，请检查资料目录及网络"}, 502)
+
+    def _get_display_settings(self, request):
+        try:
+            connected, generation = validated_authorization()
+            if not connected:
+                raise AccountError("reauth", "请先在登录管理中完成网页登录。")
+            if AUTH_METHOD.get() != "web":
+                raise AccountError("web_required", "此项需网页登录，请在登录管理中选择网页登录。")
+            ensure_network_opener_current()
+            refresh = urllib.parse.parse_qs(request.query).get("refresh", [""])[0] == "1"
+            result = WEB_DISPLAY_SETTINGS.read(generation, refresh=refresh)
+            with SEARCH_SESSION_LOCKS_GUARD:
+                assert_authorization_generation(result["authorizationGeneration"])
+                if result["browsingGeneration"] != BROWSING_GENERATION:
+                    raise AccountError("content_changed", "浏览设置已更新，请重新读取。")
+                return self.send_json(result)
+        except (ValueError, sqlite3.Error, OSError, PixivPolicyError) as error:
+            return self._cloud_error(error)
+
+    def _post_display_settings(self, data):
+        try:
+            generation = self._cloud_generation(data)
+            if AUTH_METHOD.get() != "web":
+                raise AccountError("web_required", "此项需网页登录，请在登录管理中选择网页登录。")
+            ensure_network_opener_current()
+            result = WEB_DISPLAY_SETTINGS.change(generation, data.get("key"), data.get("value"))
+            with SEARCH_SESSION_LOCKS_GUARD:
+                assert_authorization_generation(result["authorizationGeneration"])
+                if result["browsingGeneration"] != BROWSING_GENERATION:
+                    raise AccountError("content_changed", "浏览设置已更新，请重新读取。")
+                return self.send_json(result)
+        except (ValueError, sqlite3.Error, OSError, PixivPolicyError) as error:
+            return self._cloud_error(error)
 
     def _post_cloud(self, data):
         action = urllib.parse.urlsplit(self.path).path.rsplit("/", 1)[-1]
@@ -4694,6 +4783,14 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(pixiv_error_payload("图片代理", exc), 502)
 
     def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        # Relationship confirmation follows account identity; scans also publish browsing rows.
+        if path == "/api/cloud/sync":
+            with browsing_request():
+                return self._dispatch_post()
+        return self._dispatch_post()
+
+    def _dispatch_post(self):
         if BACKEND_STOP.is_set():
             return self.send_json({"error": "应用正在退出，请重新打开"}, 503)
         path = urllib.parse.urlsplit(self.path).path
@@ -4758,6 +4855,7 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/ui/guide": (1024, self._post_guide_seen),
             "/api/network/policy": (1024, self._post_request_policy),
             "/api/settings": (16384, self._post_cloud),
+            "/api/settings/pixiv": (2048, self._post_display_settings),
             "/api/cloud/read": (2048, self._post_cloud),
             "/api/cloud/write": (16384, self._post_cloud),
             "/api/cloud/sync": (2048, self._post_cloud),

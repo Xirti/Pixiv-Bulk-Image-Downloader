@@ -96,7 +96,7 @@ def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True
     return item
 
 
-def continuation(raw, path):
+def continuation(raw, path, *, current=None, visited=()):
     value = raw.get("next_url")
     if value is None or value == "":
         return None
@@ -105,7 +105,10 @@ def continuation(raw, path):
     parsed = urlsplit(value)
     if parsed.scheme != "https" or parsed.netloc != "app-api.pixiv.net" or parsed.path != path or parsed.fragment:
         raise PixivPolicyError("App 续页地址不受信任")
-    return parsed.path + "?" + parsed.query
+    next_path = parsed.path + "?" + parsed.query
+    if next_path == current or next_path in visited:
+        raise PixivPolicyError("App 续页出现循环，请刷新后重试")
+    return next_path
 
 
 def artist_profile(raw, details=None):
@@ -284,8 +287,9 @@ class AppGallery:
                     path=source['next'];raw=self.get(path,generation,cancel_event);requests+=1
                     rows=raw.get('illusts')
                     if not isinstance(rows,list):raise PixivPolicyError('App 搜索格式异常')
-                    next_path=continuation(raw,urlsplit(path).path)
-                    if next_path==path:raise PixivPolicyError('App 续页未前进')
+                    visited=source.setdefault('visited',set())
+                    next_path=continuation(raw,urlsplit(path).path,current=path,visited=visited)
+                    if not rows and next_path:raise PixivPolicyError('App 返回空续页，请刷新重试')
                     if query.kind=='uid' and next_path:
                         next_query=parse_qs(urlsplit(next_path).query)
                         if next_query.get('user_id')!=[query.value]:raise PixivPolicyError('App 作者续页身份不匹配')
@@ -305,11 +309,11 @@ class AppGallery:
                     self.check(generation,cancel_event)
                     if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
                     session.index.add(normalized)
+                    visited.add(path)
                     source['next']=next_path
                     if rows:
                         tail=rows[-1];stamp=publication_timestamp(tail.get('create_date')) if isinstance(tail,dict) else ''
                         source['bound']=(stamp,int(tail['id'])) if stamp and valid_pixiv_id(str(tail.get('id',''))) else None
-                    elif next_path:raise PixivPolicyError('App 返回空续页，请刷新重试')
                 self.check(generation,cancel_event)
                 total=session.index.emitted_count;more=bool(total>target or session.index.pending_count or any(s['next'] for s in session.sources))
                 rows=session.index.read_results((page-1)*36,page*36)

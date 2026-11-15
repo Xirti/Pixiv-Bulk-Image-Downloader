@@ -111,3 +111,10 @@
 .account-own-works h3{font-size:17px;margin:0}
 .account-own-works>header button{font-size:12px;color:var(--muted);background:none;border:0;padding:6px 0}
 .account-own-works>p{font-size:12px;color:var(--muted)}
+
+.pixiv-display-actions{align-items:center}
+.pixiv-display-links{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.pixiv-display-links a{color:var(--muted);font-size:12px;text-decoration:none;white-space:nowrap}
+.pixiv-display-links a:hover{color:var(--ink);text-decoration:underline}
+[data-pixiv-age-hint]{margin-top:6px}
+@media(max-width:650px){.pixiv-display-actions{align-items:flex-start;flex-direction:column}.pixiv-display-links{flex-wrap:wrap}}

@@ -60,7 +60,11 @@ class DownloadRequests:
     def _journal_connection(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self._path, timeout=2)
-        connection.execute("CREATE TABLE IF NOT EXISTS completed (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, files TEXT NOT NULL)")
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS completed (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, files TEXT NOT NULL)")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     def _read_success(self, request_id: str, fingerprint: str) -> Response | None:

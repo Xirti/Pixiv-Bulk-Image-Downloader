@@ -350,7 +350,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         if(version!==revision)return;data=value;cachePage(key,value);
         pending=false;render();
       }
-      if(state.view==="bookmarks" && (!tags || refresh))tags=await read("tags",refresh?{refresh:"1"}:{},{signal});
+      if(state.view==="bookmarks" && (!tags || refresh)){
+        const value=await read("tags",refresh?{refresh:"1"}:{},{signal});
+        if(version!==revision || signal.aborted)return;
+        tags=value;
+      }
       if(version!==revision)return;
       if(profile.authorization?.error)error=profile.authorization.error;
     }catch(problem){if(version!==revision || signal.aborted)return;error=problem.message || "账号读取失败，请刷新重试";}
@@ -367,10 +371,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     if(scopes[view]!==undefined)scopes[view]=state.scope;
     await load();
   }
-  function clear(keepView=false){
+  function clear(keepView=false,keepScroll=false){
+    if(keepScroll)remember();
     void stopBackground();
     controller?.abort();reads.clear();revision++;profile=null;tags=null;data=null;own=null;ownMode=null;
-    state=keepView?{...state,offset:0,page:1,trail:[],scroll:0}:empty();restoreTop=0;positions.clear();
+    state=keepView?{...state,offset:0,page:1,trail:[],scroll:keepScroll?state.scroll:0}:empty();restoreTop=state.scroll;positions.clear();
     updates={public:{},private:{}};acknowledged.clear();pendingUpdateScopes.clear();checkingUpdates=null;
     interaction.clear();ownInteraction.clear();
     cache.clear();worksCache.clear();ownCache.clear();avatars.clear();
@@ -445,6 +450,6 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     },
     invalidateConnection:()=>{profile=null;},
     suspend:()=>{remember();active=false;statistics?.setVisible(false);controller?.abort();revision++;pending=false;interaction.reset({immediate:true});ownInteraction.reset({immediate:true});},
-    clear,clearCache:()=>clear(true),
+    clear,clearCache:()=>clear(true),clearContent:()=>clear(true,true),
     label:()=>"我的账号"};
 };

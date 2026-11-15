@@ -63,6 +63,7 @@ let resumableSingleTask = null;
 let activeDownload = null;
 let lastKnownLoggedIn = null;
 let lastKnownAuthorizationGeneration = null;
+let lastKnownBrowsingGeneration = null;
 let downloadAuthorizationRevision = 0;
 let authStatusGeneration = 0;
 let appConnection = null;
@@ -1213,30 +1214,68 @@ function clearDetail(message = "选择一件作品查看详情") {
   syncSearchScopedControls();
 }
 
-function discardPreviousAccountSelections() {
+function clearBrowsingCaches() {
   cancelGalleryPopularity();galleryIntent=null;galleryLinkedEntry=false;galleryDefaultViews.clear();galleryPopularViews.clear();galleryPopularityJobs.clear();
-  clearTimeout(appConnectionTimer);
-  appConnectionRevision++;
-  appConnectionBusy=false;
-  syncAppConnection(null);
   searchPageCache.clear();
   galleryInteraction.clear();
   galleryPreviewCache.clear();
   basketPreviewCache.clear();
   artistPage.clear();
-  accountView.clear();
   discoveryView?.clear();
+  normalDetailView.clear();
+}
+
+function discardPreviousAccountSelections() {
+  clearBrowsingCaches();
+  clearTimeout(appConnectionTimer);
+  appConnectionRevision++;
+  appConnectionBusy=false;
+  syncAppConnection(null);
+  accountView.clear();
   accountOrigin=false;
   contextReturns={};
   detailDownloadProgress = null;
   batchDownloadProgress = null;
-  normalDetailView.clear();
   // A public-looking work can still contain this account's private choices.
   selection.revoke(selection.snapshot().map(row => row.id));
   batchCandidateItems = [];
   batchCandidateContextByArtwork.clear();
   batchCandidateResultPageByArtwork.clear();
   staleBasketPreviewIds.clear();
+}
+
+function invalidateBrowsingViews() {
+  invalidateDetailView();
+  cancelActiveSearch();
+  searchController=null;
+  activeSearchRequestId=null;
+  searchPending=false;
+  clearBrowsingCaches();
+  accountView.clearContent();
+  contextReturns={};
+  workspaceReturn=null;
+  imageViewer.clear();
+  ugoiraPreview.clear();
+  closeAllViewer();
+  for(const row of selection.snapshot())staleBasketPreviewIds.add(row.id);
+  items=[];
+  currentPage=1;
+  pageNumbers=[1];
+  firstAvailablePage=1;
+  preloadedThrough=1;
+  searchHasMore=false;
+  resultSelectionEnabled=false;
+  searchLoadedAt=0;
+  $("#pagination").innerHTML="";
+  $("#count").textContent="浏览设置已更新，请重新加载";
+  grid.replaceChildren();
+  clearDetail("浏览设置已更新，请重新选择作品");
+  updateSelectionBar();
+  searchButton.textContent="开始寻找";
+  cancelSearchButton.hidden=true;
+  syncSearchScopedControls();
+  pageHistory?.clear();
+  queueNavigationRecord();
 }
 
 function handleAuthorizationLoss(reason = "Pixiv 已断开") {
@@ -1608,6 +1647,7 @@ function reconcileSelectedArtworkPreviews(freshItems) {
 }
 
 let settingsView=null;
+let pixivDisplayView=null;
 let discoveryView=null;
 let downloadDefaultsTouched=false;
 let initialDownloadDefaultsApplied=false;
@@ -1685,6 +1725,12 @@ settingsView=createAccountSettings({root:$("[data-account-settings]"),save:patch
   syncNow:()=>cloudControls.refresh(),clearCache:()=>cloudControls.clearCache(),
   browse:initial=>fetchJson("/api/system/select-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({initial})},60000),
   report:announceToast});
+pixivDisplayView=createPixivDisplaySettings({root:$("[data-pixiv-display]"),request:requestAccount,
+  session:()=>({logged:lastKnownLoggedIn===true,method:loginMethod,generation:lastKnownAuthorizationGeneration,browsingGeneration:lastKnownBrowsingGeneration}),
+  reconcile:async result=>{
+    if(result===null || result.authorizationGeneration!==lastKnownAuthorizationGeneration || result.browsingGeneration!==lastKnownBrowsingGeneration)await syncAuthStatus();
+  },
+  login:async()=>{await openAccount("home");$("#authMethod").scrollIntoView({block:"center",behavior:"smooth"});$("#authMethod").focus({preventScroll:true});}});
 $("#accountSync").onclick=()=>cloudControls.refresh();
 document.querySelectorAll("[data-open-project-notice]").forEach(button=>{
   button.onclick=()=>showAppDialog($("#projectNotice"));
@@ -1940,7 +1986,8 @@ const accountView=createAccountPage({root:$("#accountPage"),request:requestAccou
   openArtwork:(item,origin)=>{accountOrigin=true;void select(-1,item,origin.context);openDownloadPage();},
   installImages:installImageFallbacks,attachUgoira:attachUgoiraHoverTargets,
   report:message=>showTaskDock("账户",message,4000),mode:()=>readSearchFilters().mode,
-  signedIn:()=>lastKnownLoggedIn===true,generation:()=>lastKnownAuthorizationGeneration,connectionChanged:syncAppConnection,settingsReady:()=>cloudControls.ready(),
+  signedIn:()=>lastKnownLoggedIn===true,generation:()=>lastKnownAuthorizationGeneration,connectionChanged:syncAppConnection,
+  settingsReady:()=>Promise.all([cloudControls.ready(),pixivDisplayView.load()]),
   autoPrepare:()=>cloudControls.getPreferences().autoSync,
   getWork:id=>[currentDetailItem,basketDetailItem,...items,...selection.snapshot()].find(item=>item?.id===id) || null,
   getAuthor:id=>{
@@ -3942,6 +3989,9 @@ async function syncAuthStatus() {
     const accountGeneration = Number.isInteger(data.authorizationGeneration) ? data.authorizationGeneration : null;
     const accountChanged = lastKnownAuthorizationGeneration !== null
       && accountGeneration !== null && accountGeneration !== lastKnownAuthorizationGeneration;
+    const browsingGeneration=Number.isInteger(data.browsingGeneration)?data.browsingGeneration:null;
+    const browsingChanged=lastKnownBrowsingGeneration!==null && browsingGeneration!==null
+      && browsingGeneration!==lastKnownBrowsingGeneration;
     const reloadWorkspace = workspaceSync.active
       && (accountChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged));
     if (reloadWorkspace) workspaceSync.reset();
@@ -3952,14 +4002,17 @@ async function syncAuthStatus() {
     }
     lastKnownLoggedIn = logged;
     lastKnownAuthorizationGeneration = accountGeneration;
+    lastKnownBrowsingGeneration = browsingGeneration;
     $("#mode").textContent = data.authMethod==="app"?(logged?"PIXIV · APP":"PIXIV · 待授权"):(logged?"PIXIV · WEB":"PIXIV PUBLIC");
     loginMethod=data.authMethod || "app";
-    if(accountChanged || authorizationLost)settingsView.reset();
+    if(authorizationLost || accountChanged)settingsView.reset();
+    pixivDisplayView.setSession();
     cloudControls.setSession();
     syncAppConnection(appConnection);
     $("#safety").querySelectorAll('option[value="r18"],option[value="r18g"],option[value="all"]').forEach((option) => { option.disabled = !logged; });
     if (authorizationLost) handleAuthorizationLoss();
     else if (accountChanged) handleAuthorizationLoss("Pixiv 账户状态已变更");
+    else if (browsingChanged) invalidateBrowsingViews();
     if (reloadWorkspace) {
       syncSearchScopedControls();
       await restoreWorkspaceWhenUnlocked();
