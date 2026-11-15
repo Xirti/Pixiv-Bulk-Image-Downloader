@@ -40,11 +40,12 @@ python -B sign-release.py import-backup --key '<新的独立目录>\release-ed25
 ```powershell
 ./build-portable.ps1 -ReleaseKey '<私钥文件>'
 ./make-release.ps1 -SkipBuild -ReleaseKey '<私钥文件>'
+./build-installer.ps1 -SkipBuild -Compiler '<Inno Setup 7 的 ISCC.exe 路径>'
 ```
 
 顺序固定：构建 → 可选 Windows 代码签名 → 计算文件摘要 → 签署 schema-4 清单 → 验证 → 压缩 → 签署发布元数据。
 
-发布目录中的 ZIP、`MOKU-update.json`、`MOKU-update.sig.json` **必须作为同一个 GitHub Release 的资产上传**。保留其他说明和摘要文件。签名后不要改文件或重新压缩；需要改动就提高版本号并重新构建、签名。此工具不会自动上传、推送或发布。
+发布目录中的 ZIP、`MOKU-update.json`、`MOKU-update.sig.json` **必须作为同一个 GitHub Release 的资产上传**。安装程序位于 `release/installer-v版本号/`，将安装 EXE 一同上传。便携版和安装版均从同一份 `dist/MOKU/` 组件构建。保留其他说明和摘要文件。签名后不要改文件或重新压缩；需要改动就提高版本号并重新构建、签名。此工具不会自动上传、推送或发布。
 
 `MOKU-update.json` 绑定仓库、Windows x64 平台、版本、ZIP 文件名、大小、SHA-256、清单 SHA-256 和一年有效期。不同用途的签名有独立前缀，不能把清单签名拿来充当发布元数据签名。
 

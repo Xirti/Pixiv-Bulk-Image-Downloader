@@ -2177,7 +2177,9 @@ function updateFloatingChrome() {
   const overlayOpen = surface !== window;
   const scrollOffset = surface === window ? window.scrollY : surface.scrollTop;
   const header = document.querySelector('.app-header');
-  header.hidden = false;
+  const compact = overlayOpen || (searchSurface === "gallery" && activeSearchContext.kind === "uid");
+  document.documentElement.classList.toggle("compact-chrome", compact);
+  header.hidden = compact && windowControls.hidden;
   const chromeHeight = header.offsetHeight;
   const chromeValue = `${chromeHeight}px`;
   if (document.documentElement.style.getPropertyValue("--chrome-height") !== chromeValue) {

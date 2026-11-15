@@ -2,9 +2,6 @@
 
 globalThis.createAccountPage = function ({root,request,escape:esc,allowed,changed,openArtist,openArtwork,
     choose,selected,canChoose=()=>true,installImages,attachUgoira,report,mode,signedIn,generation=()=>null,connectionChanged,settingsReady=()=>Promise.resolve(),autoPrepare=()=>true,getWork=()=>null,getAuthor=()=>null,openUpdates=()=>{},statistics=null}) {
-  new ResizeObserver(([entry])=>{
-    root.style.setProperty("--account-top-height",`${entry.contentRect.height}px`);
-  }).observe(root.querySelector(".account-top"));
   const header=root.querySelector("[data-account-profile]"),tools=root.querySelector("[data-account-tools]");
   const peopleRoot=root.querySelector("[data-account-people]"),grid=root.querySelector("[data-account-grid]");
   const message=root.querySelector("[data-account-message]"),pagination=root.querySelector("[data-account-pagination]");

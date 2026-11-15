@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from PyInstaller.utils.hooks import collect_all
+import hashlib
 import os
 from pathlib import Path
 
@@ -10,6 +11,13 @@ policy.parent.mkdir(parents=True, exist_ok=True)
 policy_source = 'import sys\nsys._moku_signed_build = ' + repr(os.environ.get('MOKU_SIGNED_BUILD') == '1') + '\n'
 if not policy.exists() or policy.read_text(encoding='utf-8') != policy_source:
     policy.write_text(policy_source, encoding='utf-8')
+
+# PyInstaller caches the icon path. A content-derived path refreshes resources
+# when the artwork is replaced at the same source filename.
+icon_bytes = (Path(SPECPATH) / 'assets' / 'moku-icon.ico').read_bytes()
+icon_file = policy.parent / ('moku-icon-' + hashlib.sha256(icon_bytes).hexdigest() + '.ico')
+if not icon_file.exists():
+    icon_file.write_bytes(icon_bytes)
 
 
 WINDOWS_X64_EXCLUDED_PATHS = (
@@ -118,7 +126,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='MOKU',
-    icon='assets/moku-icon.ico',
+    icon=str(icon_file),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

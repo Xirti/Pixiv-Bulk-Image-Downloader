@@ -21,6 +21,11 @@ from ctypes import wintypes
 from pathlib import Path
 
 
+if __name__ == "__main__" and getattr(sys, "frozen", False):
+    from installed_app import hold_installation_guard
+    _installation_guard = hold_installation_guard()
+
+
 def verify_startup_integrity() -> None:
     if not getattr(sys, "frozen", False):
         return
@@ -33,6 +38,17 @@ def verify_startup_integrity() -> None:
             f"程序组件未通过完整性检查：{exc}\n请重新解压官方版本覆盖程序文件，保留个人数据和下载目录。",
             "MOKU 程序完整性", 0x10)
         raise SystemExit(1)
+
+
+if __name__ == "__main__" and "--uninstall-data" in sys.argv:
+    verify_startup_integrity()
+    from installed_app import clear_installed_user_data
+    try:
+        clear_installed_user_data(Path(sys.executable).resolve().parent)
+    except (OSError, ValueError) as exc:
+        ctypes.windll.user32.MessageBoxW(None, str(exc), "MOKU 数据清理", 0x10)
+        raise SystemExit(1)
+    raise SystemExit(0)
 
 
 if __name__ == "__main__" and "--source-guest" in sys.argv:
@@ -95,7 +111,8 @@ def runtime_resource_root() -> Path:
 
 def writable_data_root() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        from installed_app import installed_data_root
+        return installed_data_root(Path(sys.executable).resolve().parent)
     return Path(__file__).resolve().parent
 
 
@@ -487,7 +504,11 @@ def run(argv: list[str] | None = None) -> int:
 
         if options.update_confirm:
             from update_install import confirm_startup
-            confirm_startup(data_root.resolve(),options.update_confirm)
+            confirm_startup(Path(sys.executable).resolve().parent,options.update_confirm)
+        if getattr(sys, "frozen", False):
+            from installed_app import refresh_installed_version
+            from version import __version__
+            refresh_installed_version(Path(sys.executable).resolve().parent, __version__)
         if owns_backend:
             server.APP_UPDATES.allow_restart=not no_browser
             server.APP_UPDATES.cleanup()

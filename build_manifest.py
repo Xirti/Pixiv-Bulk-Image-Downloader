@@ -52,6 +52,8 @@ BUILD_INPUT_FILES = (
     "requirements.lock",
     "requirements-build.lock",
     "build-portable.ps1",
+    "build-installer.ps1",
+    "installer/MOKU.iss",
     "make-release.ps1",
     "sign-release.py",
     "sign-windows.ps1",

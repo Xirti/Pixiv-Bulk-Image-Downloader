@@ -28,6 +28,7 @@ CODE_GENERATION_FILES = (
     'pixiv_login.py',
     'login_context.py',
     'moku_app.py',
+    'installed_app.py',
     'desktop_client.py',
     'native_window_frame.py',
     'network_config.py',
