@@ -61,12 +61,52 @@ Type: filesandordirs; Name: "{app}\app\_internal"
 Type: filesandordirs; Name: "{app}\.moku-update-*"
 Type: filesandordirs; Name: "{app}\previous-internal"
 Type: dirifempty; Name: "{app}\app"
+Type: dirifempty; Name: "{app}"
 
 [Code]
+#include "transaction.iss"
+
 var
-  PreviousInternal: Boolean;
-  InstallationComplete: Boolean;
   PurgeUserData: Boolean;
+  MaintenanceHandle: THandle;
+
+function CreateMaintenanceMutex(Attributes: NativeInt; Owner: Boolean; Name: String): THandle;
+  external 'CreateMutexW@kernel32.dll stdcall';
+function WaitMaintenance(Handle: THandle; Milliseconds: LongWord): LongWord;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function ReleaseMaintenanceMutex(Handle: THandle): Boolean;
+  external 'ReleaseMutex@kernel32.dll stdcall';
+function CloseMaintenanceHandle(Handle: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+procedure ReleaseMaintenance;
+begin
+  if MaintenanceHandle <> 0 then
+  begin
+    ReleaseMaintenanceMutex(MaintenanceHandle);
+    CloseMaintenanceHandle(MaintenanceHandle);
+    MaintenanceHandle := 0;
+  end;
+end;
+
+function AcquireMaintenance: Boolean;
+var
+  Status: LongWord;
+begin
+  MaintenanceHandle := CreateMaintenanceMutex(0, False, 'Local\MOKU.MaintenanceGate.v1');
+  Result := MaintenanceHandle <> 0;
+  if not Result then exit;
+  Status := WaitMaintenance(MaintenanceHandle, 0);
+  if (Status <> 0) and (Status <> $80) then
+  begin
+    CloseMaintenanceHandle(MaintenanceHandle);
+    MaintenanceHandle := 0;
+    Result := False;
+    exit;
+  end;
+  Result := not CheckForMutexes('Local\MOKU.InstallationGuard.v1');
+  if not Result then ReleaseMaintenance;
+end;
 
 function InitializeUninstall: Boolean;
 var
@@ -76,8 +116,21 @@ var
   Confirm: TNewButton;
   Cancel: TNewButton;
 begin
+  Result := AcquireMaintenance;
+  if not Result then
+  begin
+    SuppressibleMsgBox('请关闭所有 MOKU 窗口或等待当前安装操作完成后重试。', mbError, MB_OK, IDOK);
+    exit;
+  end;
+  try
+    RestoreReplacement;
+  except
+    SuppressibleMsgBox(GetExceptionMessage, mbError, MB_OK, IDOK);
+    ReleaseMaintenance;
+    Result := False;
+    exit;
+  end;
   PurgeUserData := ExpandConstant('{param:PURGEDATA|0}') = '1';
-  Result := True;
   if UninstallSilent then exit;
   Form := CreateCustomForm(480, 165, True, True);
   try
@@ -111,6 +164,11 @@ begin
   end;
 end;
 
+procedure DeinitializeUninstall;
+begin
+  ReleaseMaintenance;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Code: Integer;
@@ -128,7 +186,7 @@ var
   SetupPacked: Int64;
 begin
   Result := True;
-  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\MOKU_is1',
+  if RegQueryStringValue(HKCU, UninstallKey,
     'DisplayVersion', InstalledVersion) then
     if StrToVersion(InstalledVersion, InstalledPacked) and StrToVersion('{#AppVersion}', SetupPacked) and
       (ComparePackedVersion(InstalledPacked, SetupPacked) > 0) then
@@ -136,56 +194,37 @@ begin
       SuppressibleMsgBox('已安装较新版本的 MOKU。', mbError, MB_OK, IDOK);
       Result := False;
     end;
+  if Result then
+  begin
+    Result := AcquireMaintenance;
+    if not Result then
+      SuppressibleMsgBox('请关闭所有 MOKU 窗口或等待当前安装操作完成后重试。', mbError, MB_OK, IDOK);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var
-  Entry: TFindRec;
 begin
-  if CurStep = ssInstall then
-  begin
-    if DirExists(ExpandConstant('{app}\previous-internal')) then
-    begin
-      PreviousInternal := True;
-      if not DelTree(ExpandConstant('{app}\app\_internal'), True, True, True) then
-        RaiseException('请关闭 MOKU 后重试安装。');
-    end
-    else if DirExists(ExpandConstant('{app}\app\_internal')) then
-    begin
-      if not RenameFile(ExpandConstant('{app}\app\_internal'), ExpandConstant('{app}\previous-internal')) then
-        RaiseException('请关闭 MOKU 后重试安装。');
-      PreviousInternal := True;
-    end;
-  end;
+  if (CurStep = ssInstall) and not TransactionPrepared then Abort;
   if CurStep = ssPostInstall then
   begin
-    { Retire old update journals before launching the freshly installed app. }
-    if FindFirst(ExpandConstant('{app}\.moku-update-*'), Entry) then
-    begin
-      try
-        repeat
-          if (Entry.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
-            if not DelTree(ExpandConstant('{app}\') + Entry.Name, True, True, True) then
-              RaiseException('更新暂存目录仍被占用，请关闭 MOKU 后重试安装。');
-        until not FindNext(Entry);
-      finally
-        FindClose(Entry);
-      end;
-    end;
-    InstallationComplete := True;
-    if PreviousInternal then
-      if not DelTree(ExpandConstant('{app}\previous-internal'), True, True, True) then
-        Log('Old component backup retained for cleanup during uninstall');
+    CommitReplacement;
+    ReleaseMaintenance;
   end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  Result := 0;
+  if TransactionPrepared and not TransactionCommitted then Result := 1;
 end;
 
 procedure DeinitializeSetup;
 begin
-  if PreviousInternal and not InstallationComplete then
-  begin
-    DelTree(ExpandConstant('{app}\app\_internal'), True, True, True);
-    if not RenameFile(ExpandConstant('{app}\previous-internal'), ExpandConstant('{app}\app\_internal')) then
-      SuppressibleMsgBox('组件已保留在 previous-internal，请重新运行安装程序恢复。', mbError, MB_OK, IDOK);
+  if MaintenanceHandle = 0 then exit;
+  try
+    if not TransactionCommitted then RestoreReplacement;
+  finally
+    ReleaseMaintenance;
   end;
 end;
 
@@ -208,14 +247,30 @@ var
 #endif
 begin
   Result := '';
-  if WebViewAvailable then exit;
+  if not WebViewAvailable then
+  begin
 #ifdef WebViewInstaller
-  ExtractTemporaryFile('WebView2Setup.exe');
-  if not Exec(ExpandConstant('{tmp}\WebView2Setup.exe'), '/silent /install', '',
-    SW_HIDE, ewWaitUntilTerminated, Code) then
-    Log('Could not start WebView2 installer');
-  if WebViewAvailable then exit;
+    ExtractTemporaryFile('WebView2Setup.exe');
+    if not Exec(ExpandConstant('{tmp}\WebView2Setup.exe'), '/silent /install', '',
+      SW_HIDE, ewWaitUntilTerminated, Code) then
+      Log('Could not start WebView2 installer');
 #endif
-  Result := '请先安装 Microsoft Edge WebView2 Runtime，再继续安装 MOKU。' + #13#10 +
-    'https://developer.microsoft.com/microsoft-edge/webview2/';
+    if not WebViewAvailable then
+    begin
+      Result := '请先安装 Microsoft Edge WebView2 Runtime，再继续安装 MOKU。' + #13#10 +
+        'https://developer.microsoft.com/microsoft-edge/webview2/';
+      exit;
+    end;
+  end;
+  if TransactionPrepared then exit;
+  try
+    PrepareReplacement;
+  except
+    Result := GetExceptionMessage;
+    try
+      RestoreReplacement;
+    except
+      Result := Result + #13#10 + GetExceptionMessage;
+    end;
+  end;
 end;

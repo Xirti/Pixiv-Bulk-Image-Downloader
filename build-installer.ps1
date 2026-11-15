@@ -40,7 +40,9 @@ foreach ($Name in @('logs','downloads','runtime','__pycache__')) {
 $Output = Join-Path $Root $(if ($Development) { "release\installer-development-v$Version" } else { "release\installer-v$Version" })
 New-Item -ItemType Directory -Path $Output -Force | Out-Null
 $Suffix = if ($Development) { '-development' } else { '' }
-$Arguments = @("/DAppVersion=$Version", "/DPayloadRoot=$Payload", "/DOutputRoot=$Output", "/DNameSuffix=$Suffix")
+$ManagedNames = (python -B -c 'from update_package import MANAGED; print("|".join(sorted(MANAGED)))').Trim()
+if ($LASTEXITCODE -ne 0 -or -not $ManagedNames) { throw 'Managed component inventory failed' }
+$Arguments = @("/DAppVersion=$Version", "/DPayloadRoot=$Payload", "/DOutputRoot=$Output", "/DNameSuffix=$Suffix", "/DManagedNames=$ManagedNames")
 if ($WebViewInstaller) {
   $WebViewInstaller = (Resolve-Path -LiteralPath $WebViewInstaller).Path
   $Signature = Get-AuthenticodeSignature -LiteralPath $WebViewInstaller

@@ -23,7 +23,11 @@ from pathlib import Path
 
 if __name__ == "__main__" and getattr(sys, "frozen", False):
     from installed_app import hold_installation_guard
-    _installation_guard = hold_installation_guard()
+    try:
+        _installation_guard = hold_installation_guard(maintenance="--uninstall-data" in sys.argv)
+    except (OSError, ValueError) as exc:
+        ctypes.windll.user32.MessageBoxW(None, str(exc), "MOKU", 0x30)
+        raise SystemExit(1)
 
 
 def verify_startup_integrity() -> None:

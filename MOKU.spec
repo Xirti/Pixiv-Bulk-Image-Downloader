@@ -16,7 +16,7 @@ if not policy.exists() or policy.read_text(encoding='utf-8') != policy_source:
 # when the artwork is replaced at the same source filename.
 icon_bytes = (Path(SPECPATH) / 'assets' / 'moku-icon.ico').read_bytes()
 icon_file = policy.parent / ('moku-icon-' + hashlib.sha256(icon_bytes).hexdigest() + '.ico')
-if not icon_file.exists():
+if not icon_file.exists() or icon_file.read_bytes() != icon_bytes:
     icon_file.write_bytes(icon_bytes)
 
 

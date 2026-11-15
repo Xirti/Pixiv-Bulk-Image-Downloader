@@ -13,17 +13,39 @@ from edition_profile import DATA_FOLDER
 
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\MOKU_is1"
 LOG = logging.getLogger("moku.installation")
+INSTALLATION_GUARD_NAME = r"Local\MOKU.InstallationGuard.v1"
+MAINTENANCE_GATE_NAME = r"Local\MOKU.MaintenanceGate.v1"
 
 
-def hold_installation_guard() -> int:
+def hold_installation_guard(*, maintenance: bool = False) -> int:
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
     kernel.CreateMutexW.restype = ctypes.c_void_p
-    handle = kernel.CreateMutexW(None, False, r"Local\MOKU.InstallationGuard.v1")
-    if not handle:
-        raise ctypes.WinError(ctypes.get_last_error())
-    # Windows releases this handle when the process fully exits, including helpers.
-    return handle
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel.ReleaseMutex.argtypes = [ctypes.c_void_p]
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    gate = None
+    if not maintenance:
+        gate = kernel.CreateMutexW(None, False, MAINTENANCE_GATE_NAME)
+        if not gate:
+            raise ctypes.WinError(ctypes.get_last_error())
+        result = kernel.WaitForSingleObject(gate, 0)
+        if result not in (0, 0x80):
+            error = ctypes.get_last_error()
+            kernel.CloseHandle(gate)
+            if result == 258:
+                raise ValueError("MOKU 正在安装或卸载，请完成后再启动")
+            raise ctypes.WinError(error)
+    try:
+        handle = kernel.CreateMutexW(None, False, INSTALLATION_GUARD_NAME)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        # Windows releases this presence marker when the process fully exits.
+        return handle
+    finally:
+        if gate:
+            kernel.ReleaseMutex(gate)
+            kernel.CloseHandle(gate)
 
 
 def is_installed(program_root: Path) -> bool:
@@ -91,26 +113,27 @@ def clear_installed_user_data(program_root: Path) -> None:
         state = json.loads(read_bounded(runtime))
         if not isinstance(state, dict) or type(state.get("pid")) is not int or state["pid"] <= 0:
             raise ValueError("运行记录无效，请检查 MOKU 运行状态")
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-        kernel.OpenProcess.restype = ctypes.c_void_p
-        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        kernel.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong)]
-        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-        handle = kernel.OpenProcess(0x1000 | 0x100000, False, state["pid"])
-        if handle:
-            try:
-                executable = ctypes.create_unicode_buffer(32768)
-                length = ctypes.c_ulong(len(executable))
-                if kernel.WaitForSingleObject(handle, 0) == 258:
-                    if not kernel.QueryFullProcessImageNameW(handle, 0, executable, ctypes.byref(length)):
-                        raise ctypes.WinError(ctypes.get_last_error())
-                    if Path(executable.value).name.casefold() == "moku.exe":
-                        raise ValueError("请关闭所有 MOKU 窗口后再清除个人数据")
-            finally:
-                kernel.CloseHandle(handle)
-        elif ctypes.get_last_error() != 87:
-            raise ctypes.WinError(ctypes.get_last_error())
+        if state["pid"] != os.getpid():
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+            kernel.OpenProcess.restype = ctypes.c_void_p
+            kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            kernel.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong)]
+            kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+            handle = kernel.OpenProcess(0x1000 | 0x100000, False, state["pid"])
+            if handle:
+                try:
+                    executable = ctypes.create_unicode_buffer(32768)
+                    length = ctypes.c_ulong(len(executable))
+                    if kernel.WaitForSingleObject(handle, 0) == 258:
+                        if not kernel.QueryFullProcessImageNameW(handle, 0, executable, ctypes.byref(length)):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        if Path(executable.value).name.casefold() == "moku.exe":
+                            raise ValueError("请关闭所有 MOKU 窗口后再清除个人数据")
+                finally:
+                    kernel.CloseHandle(handle)
+            elif ctypes.get_last_error() != 87:
+                raise ctypes.WinError(ctypes.get_last_error())
     from auth_store import delete_persistent_session
     from pixiv_account import CredentialVault
     from source_search import SourceKey
