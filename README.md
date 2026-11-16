@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/moku-icon.png" width="112" height="112" alt="MOKU">
+  <img src="assets/moku-icon.png" width="312" height="312" alt="MOKU">
 </p>
 
 <h1 align="center">MOKU</h1>
