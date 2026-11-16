@@ -49,7 +49,6 @@ jobs:
           import build_manifest
           tracked = set(subprocess.check_output(["git", "ls-files", "-z"]).decode("utf-8").split("\0")) - {""}
           documentation = {
-              "assets/readme/mascot.gif",
               "assets/readme/home-light.png",
               "assets/readme/settings-dark.png",
               "assets/readme/source-search.png",

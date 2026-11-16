@@ -1,10 +1,17 @@
 <p align="center">
-  <img src="assets/readme/mascot.gif" width="112" height="112" alt="MOKU">
+  <img src="assets/moku-icon.png" width="112" height="112" alt="MOKU">
 </p>
 
 <h1 align="center">MOKU</h1>
 
 <p align="center">Windows 上的 Pixiv 浏览、云收藏与下载管理工具</p>
+
+<p align="center">
+  <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest"><img src="https://img.shields.io/github/v/release/Xirti/Pixiv-Bulk-Image-Downloader" alt="最新版本"></a>
+  <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases"><img src="https://img.shields.io/github/downloads/Xirti/Pixiv-Bulk-Image-Downloader/total" alt="下载量"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Xirti/Pixiv-Bulk-Image-Downloader" alt="MIT 许可"></a>
+  <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest"><img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4" alt="Windows 10 / 11"></a>
+</p>
 
 <p align="center">
   <a href="https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest">下载最新版</a> ·
@@ -43,7 +50,7 @@
 
 运行环境为 **Windows 10/11 x64**，需要 Microsoft Edge WebView2 Runtime 和可访问 Pixiv 的网络。
 
-1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 选择安装版 `MOKU-Setup-v2.1.5-windows-x64.exe` 或便携版 `MOKU-v2.1.5-windows-x64.zip`。
+1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 选择安装版 `MOKU-Setup-v2.1.6-windows-x64.exe` 或便携版 `MOKU-v2.1.6-windows-x64.zip`。
 2. 安装后启动 MOKU，或完整解压便携包后运行 `MOKU/MOKU.exe`。
 3. 打开「我的账号 → 资料」，选择 App 授权或网页登录，完成 Pixiv 登录。
 4. 搜索或进入「发现」，查看作品，将需要下载的图片加入采集篮。
@@ -72,12 +79,12 @@
 - **调整内容显示** — 网页登录后，在「设置 → 账号与通知 → Pixiv 浏览设置」调整 R-18／R-18G、敏感作品和 AI 作品显示，修改自动保存到 Pixiv。
 - **导出动图** — MP4 导出需要支持 `libx264` 的 FFmpeg，将其加入 `PATH` 后启动 MOKU。
 
-## v2.1.5
+## v2.1.6
 
-- 新增 Windows 安装版，支持快捷方式、覆盖安装和可选的个人数据清理。
-- 首页与搜索结果保留完整顶栏，其他页面使用紧凑窗口拖动区，页面标题随内容滚动。
-- 优化账号页设置分类定位与搜索返回位置，稳定切页时的滚动条占位。
-- 更新应用图标，安装版与便携版共用程序组件及签名更新链路。
+- 优化缓存命中、账号页滚动和下载任务登记，减少重复计算与公共锁等待。
+- 修复账号同步、关注收藏和设置保存的并发覆盖，稳定列表状态与统计。
+- 加固搜索、作者候选、收藏标签和关注更新分页，保留续页检查点。
+- 完善预览取消、缓存清理与损坏动图处理，改善连续浏览体验。
 
 完整记录见 [更新日志](RELEASE_NOTES.md)。
 

@@ -66,7 +66,10 @@ def read_persistent_session() -> str:
         return ""
     pointer = ctypes.POINTER(CREDENTIALW)()
     if not advapi32.CredReadW(TARGET, CRED_TYPE_GENERIC, 0, ctypes.byref(pointer)):
-        return ""
+        error = ctypes.get_last_error()
+        if error == ERROR_NOT_FOUND:
+            return ""
+        raise ctypes.WinError(error)
     try:
         cred = pointer.contents
         raw = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)

@@ -177,6 +177,18 @@ class DownloadRequests:
             sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False,
         ).encode("utf-8")).hexdigest()
         now = self._clock()
+        # Active polls need only registry state. Disk verification belongs
+        # outside this lock; a slow output directory must not stall other IDs.
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None and entry.active:
+                if entry.fingerprint != fingerprint:
+                    raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
+                return {"pending": True, "retryAfterMs": 1000}, 202
+        try:
+            restored = self._read_success(request_id, durable_fingerprint)
+        except (OSError, sqlite3.Error):
+            restored = None
         with self._lock:
             for key, entry in list(self._entries.items()):
                 if not entry.active and now - entry.touched >= self._ttl:
@@ -189,12 +201,6 @@ class DownloadRequests:
                     if not entry.active and durable_scope is not None and entry.durable_fingerprint == durable_fingerprint:
                         if entry.result is not None and self._path is None:
                             return entry.result
-                        try:
-                            restored = self._read_success(request_id, durable_fingerprint)
-                        except (OSError, sqlite3.Error):
-                            restored = None
-                        if restored is not None:
-                            return restored
                         entry.fingerprint = fingerprint
                         entry.result = None
                     else:
@@ -202,24 +208,11 @@ class DownloadRequests:
                 self._entries.move_to_end(request_id)
                 if entry.active:
                     return {"pending": True, "retryAfterMs": 1000}, 202
-                if entry.result is not None:
-                    if self._path is None:
-                        return entry.result
-                    try:
-                        restored = self._read_success(request_id, durable_fingerprint)
-                    except (OSError, sqlite3.Error):
-                        restored = None
-                    if restored is not None:
-                        return restored
-                    entry.result = None
-                entry.active = True
-            else:
-                try:
-                    restored = self._read_success(request_id, durable_fingerprint)
-                except (OSError, sqlite3.Error):
-                    restored = None
-                if restored is not None:
-                    return restored
+                if entry.result is not None and self._path is None:
+                    return entry.result
+            if restored is not None:
+                return restored
+            if entry is None:
                 while len(self._entries) >= self._limit:
                     idle = next((key for key, row in self._entries.items() if not row.active), None)
                     if idle is None:
@@ -227,6 +220,9 @@ class DownloadRequests:
                     del self._entries[idle]
                 entry = _Request(fingerprint, True, now, durable_fingerprint=durable_fingerprint)
                 self._entries[request_id] = entry
+            else:
+                entry.result = None
+                entry.active = True
             entry.cancel = cancel_event
             entry.scope = durable_scope if durable_scope is not None else scope
 

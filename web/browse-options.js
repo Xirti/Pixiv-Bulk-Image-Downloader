@@ -14,15 +14,19 @@ globalThis.createBrowseOptions = function ({ready,save,report}) {
       if(!loaded)return;
       automatic=settings.autoLoadPages;
       showButton=settings.showLoadButton;
-      for(const [kind,key] of Object.entries(keys))orders[kind]=pending.get(key) ?? settings[key];
+      for(const [kind,key] of Object.entries(keys))orders[kind]=pending.get(key)?.order ?? settings[key];
     },
     choose(kind,order){
       const key=keys[kind];
       if(!key || orders[kind]===order)return;
-      orders[kind]=order;pending.set(key,order);
+      // Equal values can belong to different clicks, including popular/default/popular.
+      const choice={order};
+      orders[kind]=order;pending.set(key,choice);
       writes=writes.then(async()=>{
-        await ready();await save({[key]:order});
-        if(pending.get(key)===order)pending.delete(key);
+        await ready();
+        if(pending.get(key)!==choice)return;
+        await save({[key]:order});
+        if(pending.get(key)===choice)pending.delete(key);
       }).catch(error=>report(`浏览方式暂未保存：${error.message}`));
     },
   };

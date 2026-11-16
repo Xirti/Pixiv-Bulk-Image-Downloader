@@ -12,7 +12,9 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
   function parseZipEntries(buffer) {
     const view = new DataView(buffer);
     let eocd = -1;
-    for (let index = view.byteLength - 22; index >= 0; index -= 1) {
+    // The 22-byte footer can be followed by at most 65,535 comment bytes.
+    const first = Math.max(0, view.byteLength - 22 - 65535);
+    for (let index = view.byteLength - 22; index >= first; index -= 1) {
       if (view.getUint32(index, true) === 0x06054b50) { eocd = index; break; }
     }
     if (eocd < 0) throw new Error("动图数据已损坏");

@@ -114,6 +114,8 @@ class PopularityService:
             next_path = continuation(raw, "/v1/user/illusts")
             if next_path == path:
                 raise AccountError("cursor", "作者元数据续页未前进")
+            if next_path and not rows:
+                raise AccountError("cursor", "作者元数据返回空续页，请刷新后重试")
             if next_path:
                 query = parse_qs(urlsplit(next_path).query)
                 current_type = parse_qs(urlsplit(path).query)["type"]

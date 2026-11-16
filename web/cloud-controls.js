@@ -4,19 +4,21 @@
 globalThis.createCloudControls = function ({request,session,login,report,changed,preferencesChanged,official,cachedTags=()=>null,cleared=()=>{},prepareAccount=()=>Promise.resolve(),clearStarted=()=>Promise.resolve(),checkUpdates=()=>Promise.resolve({})}) {
   const defaults={bookmarkDefault:"ask",followDefault:"ask",bookmarkLast:"private",followLast:"private",autoSync:true,syncMinutes:"10",autoRanking:true,autoFollowing:true,autoRecommended:true,saveRoot:"",createFolder:true,mediaMemory:"normal",previewLayout:"adaptive",previewAction:"expand",previewSize:"large",sensitiveMask:"both",autoLoadPages:false,orderTags:"default",orderAuthor:"default",orderUid:"default",orderPid:"default",orderRecommended:"default",orderRanking:"default",showLoadButton:true,updateDots:true};
   let prefs={...defaults},states={bookmark:new Map(),follow:new Map()},syncState={},owner=null;
-  let epoch=0,sessionKey="",settingsPromise=null,prefsLoaded=false,hydration=null,hydrationAgain=false,hydratedKey="",timer=null,syncError="";
-  let popup=null,anchor=null,popupVersion=0,readVersion=0,syncBusy=false,lastSyncAttempt=0,syncTurn=0;
+  let epoch=0,sessionKey="",settingsPromise=null,prefsLoaded=false,hydration=null,hydrationAgain=null,hydratedKey="",timer=null,syncError="";
+  let popup=null,anchor=null,popupVersion=0,syncBusy=false,lastSyncAttempt=0,syncTurn=0;
   let autoNotBefore=0,syncRequest=null,syncJob=null,syncVersion=0;
   let clearing=false,clearJob=null,accountPrepared=false,auxiliaryBusy=false,auxiliaryCompleted=0,auxiliaryError="";
   let preferenceWrites=Promise.resolve();
+  let sessionEpoch=0,settingsRevision=-1;
   let updatesBusy=false,lastUpdateCheck=0,updatesRemaining=false;
   const busy=new Set(),manual=new Set(),restart=new Set();
   const painted=new WeakMap();
   const post=(path,data,timeout=90000)=>request(path,{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({...data,authorizationGeneration:session().generation})},timeout);
   const key=(kind,id)=>`${kind}:${id}`;
-  const get=(kind,id)=>states[kind].get(id) || {known:false,active:null,privacy:null,tags:null};
+  const get=(kind,id)=>states[kind].get(id) || {known:false,active:null,privacy:null,tags:null,relationRevision:-1};
   const sameEpoch=(revision,generation)=>revision===epoch && generation===session().generation;
+  const sameSession=(revision,generation)=>revision===sessionEpoch && generation===session().generation;
 
   function paint(){
     const logged=session().logged;
@@ -42,7 +44,13 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       painted.set(button,signature);
     });
   }
-  function apply(kind,id,state){states[kind].set(id,state);paint();}
+  function rememberState(kind,id,state){
+    if(!Number.isSafeInteger(state.relationRevision) || state.relationRevision<0)throw new Error("关系状态版本无效，请刷新页面");
+    const previous=get(kind,id);
+    if(state.relationRevision<previous.relationRevision)return previous;
+    states[kind].set(id,state);return state;
+  }
+  function apply(kind,id,state){const current=rememberState(kind,id,state);paint();return current;}
   function close(){popupVersion++;if(popup){popup.remove();popup=null;}anchor=null;}
   function position(){
     if(!popup || !anchor)return;
@@ -64,11 +72,21 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     finally{if(sameEpoch(revision,generation)){auxiliaryBusy=false;notifySettings();}}
   }
 
+  function adoptPreferences(data){
+    if(!Number.isSafeInteger(data.settingsRevision) || data.settingsRevision<0)throw new Error("设置版本无效，请刷新页面");
+    if(data.settingsRevision<settingsRevision)return;
+    prefs=data.settings;settingsRevision=data.settingsRevision;prefsLoaded=true;
+  }
   async function loadPreferences(){
-    const revision=epoch;
-    const data=await request("/api/settings",{},20000);
-    if(revision!==epoch || data.authorizationGeneration!==session().generation)return;
-    prefs=data.settings;prefsLoaded=true;notifySettings();
+    const revision=sessionEpoch,generation=session().generation;
+    let data;
+    try{data=await request("/api/settings",{},20000);}
+    catch(error){
+      if(!sameSession(revision,generation) || prefsLoaded)return;
+      throw error;
+    }
+    if(!sameSession(revision,generation) || data.authorizationGeneration!==generation)return;
+    adoptPreferences(data);notifySettings();
   }
   function ready(){
     if(prefsLoaded)return Promise.resolve();
@@ -76,13 +94,14 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     return settingsPromise;
   }
   function savePreferences(patch){
-    const revision=epoch,generation=session().generation;
+    const revision=sessionEpoch,generation=session().generation;
     const pending=preferenceWrites.catch(()=>{}).then(async()=>{
-      if(!sameEpoch(revision,generation))throw new Error("账号已改变，请重新打开设置");
+      if(!sameSession(revision,generation))throw new Error("账号已改变，请重新打开设置");
       const data=await post("/api/settings",{settings:patch},20000);
-      if(!sameEpoch(revision,generation))throw new Error("账号已改变，请重新打开设置");
+      if(!sameSession(revision,generation))throw new Error("账号已改变，请重新打开设置");
       const wasAutomatic=prefs.autoSync;
-      prefs=data.settings;notifySettings();lastSyncAttempt=0;
+      adoptPreferences(data);
+      notifySettings();lastSyncAttempt=0;
       if(wasAutomatic && !prefs.autoSync)await clearStarted();
       if(!wasAutomatic && prefs.autoSync){accountPrepared=false;auxiliaryCompleted=0;void tick();}
       return {...prefs};
@@ -99,9 +118,8 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     return {works:[...result.bookmark].slice(0,100),authors:[...result.follow].slice(0,100)};
   }
   async function hydrate(force=false){
-    paint();
     if(clearing || !session().logged)return;
-    if(hydration){hydrationAgain ||= force;return hydration;}
+    if(hydration){hydrationAgain={force:force || hydrationAgain?.force || false};return hydration;}
     const {works,authors}=visibleTargets();
     const queryKey=JSON.stringify([works,authors]);
     if(!force && queryKey===hydratedKey)return;
@@ -112,14 +130,17 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
         if(!sameEpoch(revision,generation) || data.authorizationGeneration!==generation)return;
         hydratedKey=queryKey;owner=data.owner;if(syncAtStart===syncVersion)syncState=data.sync;
         for(const kind of ["bookmark","follow"])for(const [id,state] of Object.entries(data.states[kind])){
-          const old=get(kind,id);
-          if(!old.touched || state.touched>=old.touched)states[kind].set(id,state);
+          rememberState(kind,id,state);
         }
         paint();notifySettings();
       }catch(error){
         if(revision===epoch){hydratedKey="";syncError=error.message;lastSyncAttempt=Date.now();notifySettings();}
       }
-    })().finally(()=>{if(hydration!==task)return;hydration=null;if(hydrationAgain){hydrationAgain=false;void hydrate(true);}});
+    })().finally(()=>{
+      if(hydration!==task)return;
+      hydration=null;const queued=hydrationAgain;hydrationAgain=null;
+      if(queued)return hydrate(queued.force);
+    });
     hydration=task;return task;
   }
   function schedule(){clearTimeout(timer);timer=setTimeout(()=>{void hydrate();position();},100);}
@@ -128,29 +149,30 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     const revision=epoch,generation=session().generation;
     const data=await post("/api/cloud/read",{kind,id});
     if(!sameEpoch(revision,generation))throw new Error("账号已改变，请重新操作");
-    apply(kind,id,data.state);return data.state;
+    return apply(kind,id,data.state);
   }
   async function mutate(kind,id,state,active,privacy,tags,version){
-    const revision=epoch,generation=session().generation,targetKey=key(kind,id);
+    const revision=epoch,authorization=sessionEpoch,generation=session().generation,targetKey=key(kind,id);
     busy.add(targetKey);paint();
     try{
       const data=await post("/api/cloud/write",{kind,id,active,privacy,tags,expected:state.stamp || null,
         requestId:crypto.randomUUID().replaceAll("-","")},120000);
-      if(!sameEpoch(revision,generation))return;
-      apply(kind,id,data.state);
+      if(!sameSession(authorization,generation))return;
+      adoptPreferences(data.preferences);
+      if(!sameEpoch(revision,generation)){notifySettings();void hydrate(true);return;}
+      const current=apply(kind,id,data.state);
+      changed(kind,id,current,state);notifySettings();
       if(!data.confirmed)throw new Error("结果仍待确认，请刷新核对");
-      if(active)prefs[kind+"Last"]=privacy;
-      changed(kind,id,data.state,state);notifySettings();
       if(version===popupVersion)close();
       report(active?`${kind==="bookmark"?"收藏":"关注"}已保存`:`已取消${kind==="bookmark"?"收藏":"关注"}`);
     }catch(error){
       if(!sameEpoch(revision,generation))return;
       if(error.cloudState){
-        apply(kind,id,error.cloudState);changed(kind,id,error.cloudState,state);
+        const current=apply(kind,id,error.cloudState);changed(kind,id,current,state);
         if(error.errorKind==="conflict" && popup && version===popupVersion){
           const button=anchor,privacyChoice=popup.querySelector('input[name="cloudPrivacy"]:checked')?.value;
           const tagsInput=popup.querySelector('[data-cloud-tags]'),editedTags=tagsInput?.dataset.edited==="true"?tagsInput.value:null;
-          editor(button,kind,id,error.cloudState);version=popupVersion;
+          editor(button,kind,id,current);version=popupVersion;
           if(privacyChoice)popup.querySelector(`input[value="${privacyChoice}"]`).checked=true;
           if(editedTags!==null){const input=popup.querySelector('[data-cloud-tags]');input.value=editedTags;input.dataset.edited="true";}
         }
@@ -158,7 +180,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       if(error.official && kind==="follow"){
         if(!popup || version!==popupVersion){
           const target=[...document.querySelectorAll('[data-cloud-kind="follow"][data-cloud-id]')].find(button=>button.dataset.cloudId===id && button.getClientRects().length);
-          if(target){editor(target,kind,id,error.cloudState || state);version=popupVersion;}
+          if(target){editor(target,kind,id,get(kind,id));version=popupVersion;}
         }
         showOfficial(kind,id,version,error.message);
       }else if(popup && version===popupVersion){
@@ -267,9 +289,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     if(!session().logged){login();throw new Error("请先登录后清除当前账号缓存");}
     if(clearing)throw new Error("正在清除当前账号缓存");
     const generation=session().generation,job={};
+    let completed=false;
     clearing=true;clearJob=job;
     notifySettings();
-    epoch++;readVersion++;close();manual.clear();restart.clear();busy.clear();hydration=null;hydrationAgain=false;
+    epoch++;close();manual.clear();restart.clear();busy.clear();hydration=null;hydrationAgain=null;
     try{
       await clearStarted();
       if(syncRequest)await Promise.allSettled([syncRequest]);
@@ -281,7 +304,11 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;
       autoNotBefore=Date.now()+Number(prefs.syncMinutes)*60000;
       cleared();paint();notifySettings();report("当前账号缓存已清除");
-    }finally{if(clearJob===job){clearing=false;clearJob=null;notifySettings();}}
+      completed=true;
+    }finally{if(clearJob===job){
+      clearing=false;clearJob=null;notifySettings();
+      if(!completed && generation===session().generation)void hydrate(true);
+    }}
   }
   function refresh(){
     if(clearing || manual.size || syncBusy)return;
@@ -293,8 +320,9 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   function setSession(){
     const value=session(),next=JSON.stringify([value.logged,value.generation,value.method]);
     if(next===sessionKey)return;
-    sessionKey=next;epoch++;readVersion++;close();busy.clear();manual.clear();restart.clear();
-    hydration=null;hydrationAgain=false;syncBusy=false;syncRequest=null;syncJob=null;clearing=false;clearJob=null;
+    sessionKey=next;epoch++;sessionEpoch++;close();busy.clear();manual.clear();restart.clear();
+    settingsRevision=-1;
+    hydration=null;hydrationAgain=null;syncBusy=false;syncRequest=null;syncJob=null;clearing=false;clearJob=null;
     updatesBusy=false;lastUpdateCheck=0;updatesRemaining=false;
     void clearStarted();
     auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;auxiliaryError="";
@@ -314,19 +342,19 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   document.addEventListener("click",event=>{
     const button=event.target.closest("[data-cloud-kind][data-cloud-id]");
     if(button){button.dispatchEvent(new Event("moku-card-action",{bubbles:true}));event.preventDefault();event.stopImmediatePropagation();void open(button,false);}
-    else if(popup && !popup.contains(event.target)){readVersion++;close();}
+    else if(popup && !popup.contains(event.target)){close();}
   },true);
   document.addEventListener("dblclick",event=>{if(event.target.closest("[data-cloud-kind]")){event.preventDefault();event.stopImmediatePropagation();}},true);
   document.addEventListener("contextmenu",event=>{
     const button=event.target.closest("[data-cloud-kind][data-cloud-id]");
     if(button){button.dispatchEvent(new Event("moku-card-action",{bubbles:true}));event.preventDefault();event.stopImmediatePropagation();void open(button,true);}
   },true);
-  document.addEventListener("keydown",event=>{if(event.key==="Escape" && popup){event.preventDefault();event.stopPropagation();readVersion++;close();}});
+  document.addEventListener("keydown",event=>{if(event.key==="Escape" && popup){event.preventDefault();event.stopPropagation();close();}});
   document.addEventListener("scroll",schedule,true);window.addEventListener("resize",schedule);
   new MutationObserver(records=>{
     const selector="[data-cloud-kind][data-cloud-id]";
     if(records.some(record=>[...record.addedNodes,...record.removedNodes].some(node=>
-      node.nodeType===1 && (node.matches(selector) || node.querySelector(selector)))))schedule();
+      node.nodeType===1 && (node.matches(selector) || node.querySelector(selector))))){paint();schedule();}
   }).observe(document.body,{subtree:true,childList:true});
   setInterval(()=>{void tick();},5000);
   return {get busy(){return busy.size>0;},canPrepareBackground:()=>!clearing && Date.now()>=autoNotBefore,

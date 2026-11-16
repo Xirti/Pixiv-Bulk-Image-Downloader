@@ -185,17 +185,19 @@ class AppGallery:
             if not isinstance(target,str) or not 1 <= len(target) <= 60 or not 1 <= page <= 1000:
                 raise SearchInputError('作者搜索条件无效')
             with self.lock:
-                path='/v1/search/user?'+urlencode({'word':target,'filter':'for_android'}) if page==1 else self.candidate_paths.get((generation,target,page))
-            if not path:raise SearchInputError('作者候选分页记录已清理，请从第一页重新搜索')
+                checkpoint=('/v1/search/user?'+urlencode({'word':target,'filter':'for_android'}), ()) if page==1 else self.candidate_paths.get((generation,target,page))
+            if not checkpoint:raise SearchInputError('作者候选分页记录已清理，请从第一页重新搜索')
+            path,visited=checkpoint
             raw = self.get(path,generation,cancel_event)
             rows = raw.get('user_previews')
             if not isinstance(rows,list):raise PixivPolicyError('App 作者候选格式异常')
             profiles = [artist_profile(row.get('user')) for row in rows if isinstance(row,dict)]
-            next_path=continuation(raw,'/v1/search/user')
+            next_path=continuation(raw,'/v1/search/user',current=path,visited=visited)
+            if next_path and not rows:raise PixivPolicyError('作者候选返回空续页，请稍后重试')
             if next_path:
-                if next_path==path:raise PixivPolicyError('作者候选续页未前进')
+                if parse_qs(urlsplit(next_path).query).get('word')!=[target]:raise PixivPolicyError('作者候选续页关键词不符')
                 with self.lock:
-                    self.candidate_paths[generation,target,page+1]=next_path
+                    self.candidate_paths[generation,target,page+1]=(next_path,(*visited,path))
                     while len(self.candidate_paths)>80:self.candidate_paths.popitem(last=False)
             return {'query':target,'page':page,'candidates':[p for p in profiles if p['name'].casefold()==target.casefold()],'hasMore':bool(next_path)}
         if not valid_pixiv_id(target):raise SearchInputError('作者 ID 无效')

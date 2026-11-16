@@ -78,8 +78,20 @@ class CloudState:
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         try:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version == 1:
+                return db
+            if version != 0:
+                raise ValueError("Unsupported cloud state schema")
             db.executescript("""
+          BEGIN IMMEDIATE;
           CREATE TABLE IF NOT EXISTS preferences(scope TEXT PRIMARY KEY, payload TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS preference_revision (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>=0));
+          CREATE TABLE IF NOT EXISTS relation_revision (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>=0));
           CREATE TABLE IF NOT EXISTS relations(owner TEXT, method TEXT, kind TEXT, target TEXT,
             active INTEGER NOT NULL, privacy TEXT, tags TEXT, bookmark_id TEXT, touched REAL,
             version INTEGER NOT NULL, PRIMARY KEY(owner,method,kind,target));
@@ -93,6 +105,20 @@ class CloudState:
           CREATE TABLE IF NOT EXISTS page_repairs(owner TEXT, method TEXT, token TEXT,
             PRIMARY KEY(owner,method,token));
             """)
+            # Triggers also version writes made by an older running backend.
+            for table, revision_table, prefix in (
+                ("preferences", "preference_revision", "preference"),
+                ("relations", "relation_revision", "relation"),
+                ("scans", "relation_revision", "scan"),
+            ):
+                for action in ("INSERT", "UPDATE", "DELETE"):
+                    db.execute(f"""CREATE TRIGGER IF NOT EXISTS {prefix}_{action.lower()}_revision
+                        AFTER {action} ON {table} BEGIN
+                          INSERT INTO {revision_table} VALUES(1,1)
+                            ON CONFLICT(singleton) DO UPDATE SET version=version+1;
+                        END""")
+            db.execute("PRAGMA user_version=1")
+            db.commit()
         except BaseException:
             db.close()
             raise
@@ -106,53 +132,80 @@ class CloudState:
             db.execute("BEGIN IMMEDIATE")
             yield db
 
-    def preferences(self, scope):
+    @staticmethod
+    def _preferences_snapshot(db, scope):
+        values = {}
+        for key in ("machine", scope):
+            row = db.execute("SELECT payload FROM preferences WHERE scope=?", (key,)).fetchone()
+            if row:
+                values.update(validate_preferences(json.loads(row[0])))
+        row = db.execute("SELECT version FROM preference_revision WHERE singleton=1").fetchone()
+        return {"settings": {**DEFAULT_MACHINE, **DEFAULT_ACCOUNT, **values},
+                "settingsRevision": row[0] if row else 0}
+
+    def preferences_snapshot(self, scope):
         with self.lock, closing(self._connect()) as db:
             db.execute("BEGIN")
-            values = {}
-            for key in ("machine", scope):
-                row = db.execute("SELECT payload FROM preferences WHERE scope=?", (key,)).fetchone()
-                if row:
-                    values.update(validate_preferences(json.loads(row[0])))
-            return {**DEFAULT_MACHINE, **DEFAULT_ACCOUNT, **values}
+            return self._preferences_snapshot(db, scope)
 
-    def save_preferences(self, scope, changes):
-        # Caller has validated the external patch once.
-        with self._write() as db:
-            for key, fields in (("machine", DEFAULT_MACHINE), (scope, DEFAULT_ACCOUNT)):
-                patch = {k: v for k, v in changes.items() if k in fields}
-                if not patch:
-                    continue
-                row = db.execute("SELECT payload FROM preferences WHERE scope=?", (key,)).fetchone()
-                value = json.loads(row[0]) if row else {}
-                value.update(patch)
-                db.execute("INSERT OR REPLACE INTO preferences VALUES(?,?)", (key, json.dumps(value)))
-        return self.preferences(scope)
+    def preferences(self, scope):
+        return self.preferences_snapshot(scope)["settings"]
 
     @staticmethod
-    def _decode(row):
+    def _save_preferences(db, scope, changes):
+        for key, fields in (("machine", DEFAULT_MACHINE), (scope, DEFAULT_ACCOUNT)):
+            patch = {k: v for k, v in changes.items() if k in fields}
+            if not patch:
+                continue
+            row = db.execute("SELECT payload FROM preferences WHERE scope=?", (key,)).fetchone()
+            value = json.loads(row[0]) if row else {}
+            value.update(patch)
+            db.execute("INSERT OR REPLACE INTO preferences VALUES(?,?)", (key, json.dumps(value)))
+
+    def save_preferences(self, scope, changes):
+        return self.save_preferences_snapshot(scope, changes)["settings"]
+
+    def save_preferences_snapshot(self, scope, changes):
+        # Caller has validated the external patch once.
+        with self._write() as db:
+            self._save_preferences(db, scope, changes)
+            return self._preferences_snapshot(db, scope)
+
+    @staticmethod
+    def _decode(row, revision):
         if row is None:
-            return {"known": False, "active": None, "privacy": None, "tags": None, "touched": None}
+            return {"known": False, "active": None, "privacy": None, "tags": None, "touched": None,
+                    "relationRevision": revision}
         value = {"known": True, "active": bool(row["active"]), "privacy": row["privacy"],
                  "tags": json.loads(row["tags"]) if row["tags"] is not None else None,
-                 "bookmarkId": row["bookmark_id"], "touched": row["touched"]}
+                 "bookmarkId": row["bookmark_id"], "touched": row["touched"], "relationRevision": revision}
         value["stamp"] = relationship_stamp(value)
         return value
 
+    @staticmethod
+    def _relation_revision(db):
+        row = db.execute("SELECT version FROM relation_revision WHERE singleton=1").fetchone()
+        return row[0] if row else 0
+
     def get(self, owner, method, kind, target):
         with self.lock, closing(self._connect()) as db:
+            db.execute("BEGIN")
+            revision = self._relation_revision(db)
             return self._decode(db.execute("SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target=?",
-                                          (owner, method, kind, target)).fetchone())
+                                          (owner, method, kind, target)).fetchone(), revision)
 
     def newer_relations(self, owner, method, kind, version):
         with self.lock, closing(self._connect()) as db:
-            return [(row["target"],self._decode(row)) for row in db.execute(
+            db.execute("BEGIN")
+            revision = self._relation_revision(db)
+            return [(row["target"],self._decode(row, revision)) for row in db.execute(
                 "SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND version>?",(owner,method,kind,version))]
 
     def many(self, owner, method, works, authors):
         result = {"bookmark": {}, "follow": {}}
         with self.lock, closing(self._connect()) as db:
             db.execute("BEGIN")
+            revision = self._relation_revision(db)
             scans={row["kind"]:row["completed"] or 0 for row in db.execute(
                 "SELECT kind,json_extract(payload,'$.completed') AS completed FROM scans WHERE owner=? AND method=?",(owner,method))}
             for kind, targets in (("bookmark", works), ("follow", authors)):
@@ -162,9 +215,10 @@ class CloudState:
                     query="SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target IN ("+','.join('?' for _ in part)+')'
                     rows.update((row['target'],row) for row in db.execute(query,(owner,method,kind,*part)))
                 for target in targets:
-                    state = self._decode(rows.get(target))
+                    state = self._decode(rows.get(target), revision)
                     if not state["known"] and completed:
-                        state = {"known": True, "active": False, "privacy": None, "tags": [], "touched": completed}
+                        state = {"known": True, "active": False, "privacy": None, "tags": [], "touched": completed,
+                                 "relationRevision": revision}
                         state["stamp"] = relationship_stamp(state)
                     result[kind][target] = state
         return result
@@ -183,7 +237,7 @@ class CloudState:
             if repair_id is not None:
                 db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, method, repair_id))
             current = self._decode(db.execute("SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target=?",
-                (owner, method, kind, target)).fetchone())
+                (owner, method, kind, target)).fetchone(), self._relation_revision(db))
         return current
 
     def queue_page_repair(self, owner, method, token):
@@ -221,10 +275,13 @@ class CloudState:
             db.execute("INSERT INTO operations VALUES(?,?,?,?,NULL,?)", (owner, method, request_id, signature, time.time()))
             return False, None
 
-    def finish_operation(self, owner, method, request_id, state):
+    def finish_operation(self, owner, method, request_id, state, *, preferences: tuple[str, dict] | None = None):
         with self._write() as db:
             db.execute("UPDATE operations SET result=? WHERE owner=? AND method=? AND request_id=?",
                        (json.dumps(state), owner, method, request_id))
+            if preferences is not None:
+                self._save_preferences(db, *preferences)
+                return self._preferences_snapshot(db, preferences[0])
 
     def sync_status(self, owner, method):
         with self.lock, closing(self._connect()) as db:

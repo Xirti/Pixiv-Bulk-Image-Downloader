@@ -76,10 +76,11 @@ class DiscoveryService:
         owner, method = self.context(generation)
         with self._guard:
             stored = self._feeds.get((owner, method, batch))
-            result = copy.deepcopy(stored) if stored else None
+            epoch = self._epoch
+        result = copy.deepcopy(stored) if stored else None
         if result is None:
             result = self.pages.saved_cache.read(owner, method, ["discovery-feed", batch])
-        self.pages.check(generation)
+        self._check(generation, epoch)
         if result is None:
             raise AccountError("cache_miss", "原发现批次已清理，请刷新当前页面")
         return result

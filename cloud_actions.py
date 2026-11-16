@@ -291,10 +291,21 @@ class CloudActions:
             before = self._read(owner, method, kind, target, generation)
             signature = hashlib.sha256(json.dumps(intent, sort_keys=True).encode()).hexdigest()
             replay, result = self._commit(generation, lambda: self.store.operation(owner, method, intent["requestId"], signature))
+
+            def complete(state):
+                preferences = (scope, {kind + "Last": intent["privacy"]} if intent["active"] else {})
+                return self._commit(generation, lambda: self.store.finish_operation(
+                    owner, method, intent["requestId"], state, preferences=preferences))
+
             if replay:
                 # A lost response never causes a second POST. A fresh read repairs the local view.
                 current = self._commit(generation, lambda: self._record(owner, method, kind, target, cached, before))
-                return {"state": current, "confirmed": self._matches(intent, before), "replayed": True}
+                confirmed = self._matches(intent, before)
+                if confirmed and result is None:
+                    preferences = complete(current)
+                else:
+                    preferences = self._commit(generation, lambda: self.store.preferences_snapshot(scope))
+                return {"state": current, "confirmed": confirmed, "replayed": True, "preferences": preferences}
             conflict = before["active"] if intent["expected"] is None else (
                 not cached["known"] or cached.get("stamp") != intent["expected"] or cached["active"] != before["active"] or
                 before["active"] and any(cached.get(field) is not None and before.get(field) is not None and
@@ -325,10 +336,8 @@ class CloudActions:
                 official = method == "web" and kind == "follow"
                 raise CloudActionError("verification" if official else "unconfirmed", "请前往官网完成操作，再返回核对" if official else
                                        "云端结果尚未符合所选状态，请刷新核对；不会自动重试", state=current, official=official) from error
-            self._commit(generation, lambda: self.store.finish_operation(owner, method, intent["requestId"], current))
-            if intent["active"]:
-                self._commit(generation, lambda: self.store.save_preferences(scope, {kind + "Last": intent["privacy"]}))
-            return {"state": current, "confirmed": True}
+            preferences = complete(current)
+            return {"state": current, "confirmed": True, "preferences": preferences}
 
     @staticmethod
     def _matches(intent, state):

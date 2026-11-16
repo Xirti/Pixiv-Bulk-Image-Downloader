@@ -22,7 +22,6 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   let relationVersion=0;
   let scrollFrame=null,restoringScroll=false,restoreTop=null;
   function remember(){if(active && !restoringScroll){state.scroll=root.scrollTop;positions.set(state.view,structuredClone(state));}}
-  root.addEventListener("scroll",remember,{passive:true});
   const pageKey=()=>JSON.stringify([state.view,state.scope,state.tag,state.offset,mode()]);
   function cachePage(key,value){
     cache.delete(key);cache.set(key,value);

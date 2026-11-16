@@ -242,6 +242,7 @@ def health_request_may_disclose_token(handler) -> bool:
 
 
 class LocalThreadingHTTPServer(ThreadingHTTPServer):
+    request_queue_size = 64
     daemon_threads = True
     block_on_close = False
 
@@ -3982,13 +3983,23 @@ class Handler(SimpleHTTPRequestHandler):
         return False
 
     def do_GET(self):
-        path = urllib.parse.urlsplit(self.path).path
-        browsing = path.startswith("/api/pixiv/") or path in {"/api/discovery", "/api/popularity"} or (
-            path.startswith("/api/account/") and path != "/api/account/authorization")
-        if browsing:
-            with browsing_request():
-                return self._dispatch_get()
-        return self._dispatch_get()
+        try:
+            path = urllib.parse.urlsplit(self.path).path
+            browsing = path.startswith("/api/pixiv/") or path in {"/api/discovery", "/api/popularity"} or (
+                path.startswith("/api/account/") and path != "/api/account/authorization")
+            if browsing:
+                with browsing_request():
+                    return self._dispatch_get()
+            return self._dispatch_get()
+        except (OSError, AccountError) as error:
+            return self._local_operation_error(error)
+
+    def _local_operation_error(self, error):
+        HTTP_LOG.warning("Local %s operation failed", self.command, exc_info=True)
+        message = str(error) if isinstance(error, AccountError) else "本机操作失败，请稍后重试"
+        kind = error.kind if isinstance(error, AccountError) else "local_operation_failed"
+        status = 409 if kind in {"revoked", "content_changed"} else 503
+        return self.send_json({"error": message, "errorKind": kind}, status)
 
     def _dispatch_get(self):
         request = urllib.parse.urlparse(self.path)
@@ -4193,10 +4204,10 @@ class Handler(SimpleHTTPRequestHandler):
             with SEARCH_SESSION_LOCKS_GUARD:
                 generation, scope = authorization_generation(), workspace_scope()
             if request.path == "/api/settings":
-                result = CLOUD_STATE.preferences(scope)
+                result = CLOUD_STATE.preferences_snapshot(scope)
                 if generation != authorization_generation():
                     raise AccountError("revoked", "账号已改变，请重新读取设置")
-                return self.send_json({"settings": result, "authorizationGeneration": generation})
+                return self.send_json({**result, "authorizationGeneration": generation})
             query = urllib.parse.parse_qs(request.query)
             works, authors = (list(dict.fromkeys(filter(None, query.get(key, [""])[0].split(",")))) for key in ("works", "authors"))
             if len(works) + len(authors) > 240 or any(not valid_pixiv_id(value) for value in works + authors):
@@ -4267,8 +4278,8 @@ class Handler(SimpleHTTPRequestHandler):
                     generation = authorization_generation()
                     if type(data.get("authorizationGeneration")) is not int or data["authorizationGeneration"] != generation:
                         raise AccountError("revoked", "账号已改变，请重新打开设置")
-                    settings = CLOUD_STATE.save_preferences(workspace_scope(), changes)
-                return self.send_json({"settings": settings, "authorizationGeneration": generation})
+                    settings = CLOUD_STATE.save_preferences_snapshot(workspace_scope(), changes)
+                return self.send_json({**settings, "authorizationGeneration": generation})
             generation = self._cloud_generation(data)
             if action == "clear-cache":
                 with CLOUD.lock:
@@ -4783,12 +4794,15 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(pixiv_error_payload("图片代理", exc), 502)
 
     def do_POST(self):
-        path = urllib.parse.urlsplit(self.path).path
-        # Relationship confirmation follows account identity; scans also publish browsing rows.
-        if path == "/api/cloud/sync":
-            with browsing_request():
-                return self._dispatch_post()
-        return self._dispatch_post()
+        try:
+            path = urllib.parse.urlsplit(self.path).path
+            # Relationship confirmation follows account identity; scans also publish browsing rows.
+            if path == "/api/cloud/sync":
+                with browsing_request():
+                    return self._dispatch_post()
+            return self._dispatch_post()
+        except (OSError, AccountError) as error:
+            return self._local_operation_error(error)
 
     def _dispatch_post(self):
         if BACKEND_STOP.is_set():

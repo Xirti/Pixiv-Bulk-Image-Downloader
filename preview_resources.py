@@ -64,9 +64,13 @@ class PreviewResources:
         if event is not None and event.is_set():
             raise PreviewCancelledError("动图预览已取消")
 
-    @staticmethod
-    def _copy(value):
-        return value if isinstance(value, bytes) else copy.deepcopy(value)
+    def _copy_result(self, value, generation, cancel_event):
+        result = value if isinstance(value, bytes) else copy.deepcopy(value)
+        self._check_cancel(cancel_event)
+        with self._lock:
+            if generation != self._generation:
+                raise PreviewCancelledError("动图预览缓存已清理")
+        return result
 
     def get(self, key: tuple, load: Callable[[threading.Event], object], *,
             ttl: float, cancel_event: threading.Event | None = None):
@@ -82,22 +86,25 @@ class PreviewResources:
                 cached = self._cache.get(key)
                 if cached is not None:
                     self._cache.move_to_end(key)
-                    return self._copy(cached[1])
-                job = self._loads.get(key)
-                if job is None:
-                    if len(self._loads) >= self._max_loads:
-                        raise PreviewBusyError("动图预览繁忙，请稍后再试")
-                    job = _Load(self._generation, _ConsumerCancellation(self._lock))
-                    self._loads[key] = job
-                    try:
-                        threading.Thread(target=copy_context().run, args=(self._run, key, job, load, ttl),
-                                         name="moku-preview", daemon=True).start()
-                    except Exception:
-                        del self._loads[key]
-                        raise
-                if not job.stop.is_set():
-                    job.stop.consumers[consumer] = cancel_event
-                    break
+                    generation = self._generation
+                else:
+                    job = self._loads.get(key)
+                    if job is None:
+                        if len(self._loads) >= self._max_loads:
+                            raise PreviewBusyError("动图预览繁忙，请稍后再试")
+                        job = _Load(self._generation, _ConsumerCancellation(self._lock))
+                        self._loads[key] = job
+                        try:
+                            threading.Thread(target=copy_context().run, args=(self._run, key, job, load, ttl),
+                                             name="moku-preview", daemon=True).start()
+                        except Exception:
+                            del self._loads[key]
+                            raise
+                    if not job.stop.is_set():
+                        job.stop.consumers[consumer] = cancel_event
+                        break
+            if cached is not None:
+                return self._copy_result(cached[1], generation, cancel_event)
             # A fully cancelled load cannot be reused or replaced while its
             # socket is still closing; wait without consuming another worker.
             job.done.wait(.05)
@@ -108,7 +115,7 @@ class PreviewResources:
             if job.error is not None:
                 raise job.error
             self._check_cancel(job.stop)
-            return self._copy(job.value)
+            return self._copy_result(job.value, job.generation, cancel_event)
         finally:
             with self._lock:
                 del job.stop.consumers[consumer]
