@@ -100,7 +100,7 @@ globalThis.createArtistPage = function ({root,fetchJson,nextRequestId,cancelRequ
     changed();
   }
   function setWorks(){setSort("default");}
-  function restore(snapshot){suspend();state=snapshot?structuredClone(snapshot):empty();if(!["default","popular"].includes(state.sort))state.sort="default";render();resume();}
+  function restore(snapshot,{resumeReads=true}={}){suspend();state=snapshot?structuredClone(snapshot):empty();if(!["default","popular"].includes(state.sort))state.sort="default";render();if(resumeReads)resume();}
   function resume(){if(state.paused)return;if(state.kind==="profile" && (!state.profile || !state.overview))showProfile(state.userId);else if(state.kind==="candidates"){begin();void hydrateCandidates();}}
   document.addEventListener("selectionchange",()=>{if(renderPending && !mokuHasSelectedText(root))render();});
   return {showName,showProfile,prepareProfile,clear,suspend,resume,setWorks,setSort,setLoading,snapshot:()=>structuredClone(state),restore};

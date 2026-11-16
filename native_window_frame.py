@@ -40,9 +40,6 @@ class NativeWindowFrame:
         self.comctl32 = ctypes.WinDLL("comctl32", use_last_error=True)
         self.user32.GetDpiForWindow.argtypes = [wintypes.HWND]
         self.user32.GetDpiForWindow.restype = wintypes.UINT
-        self.user32.AdjustWindowRectExForDpi.argtypes = [ctypes.POINTER(wintypes.RECT), wintypes.DWORD,
-                                                       wintypes.BOOL, wintypes.DWORD, wintypes.UINT]
-        self.user32.AdjustWindowRectExForDpi.restype = wintypes.BOOL
         self.user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
         self.user32.SendMessageW.restype = ctypes.c_ssize_t
         self.user32.IsZoomed.argtypes = [wintypes.HWND]
@@ -95,8 +92,16 @@ class NativeWindowFrame:
             self.user32.ReleaseCapture()
             self.user32.SendMessageW(self.hwnd, 0x00A1, 2, self.user32.GetMessagePos())
 
+    def resize(self, edge: int) -> None:
+        # WebView owns the client pixels, so its edge press starts the native size loop.
+        if not self.maximized and self.user32.GetAsyncKeyState(1) & 0x8000:
+            self.user32.ReleaseCapture()
+            self.user32.SendMessageW(self.hwnd, 0x0112, 0xF000 | edge, 0)
+
     def _window_proc(self, hwnd, message, wparam, lparam, subclass_id, reference) -> int:
         try:
+            if message == 0x0083:  # WM_NCCALCSIZE: the custom caption fills the window.
+                return 0
             if message == 0x0319 and self.browser_navigation:  # WM_APPCOMMAND from mouse drivers.
                 command = (lparam >> 16) & 0x0FFF
                 if command in {1, 2} and self.browser_navigation(-1 if command == 1 else 1):
@@ -131,18 +136,11 @@ class NativeWindowFrame:
                 info.size = ctypes.sizeof(info)
                 if not self.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
                     raise ctypes.WinError(ctypes.get_last_error())
-                dpi = self.user32.GetDpiForWindow(hwnd)
-                frame = wintypes.RECT()
-                style = self.user32.GetWindowLongW(hwnd, -16)
-                extended_style = self.user32.GetWindowLongW(hwnd, -20)
-                if not self.user32.AdjustWindowRectExForDpi(ctypes.byref(frame), style, False, extended_style, dpi):
-                    raise ctypes.WinError(ctypes.get_last_error())
-                x_frame, y_frame = -frame.left, -frame.top
                 limits = ctypes.cast(lparam, ctypes.POINTER(_MinMaxInfo)).contents
-                limits.max_position.x = info.work.left - info.monitor.left - x_frame
-                limits.max_position.y = info.work.top - info.monitor.top - y_frame
-                limits.max_size.x = info.work.right - info.work.left + 2 * x_frame
-                limits.max_size.y = info.work.bottom - info.work.top + 2 * y_frame
+                limits.max_position.x = info.work.left - info.monitor.left
+                limits.max_position.y = info.work.top - info.monitor.top
+                limits.max_size.x = info.work.right - info.work.left
+                limits.max_size.y = info.work.bottom - info.work.top
                 return result
             if message == 0x0082:  # WM_NCDESTROY: detach before forwarding destruction.
                 self.comctl32.RemoveWindowSubclass(hwnd, self._callback, _SUBCLASS_ID)

@@ -382,7 +382,10 @@ class DesktopApi:
         return result
 
     def window_action(self, action: str) -> dict:
-        if not isinstance(action, str) or action not in {"state", "drag", "minimize", "toggle-maximize", "close"}:
+        resize_edges = {"resize-left": 1, "resize-right": 2, "resize-top": 3,
+                        "resize-top-left": 4, "resize-top-right": 5, "resize-bottom": 6,
+                        "resize-bottom-left": 7, "resize-bottom-right": 8}
+        if not isinstance(action, str) or action not in {"state", "drag", "minimize", "toggle-maximize", "close", *resize_edges}:
             return {"ok": False, "error": "窗口操作无效"}
         if self._window is None:
             return {"ok": False, "error": "桌面窗口尚未准备好"}
@@ -394,6 +397,8 @@ class DesktopApi:
                 frame = self._window._native_frame
                 if action == "drag":
                     frame.drag()
+                elif action in resize_edges:
+                    frame.resize(resize_edges[action])
                 elif action == "minimize":
                     frame.command(0xF020)
                 elif action == "toggle-maximize":

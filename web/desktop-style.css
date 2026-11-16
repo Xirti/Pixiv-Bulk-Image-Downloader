@@ -33,6 +33,11 @@ body>.app-header,.desktop-window body>.app-header{height:48px;min-height:48px;pa
 .compact-chrome .window-controls button{height:28px;min-height:28px}
 .compact-chrome .window-controls svg{width:12px;height:12px}
 .desktop-window .head-actions{flex-wrap:nowrap}
+.desktop-window[data-window-resize=top],.desktop-window[data-window-resize=bottom]{cursor:ns-resize}
+.desktop-window[data-window-resize=left],.desktop-window[data-window-resize=right]{cursor:ew-resize}
+.desktop-window[data-window-resize=top-left],.desktop-window[data-window-resize=bottom-right]{cursor:nwse-resize}
+.desktop-window[data-window-resize=top-right],.desktop-window[data-window-resize=bottom-left]{cursor:nesw-resize}
+.desktop-window[data-window-resize] *{cursor:inherit!important}
 .desktop-window .workspace-bar,.desktop-window .basket-bar,.desktop-window .all-viewer .viewer-bar{padding-right:24px}
 .brand{flex:none}
 .head-actions{white-space:nowrap}

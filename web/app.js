@@ -119,6 +119,8 @@ function showAppDialog(modal) {
 }
 
 function syncWindowState(state) {
+  document.documentElement.classList.toggle("window-maximized", state.maximized);
+  if (state.maximized) delete document.documentElement.dataset.windowResize;
   const button = $("#windowMaximize");
   button.dataset.maximized = String(state.maximized);
   const label = state.maximized ? "还原窗口" : "最大化窗口";
@@ -152,6 +154,28 @@ windowControls.querySelectorAll("[data-window-action]").forEach(button => {
     else void performWindowAction(button.dataset.windowAction);
   };
 });
+
+function windowResizeEdge(event) {
+  if (windowControls.hidden || document.documentElement.classList.contains("window-maximized")) return "";
+  const vertical = event.clientY < 5 ? "top" : event.clientY >= innerHeight - 5 ? "bottom" : "";
+  const horizontal = event.clientX < 5 ? "left" : event.clientX >= innerWidth - 5 ? "right" : "";
+  return [vertical, horizontal].filter(Boolean).join("-");
+}
+document.addEventListener("mousemove", event => {
+  const edge = windowResizeEdge(event), html = document.documentElement;
+  if (edge) {
+    if (html.dataset.windowResize !== edge) html.dataset.windowResize = edge;
+  } else delete html.dataset.windowResize;
+});
+document.addEventListener("mousedown", event => {
+  const edge = windowResizeEdge(event);
+  if (event.button !== 0 || !edge) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  void performWindowAction(`resize-${edge}`);
+}, true);
+document.addEventListener("mouseleave", () => { delete document.documentElement.dataset.windowResize; });
+window.addEventListener("blur", () => { delete document.documentElement.dataset.windowResize; });
 document.querySelectorAll(".app-header, .viewer-bar, .workspace-bar").forEach(header => {
   const draggable = event => !windowControls.hidden
     && !event.target.closest("button, a, input, select, textarea, label, [contenteditable]");
@@ -727,6 +751,7 @@ async function getRequestToken() {
         if (data.protocolVersion !== 5 || data.applicationId !== "MOKU.PixivTagGallery") throw new Error("MOKU 后端版本过旧，请关闭当前窗口并重新启动 MOKU");
         if (!data.requestToken) throw new Error("本机请求授权未初始化");
         requestToken = data.requestToken;
+        $("#appVersion").textContent = `MOKU · v${data.version}`;
         if (data.animationFormats) animationFormats = data.animationFormats;
         return requestToken;
       })
@@ -2440,7 +2465,7 @@ async function restorePageState(state) {
   closeAllViewer();closeBasketPage();invalidateDetailView();clearDetail();
   setWorkspace(["account","discovery","history","reverse"].includes(state.baseView)?state.baseView:null);
   searchSurface=state.searchSurface;accountOrigin=Boolean(state.accountOrigin);
-  artistPage.restore(state.artist);
+  artistPage.restore(state.artist,{resumeReads:state.baseView==="gallery"});
   for(const id of ["tag","safety","workType","datePreset","startDate","endDate"])$(`#${id}`).value=state.form[id];
   $("#includeAi").checked=state.form.includeAi;$("#fuzzySearch").checked=state.form.fuzzySearch;
   syncSearchKind();syncDateInputs();
@@ -2581,7 +2606,7 @@ function setWorkspace(view) {
   if (view !== "download") normalDetailView.suspend();
   if (activeWorkspace === "history" && view !== "history") historyView.close();
   activeWorkspace = view;
-  if(view)artistPage.suspend();
+  if(view || searchSurface!=="gallery")artistPage.suspend();
   else if(!searchPending && !pageHistory?.status().restoring)artistPage.resume();
   for (const name of ["download", "history", "account", "discovery", "reverse"]) $(`#${name}Page`).hidden = name !== view;
   ugoiraPreview.stop();

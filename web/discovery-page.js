@@ -165,11 +165,12 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     const target={...state,...options};
     if(target.kind!=='following')target.scope='all';
     if(target.kind!=='ranking')target.rank='day';else target.mode='safe';
-    const key=sourceKey(target),choice=browse.order(target.kind),fresh=staged.get(key);
+    const key=sourceKey(target),previousKey=sourceKey(state),choice=browse.order(target.kind),fresh=staged.get(key);
     const normal=positions.get(key),popular=sortViews.get(`${key}:popular`);
     const saved=fresh || (choice==='popular' && popular?.state.batch===normal?.state.batch?popular:null) || normal;
     state=saved?structuredClone(saved.state):{...target,offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:''};
-    state.choice=choice;state.waiting=manual();data=startedSources.has(key)?saved?.data || null:null;restoreTop=saved?.scroll || 0;error='';
+    state.choice=choice;state.waiting=manual();data=startedSources.has(key)?saved?.data || null:null;restoreTop=key===previousKey?saved?.scroll || 0:0;error='';
+    if(key!==previousKey)root.scrollTop=0;
     if(!signedIn()){data=null;pending=false;render();return;}
     if(manual() && !options.refresh){render();void prepare({network:false});return;}
     await startLoad({refresh:Boolean(options.refresh) || followingDirty.has(key)});

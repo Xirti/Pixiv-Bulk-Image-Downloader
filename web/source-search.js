@@ -2,7 +2,7 @@
 
 globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,changed,openArtwork,preview,openExternal,allowed,installImages=()=>{}}) {
   const find=selector=>root.querySelector(selector), setting=selector=>settingsRoot.querySelector(selector);
-  let file=null, imageUrl="", job=null, busy=false, sequence=0, timer=null, clickTimer=null;
+  let file=null, imageUrl="", job=null, busy=false, sequence=0, timer=null, clickTimer=null, polling=null;
   let configuration={mode:"guest",keyConfigured:false}, settingsLoaded=false;
   let maskSensitive=true;
   const revealed = createSensitiveImageReveals({root,onHide:()=>render()});
@@ -85,17 +85,20 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     job=data;busy=["queued","searching","verification"].includes(job.state);
     message(job.message,job.state==="error");render();changed();
   }
-  async function poll(revision){
-    if(revision!==sequence || !job?.id)return;
-    try{
-      const data=await request(`/api/source-search/job?id=${encodeURIComponent(job.id)}`);
+  function poll(revision){
+    if(revision!==sequence || !job?.id)return Promise.resolve();
+    if(polling?.revision===revision)return polling.promise;
+    clearTimeout(timer);timer=null;
+    const owner={revision,promise:null};polling=owner;
+    owner.promise=request(`/api/source-search/job?id=${encodeURIComponent(job.id)}`).then(data=>{
       if(revision!==sequence)return;
       apply(data);
       if(busy)timer=setTimeout(()=>void poll(revision),1500);
-    }catch(error){
+    }).catch(error=>{
       if(revision!==sequence)return;
-      busy=false;message(`${error.message}。可点击「读取状态」重试，查询不会重复提交。`,true);controls();
-    }
+      message(`${error.message}。可点击「读取状态」重试，查询不会重复提交。`,true);controls();
+    }).finally(()=>{if(polling===owner)polling=null;});
+    return owner.promise;
   }
   async function search(){
     if(!allowed() || !file || busy)return;
@@ -190,8 +193,13 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   find("[data-source-read]").onclick=()=>{if(job?.id){clearTimeout(timer);void poll(sequence);}else message("还没有发起查询，请先选择图片。");};
   find("[data-source-cancel]").onclick=async()=>{
     if(!job?.id)return;
-    try{await post("cancel",{id:job.id});clearTimeout(timer);sequence++;apply({...job,state:"cancelled",message:"已取消查询；已发出的请求可能仍计入额度"});}
-    catch(error){message(error.message,true);}
+    const revision=sequence,id=job.id;
+    try{
+      const result=await post("cancel",{id});
+      if(revision!==sequence || job?.id!==id)return;
+      clearTimeout(timer);sequence++;
+      apply(result.job || {...job,state:"cancelled",message:"已取消查询；已发出的请求可能仍计入额度"});
+    }catch(error){if(revision===sequence && job?.id===id)message(error.message,true);}
   };
   root.addEventListener("dragover",event=>{if(event.dataTransfer.types.includes("Files")){event.preventDefault();root.classList.add("is-dragging");}});
   root.addEventListener("dragleave",event=>{if(!root.contains(event.relatedTarget))root.classList.remove("is-dragging");});
@@ -236,11 +244,13 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     snapshot:()=>({job,imageUrl,name:find("[data-source-file-name]").textContent,epoch:cacheEpoch}),
     restore(state){
       clearTimeout(timer);clearTimeout(clickTimer);sequence++;
-      if(imageUrl!==state?.imageUrl){file=null;find("[data-source-file]").value="";}
-      job=state?.epoch===cacheEpoch?state.job:null;imageUrl=state?.imageUrl || "";
+      const savedImage=state?.imageUrl || "",expired=Boolean(savedImage) && !urls.includes(savedImage);
+      if(imageUrl!==savedImage || expired){file=null;find("[data-source-file]").value="";}
+      job=state?.epoch===cacheEpoch?state.job:null;imageUrl=expired?"":savedImage;
       const image=find("[data-source-input-image]");image.hidden=!imageUrl;if(imageUrl)image.src=imageUrl;else image.removeAttribute("src");
       find("[data-source-file-name]").textContent=state?.name || "选择、拖入或粘贴图片";
-      busy=Boolean(job && ["queued","searching","verification"].includes(job.state));render();message(job?.message || "选择图片后，点击上传查询。");
+      busy=Boolean(job && ["queued","searching","verification"].includes(job.state));render();
+      message(expired?[job?.message,"图片预览已释放，重新查询请选择图片。"].filter(Boolean).join(" · "):job?.message || "选择图片后，点击上传查询。");
       if(busy)void poll(sequence);
     },
     refresh(){

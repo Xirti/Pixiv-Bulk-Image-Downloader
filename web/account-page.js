@@ -21,7 +21,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   const pendingUpdateScopes=new Set();
   let relationVersion=0;
   let scrollFrame=null,restoringScroll=false,restoreTop=null;
-  function remember(){if(active && !restoringScroll){state.scroll=root.scrollTop;positions.set(state.view,structuredClone(state));}}
+  function remember(){
+    if(!active)return;
+    if(!restoringScroll)state.scroll=root.scrollTop;
+    positions.set(state.view,structuredClone(state));
+  }
   const pageKey=()=>JSON.stringify([state.view,state.scope,state.tag,state.offset,mode()]);
   function cachePage(key,value){
     cache.delete(key);cache.set(key,value);
@@ -361,7 +365,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     remember();
     const same=view===state.view;
     const saved=!same && !Object.keys(options).length?positions.get(view):null;
-    state=saved?structuredClone(saved):{view,scope:options.scope || (same?state.scope:scopes[view] || "public"),tag:options.tag ?? (same?state.tag:""),
+    state=saved?{...structuredClone(saved),scroll:0}:{view,scope:options.scope || (same?state.scope:scopes[view] || "public"),tag:options.tag ?? (same?state.tag:""),
       offset:options.offset ?? 0,page:options.page ?? 1,trail:options.trail || [],scroll:0};
     restoreTop=state.scroll;
     if(scopes[view]!==undefined)scopes[view]=state.scope;

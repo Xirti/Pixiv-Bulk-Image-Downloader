@@ -50,7 +50,7 @@
 
 运行环境为 **Windows 10/11 x64**，需要 Microsoft Edge WebView2 Runtime 和可访问 Pixiv 的网络。
 
-1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 选择安装版 `MOKU-Setup-v2.1.6-windows-x64.exe` 或便携版 `MOKU-v2.1.6-windows-x64.zip`。
+1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 选择安装版 `MOKU-Setup-v2.1.7-windows-x64.exe` 或便携版 `MOKU-v2.1.7-windows-x64.zip`。
 2. 安装后启动 MOKU，或完整解压便携包后运行 `MOKU/MOKU.exe`。
 3. 打开「我的账号 → 资料」，选择 App 授权或网页登录，完成 Pixiv 登录。
 4. 搜索或进入「发现」，查看作品，将需要下载的图片加入采集篮。
@@ -79,12 +79,12 @@
 - **调整内容显示** — 网页登录后，在「设置 → 账号与通知 → Pixiv 浏览设置」调整 R-18／R-18G、敏感作品和 AI 作品显示，修改自动保存到 Pixiv。
 - **导出动图** — MP4 导出需要支持 `libx264` 的 FFmpeg，将其加入 `PATH` 后启动 MOKU。
 
-## v2.1.6
+## v2.1.7
 
-- 优化缓存命中、账号页滚动和下载任务登记，减少重复计算与公共锁等待。
-- 修复账号同步、关注收藏和设置保存的并发覆盖，稳定列表状态与统计。
-- 加固搜索、作者候选、收藏标签和关注更新分页，保留续页检查点。
-- 完善预览取消、缓存清理与损坏动图处理，改善连续浏览体验。
+- 修复账号板块与发现来源切换时的位置跳动，返回页面恢复原有位置。
+- 改善窗口边缘缩放与光标反馈，消除非最大化窗口顶部细线。
+- 合并搜图状态读取，完善取消、失败重试和历史图片恢复。
+- 修复更新轮询、原生重启和官网关注弹窗的迟到响应覆盖。
 
 完整记录见 [更新日志](RELEASE_NOTES.md)。
 

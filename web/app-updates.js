@@ -9,6 +9,10 @@ globalThis.createAppUpdates=function({root,request,beforeRestart,report,openUpda
   const progress=root.querySelector("[data-update-progress]");
   let state=null,reading=false,acting=false,timer=null,sequence=0,announced=null;
   const busy=()=>state && ["checking","downloading","verifying","restarting"].includes(state.phase);
+  function scheduleRead(delay){
+    if(timer!==null)clearTimeout(timer);
+    timer=setTimeout(()=>{timer=null;void read();},delay);
+  }
   function render(){
     const phase=state.phase,release=state.release;
     check.disabled=acting || busy();channel.disabled=acting || busy();automatic.disabled=acting || busy();
@@ -31,26 +35,35 @@ globalThis.createAppUpdates=function({root,request,beforeRestart,report,openUpda
       if(completed!==announced){announced=completed;notice.show(release.version);}
     }
     if(!release)notice.clear();
-    if(timer){clearTimeout(timer);timer=null;}
-    if(busy() && phase!=="restarting")timer=setTimeout(()=>void read(),750);
+    if(busy() && phase!=="restarting")scheduleRead(750);
+    else{clearTimeout(timer);timer=null;}
   }
   async function read(){
     if(reading || acting)return;reading=true;const revision=++sequence;
     try{const value=await request("/api/updates");if(revision===sequence){state=value;render();}}
-    catch(error){status.textContent=error.message;if(state && busy())timer=setTimeout(()=>void read(),3000);}
-    finally{reading=false;}
+    catch(error){
+      if(revision===sequence){status.textContent=error.message;if(busy())scheduleRead(3000);}
+    }finally{
+      reading=false;
+      if(busy() && state.phase!=="restarting" && timer===null)scheduleRead(750);
+    }
   }
   async function act(action,extra={}){
-    if(acting)return;acting=true;++sequence;if(state)render();
+    if(!beginAction())return;
     try{state=await request("/api/updates",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,...extra})});}
     catch(error){report(error.message);}
     finally{acting=false;if(state)render();}
+  }
+  function beginAction(){
+    if(acting)return false;
+    acting=true;++sequence;if(state)render();
+    return true;
   }
   check.onclick=()=>void act("check");download.onclick=()=>void act("download");cancel.onclick=()=>void act("cancel");
   channel.onchange=()=>void act("configure",{options:{channel:channel.value}});
   automatic.onchange=()=>void act("configure",{options:{automatic:automatic.checked}});
   restart.onclick=async()=>{
-    if(acting)return;acting=true;render();
+    if(!beginAction())return;
     try{
       await beforeRestart();
       if(!window.pywebview?.api?.restart_update)throw Error("请在 MOKU 桌面窗口中重启更新");

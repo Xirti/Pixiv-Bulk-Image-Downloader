@@ -323,7 +323,7 @@ class SourceSearch:
             job = self.jobs.get(identity)
             if job and job["state"] not in {"done", "error", "cancelled"}:
                 job.update(state="cancelled", image=b"", message="已取消查询；已发出的请求可能仍计入额度")
-            return {"ok": True}
+            return {"ok": True, "job": self.snapshot(identity) if job else None}
 
     def _opener(self):
         class NoRedirect(urllib.request.HTTPRedirectHandler):

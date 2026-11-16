@@ -210,8 +210,15 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
         const result=await official(id);
         if(revision!==epoch)return;
         if(!result.ok)throw new Error(result.error || "官网窗口暂不可用");
-        const state=await read(kind,id);changed(kind,id,state);close();refresh();report("官网状态已重新核对");
-      }catch(error){if(revision===epoch && popup)popup.querySelector("[data-cloud-error]").textContent=error.message;}
+        const state=await read(kind,id);changed(kind,id,state);
+        if(version===popupVersion)close();
+        refresh();report("官网状态已重新核对");
+      }catch(error){
+        if(revision===epoch){
+          if(popup && version===popupVersion)popup.querySelector("[data-cloud-error]").textContent=error.message;
+          else report(error.message);
+        }
+      }
       finally{button.disabled=false;}
     };
     popup.append(button);position();
