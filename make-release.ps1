@@ -1,6 +1,7 @@
 param(
   [switch]$SkipBuild,
   [switch]$Development,
+  [string]$VerificationRecord = $env:MOKU_VERIFICATION_RECORD,
   [string]$ReleaseKey = $env:MOKU_RELEASE_KEY,
   [string]$CodeSignThumbprint = $env:MOKU_CODESIGN_THUMBPRINT,
   [uri]$TimestampUrl
@@ -9,12 +10,15 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $Root
 if (-not $Development) {
+  if (-not $VerificationRecord) { throw 'Formal releases require -VerificationRecord (or MOKU_VERIFICATION_RECORD) from the engineering verification run.' }
+  python -B release_verification.py verify $VerificationRecord
+  if ($LASTEXITCODE -ne 0) { throw 'Engineering verification failed; run the source-matched checks again.' }
   if (-not $ReleaseKey) { throw 'Release requires a signing key; unsigned CI artifacts must use -Development.' }
   python -B sign-release.py check-key --key $ReleaseKey
   if ($LASTEXITCODE -ne 0) { throw 'Release signing key preflight failed' }
 }
 if (-not $SkipBuild) {
-  & (Join-Path $Root 'build-portable.ps1') -Development:$Development -ReleaseKey $ReleaseKey -CodeSignThumbprint $CodeSignThumbprint -TimestampUrl $TimestampUrl
+  & (Join-Path $Root 'build-portable.ps1') -Development:$Development -VerificationRecord $VerificationRecord -ReleaseKey $ReleaseKey -CodeSignThumbprint $CodeSignThumbprint -TimestampUrl $TimestampUrl
   if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 }
 $Tag = (python -B -c 'from edition_profile import RELEASE_TAG; print(RELEASE_TAG)').Trim()
@@ -24,6 +28,8 @@ $Exe = Join-Path $Dist 'MOKU.exe'
 python -B build_manifest.py verify (Join-Path $Dist 'BUILD_MANIFEST.json') $Exe
 if ($LASTEXITCODE -ne 0) { throw 'Manifest verification failed' }
 if (-not $Development) {
+  python -B release_verification.py verify $VerificationRecord --manifest (Join-Path $Dist 'BUILD_MANIFEST.json')
+  if ($LASTEXITCODE -ne 0) { throw 'Package verification evidence differs from current source.' }
   python -B sign-release.py verify-bundle --root $Dist --version $Tag.Substring(1)
   if ($LASTEXITCODE -ne 0) { throw 'Signed bundle verification failed' }
 }

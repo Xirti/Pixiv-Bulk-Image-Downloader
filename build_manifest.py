@@ -65,6 +65,7 @@ BUILD_INPUT_FILES = (
     "USAGE.md",
     "RELEASE_NOTES.md",
     "build_manifest.py",
+    "release_verification.py",
     "generate-third-party-licenses.py",
     "PRIVACY.md",
     "SECURITY.md",

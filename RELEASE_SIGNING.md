@@ -37,13 +37,18 @@ python -B sign-release.py import-backup --key '<新的独立目录>\release-ed25
 
 ## 发布流程
 
+先在维护环境执行工程验证，取得 `release-verification.json`。记录绑定当前源码、构建脚本、文档及三个检查组的证据摘要，检查组为静态契约、核心回归、真实页面交接。源码或证据变化后重新验证。验证脚本和证据保存在维护工作区，不进入用户包。
+
 ```powershell
+$env:MOKU_VERIFICATION_RECORD = '<工程验收目录>\release-verification.json'
 ./build-portable.ps1 -ReleaseKey '<私钥文件>'
 ./make-release.ps1 -SkipBuild -ReleaseKey '<私钥文件>'
 ./build-installer.ps1 -SkipBuild -Compiler '<Inno Setup 7 的 ISCC.exe 路径>'
 ```
 
-顺序固定：构建 → 可选 Windows 代码签名 → 计算文件摘要 → 签署 schema-4 清单 → 验证 → 压缩 → 签署发布元数据。
+也可向每个入口传入 `-VerificationRecord '<记录路径>'`。正式便携构建、压缩发行和安装构建都核对记录，`-SkipChecks` 与 `-SkipBuild` 仍需通过这项检查。复用组件时，还会核对其 `BUILD_MANIFEST.json` 是否来自同一份已验证源码。开发构建继续使用 `-Development`。
+
+顺序固定：工程验证 → 构建 → 可选 Windows 代码签名 → 计算文件摘要 → 签署 schema-4 清单 → 验证 → 压缩 → 签署发布元数据。首次注册公钥或更改版本号须在工程验证前完成。
 
 发布目录中的 ZIP、`MOKU-update.json`、`MOKU-update.sig.json` **必须作为同一个 GitHub Release 的资产上传**。安装程序位于 `release/installer-v版本号/`，将安装 EXE 一同上传。便携版和安装版均从同一份 `dist/MOKU/` 组件构建。保留其他说明和摘要文件。签名后不要改文件或重新压缩；需要改动就提高版本号并重新构建、签名。此工具不会自动上传、推送或发布。
 

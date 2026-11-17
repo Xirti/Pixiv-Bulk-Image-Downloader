@@ -1,6 +1,7 @@
 param(
   [switch]$SkipChecks,
   [switch]$Development,
+  [string]$VerificationRecord = $env:MOKU_VERIFICATION_RECORD,
   [string]$ReleaseKey = $env:MOKU_RELEASE_KEY,
   [string]$CodeSignThumbprint = $env:MOKU_CODESIGN_THUMBPRINT,
   [uri]$TimestampUrl
@@ -9,6 +10,10 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $Root
 if (-not $Development) {
+  if (-not $VerificationRecord) { throw 'Formal builds require -VerificationRecord (or MOKU_VERIFICATION_RECORD) from the engineering verification run. Use -Development for local builds.' }
+  $VerifiedSource = python -B release_verification.py verify $VerificationRecord
+  if ($LASTEXITCODE -ne 0) { throw 'Engineering verification failed; run the source-matched checks again.' }
+  $VerifiedSource = "$VerifiedSource".Trim()
   if (-not $ReleaseKey) { throw 'Signed build requires -ReleaseKey (or MOKU_RELEASE_KEY). Use -Development explicitly for an unsigned local build.' }
   python -B sign-release.py check-key --key $ReleaseKey
   if ($LASTEXITCODE -ne 0) { throw 'Release signing key preflight failed' }
@@ -37,6 +42,7 @@ print(f"Python syntax verified: {len(paths)} files")
 }
 $SourceBefore = (python -B build_manifest.py source).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Source fingerprint failed' }
+if (-not $Development -and $SourceBefore -ne $VerifiedSource) { throw 'Source inputs changed after verification; run verification again.' }
 $PreviousPolicy = $env:MOKU_SIGNED_BUILD
 try {
   $env:MOKU_SIGNED_BUILD = $(if ($Development) { '0' } else { '1' })

@@ -6,8 +6,6 @@ from __future__ import annotations
 import json
 import queue
 import copy
-import ctypes
-from ctypes import wintypes
 import hashlib
 import hmac
 import http.client
@@ -29,11 +27,11 @@ import weakref
 import winreg
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -48,11 +46,19 @@ from auth_store import (
 from folder_picker import select_folder
 from login_context import load_login_context, parse_login_context, save_login_context
 from download_requests import DownloadRequestError, DownloadRequests
+from download_admission import DownloadAdmission
+from http_routes import POST_ROUTES, DESKTOP_AUTH_PATHS
+from file_publish import (
+    PublishedFileOwnership, PublishRollbackError, create_staged_file,
+    discard_staging, owned_staging_batch, publish_staged_files,
+    reject_reparse_components, secure_staging_directory,
+)
 from download_pipeline import DownloadAhead, DownloadSource, consume_downloads, stream_downloads
 from download_history import DownloadHistory, history_path
 from local_catalog import LocalCatalog
 from workspace_store import TaskConflictError, TaskCapacityError, WorkspaceCapacityError, WorkspaceStore
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
+from read_scope import ReadScopes
 from ugoira_export import MAX_ARCHIVE_BYTES as MAX_UGOIRA_BYTES, MAX_EXPANDED_BYTES as MAX_UGOIRA_TEMP_BYTES, UgoiraCancelledError, UgoiraExportError, export_formats, export_ugoira, require_mp4_encoder
 from request_coordinator import REQUEST_PRIORITY, RequestCoordinator, RequestDeferredError, RequestBlockedError
 from browser_transport import BrowserTransport
@@ -121,7 +127,6 @@ FOLDER_PICKER_LOCK = threading.Lock()
 # Single-artwork and batch requests share this process-wide limiter. The HTTP
 # server may create many request threads, but only a small bounded number may
 # consume Pixiv bandwidth and local staging/publish resources at once.
-DOWNLOAD_TASK_SLOTS = threading.BoundedSemaphore(MAX_ACTIVE_DOWNLOAD_TASKS)
 DOWNLOAD_REQUESTS = DownloadRequests(path=history_path().with_name("requests.sqlite3"))
 DOWNLOAD_HISTORY = DownloadHistory(history_path())
 LOCAL_CATALOG = LocalCatalog(history_path().with_name("catalog.sqlite3"))
@@ -132,6 +137,10 @@ AUTH_METHOD = AuthMethod(history_path().with_name("auth-method.json"))
 SOURCE_SEARCH = SourceSearch(history_path().with_name("source-search"), proxy=lambda: PIXIV_PROXY)
 APP_UPDATES = AppUpdates(history_path().with_name("app-updates.json"))
 DOWNLOAD_AHEAD = DownloadAhead(capacity=2)
+DOWNLOAD_ADMISSION = DownloadAdmission(
+    updates=APP_UPDATES, ahead=DOWNLOAD_AHEAD,
+    network_ready=lambda: ensure_network_opener_current(), capacity=MAX_ACTIVE_DOWNLOAD_TASKS,
+)
 MAX_AHEAD_BYTES = 1024 * 1024 * 1024
 
 
@@ -157,9 +166,6 @@ SEARCH_NETWORK_POOL = ThreadPoolExecutor(
     max_workers=MAX_SEARCH_NETWORK_WORKERS,
     thread_name_prefix="moku-pixiv-search",
 )
-# Network reads remain concurrent. This lock covers only the final local
-# publish/exact-object rollback transaction shared by request threads.
-PUBLISH_TRANSACTION_LOCK = threading.Lock()
 HTTP_LOG = logging.getLogger("moku.http")
 
 
@@ -375,7 +381,7 @@ def register_search_request(request_id: str) -> threading.Event:
         return event
 
 
-def cancel_search_request(request_id: str) -> bool:
+def cancel_search_request(request_id: object) -> bool:
     clean = parse_search_request_id(request_id, required=True)
     now = time.monotonic()
     with SEARCH_REQUESTS_LOCK:
@@ -400,6 +406,17 @@ def release_search_request(request_id: str, event: threading.Event) -> None:
             SEARCH_REQUESTS.pop(request_id, None)
 
 
+@contextmanager
+def tracked_search_request(request_id: str):
+    event = register_search_request(request_id) if request_id else None
+    try:
+        raise_if_search_cancelled(event)
+        yield event
+    finally:
+        if event is not None:
+            release_search_request(request_id, event)
+
+
 def cancel_all_search_requests() -> None:
     with SEARCH_REQUESTS_LOCK:
         for entry in SEARCH_REQUESTS.values():
@@ -411,6 +428,15 @@ def raise_if_search_cancelled(cancel_event: threading.Event | None) -> None:
     check_browsing_request()
     if BACKEND_STOP.is_set() or cancel_event is not None and cancel_event.is_set():
         raise SearchCancelledError("搜索已取消")
+
+
+def assert_read_current(cancel_event: threading.Event | None, generation: int,
+                        authorization_epoch: int | None = None) -> None:
+    raise_if_search_cancelled(cancel_event)
+    if authorization_epoch is not None:
+        assert_authorization_generation(authorization_epoch)
+    if authorization_generation() != generation:
+        raise AuthorizationRevokedError("Pixiv 账号状态已变更，请重新加载")
 
 
 def authorization_generation() -> int:
@@ -617,6 +643,19 @@ def validated_authorization(force: bool = False) -> tuple[bool, int | None]:
         return True, AUTHORIZATION_GENERATION
 
 
+def read_authorization_snapshot() -> tuple[bool, int | None, int]:
+    with SEARCH_SESSION_LOCKS_GUARD:
+        connected, epoch = validated_authorization()
+        return connected, epoch, authorization_generation()
+
+
+READ_SCOPES = ReadScopes(
+    track=lambda request_id: tracked_search_request(request_id),
+    capture_identity=lambda: read_authorization_snapshot(),
+    check_current=lambda event, generation, epoch: assert_read_current(event, generation, epoch),
+)
+
+
 def auth_status_snapshot() -> dict:
     with SEARCH_SESSION_LOCKS_GUARD:
         session_present, _epoch = validated_authorization()
@@ -690,16 +729,10 @@ def prune_image_tokens(now: float | None = None) -> None:
         _prune_image_tokens_locked(current)
 
 
-def prune_search_image_tokens(
-    session_key: tuple, *, retained_pages: set[int] | None = None,
-    replace_page: int | None = None,
-) -> None:
+def prune_search_image_tokens(session_key: tuple) -> None:
     with PIXIV_STATE_LOCK:
         for token, row in list(IMAGE_TOKENS.items()):
-            if len(row) < 6 or row[4] != session_key:
-                continue
-            page = int(row[5])
-            if retained_pages is None or page not in retained_pages or page == replace_page:
+            if len(row) >= 6 and row[4] == session_key:
                 IMAGE_TOKENS.pop(token, None)
 
 
@@ -2068,9 +2101,6 @@ def search_user_results(
                 del session["items"][:remove_count]
                 session["baseIndex"] += remove_count
                 session["seen"] = {str(item["id"]) for item in session["items"]}
-            prune_search_image_tokens(
-                session_key, retained_pages=set(available_pages), replace_page=None if prefetch else page,
-            )
             authorized_items = [] if prefetch else [
                 authorize_item_images(
                     copy.deepcopy(item),
@@ -2450,9 +2480,6 @@ def search_pixiv_results(
             has_more = (absolute_result_count > page * SEARCH_PER_PAGE
                         or any(not session["sourceDone"].get(source) for source in sources)
                         or bool(session["identityIndex"].pending_count))
-            prune_search_image_tokens(
-                session_key, retained_pages=set(available_pages), replace_page=None if prefetch else page,
-            )
             authorized_items = [] if prefetch else [
                 authorize_item_images(
                     copy.deepcopy(item),
@@ -2672,7 +2699,7 @@ def pixiv_error_payload(action: str, exc: Exception, *, saving: bool = False) ->
     payload = {"error": public_pixiv_error(action, exc, saving=saving)}
     if isinstance(exc, RequestDeferredError):
         payload.update(errorKind=exc.kind, retryAfterSeconds=exc.retry_after)
-    elif isinstance(exc, RequestBlockedError):
+    elif isinstance(exc, (RequestBlockedError, AccountError)):
         payload["errorKind"] = exc.kind
     return payload
 
@@ -2731,21 +2758,6 @@ def approved_image_url(proxy_url: str, artwork_id: str) -> str:
         approved = tuple(approved)
     assert_image_token_authorization(approved)
     return str(approved[2])
-
-
-@contextmanager
-def owned_staging_batch():
-    """Release partial staging on failure; transfer ownership on success."""
-    staged: list[PublishedFileOwnership] = []
-    try:
-        yield staged
-    except Exception as original:
-        failures = _discard_owned_staging(staged)
-        if failures:
-            raise PublishRollbackError(
-                f"暂存失败且有 {failures} 个文件未能安全清理"
-            ) from original
-        raise
 
 
 @contextmanager
@@ -2828,15 +2840,15 @@ def _stage_ugoira_source(
                 assert_authorization_generation(authorization_epoch)
             converted.seek(0)
             with owned_staging_batch() as staged:
-                staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.{ugoira_format}", converted))
+                staged.append(create_staged_file(staging_root, folder / f"{stem}_ugoira.{ugoira_format}", converted))
                 return staged
     manifest = json.dumps(
         {"mime": meta["mime"], "frames": meta["frames"], "source": zip_url},
         ensure_ascii=False, indent=2,
     ).encode("utf-8")
     with owned_staging_batch() as staged:
-        staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.zip", source))
-        staged.append(_create_owned_staged_file(staging_root, folder / f"{stem}_ugoira.frames.json", manifest))
+        staged.append(create_staged_file(staging_root, folder / f"{stem}_ugoira.zip", source))
+        staged.append(create_staged_file(staging_root, folder / f"{stem}_ugoira.frames.json", manifest))
         return staged
 
 
@@ -2957,7 +2969,7 @@ def stage_artwork_groups(
             if approved_image_url(str(item["pageImages"][page][quality]), artwork_id) != remote:
                 raise PixivPolicyError("图片授权已失效")
             stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
-            files = [_create_owned_staged_file(staging_root, folder / f"{stem}_p{page}.{extension}", source)]
+            files = [create_staged_file(staging_root, folder / f"{stem}_p{page}.{extension}", source)]
         completed.extend(files)
         files_by_order[job.order] = files
         counts[artwork_id] = counts.get(artwork_id, 0) + len(files)
@@ -2980,850 +2992,6 @@ def stage_artwork_groups(
     HTTP_LOG.info("download pipeline sources=%d peak=%d seconds=%.3f",
                   metrics["sources"], metrics["peakSources"], metrics["seconds"])
     return counts
-
-
-def _is_link_or_reparse(path: Path) -> bool:
-    target = Path(path)
-    if target.is_symlink() or bool(getattr(target, "is_junction", lambda: False)()):
-        return True
-    if os.name != "nt" or not target.exists():
-        return False
-    attributes = ctypes.windll.kernel32.GetFileAttributesW(str(target))
-    return attributes != 0xFFFFFFFF and bool(attributes & 0x400)
-
-
-def _lexical_absolute(path: Path) -> Path:
-    """Normalize dot segments without following links or reparse points."""
-    return Path(os.path.abspath(os.fspath(path)))
-
-
-def _reject_reparse_components(path: Path, message: str) -> Path:
-    """Reject every existing component before any filesystem write occurs."""
-    candidate = _lexical_absolute(path)
-    current = Path(candidate.anchor)
-    for part in candidate.parts[1:]:
-        current /= part
-        if _is_link_or_reparse(current):
-            raise PixivPolicyError(message)
-    return candidate
-
-
-def _validated_publish_parent(
-    save_root: Path,
-    final: Path,
-    *,
-    created_dirs: list[Path] | None = None,
-    retained_handles: list[int] | None = None,
-) -> Path:
-    if not WINDOWS_SECURE_PUBLICATION:
-        raise PixivPolicyError("安全文件发布仅支持 Windows")
-    # Lexical containment is followed by handle-based component validation.
-    # Do not resolve(): doing so follows a junction before it can be rejected.
-    root = _lexical_absolute(save_root)
-    candidate = _lexical_absolute(final)
-    try:
-        relative = candidate.relative_to(root)
-    except ValueError as exc:
-        raise PixivPolicyError("保存路径超出目标目录") from exc
-
-    handles = _directory_lock_chain(root, [root])
-    current = root
-    retain = False
-    try:
-        for part in relative.parts[:-1]:
-            child = current / part
-            created = False
-            try:
-                handle = _open_directory_handle(
-                    child, share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
-                )
-            except FileNotFoundError:
-                try:
-                    child.mkdir()
-                    created = True
-                    if created_dirs is not None:
-                        created_dirs.append(child)
-                except FileExistsError:
-                    pass
-                handle = _open_directory_handle(
-                    child, share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
-                )
-            try:
-                _handle_identity(handle)
-            except Exception:
-                _close_windows_handle(handle)
-                raise
-            handles.append(handle)
-            current = child
-        result = current / relative.name
-        if retained_handles is not None:
-            retained_handles.extend(handles)
-            handles = []
-            retain = True
-        return result
-    finally:
-        if not retain:
-            _close_directory_lock_chain(handles)
-
-
-class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
-    _fields_ = [
-        ("dwFileAttributes", wintypes.DWORD),
-        ("ftCreationTime", wintypes.FILETIME),
-        ("ftLastAccessTime", wintypes.FILETIME),
-        ("ftLastWriteTime", wintypes.FILETIME),
-        ("dwVolumeSerialNumber", wintypes.DWORD),
-        ("nFileSizeHigh", wintypes.DWORD),
-        ("nFileSizeLow", wintypes.DWORD),
-        ("nNumberOfLinks", wintypes.DWORD),
-        ("nFileIndexHigh", wintypes.DWORD),
-        ("nFileIndexLow", wintypes.DWORD),
-    ]
-
-
-FILE_TRAVERSE = 0x0020
-FILE_READ_DATA = 0x0001
-FILE_WRITE_DATA = 0x0002
-FILE_READ_ATTRIBUTES = 0x0080
-SYNCHRONIZE_ACCESS = 0x00100000
-DELETE_ACCESS = 0x00010000
-FILE_SHARE_READ = 0x00000001
-FILE_SHARE_WRITE = 0x00000002
-FILE_SHARE_DELETE = 0x00000004
-FILE_SHARE_ALL = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
-CREATE_NEW = 1
-OPEN_EXISTING = 3
-FILE_ATTRIBUTE_NORMAL = 0x00000080
-FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
-FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-FILE_ATTRIBUTE_DIRECTORY = 0x00000010
-FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
-WINDOWS_SECURE_PUBLICATION = os.name == "nt" and hasattr(ctypes, "windll")
-FILE_DISPOSITION_INFO_CLASS = 4
-FILE_RENAME_INFO_CLASS = 3
-
-
-class FILE_DISPOSITION_INFO(ctypes.Structure):
-    _fields_ = [("DeleteFile", wintypes.BOOL)]
-
-
-class FILE_RENAME_INFO(ctypes.Structure):
-    _fields_ = [
-        ("ReplaceIfExists", wintypes.BOOL),
-        ("RootDirectory", wintypes.HANDLE),
-        ("FileNameLength", wintypes.DWORD),
-        ("FileName", wintypes.WCHAR * 1),
-    ]
-
-
-def _open_directory_handle(
-    path: Path,
-    *,
-    share_mode: int = FILE_SHARE_ALL,
-    access: int = FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
-) -> int:
-    return _open_windows_handle(
-        path,
-        share_mode=share_mode,
-        access=access,
-        flags=FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-    )
-
-
-def _open_windows_handle(
-    path: Path,
-    *,
-    share_mode: int,
-    access: int,
-    flags: int,
-) -> int:
-    create_file = ctypes.windll.kernel32.CreateFileW
-    create_file.argtypes = [
-        ctypes.c_wchar_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
-        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-    ]
-    create_file.restype = wintypes.HANDLE
-    handle = create_file(
-        str(path), access,
-        share_mode, None, OPEN_EXISTING,
-        flags, None,
-    )
-    if handle == wintypes.HANDLE(-1).value:
-        raise ctypes.WinError()
-    return int(handle)
-
-
-def _close_windows_handle(handle: int) -> None:
-    close_handle = ctypes.windll.kernel32.CloseHandle
-    close_handle.argtypes = [wintypes.HANDLE]
-    close_handle.restype = wintypes.BOOL
-    close_handle(handle)
-
-
-def _delete_empty_directory_on_close(handle: int) -> None:
-    disposition = FILE_DISPOSITION_INFO(True)
-    set_information = ctypes.windll.kernel32.SetFileInformationByHandle
-    set_information.argtypes = [
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
-    ]
-    set_information.restype = wintypes.BOOL
-    if not set_information(
-        handle,
-        FILE_DISPOSITION_INFO_CLASS,
-        ctypes.byref(disposition),
-        ctypes.sizeof(disposition),
-    ):
-        raise ctypes.WinError()
-
-
-def _rename_file_by_handle(handle: int, destination: Path) -> None:
-    encoded = str(destination).encode("utf-16-le")
-    name_offset = FILE_RENAME_INFO.FileName.offset
-    # FILE_RENAME_INFO includes FileName[1] and ABI tail padding. Supplying only
-    # FIELD_OFFSET + FileNameLength lets the kernel consume adjacent memory as
-    # random filename suffixes. Over-allocate the complete structure plus name.
-    buffer_size = ctypes.sizeof(FILE_RENAME_INFO) + len(encoded)
-    buffer = ctypes.create_string_buffer(buffer_size)
-    info = ctypes.cast(buffer, ctypes.POINTER(FILE_RENAME_INFO)).contents
-    info.ReplaceIfExists = 0
-    info.RootDirectory = None
-    info.FileNameLength = len(encoded)
-    ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded, len(encoded))
-
-    set_information = ctypes.windll.kernel32.SetFileInformationByHandle
-    set_information.argtypes = [
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
-    ]
-    set_information.restype = wintypes.BOOL
-    if not set_information(
-        handle, FILE_RENAME_INFO_CLASS, buffer, buffer_size,
-    ):
-        raise ctypes.WinError()
-
-
-def _handle_identity(handle: int) -> tuple[int, int, int]:
-    info = _raw_handle_information(handle)
-    if not info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
-        raise PixivPolicyError("保存路径组件不是目录")
-    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
-        raise PixivPolicyError("保存目录包含链接或重解析点")
-    return _identity_from_handle_information(info)
-
-
-def _raw_handle_information(handle: int) -> BY_HANDLE_FILE_INFORMATION:
-    info = BY_HANDLE_FILE_INFORMATION()
-    get_info = ctypes.windll.kernel32.GetFileInformationByHandle
-    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(BY_HANDLE_FILE_INFORMATION)]
-    get_info.restype = wintypes.BOOL
-    if not get_info(handle, ctypes.byref(info)):
-        raise ctypes.WinError()
-    return info
-
-
-def _identity_from_handle_information(
-    info: BY_HANDLE_FILE_INFORMATION,
-) -> tuple[int, int, int]:
-    return (
-        int(info.dwVolumeSerialNumber),
-        (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow),
-        int(info.dwFileAttributes),
-    )
-
-
-@dataclass(frozen=True)
-class PublishedFileSnapshot:
-    identity: tuple[int, int]
-    size: int
-    sha256: str
-
-
-@dataclass
-class PublishedFileOwnership:
-    final: Path
-    handle: int | None
-    snapshot: PublishedFileSnapshot | None = None
-    staged_handle: int | None = None
-    staged_snapshot: PublishedFileSnapshot | None = None
-    published: bool = False
-
-
-class PublishedOwnershipError(PixivPolicyError):
-    """A published path could not be proven to still contain our staged file."""
-
-
-def _hash_windows_file_handle(handle: int) -> str:
-    set_pointer = ctypes.windll.kernel32.SetFilePointerEx
-    set_pointer.argtypes = [
-        wintypes.HANDLE, ctypes.c_longlong, ctypes.c_void_p, wintypes.DWORD,
-    ]
-    set_pointer.restype = wintypes.BOOL
-    if not set_pointer(handle, 0, None, 0):
-        raise ctypes.WinError()
-
-    read_file = ctypes.windll.kernel32.ReadFile
-    read_file.argtypes = [
-        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
-    ]
-    read_file.restype = wintypes.BOOL
-    digest = hashlib.sha256()
-    buffer = ctypes.create_string_buffer(1024 * 1024)
-    while True:
-        count = wintypes.DWORD()
-        if not read_file(handle, buffer, len(buffer), ctypes.byref(count), None):
-            raise ctypes.WinError()
-        if count.value == 0:
-            return digest.hexdigest()
-        digest.update(buffer.raw[:count.value])
-
-
-def _snapshot_windows_file_handle(handle: int) -> PublishedFileSnapshot:
-    info = _raw_handle_information(handle)
-    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
-        raise PixivPolicyError("发布目标不是普通文件")
-    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
-        raise PixivPolicyError("发布目标不能是链接或重解析点")
-    return PublishedFileSnapshot(
-        identity=(
-            int(info.dwVolumeSerialNumber),
-            (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow),
-        ),
-        size=(int(info.nFileSizeHigh) << 32) | int(info.nFileSizeLow),
-        sha256=_hash_windows_file_handle(handle),
-    )
-
-
-def _own_staged_file(path: Path, final: Path) -> PublishedFileOwnership:
-    """Snapshot a staging file while retaining exclusive ownership until commit."""
-    handle = _open_windows_handle(
-        path,
-        share_mode=0,
-        access=(
-            FILE_READ_DATA | FILE_WRITE_DATA
-            | FILE_READ_ATTRIBUTES | DELETE_ACCESS
-        ),
-        flags=FILE_FLAG_OPEN_REPARSE_POINT,
-    )
-    try:
-        snapshot = _snapshot_windows_file_handle(handle)
-        return PublishedFileOwnership(
-            final=final,
-            handle=handle,
-            snapshot=snapshot,
-            staged_handle=handle,
-            staged_snapshot=snapshot,
-        )
-    except Exception:
-        _close_windows_handle(handle)
-        raise
-
-
-def _write_windows_file_handle(handle: int, raw: bytes | BinaryIO) -> None:
-    write_file = ctypes.windll.kernel32.WriteFile
-    write_file.argtypes = [
-        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
-    ]
-    write_file.restype = wintypes.BOOL
-    if isinstance(raw, bytes):
-        view = memoryview(raw)
-        chunks = (bytes(view[offset:offset + 1024 * 1024]) for offset in range(0, len(view), 1024 * 1024))
-    else:
-        chunks = iter(lambda: raw.read(1024 * 1024), b"")
-    for chunk in chunks:
-        buffer = ctypes.create_string_buffer(chunk)
-        written = wintypes.DWORD()
-        if not write_file(
-            handle, buffer, len(chunk), ctypes.byref(written), None,
-        ):
-            raise ctypes.WinError()
-        if written.value != len(chunk):
-            raise OSError("暂存文件写入不完整")
-    flush = ctypes.windll.kernel32.FlushFileBuffers
-    flush.argtypes = [wintypes.HANDLE]
-    flush.restype = wintypes.BOOL
-    if not flush(handle):
-        raise ctypes.WinError()
-
-
-def _create_owned_staged_file(
-    staging_root: Path,
-    final: Path,
-    raw: bytes | BinaryIO,
-) -> PublishedFileOwnership:
-    """Create, write, verify, and retain one zero-share staging file object."""
-    create_file = ctypes.windll.kernel32.CreateFileW
-    create_file.argtypes = [
-        ctypes.c_wchar_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
-        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-    ]
-    create_file.restype = wintypes.HANDLE
-    for _attempt in range(32):
-        path = staging_root / f".page-{secrets.token_hex(16)}.part"
-        handle = create_file(
-            str(path),
-            FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE_ACCESS,
-            0,
-            None,
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-        if handle == wintypes.HANDLE(-1).value:
-            error = ctypes.WinError()
-            if isinstance(error, FileExistsError):
-                continue
-            raise error
-        owned_handle = int(handle)
-        try:
-            _write_windows_file_handle(owned_handle, raw)
-            snapshot = _snapshot_windows_file_handle(owned_handle)
-            return PublishedFileOwnership(
-                final=final,
-                handle=owned_handle,
-                snapshot=snapshot,
-                staged_handle=owned_handle,
-                staged_snapshot=snapshot,
-            )
-        except Exception as original:
-            cleanup_error: Exception | None = None
-            try:
-                _delete_empty_directory_on_close(owned_handle)
-            except Exception as error:
-                cleanup_error = error
-            finally:
-                _close_windows_handle(owned_handle)
-            if cleanup_error is not None:
-                raise PublishRollbackError(
-                    "暂存失败且恢复文件保留在临时目录"
-                ) from original
-            raise
-    raise PublishedOwnershipError("无法分配安全暂存文件名")
-
-
-def _close_published_ownership(ownership: PublishedFileOwnership) -> None:
-    closed: set[int] = set()
-    for attribute in ("staged_handle", "handle"):
-        handle = getattr(ownership, attribute)
-        if handle is not None and handle not in closed:
-            _close_windows_handle(handle)
-            closed.add(handle)
-        setattr(ownership, attribute, None)
-
-
-def _delete_owned_published_file(ownership: PublishedFileOwnership) -> None:
-    if ownership.handle is None:
-        raise PublishedOwnershipError("发布目标所有权句柄已关闭")
-    handle = ownership.handle
-    try:
-        _delete_empty_directory_on_close(handle)
-    finally:
-        _close_windows_handle(handle)
-        ownership.handle = None
-        if ownership.staged_handle == handle:
-            ownership.staged_handle = None
-    ownership.published = False
-
-
-def _rollback_owned_files(
-    ownerships: list[PublishedFileOwnership],
-) -> list[Exception]:
-    failures: list[Exception] = []
-    for ownership in reversed(ownerships):
-        try:
-            if ownership.published:
-                _delete_owned_published_file(ownership)
-            elif ownership.staged_handle is not None:
-                _delete_empty_directory_on_close(ownership.staged_handle)
-        except Exception as exc:
-            failures.append(exc)
-        finally:
-            _close_published_ownership(ownership)
-    return failures
-
-
-def _discard_owned_staging(
-    ownerships: list[PublishedFileOwnership],
-) -> int:
-    return len(_rollback_owned_files(ownerships))
-
-
-def _directory_lock_chain(root: Path, paths: list[Path]) -> list[int]:
-    """Lock a validated root-to-leaf directory tree against retargeting.
-
-    Handles are function-local, acquired in deterministic root-first order, and
-    closed by the caller. Windows share-mode enforcement owns synchronization;
-    no mutable Python state is shared between concurrent publications.
-    """
-    boundary = _lexical_absolute(root)
-    anchor = Path(boundary.anchor)
-    directories: dict[str, Path] = {os.path.normcase(str(anchor)): anchor}
-    current = anchor
-    for part in boundary.parts[1:]:
-        current /= part
-        directories[os.path.normcase(str(current))] = current
-    for raw_path in paths:
-        candidate = _lexical_absolute(raw_path)
-        try:
-            relative = candidate.relative_to(boundary)
-        except ValueError as exc:
-            raise PixivPolicyError("保存路径超出目标目录") from exc
-        current = boundary
-        for part in relative.parts:
-            current /= part
-            directories[os.path.normcase(str(current))] = current
-
-    ordered = sorted(
-        directories.values(),
-        key=lambda path: (len(path.parts), os.path.normcase(str(path))),
-    )
-    handles: list[int] = []
-    try:
-        for current in ordered:
-            handle = _open_directory_handle(
-                current, share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
-            )
-            try:
-                _handle_identity(handle)
-            except Exception:
-                _close_windows_handle(handle)
-                raise
-            handles.append(handle)
-    except Exception:
-        for handle in reversed(handles):
-            _close_windows_handle(handle)
-        raise
-    return handles
-
-
-def _close_directory_lock_chain(handles: list[int]) -> None:
-    for handle in reversed(handles):
-        _close_windows_handle(handle)
-
-
-def _remove_publish_directory(path: Path, *, boundary_root: Path) -> None:
-    if not WINDOWS_SECURE_PUBLICATION:
-        raise PixivPolicyError("安全文件发布仅支持 Windows")
-    locks = _directory_lock_chain(boundary_root, [path.parent])
-    handle: int | None = None
-    try:
-        handle = _open_directory_handle(
-            path,
-            share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
-            access=FILE_TRAVERSE | FILE_READ_ATTRIBUTES | DELETE_ACCESS,
-        )
-        _handle_identity(handle)
-        _delete_empty_directory_on_close(handle)
-    finally:
-        if handle is not None:
-            _close_windows_handle(handle)
-        _close_directory_lock_chain(locks)
-
-
-class PublishRollbackError(PixivPolicyError):
-    """Publication failed and one or more owned outputs could not be removed."""
-
-
-class SecureStagingDirectory:
-    """Hold the selected Windows directory identity for one download lifecycle."""
-
-    def __init__(self, save_root: Path, *, prefix: str) -> None:
-        self.save_root = _lexical_absolute(save_root)
-        self.prefix = prefix
-        self.path: Path | None = None
-        self.cleanup_pending = False
-        self._root_handles: list[int] = []
-        self._staging_handle: int | None = None
-
-    def __enter__(self) -> Path:
-        if not WINDOWS_SECURE_PUBLICATION:
-            raise PixivPolicyError("安全文件发布仅支持 Windows")
-        if not self.save_root.is_dir():
-            raise PixivPolicyError("保存根目录不存在")
-        self._root_handles = _directory_lock_chain(
-            self.save_root, [self.save_root],
-        )
-        try:
-            self.path = Path(tempfile.mkdtemp(
-                prefix=self.prefix, dir=str(self.save_root),
-            ))
-            self._staging_handle = _open_directory_handle(
-                self.path,
-                share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
-            )
-            _handle_identity(self._staging_handle)
-            return self.path
-        except Exception as original:
-            cleanup_error: Exception | None = None
-            try:
-                if self._staging_handle is not None:
-                    _close_windows_handle(self._staging_handle)
-                    self._staging_handle = None
-                if self.path is not None and self.path.exists():
-                    if _is_link_or_reparse(self.path) or not self.path.is_dir():
-                        raise PixivPolicyError("临时目录初始化后身份异常")
-                    # No image bytes exist before __enter__ returns. rmdir is
-                    # deliberately non-recursive and runs while the root is locked.
-                    self.path.rmdir()
-            except Exception as error:
-                cleanup_error = error
-            finally:
-                self._close_handles()
-            if cleanup_error is not None:
-                raise PixivPolicyError("临时目录初始化失败且空目录清理失败") from original
-            raise
-
-    def _close_handles(self) -> None:
-        if self._staging_handle is not None:
-            _close_windows_handle(self._staging_handle)
-            self._staging_handle = None
-        if self._root_handles:
-            _close_directory_lock_chain(self._root_handles)
-            self._root_handles = []
-
-    def __exit__(self, exc_type, exc, _traceback) -> bool:
-        preserve = isinstance(exc, PublishRollbackError)
-        cleanup_error: Exception | None = None
-        try:
-            if not preserve and self.path is not None:
-                # Staging is deliberately flat. Delete only ordinary files while
-                # both root and staging identities remain locked; never recurse
-                # through an unexpected directory or reparse point.
-                for child in self.path.iterdir():
-                    if _is_link_or_reparse(child) or not child.is_file():
-                        raise PixivPolicyError("临时目录包含非普通文件")
-                    child.unlink()
-        except Exception as error:
-            cleanup_error = error
-        finally:
-            if self._staging_handle is not None:
-                _close_windows_handle(self._staging_handle)
-                self._staging_handle = None
-        try:
-            if not preserve and cleanup_error is None and self.path is not None:
-                # The directory is known empty. Non-recursive rmdir cannot follow
-                # an attacker path; the locked root chain still prevents retargeting.
-                self.path.rmdir()
-        except Exception as error:
-            cleanup_error = error
-        finally:
-            if self._root_handles:
-                _close_directory_lock_chain(self._root_handles)
-                self._root_handles = []
-        if cleanup_error is not None and exc is None:
-            # Publication and response-path construction already committed. A
-            # best-effort staging cleanup failure must not turn success into 502.
-            self.cleanup_pending = True
-            HTTP_LOG.warning("下载已提交；临时目录清理待处理")
-        elif cleanup_error is not None:
-            raise PixivPolicyError("下载失败且临时目录清理失败") from (exc or cleanup_error)
-        return False
-
-
-def secure_staging_directory(save_root: Path, *, prefix: str) -> SecureStagingDirectory:
-    return SecureStagingDirectory(save_root, prefix=prefix)
-
-
-def _same_file_content(
-    left: PublishedFileSnapshot,
-    right: PublishedFileSnapshot,
-) -> bool:
-    return left.size == right.size and hmac.compare_digest(left.sha256, right.sha256)
-
-
-def _publish_owned_staged_file(
-    ownership: PublishedFileOwnership,
-    final: Path,
-    *,
-    boundary_root: Path,
-    prelocked_parent: Path | None = None,
-) -> None:
-    """Publish one exclusively owned staging file without reopening it by path."""
-    if ownership.staged_handle is None or ownership.staged_snapshot is None:
-        raise PublishedOwnershipError("暂存文件所有权缺失")
-    parents = [final.parent]
-    if prelocked_parent is not None:
-        locked = os.path.normcase(str(_lexical_absolute(prelocked_parent)))
-        parents = [
-            parent for parent in parents
-            if os.path.normcase(str(_lexical_absolute(parent))) != locked
-        ]
-    locks = _directory_lock_chain(boundary_root, parents)
-    try:
-        try:
-            target_handle = _open_windows_handle(
-                final,
-                share_mode=0,
-                access=FILE_READ_DATA | FILE_READ_ATTRIBUTES,
-                flags=FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-        except FileNotFoundError:
-            # Register ownership before the kernel rename. If a competitor wins
-            # this name, fall through to the collision-safe sibling loop.
-            ownership.final = final
-            ownership.handle = ownership.staged_handle
-            ownership.snapshot = ownership.staged_snapshot
-            ownership.published = True
-            try:
-                _rename_file_by_handle(ownership.staged_handle, final)
-                return
-            except FileExistsError:
-                ownership.published = False
-        else:
-            try:
-                current = _snapshot_windows_file_handle(target_handle)
-                if _same_file_content(current, ownership.staged_snapshot):
-                    # Idempotent download: retain the existing complete file and
-                    # leave the duplicate staging object for context cleanup.
-                    ownership.final = final
-                    ownership.handle = target_handle
-                    ownership.snapshot = current
-                    target_handle = None
-                    return
-            finally:
-                if target_handle is not None:
-                    _close_windows_handle(target_handle)
-
-        # Never overwrite a different existing file. Publish the verified
-        # staging object under a collision-safe sibling name using the same
-        # zero-share handle and a no-replace kernel rename.
-        for collision in range(1, 10_001):
-            candidate = final.with_name(
-                f"{final.stem} ({collision}){final.suffix}",
-            )
-            ownership.final = candidate
-            ownership.handle = ownership.staged_handle
-            ownership.snapshot = ownership.staged_snapshot
-            ownership.published = True
-            try:
-                _rename_file_by_handle(ownership.staged_handle, candidate)
-                return
-            except FileExistsError:
-                ownership.published = False
-                continue
-        raise PublishedOwnershipError("同名下载文件过多，无法分配安全文件名")
-    finally:
-        _close_directory_lock_chain(locks)
-
-
-def publish_staged_files(
-    staging_root: Path,
-    staged: list[tuple[Path, Path] | PublishedFileOwnership],
-    *,
-    save_root: Path | None = None,
-    staging_locked: bool = False,
-    public_paths: bool = False,
-) -> list[Path] | list[str]:
-    """Serialize one complete local publish/rollback transaction.
-
-    Network reads and staging have already completed. The lock covers every
-    mutable destination operation, preventing concurrent request threads from
-    deleting each other's published bytes.
-    """
-    if not WINDOWS_SECURE_PUBLICATION:
-        raise PixivPolicyError("安全文件发布仅支持 Windows")
-    if save_root is None:
-        raise PixivPolicyError("安全文件发布必须绑定保存根目录")
-    with PUBLISH_TRANSACTION_LOCK:
-        return _publish_staged_files_locked(
-            staging_root, staged, save_root=save_root,
-            staging_locked=staging_locked, public_paths=public_paths,
-        )
-
-
-def _publish_staged_files_locked(
-    staging_root: Path,
-    staged: list[tuple[Path, Path] | PublishedFileOwnership],
-    *,
-    save_root: Path | None = None,
-    staging_locked: bool = False,
-    public_paths: bool = False,
-) -> list[Path] | list[str]:
-    """Publish a completed batch and restore every owned object on failure."""
-    transactions: list[PublishedFileOwnership] = [
-        entry for entry in staged
-        if isinstance(entry, PublishedFileOwnership)
-    ]
-    created_dirs: list[Path] = []
-    retained_parent_handles: list[int] = []
-    try:
-        for entry in staged:
-            if isinstance(entry, PublishedFileOwnership):
-                ownership = entry
-                final = ownership.final
-            else:
-                temporary, final = entry
-                ownership = None
-            if save_root is not None:
-                final = _validated_publish_parent(
-                    save_root,
-                    final,
-                    created_dirs=created_dirs,
-                    retained_handles=retained_parent_handles,
-                )
-            elif not final.parent.exists():
-                final.parent.mkdir(parents=True, exist_ok=True)
-            if ownership is None:
-                ownership = _own_staged_file(temporary, final)
-                transactions.append(ownership)
-            else:
-                ownership.final = final
-                if ownership.staged_handle is None or ownership.staged_snapshot is None:
-                    raise PublishedOwnershipError("暂存文件所有权已关闭")
-            # Register before the first public mutation. Even a helper that raises
-            # after its kernel operation leaves the current item rollback-capable.
-            _publish_owned_staged_file(
-                ownership,
-                final,
-                boundary_root=save_root,
-                prelocked_parent=staging_root if staging_locked else None,
-            )
-            if (
-                ownership.staged_handle is not None
-                and ownership.staged_handle != ownership.handle
-            ):
-                _delete_empty_directory_on_close(ownership.staged_handle)
-        saved = [ownership.final for ownership in transactions]
-        # Compute response values while every published file handle remains open.
-        # No committed path is resolved after ownership is released.
-        if public_paths:
-            return public_saved_files(save_root, saved)
-        return saved
-    except Exception as original:
-        rollback_failures = _rollback_owned_files(transactions)
-        if retained_parent_handles:
-            _close_directory_lock_chain(retained_parent_handles)
-            retained_parent_handles = []
-        for directory in reversed(created_dirs):
-            try:
-                _remove_publish_directory(directory, boundary_root=save_root)
-            except Exception as exc:
-                rollback_failures.append(exc)
-        if rollback_failures:
-            raise PublishRollbackError(
-                f"发布失败且有 {len(rollback_failures)} 项未能安全恢复；恢复文件保留在临时目录"
-            ) from original
-        raise
-    finally:
-        for ownership in transactions:
-            _close_published_ownership(ownership)
-        if retained_parent_handles:
-            _close_directory_lock_chain(retained_parent_handles)
-
-
-def public_saved_files(save_root: Path, saved: list[Path]) -> list[str]:
-    root = _lexical_absolute(save_root)
-    result: list[str] = []
-    for path in saved:
-        candidate = _lexical_absolute(path)
-        try:
-            relative = candidate.relative_to(root)
-        except ValueError as exc:
-            raise PixivPolicyError("保存结果超出目标目录") from exc
-        if not relative.parts or relative.is_absolute():
-            raise PixivPolicyError("保存结果不是有效文件路径")
-        result.append(relative.as_posix())
-    return result
 
 
 def _stage_and_publish_download(
@@ -3864,7 +3032,7 @@ def _stage_and_publish_download(
                     if authorization_check:
                         authorization_check()
                 except Exception as original:
-                    failures = _discard_owned_staging(staged)
+                    failures = discard_staging(staged)
                     if failures:
                         raise PublishRollbackError(
                             f"授权撤销后有 {failures} 个暂存文件未能安全清理"
@@ -3903,10 +3071,13 @@ class Handler(SimpleHTTPRequestHandler):
         except PixivPolicyError:
             return str(WEB / "__not_found__")
 
-    def send_json(self, obj, code=200):
+    def send_json(self, obj, code=200, *, before_send: Callable[[], None] | None = None):
         if code == 502 and obj.get("errorKind") in {"upstream_rate_limit", "request_queue"}:
             code = 503
         raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        # Read ownership can change while the response is being encoded.
+        if before_send is not None:
+            before_send()
         try:
             if code == 502 and obj.get("errorKind") in {"verification_required", "authentication_required", "access_denied"}:
                 code = 403
@@ -3961,7 +3132,7 @@ class Handler(SimpleHTTPRequestHandler):
         raw = self.read_body(max_bytes)
         try:
             data = json.loads(raw or b"{}")
-        except (UnicodeError, json.JSONDecodeError) as exc:
+        except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
             raise RequestInputError(400, "请求正文不是有效 JSON") from exc
         if not isinstance(data, dict):
             raise RequestInputError(400, "请求正文必须是 JSON 对象")
@@ -4150,45 +3321,51 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _get_pixiv_artist(self, request, match):
         query = urllib.parse.parse_qs(request.query)
+        request_id = query.get("requestId", [""])[0].strip() or secrets.token_urlsafe(24)
         try:
-            request_id = parse_search_request_id(query.get("requestId", [""])[0]) or secrets.token_urlsafe(24)
             page = int(query.get("page", ["1"])[0])
-            cancel_event = register_search_request(request_id)
-        except (SearchInputError, ValueError) as exc:
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        try:
+            def capture_artist_identity():
+                if AUTH_METHOD.get() == "app":
+                    connected, generation = validated_authorization()
+                    if not connected:
+                        raise AccountError("reauth", "请先在「我的账号」完成 App 授权")
+                    return connected, generation, generation
+                return False, None, authorization_generation()
+
+            with READ_SCOPES.request(request_id, capture_identity=capture_artist_identity) as lease:
+                generation = lease.generation
+                cancel_event = lease.cancel_event
+                kind = "candidates" if match is None else "overview" if match.group(2) else "profile"
+                target = query.get("name", [""])[0] if match is None else match.group(1)
+                reader=APP_GALLERY.artist if AUTH_METHOD.get()=="app" else ARTISTS.read
+                result = reader(kind, target, generation=generation, page=page, cancel_event=cancel_event,
+                                      refresh=query.get("refresh", [""])[0] == "1")
+                if authorization_generation() != generation:
+                    raise AuthorizationRevokedError("作者读取期间账号已变更，请重试")
+                profiles = result["candidates"] if kind == "candidates" else [result] if kind == "profile" else []
+                for profile in profiles:
+                    for key in ("avatar", "background"):
+                        if profile[key]:
+                            proxy = "/api/pixiv/image?" + urllib.parse.urlencode({"url": profile[key]})
+                            profile[key] = authorize_image_proxy(proxy, "artist:" + profile["userId"])
+                if kind == "overview":
+                    result["featured"] = [authorize_item_images(item) for item in result["featured"]]
+                if authorization_generation() != generation:
+                    raise AuthorizationRevokedError("作者读取期间账号已变更，请重试")
+                return self.send_json(result, before_send=lease.check)
+        except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         except (SearchRequestConflictError, SearchRequestLimitError) as exc:
             return self.send_json({"error": str(exc)}, 409)
-        try:
-            generation = authorization_generation()
-            kind = "candidates" if match is None else "overview" if match.group(2) else "profile"
-            target = query.get("name", [""])[0] if match is None else match.group(1)
-            if AUTH_METHOD.get()=="app":
-                connected,generation=validated_authorization()
-                if not connected:raise AccountError("reauth","请先在「我的账号」完成 App 授权")
-            reader=APP_GALLERY.artist if AUTH_METHOD.get()=="app" else ARTISTS.read
-            result = reader(kind, target, generation=generation, page=page, cancel_event=cancel_event,
-                                  refresh=query.get("refresh", [""])[0] == "1")
-            if authorization_generation() != generation:
-                raise AuthorizationRevokedError("作者读取期间账号已变更，请重试")
-            profiles = result["candidates"] if kind == "candidates" else [result] if kind == "profile" else []
-            for profile in profiles:
-                for key in ("avatar", "background"):
-                    if profile[key]:
-                        proxy = "/api/pixiv/image?" + urllib.parse.urlencode({"url": profile[key]})
-                        profile[key] = authorize_image_proxy(proxy, "artist:" + profile["userId"])
-            if kind == "overview":
-                result["featured"] = [authorize_item_images(item) for item in result["featured"]]
-            if authorization_generation() != generation:
-                raise AuthorizationRevokedError("作者读取期间账号已变更，请重试")
-            return self.send_json(result)
         except SearchCancelledError:
             return self.send_json({"error": "作者读取已取消", "cancelled": True}, 409)
         except AuthorizationRevokedError as exc:
             return self.send_json({"error": str(exc)}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json(pixiv_error_payload("作者资料", exc), 502)
-        finally:
-            release_search_request(request_id, cancel_event)
 
     def _cloud_generation(self, data):
         connected, generation = validated_authorization()
@@ -4230,10 +3407,10 @@ class Handler(SimpleHTTPRequestHandler):
             if isinstance(error, CloudActionError):
                 payload.update(state=error.state, official=error.official)
             return self.send_json(payload, 409 if error.kind in {"conflict", "revoked", "content_changed"} else 502)
-        if isinstance(error, ValueError):
-            return self.send_json({"error": str(error)}, 400)
         if isinstance(error, PixivPolicyError):
             return self.send_json(pixiv_error_payload("云端操作", error), 502)
+        if isinstance(error, ValueError):
+            return self.send_json({"error": str(error)}, 400)
         return self.send_json({"error": "无法读取或保存云端状态，请检查资料目录及网络"}, 502)
 
     def _get_display_settings(self, request):
@@ -4329,23 +3506,42 @@ class Handler(SimpleHTTPRequestHandler):
         except (OSError, PixivPolicyError) as error:
             return self._cloud_error(error)
 
+    def _read_pixiv_response(self, query, action, read, *, priority=None, account_cache=False):
+        """Own an authenticated read from registration through response publication."""
+        try:
+            request_id = query.get("requestId", [""])[0].strip()
+            if priority is None:
+                priority = 1 if query.get("background", [""])[0] == "1" else 0
+            with READ_SCOPES.request(request_id, require_account=True, priority=priority,
+                    cache_only=query.get("cached", [""])[0] == "1" if account_cache else None) as lease:
+                generation, cancel_event = lease.generation, lease.cancel_event
+                ensure_network_opener_current()
+                try:
+                    result = read(generation, cancel_event)
+                except AccountError as error:
+                    if not account_cache or error.kind != "cache_miss":
+                        raise
+                    result = {"cached": False, "authorizationGeneration": generation}
+                return self.send_json(result, before_send=lease.check)
+        except SearchRequestConflictError as error:
+            return self.send_json({"error": str(error)}, 409)
+        except (DiscoveryInputError, SearchInputError, SearchRequestLimitError) as error:
+            return self.send_json({"error": str(error)}, 400)
+        except SearchCancelledError:
+            return self.send_json({"cancelled": True}, 499)
+        except PIXIV_OPERATION_ERRORS as error:
+            return self.send_json(pixiv_error_payload(action + "读取", error), 502)
+        except sqlite3.Error:
+            return self.send_json({"error": f"{action}缓存读写失败，请检查本地资料目录"}, 500)
+
     def _get_discovery(self, request):
         query = urllib.parse.parse_qs(request.query)
-        request_id=None;cancel_event=None;check_token=None;priority_token=None
         try:
-            request_id=parse_search_request_id(query.get("requestId",[""])[0])
-            try:offset=int(query.get("offset",["0"])[0])
-            except ValueError:raise DiscoveryInputError("发现分页无效") from None
-            if request_id:cancel_event=register_search_request(request_id)
-            connected,generation=validated_authorization()
-            if not connected:raise AccountError("reauth","请在我的账号登录后查看发现")
-            from pixiv_account import ACCOUNT_REQUEST_CHECK
-            def check():
-                raise_if_search_cancelled(cancel_event)
-                assert_authorization_generation(generation)
-            check_token=ACCOUNT_REQUEST_CHECK.set(check)
-            priority_token=REQUEST_PRIORITY.set(1 if query.get("background",[""])[0]=="1" else 0)
-            ensure_network_opener_current()
+            offset = int(query.get("offset", ["0"])[0])
+        except ValueError:
+            return self.send_json({"error": "发现分页无效"}, 400)
+
+        def read(generation, _cancel_event):
             result=DISCOVERY.read(generation=generation,kind=query.get("kind",["recommended"])[0],
                 scope=query.get("scope",["all"])[0],mode=query.get("mode",["safe"])[0],rank=query.get("rank",["day"])[0],
                 offset=offset,batch=query.get("batch",[""])[0],
@@ -4359,62 +3555,32 @@ class Handler(SimpleHTTPRequestHandler):
                             dates[item["userId"]]=max(dates.get(item["userId"],""),stamp)
                     ACCOUNTS.visits.observe(result["uid"],dates)
                 result["items"]=[authorize_item_images(item,authorization_epoch=generation,account_bound=True) for item in result["items"]]
-            check()
-            return self.send_json(result)
-        except (DiscoveryInputError,SearchInputError,SearchRequestLimitError) as error:
-            return self.send_json({"error":str(error)},400)
-        except SearchCancelledError:
-            return self.send_json({"cancelled":True},499)
-        except PIXIV_OPERATION_ERRORS as error:
-            return self.send_json({"error":str(error) if isinstance(error,(AccountError,RequestDeferredError)) else "发现读取失败，请稍后刷新",
-                "errorKind":getattr(error,"kind","read")},502)
-        except sqlite3.Error:
-            return self.send_json({"error":"发现缓存读写失败，请检查本地资料目录"},500)
-        finally:
-            if priority_token is not None:REQUEST_PRIORITY.reset(priority_token)
-            if check_token is not None:ACCOUNT_REQUEST_CHECK.reset(check_token)
-            if request_id and cancel_event is not None:release_search_request(request_id,cancel_event)
+            return result
+
+        return self._read_pixiv_response(query, "发现", read)
 
     def _get_popularity(self, request):
         query=urllib.parse.parse_qs(request.query)
-        request_id=None;cancel_event=None;check_token=None;priority_token=None
         try:
-            if query.get("includeAi",["true"])[0] not in {"true","false"} or query.get("fuzzy",["false"])[0] not in {"true","false"}:
+            include_ai = query.get("includeAi", ["true"])[0]
+            fuzzy = query.get("fuzzy", ["false"])[0]
+            if include_ai not in {"true", "false"} or fuzzy not in {"true", "false"}:
                 raise ValueError("搜索筛选无效")
-            request_id=parse_search_request_id(query.get("requestId",[""])[0])
-            if request_id:cancel_event=register_search_request(request_id)
-            connected,generation=validated_authorization()
-            if not connected:raise AccountError("reauth","请先连接 Pixiv 账号再准备人气排序")
-            from pixiv_account import ACCOUNT_REQUEST_CHECK
-            def check():
-                raise_if_search_cancelled(cancel_event)
-                assert_authorization_generation(generation)
-            check_token=ACCOUNT_REQUEST_CHECK.set(check)
-            priority_token=REQUEST_PRIORITY.set(1)
-            ensure_network_opener_current()
+            page = int(query.get("page", ["1"])[0])
+        except ValueError as error:
+            return self.send_json({"error": str(error)}, 400)
+        def read(generation, cancel_event):
             result=POPULARITY.read(generation=generation,kind=query.get("kind",[""])[0],
                 uid=query.get("uid",[""])[0],batch=query.get("batch",[""])[0],mode=query.get("mode",["safe"])[0],
-                work_type=query.get("workType",["all"])[0],include_ai=query.get("includeAi",["true"])[0]=="true",
+                work_type=query.get("workType",["all"])[0],include_ai=include_ai=="true",
                 start=query.get("startDate",[""])[0],end=query.get("endDate",[""])[0],
-                index=query.get("index",[""])[0],page=int(query.get("page",["1"])[0]),
+                index=query.get("index",[""])[0],page=page,
                 refresh=query.get("refresh",[""])[0]=="1",query=query.get("query",[""])[0],
-                fuzzy=query.get("fuzzy",["false"])[0]=="true",cancel_event=cancel_event)
+                fuzzy=fuzzy=="true",cancel_event=cancel_event)
             result["items"]=[authorize_item_images(item,authorization_epoch=generation,account_bound=True) for item in result["items"]]
-            check()
-            return self.send_json(result)
-        except (ValueError,SearchInputError,SearchRequestLimitError) as error:
-            return self.send_json({"error":str(error)},400)
-        except SearchCancelledError:
-            return self.send_json({"cancelled":True},499)
-        except PIXIV_OPERATION_ERRORS as error:
-            return self.send_json({"error":str(error) if isinstance(error,(AccountError,RequestDeferredError)) else "排序元数据读取失败，请重试",
-                "errorKind":getattr(error,"kind","read")},502)
-        except sqlite3.Error:
-            return self.send_json({"error":"排序缓存读写失败，请检查资料目录"},500)
-        finally:
-            if priority_token is not None:REQUEST_PRIORITY.reset(priority_token)
-            if check_token is not None:ACCOUNT_REQUEST_CHECK.reset(check_token)
-            if request_id and cancel_event is not None:release_search_request(request_id,cancel_event)
+            return result
+
+        return self._read_pixiv_response(query, "排序元数据", read, priority=1)
 
     def _get_account(self, request):
         kind = request.path.removeprefix("/api/account/")
@@ -4438,22 +3604,7 @@ class Handler(SimpleHTTPRequestHandler):
                 raise ValueError("invalid_account_query")
         except ValueError:
             return self.send_json({"error": "账号列表参数无效"}, 400)
-        cancel_event=None;request_id=None;check_token=None;cache_token=None;priority_token=None
-        try:
-            request_id=parse_search_request_id(query.get("requestId",[""])[0])
-            if request_id:cancel_event=register_search_request(request_id)
-            connected, generation = validated_authorization()
-            if not connected:
-                raise AccountError("reauth", "请先在「我的账号」完成所选方式的登录")
-            from pixiv_account import ACCOUNT_REQUEST_CHECK
-            def current():
-                raise_if_search_cancelled(cancel_event)
-                assert_authorization_generation(generation)
-            check_token=ACCOUNT_REQUEST_CHECK.set(current)
-            current()
-            ensure_network_opener_current()
-            cache_token=ACCOUNT_CACHE_ONLY.set(query.get("cached",[""])[0]=="1")
-            priority_token=REQUEST_PRIORITY.set(1 if query.get("background",[""])[0]=="1" else 0)
+        def read(generation, _cancel_event):
             CLOUD.recover_pages(generation)
             result = ACCOUNTS.read(kind, scope=scope, offset=offset, tag=tag, generation=generation,
                 mode=mode, refresh=query.get("refresh", [""])[0] == "1",
@@ -4477,23 +3628,9 @@ class Handler(SimpleHTTPRequestHandler):
                         "account-author:" + person["id"], "account", authorization_epoch=generation)
             if "items" in result:
                 result["items"] = [authorize_item_images(item, authorization_epoch=generation, account_bound=True) for item in result["items"]]
-            assert_authorization_generation(generation)
-            return self.send_json(result)
-        except SearchCancelledError:
-            return self.send_json({"cancelled":True},499)
-        except (SearchInputError,SearchRequestLimitError) as error:
-            return self.send_json({"error":str(error)},400)
-        except PIXIV_OPERATION_ERRORS as error:
-            if isinstance(error,AccountError) and error.kind=="cache_miss":
-                return self.send_json({"cached":False,"authorizationGeneration":generation})
-            return self.send_json({"error": str(error) if isinstance(error, (AccountError, RequestDeferredError)) else "账户资料读取失败，请稍后重试"}, 502)
-        except sqlite3.Error:
-            return self.send_json({"error":"账号缓存读写失败，请检查资料目录或清除账号缓存"},500)
-        finally:
-            if cache_token is not None:ACCOUNT_CACHE_ONLY.reset(cache_token)
-            if priority_token is not None:REQUEST_PRIORITY.reset(priority_token)
-            if check_token is not None:ACCOUNT_REQUEST_CHECK.reset(check_token)
-            if request_id and cancel_event is not None:release_search_request(request_id,cancel_event)
+            return result
+
+        return self._read_pixiv_response(query, "账号资料", read, account_cache=True)
 
     def _post_account_seen(self, data):
         author = data.get("author")
@@ -4568,7 +3705,7 @@ class Handler(SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(request.query)
         tag_query = query.get("tag", ["原创"])[0]
         try:
-            request_id = parse_search_request_id(query.get("requestId", [""])[0])
+            request_id = query.get("requestId", [""])[0].strip()
             snapshot_id = parse_search_snapshot_id(query.get("snapshotId", [""])[0])
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
@@ -4577,7 +3714,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not snapshot_id:
             snapshot_id = secrets.token_urlsafe(24)
         search_scope = query.get("mode", ["safe"])[0]
-        session_authorized, session_epoch = validated_authorization()
+        session_authorized, session_epoch, read_generation = read_authorization_snapshot()
         if search_scope in {"r18", "r18g", "all"} and not session_authorized:
             return self.send_json({"error": "限制级搜索需要先完成Pixiv账户授权"}, 403)
         work_type = query.get("workType", ["all"])[0]
@@ -4588,13 +3725,10 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError:
             page = 1
         try:
-            cancel_event = register_search_request(request_id)
-        except SearchRequestConflictError as exc:
-            return self.send_json({"error": str(exc)}, 409)
-        except SearchRequestLimitError as exc:
-            return self.send_json({"error": str(exc)}, 429)
-        try:
-            try:
+            with READ_SCOPES.request(request_id,
+                    capture_identity=lambda: (session_authorized, session_epoch, read_generation),
+                    priority=2 if query.get("prefetch", ["false"])[0].lower() == "true" or query.get("warm", [""])[0] == "1" else 0) as lease:
+                cancel_event = lease.cancel_event
                 authorization_epoch = (
                     session_epoch if search_scope in {"r18", "r18g", "all"} else None
                 )
@@ -4614,126 +3748,117 @@ class Handler(SimpleHTTPRequestHandler):
                     with self.server._download_idle:
                         downloading = bool(self.server._download_jobs)
                     if state["cooldownSeconds"] or downloading:
-                        return self.send_json({"prefetchSkipped": True})
+                        return self.send_json({"prefetchSkipped": True}, before_send=lease.check)
                 if query.get("prefetch", ["false"])[0].lower() == "true":
                     state = REQUEST_COORDINATOR.snapshot()
                     with self.server._download_idle:
                         downloading = bool(self.server._download_jobs)
                     if state["mode"] == "safe" or state["cooldownSeconds"] or downloading:
-                        return self.send_json({"prefetchSkipped": True})
+                        return self.send_json({"prefetchSkipped": True}, before_send=lease.check)
                     ahead = query.get("prefetchAhead", ["3"])[0]
                     if ahead not in {"1", "3"}:
                         raise SearchInputError("预取页数无效")
                     kwargs["prefetch"] = True
                     kwargs["prefetch_ahead"] = int(ahead)
-                priority_token = REQUEST_PRIORITY.set(2 if kwargs.get("prefetch") or warm else 0)
-                try:
-                    result = search_pixiv_results(
-                        tag_query, search_scope, page, work_type, include_ai, **kwargs,
-                    )
-                finally:
-                    REQUEST_PRIORITY.reset(priority_token)
-                return self.send_json(result)
-            except SearchCancelledError:
-                return self.send_json({"error": "搜索已取消", "cancelled": True}, 409)
-            except SearchInputError as exc:
-                status = 403 if "授权" in str(exc) else 400
-                return self.send_json({"error": str(exc)}, status)
-            except AuthorizationRevokedError as exc:
-                return self.send_json({"error": str(exc)}, 403)
-            except sqlite3.Error:
-                return self.send_json({"error": "搜索临时索引不可用，请检查临时目录或磁盘空间后重试"}, 502)
-            except PIXIV_OPERATION_ERRORS as exc:
-                return self.send_json(pixiv_error_payload("Pixiv 搜索", exc), 502)
-        finally:
-            release_search_request(request_id, cancel_event)
+                result = search_pixiv_results(
+                    tag_query, search_scope, page, work_type, include_ai, **kwargs,
+                )
+                return self.send_json(result, before_send=lease.check)
+        except SearchCancelledError:
+            return self.send_json({"error": "搜索已取消", "cancelled": True}, 409)
+        except SearchInputError as exc:
+            status = 403 if "授权" in str(exc) else 400
+            return self.send_json({"error": str(exc)}, status)
+        except AuthorizationRevokedError as exc:
+            return self.send_json({"error": str(exc)}, 403)
+        except sqlite3.Error:
+            return self.send_json({"error": "搜索临时索引不可用，请检查临时目录或磁盘空间后重试"}, 502)
+        except PIXIV_OPERATION_ERRORS as exc:
+            return self.send_json(pixiv_error_payload("Pixiv 搜索", exc), 502)
+        except SearchRequestConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
+        except SearchRequestLimitError as exc:
+            return self.send_json({"error": str(exc)}, 429)
 
     def _get_pixiv_detail(self, request, artwork_id: str):
+        query = urllib.parse.parse_qs(request.query)
+        request_id = query.get("requestId", [""])[0].strip() or secrets.token_urlsafe(24)
         try:
-            query = urllib.parse.parse_qs(request.query)
-            request_id = parse_search_request_id(query.get("requestId", [""])[0]) or secrets.token_urlsafe(24)
-            cancel_event = register_search_request(request_id)
+            with READ_SCOPES.request(request_id) as lease:
+                return self.send_json(
+                    pixiv_item_for_download(
+                        artwork_id,
+                        allow_r18=lease.authorized,
+                        authorization_epoch=lease.authorization_epoch,
+                        require_thumb=True,
+                        cancel_event=lease.cancel_event,
+                        refresh=query.get("refresh", [""])[0] == "1",
+                    ),
+                    before_send=lease.check,
+                )
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         except SearchRequestConflictError as exc:
             return self.send_json({"error": str(exc)}, 409)
         except SearchRequestLimitError as exc:
             return self.send_json({"error": str(exc)}, 429)
-        try:
-            authorized, authorization_epoch = validated_authorization()
-            return self.send_json(
-                pixiv_item_for_download(
-                    artwork_id,
-                    allow_r18=authorized,
-                    authorization_epoch=authorization_epoch,
-                    require_thumb=True,
-                    cancel_event=cancel_event,
-                    refresh=query.get("refresh", [""])[0] == "1",
-                ),
-            )
         except SearchCancelledError:
             return self.send_json({"error": "作品详情读取已取消", "cancelled": True}, 409)
         except AuthorizationRevokedError as exc:
             return self.send_json({"error": str(exc)}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json(pixiv_error_payload("作品详情", exc), 502)
-        finally:
-            release_search_request(request_id, cancel_event)
 
     def _get_pixiv_ugoira(self, request, artwork_id: str):
         """Serve ugoira hover previews: frame manifest JSON or the frame zip."""
-        mode = urllib.parse.parse_qs(request.query).get("mode", ["meta"])[0]
+        query = urllib.parse.parse_qs(request.query)
+        mode = query.get("mode", ["meta"])[0]
         if mode not in {"meta", "zip"}:
             return self.send_json({"error": "mode 无效"}, 400)
-        request_id = ""
-        cancel_event = None
+        request_id = query.get("requestId", [""])[0].strip()
         try:
-            request_id = parse_search_request_id(
-                urllib.parse.parse_qs(request.query).get("requestId", [""])[0],
-            )
-            if request_id:
-                cancel_event = register_search_request(request_id)
-            raise_if_search_cancelled(cancel_event)
-            authorized, authorization_epoch = validated_authorization()
-            item = pixiv_item_for_download(
-                artwork_id,
-                allow_r18=authorized,
-                authorization_epoch=authorization_epoch,
-                cancel_event=cancel_event,
-            )
-            if item.get("workType") != "ugoira":
-                raise PixivPolicyError("该作品不是动图")
-            restricted = item.get("restriction") in RESTRICTED_CONTENT
-            if restricted and not authorized:
-                raise PixivPolicyError("限制级动图预览需要有效账户授权")
-            meta = pixiv_ugoira_meta(
-                artwork_id,
-                authorization_epoch=authorization_epoch if restricted else None,
-                cancel_event=cancel_event,
-            )
-            if mode == "meta":
-                return self.send_json({
-                    "frames": meta["frames"], "mime": meta["mime"],
-                    "width": item.get("width"), "height": item.get("height"),
-                })
-            def fetch_zip(event):
-                raw, _content_type = pixiv_request(str(meta["src"]), image_only=True, cancel_event=event)
+            with READ_SCOPES.request(request_id) as lease:
+                authorized, authorization_epoch, cancel_event = lease.authorized, lease.authorization_epoch, lease.cancel_event
+                item = pixiv_item_for_download(
+                    artwork_id,
+                    allow_r18=authorized,
+                    authorization_epoch=authorization_epoch,
+                    cancel_event=cancel_event,
+                )
+                if item.get("workType") != "ugoira":
+                    raise PixivPolicyError("该作品不是动图")
+                restricted = item.get("restriction") in RESTRICTED_CONTENT
+                if restricted and not authorized:
+                    raise PixivPolicyError("限制级动图预览需要有效账户授权")
+                meta = pixiv_ugoira_meta(
+                    artwork_id,
+                    authorization_epoch=authorization_epoch if restricted else None,
+                    cancel_event=cancel_event,
+                )
+                if mode == "meta":
+                    return self.send_json({
+                        "frames": meta["frames"], "mime": meta["mime"],
+                        "width": item.get("width"), "height": item.get("height"),
+                    }, before_send=lease.check)
+                def fetch_zip(event):
+                    raw, _content_type = pixiv_request(str(meta["src"]), image_only=True, cancel_event=event)
+                    if not raw.startswith(UGOIRA_ZIP_MAGIC):
+                        raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
+                    return raw
+
+                raw = UGOIRA_RESOURCES.get(
+                    ("zip", artwork_id, authorization_epoch if restricted else None),
+                    fetch_zip, ttl=15, cancel_event=cancel_event,
+                )
+                raise_if_search_cancelled(cancel_event)
+                # Mirror the download path: revoked authorization mid-flight must
+                # not publish restricted bytes.
+                if restricted and authorization_epoch is not None:
+                    assert_authorization_generation(authorization_epoch)
                 if not raw.startswith(UGOIRA_ZIP_MAGIC):
                     raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
-                return raw
-
-            raw = UGOIRA_RESOURCES.get(
-                ("zip", artwork_id, authorization_epoch if restricted else None),
-                fetch_zip, ttl=15, cancel_event=cancel_event,
-            )
-            raise_if_search_cancelled(cancel_event)
-            # Mirror the download path: revoked authorization mid-flight must
-            # not publish restricted bytes.
-            if restricted and authorization_epoch is not None:
-                assert_authorization_generation(authorization_epoch)
-            if not raw.startswith(UGOIRA_ZIP_MAGIC):
-                raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
-            return self.send_bytes(raw, "application/zip", "private, no-store")
+                lease.check()
+                return self.send_bytes(raw, "application/zip", "private, no-store")
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         except SearchRequestConflictError as exc:
@@ -4746,9 +3871,6 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(exc)}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json(pixiv_error_payload("动图预览", exc), 502)
-        finally:
-            if request_id and cancel_event is not None:
-                release_search_request(request_id, cancel_event)
 
     def _get_pixiv_image(self, request):
         token = urllib.parse.parse_qs(request.query).get("token", [""])[0]
@@ -4847,15 +3969,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({"error": str(exc)}, exc.status)
             except OSError:
                 return self.send_json({"error": "搜图本机操作失败，请检查资料目录及凭据权限"}, 500)
-        desktop_auth_path = path in {
-            "/api/desktop/update-restart",
-            "/api/desktop/auth/session",
-            "/api/desktop/auth/logout",
-            "/api/desktop/auth/context",
-            "/api/desktop/auth/app-connect",
-            "/api/desktop/auth/app-cancel",
-            "/api/desktop/auth/official-context",
-        }
+        desktop_auth_path = path in DESKTOP_AUTH_PATHS
         authorization_error = (
             validate_desktop_auth_request(self)
             if desktop_auth_path
@@ -4863,43 +3977,8 @@ class Handler(SimpleHTTPRequestHandler):
         )
         if authorization_error:
             return self.send_json({"error": authorization_error[1]}, authorization_error[0])
-        routes = {
-            "/api/updates": (2048, self._post_updates),
-            "/api/desktop/update-restart": (1024, self._post_update_restart),
-            "/api/ui/guide": (1024, self._post_guide_seen),
-            "/api/network/policy": (1024, self._post_request_policy),
-            "/api/settings": (16384, self._post_cloud),
-            "/api/settings/pixiv": (2048, self._post_display_settings),
-            "/api/cloud/read": (2048, self._post_cloud),
-            "/api/cloud/write": (16384, self._post_cloud),
-            "/api/cloud/sync": (2048, self._post_cloud),
-            "/api/cloud/clear-cache": (2048, self._post_cloud),
-            "/api/auth/logout": (4096, self._post_logout),
-            "/api/auth/method": (1024,self._post_auth_method),
-            "/api/desktop/auth/session": (4096, self._post_desktop_session),
-            "/api/desktop/auth/logout": (4096, self._post_desktop_logout),
-            "/api/desktop/auth/context": (1024, self._post_desktop_context),
-            "/api/desktop/auth/app-connect": (1024, self._post_desktop_app_connect),
-            "/api/desktop/auth/app-cancel": (8192, self._post_desktop_app_cancel),
-            "/api/desktop/auth/official-context": (1024, self._post_official_context),
-            "/api/account/seen": (65536, self._post_account_seen),
-            "/api/account/callback": (16384, self._post_account_callback),
-            "/api/system/select-folder": (4096, self._post_select_folder),
-            "/api/library/history/clear": (4096, self._post_clear_history),
-            "/api/library/history/delete": (65536, self._post_delete_history),
-            "/api/library/history/open": (4096, self._post_open_history),
-            "/api/workspace/basket": (8388608, self._post_save_basket),
-            "/api/workspace/task": (4194304, self._post_save_task),
-            "/api/workspace/task/delete": (4096, self._post_delete_task),
-            "/api/workspace/task/migrate": (4096, self._post_migrate_task),
-            "/api/workspace/recent": (8192, self._post_recent_search),
-            "/api/pixiv/search/cancel": (4096, self._post_cancel_search),
-            "/api/pixiv/ugoira/cancel": (4096, self._post_cancel_search),
-            "/api/pixiv/download/cancel": (4096, self._post_cancel_download),
-            "/api/pixiv/batch-download": (65536, self._post_pixiv_batch_download),
-            "/api/pixiv/download": (16384, self._post_pixiv_download),
-        }
-        route = routes.get(path)
+        route = POST_ROUTES.get(path)
+        route = (route[0], getattr(self, route[1])) if route is not None else None
         if route is None:
             return self.send_json({"error": "not found"}, 404)
         try:
@@ -4911,38 +3990,18 @@ class Handler(SimpleHTTPRequestHandler):
             "/api/pixiv/download",
         }
         if is_download_task:
+            def validate_queued_download():
+                if data.get("queueId") is not None:
+                    with SEARCH_SESSION_LOCKS_GUARD:
+                        queued = WORKSPACE_STORE.get_task(data["queueId"], owner_scope, head=3)
+                        if queued is None or data.get("requestId") != queued["remainingChunks"][0]["requestId"]:
+                            raise DownloadRequestError("任务进度已更新，请重新读取任务", 409)
+
             def download_result() -> tuple[dict, int]:
-                with APP_UPDATES.gate:
-                    if APP_UPDATES.restarting:
-                        return {"error":"正在重启更新，请稍后再下载"},409
-                    admitted=DOWNLOAD_TASK_SLOTS.acquire(blocking=False)
-                    if admitted:APP_UPDATES.active_downloads+=1
-                if not admitted:
-                    return {
-                        "error": "下载任务繁忙，请等待当前任务完成后重试",
-                        "retryable": True,
-                    }, 429
-                try:
-                    if data.get("queueId") is not None:
-                        with SEARCH_SESSION_LOCKS_GUARD:
-                            queued = WORKSPACE_STORE.get_task(data["queueId"], owner_scope, head=3)
-                            if queued is None or data.get("requestId") != queued["remainingChunks"][0]["requestId"]:
-                                raise DownloadRequestError("任务进度已更新，请重新读取任务", 409)
-                    ensure_network_opener_current()
-                    priority_token = REQUEST_PRIORITY.set(1)
-                    completed = False
-                    try:
-                        DOWNLOAD_AHEAD.begin()
-                        result = route[1](data)
-                        completed = result[1] == 200
-                        return result
-                    finally:
-                        DOWNLOAD_AHEAD.finish(keep=completed and not self._download_cancel.is_set())
-                        REQUEST_PRIORITY.reset(priority_token)
-                finally:
-                    with APP_UPDATES.gate:
-                        APP_UPDATES.active_downloads-=1
-                        DOWNLOAD_TASK_SLOTS.release()
+                return DOWNLOAD_ADMISSION.run(
+                    lambda: route[1](data), self._download_cancel,
+                    validate=validate_queued_download,
+                )
 
             try:
                 with SEARCH_SESSION_LOCKS_GUARD:
@@ -5096,8 +4155,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_cancel_search(self, data: dict):
         try:
-            request_id = parse_search_request_id(data.get("requestId"), required=True)
-            found = cancel_search_request(request_id)
+            found = cancel_search_request(data.get("requestId"))
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         return self.send_json({"ok": True, "cancelled": found})
@@ -5287,7 +4345,7 @@ class Handler(SimpleHTTPRequestHandler):
             file = DOWNLOAD_HISTORY.first_file(data.get("id"))
             if file is None:
                 return self.send_json({"error": "这条记录已删除，请刷新历史"}, 404)
-            parent = _reject_reparse_components(Path(file).parent, "保存位置已变为链接")
+            parent = reject_reparse_components(Path(file).parent, "保存位置已变为链接")
             if not parent.is_dir():
                 return self.send_json({"error": "保存文件夹已移动或删除"}, 404)
             os.startfile(parent)
@@ -5375,7 +4433,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not root.is_absolute():
             raise RequestInputError(400, "保存位置必须是绝对路径")
         try:
-            candidate = _reject_reparse_components(
+            candidate = reject_reparse_components(
                 root, "保存根目录不能是链接或重解析点",
             )
         except PixivPolicyError as exc:

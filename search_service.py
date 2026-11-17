@@ -355,11 +355,12 @@ class _PageSession:
 
 
 class SearchPageCache:
-    """Small LRU of normalized result pages with a sliding backward window."""
+    """Bounded LRU of normalized pages, with a sliding backward window."""
 
-    def __init__(self, *, keep_behind: int = 6, max_sessions: int = 12) -> None:
+    def __init__(self, *, keep_behind: int = 6, max_sessions: int = 12, max_pages: int = 16) -> None:
         self.keep_behind = max(0, int(keep_behind))
         self.max_sessions = max(1, int(max_sessions))
+        self.max_pages = max(1, int(max_pages))
         self._sessions: OrderedDict[Hashable, _PageSession] = OrderedDict()
         self._lock = threading.RLock()
 
@@ -376,9 +377,13 @@ class SearchPageCache:
             session = self._sessions.pop(key, _PageSession())
             for page, items in pages.items():
                 number = max(1, int(page))
+                session.pages.pop(number, None)
                 session.pages[number] = list(items)
             oldest = max(1, int(current_page) - self.keep_behind)
             session.pages = {page: items for page, items in session.pages.items() if page >= oldest}
+            while len(session.pages) > self.max_pages:
+                stale = next(page for page in session.pages if page != current_page)
+                del session.pages[stale]
             self._sessions[key] = session
             while len(self._sessions) > self.max_sessions:
                 self._sessions.popitem(last=False)
@@ -389,7 +394,10 @@ class SearchPageCache:
             if session is None:
                 return None
             self._sessions[key] = session
-            items = session.pages.get(max(1, int(page)))
+            number = max(1, int(page))
+            items = session.pages.pop(number, None)
+            if items is not None:
+                session.pages[number] = items
             return list(items) if items is not None else None
 
     def available_pages(self, key: Hashable) -> list[int]:

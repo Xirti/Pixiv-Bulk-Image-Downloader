@@ -135,7 +135,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     nextReads.set(key,reading);
   }
   const artworkContext=item=>({context:{kind:"pid",value:item.id},resultPage:state.page});
-  function syncUpdateDots(){
+  function syncPeopleStatus(){
     const enabled=updatePreferences.detect && updatePreferences.dots;
     const dot=tools.querySelector('[data-account-updates] .update-dot');
     if(dot)dot.hidden=!enabled || !Object.values(updates[state.scope]).some(row=>row.isNew);
@@ -143,6 +143,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       const person=data?.people?.[Number(card.dataset.person)];if(!person)return;
       const marker=updates[state.scope][person.id] || person;
       card.querySelector('.update-dot').hidden=!enabled || !marker.isNew;
+      card.querySelector('[data-person-following]').hidden=state.view!=="followers" || !person.following;
     });
   }
   function checkUpdates({network=true,continuing=false}={}){
@@ -166,7 +167,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         }
         for(const id of Object.keys(updates[scope]))if(!result.authors[id])delete updates[scope][id];
       }
-      syncUpdateDots();return {hasMore};
+      syncPeopleStatus();return {hasMore};
     })().finally(()=>{if(checkingUpdates===task)checkingUpdates=null;});
     checkingUpdates=task;return task;
   }
@@ -184,7 +185,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         for(const value of cache.values())for(const person of value.people || [])if(person.id===id && person.latestObserved<=stamp)person.isNew=false;
       }
     }
-    syncUpdateDots();
+    syncPeopleStatus();
   }
   function seenWorks(items){
     if(!updatePreferences.detect)return Promise.resolve();
@@ -276,7 +277,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     grid.hidden=!p?.connected || state.view!=="bookmarks";
     if(!peopleRoot.hidden && (renderedPeople!==data?.people || peopleKey!==pageKey())){
     renderedPeople=data?.people;peopleKey=pageKey();avatars.park(peopleRoot);
-    peopleRoot.innerHTML=(data?.people || []).map((person,index)=>`<article class="account-person" data-person="${index}"><a class="account-person-avatar" href="#artist/${esc(person.id)}" aria-label="${esc(person.name)}"><span class="update-dot" hidden aria-hidden="true"></span>${person.avatar?`<img data-gallery-src="${esc(person.avatar)}" data-preview-artwork="avatar:${esc(person.id)}" alt="" loading="lazy" decoding="async">`:'<span aria-hidden="true">人</span>'}</a><div class="account-person-info"><a class="account-person-name" href="#artist/${esc(person.id)}">${esc(person.name)}</a><span class="account-person-uid">UID ${esc(person.id)}${state.view==="followers"&&person.following?' · 互相关注':""}</span><p class="account-person-bio">${person.bioLoaded?esc(person.bio || "暂未填写简介"):'<button type="button" data-person-bio>查看简介</button>'}</p>${person.latestObserved?`<span class="account-person-update" title="已读取范围内的最新作品">最新观察 · ${esc(person.latestObserved.slice(0,10))}</span>`:""}</div></article>`).join("");
+    peopleRoot.innerHTML=(data?.people || []).map((person,index)=>`<article class="account-person" data-person="${index}"><a class="account-person-avatar" href="#artist/${esc(person.id)}" aria-label="${esc(person.name)}"><span class="update-dot" hidden aria-hidden="true"></span>${person.avatar?`<img data-gallery-src="${esc(person.avatar)}" data-preview-artwork="avatar:${esc(person.id)}" alt="" loading="lazy" decoding="async">`:'<span aria-hidden="true">人</span>'}</a><div class="account-person-info"><a class="account-person-name" href="#artist/${esc(person.id)}">${esc(person.name)}</a><span class="account-person-uid">UID ${esc(person.id)}<span data-person-following ${state.view==="followers"&&person.following?"":"hidden"}> · 互相关注</span></span><p class="account-person-bio">${person.bioLoaded?esc(person.bio || "暂未填写简介"):'<button type="button" data-person-bio>查看简介</button>'}</p>${person.latestObserved?`<span class="account-person-update" title="已读取范围内的最新作品">最新观察 · ${esc(person.latestObserved.slice(0,10))}</span>`:""}</div></article>`).join("");
     if(!peopleRoot.hidden && !pending && !error && !(data?.people?.length))peopleRoot.innerHTML=`<p class="account-empty">${state.view==="followers"?"目前还没有粉丝。":"这个范围内还没有关注的作者。"}</p>`;
     avatars.mount(peopleRoot,"account-people");installImages(peopleRoot);
     peopleRoot.querySelectorAll("[data-person]").forEach(row=>{
@@ -308,7 +309,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       restoringScroll=true;
       cancelAnimationFrame(scrollFrame);scrollFrame=requestAnimationFrame(()=>{restoringScroll=false;scrollFrame=null;});
     }
-    syncSelection();syncUpdateDots();changed();
+    syncSelection();syncPeopleStatus();changed();
   }
 
   async function load(refresh=false){
@@ -388,7 +389,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   return {open:async snapshot=>{remember();active=true;if(snapshot)state={...empty(),...structuredClone(snapshot)};restoreTop=state.scroll;await load();},
     snapshot:()=>{remember();return structuredClone(state);},refresh:()=>{remember();return Promise.all([load(true),state.view==="home"?statistics?.refresh():null]);},syncSelection,
     cachedTags:()=>tags,prepare,stopBackground,checkUpdates,seenWorks,
-    configure(value,loaded){if(!loaded)return;updatePreferences={detect:value.autoFollowing,dots:value.updateDots};syncUpdateDots();},
+    configure(value,loaded){if(!loaded)return;updatePreferences={detect:value.autoFollowing,dots:value.updateDots};syncPeopleStatus();},
     cloudChanged:(kind,id,value,previous)=>{
       relationVersion++;
       if(kind==='follow')for(const scope of ['public','private'])if(!value.active || value.privacy && value.privacy!==scope)delete updates[scope][id];

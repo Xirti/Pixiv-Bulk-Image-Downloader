@@ -1,8 +1,7 @@
 "use strict";
 
-// One renderer/interaction owner; the two entry points supply only their DOM.
-globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, installImages, stage = null, openOfficial = null, noticeBefore = null, isDownloaded = () => false}) {
-  let current=null;
+// Each renderer shares its own detail state with page navigation.
+globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, installImages, stage = null, detail = {item: null}, openOfficial = null, noticeBefore = null, isDownloaded = () => false}) {
   const actions=document.createElement("div");actions.className="cloud-detail-actions";
   fields.Tags.after(actions);
   const notice=document.createElement("p"),message=document.createElement("span");
@@ -11,7 +10,7 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
   notice.hidden=true;
   if(noticeBefore)noticeBefore.before(notice);else actions.after(notice);
   function refreshDownloadStatus(){
-    message.textContent=current && isDownloaded(current)?"👍 下载成功，快去给画师点赞评论吧！":"👍 喜欢的话就去给画师点赞评论吧！";
+    message.textContent=detail.item && isDownloaded(detail.item)?"👍 下载成功，快去给画师点赞评论吧！":"👍 喜欢的话就去给画师点赞评论吧！";
   }
   let foldFrame=null;
   function measureFolds(){
@@ -37,14 +36,14 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
     new ResizeObserver(measureFolds).observe(field);
     return {field,wrapper,button,label};
   });
-  function reset(){current=null;actions.replaceChildren();notice.hidden=true;notice.replaceChildren();stage.reset();}
+  function reset(){detail.item=null;actions.replaceChildren();notice.hidden=true;notice.replaceChildren();stage.reset();}
   function render(item, fallback = () => "", {preserve = false} = {}) {
-    const keepFolds=preserve && current?.id===item.id;
+    const keepFolds=preserve && detail.item?.id===item.id;
     folds.forEach(fold=>{
       if(!keepFolds){fold.wrapper.classList.remove('is-open');fold.button.setAttribute('aria-expanded','false');fold.button.setAttribute('aria-label',`展开${fold.label}`);}
       fold.wrapper.hidden=fold.field===fields.Desc?!item.description:!item.tags?.length;
     });
-    current=item;actions.innerHTML=cloudActionButton("bookmark",item.id,true)+(item.userId?cloudActionButton("follow",item.userId,true):"");
+    detail.item=item;actions.innerHTML=cloudActionButton("bookmark",item.id,true)+(item.userId?cloudActionButton("follow",item.userId,true):"");
     const official=document.createElement("a");official.className="artwork-source-link";
     official.href=`https://www.pixiv.net/artworks/${item.id}`;official.target="_blank";official.rel="noopener noreferrer";
     official.dataset.copyLink="";official.textContent=official.href;official.title=official.href;
@@ -65,6 +64,6 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
     measureFolds();
     return stage.render(item, {preserve});
   }
-  return {render, reset, refreshDownloadStatus, snapshot:()=>({item:current,stagePage:stage.state().page}), suspend: () => stage?.suspend(), setVisible: value => stage?.setVisible(value), clear: () => {current=null;actions.replaceChildren();notice.hidden=true;notice.replaceChildren();stage.clear();},
+  return {render, reset, refreshDownloadStatus, snapshot:()=>({item:detail.item,stagePage:stage.state().page}), suspend: () => stage?.suspend(), setVisible: value => stage?.setVisible(value), clear: () => {detail.item=null;actions.replaceChildren();notice.hidden=true;notice.replaceChildren();stage.clear();},
     restorePage:index=>stage?.restorePage(index), state:()=>stage?.state() || {page:0}};
 };

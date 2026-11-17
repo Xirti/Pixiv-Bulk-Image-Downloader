@@ -4,12 +4,15 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   const find=selector=>root.querySelector(selector), setting=selector=>settingsRoot.querySelector(selector);
   let file=null, imageUrl="", job=null, busy=false, sequence=0, timer=null, clickTimer=null, polling=null;
   let configuration={mode:"guest",keyConfigured:false}, settingsLoaded=false;
+  let settingsVersion=0;
+  let settingsRead=null,settingsWrite=null;
+  let queryModeChosen=false,settingsModeChosen=false;
   let maskSensitive=true;
   const revealed = createSensitiveImageReveals({root,onHide:()=>render()});
   let revealedJob = null;
   let recentlyRevealedId=null,revealedAt=-Infinity;
   let cacheEpoch=0;
-  let loginTimer=null;
+  let loginPending=false;
   const images=createPreviewImageCache({retainUnused:true,maxImages:128,reuseDetached:true});
   let renderedResults="";
 
@@ -109,57 +112,94 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
       apply(data);if(busy)timer=setTimeout(()=>void poll(revision),1500);
     }catch(error){if(revision===sequence){busy=false;message(error.message,true);controls();}}
   }
-  function showSettings(){
-    setting("[data-source-setting-mode]").value=configuration.mode;
+  function showSettings({applyMode=false}={}){
+    if(!settingsModeChosen)setting("[data-source-setting-mode]").value=configuration.mode;
     setting("[data-source-key-status]").textContent=configuration.keyConfigured?"已安全保存 API Key":"尚未配置 API Key，官网查询可独立登录";
     const states={"signed-in":"上次核对已登录","signed-out":"尚未登录","unknown":"尚未核对"};
     setting("[data-source-website-state]").textContent=`SauceNAO 官网会话 · ${states[configuration.websiteLogin] || states.unknown}`;
-    find("[data-source-mode]").value=configuration.mode;
+    if(applyMode)find("[data-source-mode]").value=configuration.mode;
   }
-  async function loadSettings(){
-    try{
-      configuration=await request("/api/source-search/settings");settingsLoaded=true;showSettings();render();
-      if(configuration.error){setting("[data-source-settings-message]").textContent=configuration.error;message(configuration.error,true);}
+  function loadSettings({refresh=false}={}){
+    if(settingsWrite){
+      const readAfterWrite=()=>loadSettings({refresh});
+      return settingsWrite.then(readAfterWrite,readAfterWrite);
     }
-    catch(error){setting("[data-source-settings-message]").textContent=error.message;}
+    if(!refresh && settingsRead?.version===settingsVersion){
+      return settingsRead.promise;
+    }
+    const reading={version:++settingsVersion,promise:null};
+    settingsRead=reading;
+    reading.promise=request("/api/source-search/settings").then(value=>{
+      if(reading.version!==settingsVersion)return false;
+      const applyMode=!settingsLoaded && !queryModeChosen;
+      configuration=value;
+      settingsLoaded=true;
+      showSettings({applyMode});
+      render();
+      if(configuration.error){
+        setting("[data-source-settings-message]").textContent=configuration.error;
+        message(configuration.error,true);
+      }
+      return true;
+    }).catch(error=>{
+      if(reading.version===settingsVersion){
+        setting("[data-source-settings-message]").textContent=error.message;
+      }
+      return false;
+    }).finally(()=>{
+      if(settingsRead===reading)settingsRead=null;
+    });
+    return reading.promise;
   }
   async function saveSettings(action){
-    const status=setting("[data-source-settings-message]"), buttons=settingsRoot.querySelectorAll("button");
-    buttons.forEach(button=>button.disabled=true);status.textContent="正在保存…";
+    if(settingsWrite)return;
+    settingsVersion++;
+    const status=setting("[data-source-settings-message]"), controls=settingsRoot.querySelectorAll("button,input,select");
+    controls.forEach(control=>control.disabled=true);status.textContent="正在保存…";
     const key=setting("[data-source-key]");
     try{
       const data={action,mode:setting("[data-source-setting-mode]").value};
       if(action==="save" && key.value.trim())data.key=key.value.trim();
-      configuration=await post("settings",data);key.value="";showSettings();render();
+      settingsWrite=post("settings",data);
+      configuration=await settingsWrite;
+      settingsLoaded=true;
+      queryModeChosen=false;
+      settingsModeChosen=false;
+      key.value="";
+      showSettings({applyMode:true});
+      render();
       if(action==="clear"){
         clearTimeout(timer);clearTimeout(clickTimer);sequence++;cacheEpoch++;job=null;busy=false;render();changed();
         images.clear();
       }
       status.textContent=action==="clear"?"搜图结果缓存已清除":action==="reset-guest"?"游客会话已重置":action==="remove-key"?"API Key 已移除":"搜图设置已保存";
     }catch(error){status.textContent=error.message;}
-    finally{buttons.forEach(button=>button.disabled=false);}
+    finally{
+      settingsWrite=null;
+      controls.forEach(control=>control.disabled=false);
+    }
   }
   find("[data-source-file]").addEventListener("change",event=>choose(event.target.files[0]));
   find("[data-source-query]").onclick=()=>void search();
+  find("[data-source-mode]").addEventListener("change",()=>{queryModeChosen=true;});
+  setting("[data-source-setting-mode]").addEventListener("change",()=>{settingsModeChosen=true;});
   async function login() {
-    clearTimeout(loginTimer);
+    if(loginPending)return;
+    loginPending=true;
     try {
       const task=await post("login",{});
       setting("[data-source-settings-message]").textContent="请在官网窗口输入账号、密码并完成验证";
-      let remaining=200;
-      async function check() {
-        try {
-          const state=await request(`/api/source-search/job?id=${encodeURIComponent(task.id)}`);
-          configuration=await request("/api/source-search/settings");
-          const selected=find("[data-source-mode]").value;
-          showSettings();find("[data-source-mode]").value=selected;
-          if (state.state === "done" || state.state === "error" || state.state === "cancelled") {
-            setting("[data-source-settings-message]").textContent=state.message;
-          } else if (--remaining > 0) loginTimer=setTimeout(()=>void check(),3000);
-        } catch(error) {setting("[data-source-settings-message]").textContent=error.message;}
+      for(let remaining=200;remaining>0;remaining--){
+        await new Promise(resolve=>setTimeout(resolve,remaining===200?1500:3000));
+        const state=await request(`/api/source-search/job?id=${encodeURIComponent(task.id)}`);
+        const adopted=await loadSettings({refresh:true});
+        if(state.state === "done" || state.state === "error" || state.state === "cancelled"){
+          if(adopted)setting("[data-source-settings-message]").textContent=state.message;
+          return;
+        }
       }
-      loginTimer=setTimeout(()=>void check(),1500);
     } catch(error) {setting("[data-source-settings-message]").textContent=error.message;message(error.message,true);}
+    finally{loginPending=false;}
   }
   setting("[data-source-login]").onclick=()=>void login();
   find("[data-source-login]").onclick=()=>void login();

@@ -13,7 +13,7 @@ from pixiv_account import AccountError
 from pixiv_adapter import (PixivPolicyError, valid_pixiv_id, normalize_search_item,
     build_user_profile_all_url, build_user_profile_works_url,CONTENT_MODES,matches_content_mode)
 from pixiv_app_gallery import normalize_work, continuation
-from search_service import parse_search_date_range, parse_search_query, parse_search_tags
+from search_service import SearchInputError, parse_search_date_range, parse_search_query, parse_search_tags
 from request_coordinator import checked_lock
 
 CARD_FIELDS = ("id", "source", "userId", "title", "artist", "thumb", "width", "height", "pages",
@@ -169,20 +169,20 @@ class PopularityService:
     def read(self, *, generation, kind, uid="", batch="", mode="safe", work_type="all", include_ai=True,
              start="", end="", index="", page=1, refresh=False, query="", fuzzy=False, cancel_event=None):
         if kind not in {"author", "ranking", "recommended", "search"} or mode not in CONTENT_MODES:
-            raise ValueError("排序来源无效")
+            raise SearchInputError("排序来源无效")
         if work_type not in {"all", "illustration", "manga", "ugoira"} or type(include_ai) is not bool:
-            raise ValueError("排序筛选无效")
+            raise SearchInputError("排序筛选无效")
         if type(page) is not int or not 1 <= page <= 100000:
-            raise ValueError("排序页码无效")
+            raise SearchInputError("排序页码无效")
         if kind == "author" and not valid_pixiv_id(uid) or kind in {"ranking","recommended"} and not re.fullmatch(r"[a-f0-9]{32}", batch):
-            raise ValueError("排序作品来源无效")
+            raise SearchInputError("排序作品来源无效")
         if kind == "search":
             parsed = parse_search_query(query)
             if parsed.kind != "tags" or type(fuzzy) is not bool:
-                raise ValueError("搜索候选池条件无效")
+                raise SearchInputError("搜索候选池条件无效")
             query = "；".join(parse_search_tags(parsed.value))
         if index and not re.fullmatch(r"[a-f0-9]{32}", index):
-            raise ValueError("排序快照无效")
+            raise SearchInputError("排序快照无效")
         parse_search_date_range(start, end)
         owner, method = self.context(generation)
         descriptor = [kind, uid, batch, mode, work_type, include_ai, start, end]
@@ -256,7 +256,7 @@ class PopularityService:
             offset = (page - 1) * 36
             total = len(job["items"])
             if job["ready"] and offset >= total and page != 1:
-                raise ValueError("排序页码超出范围")
+                raise SearchInputError("排序页码超出范围")
             result = {"index": job["index"], "ready": job["ready"], "loaded": total, "counted": job["enrichOffset"], "total": total if job["ready"] else None,
                     "items": copy.deepcopy(job["items"][offset:offset + 36]) if job["ready"] else [],
                     "page": page, "pages": max(1, (total + 35) // 36) if job["ready"] else None,

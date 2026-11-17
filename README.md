@@ -50,7 +50,7 @@
 
 运行环境为 **Windows 10/11 x64**，需要 Microsoft Edge WebView2 Runtime 和可访问 Pixiv 的网络。
 
-1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 选择安装版 `MOKU-Setup-v2.1.7-windows-x64.exe` 或便携版 `MOKU-v2.1.7-windows-x64.zip`。
+1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 选择安装版 `MOKU-Setup-v2.1.8-windows-x64.exe` 或便携版 `MOKU-v2.1.8-windows-x64.zip`。
 2. 安装后启动 MOKU，或完整解压便携包后运行 `MOKU/MOKU.exe`。
 3. 打开「我的账号 → 资料」，选择 App 授权或网页登录，完成 Pixiv 登录。
 4. 搜索或进入「发现」，查看作品，将需要下载的图片加入采集篮。
@@ -79,12 +79,12 @@
 - **调整内容显示** — 网页登录后，在「设置 → 账号与通知 → Pixiv 浏览设置」调整 R-18／R-18G、敏感作品和 AI 作品显示，修改自动保存到 Pixiv。
 - **导出动图** — MP4 导出需要支持 `libx264` 的 FFmpeg，将其加入 `PATH` 后启动 MOKU。
 
-## v2.1.7
+## v2.1.8
 
-- 修复账号板块与发现来源切换时的位置跳动，返回页面恢复原有位置。
-- 改善窗口边缘缩放与光标反馈，消除非最大化窗口顶部细线。
-- 合并搜图状态读取，完善取消、失败重试和历史图片恢复。
-- 修复更新轮询、原生重启和官网关注弹窗的迟到响应覆盖。
+- 改进搜索翻页、作者返回与图片缓存复用。
+- 完善页面返回、失败恢复和多图详情的状态管理。
+- 修复切号后旧设置操作影响当前表单的问题。
+- 改进账号刷新取消、下载恢复和本机接口输入校验。
 
 完整记录见 [更新日志](RELEASE_NOTES.md)。
 
@@ -120,7 +120,7 @@ powershell -ExecutionPolicy Bypass -File .\make-release.ps1 -Development
 .\build-installer.ps1 -Development -Compiler 'C:\Program Files\Inno Setup 7\ISCC.exe'
 ```
 
-安装程序位于 `release/installer-development-v版本号/`。正式构建省略 `-Development`，通过 `-ReleaseKey` 指定发布密钥。`-SkipBuild` 复用已校验的 `dist/MOKU/`，`-WebViewInstaller` 可附带微软签名的 WebView2 安装程序。
+安装程序位于 `release/installer-development-v版本号/`。正式构建省略 `-Development`，通过 `-ReleaseKey` 指定发布密钥，并以 `-VerificationRecord` 提供当前源码的工程验证记录。`-SkipBuild` 复用已校验的 `dist/MOKU/`，`-WebViewInstaller` 可附带微软签名的 WebView2 安装程序。
 
 安装版默认安装到当前用户目录，配置与缓存沿用 `%LOCALAPPDATA%\MOKU`。卸载时可选择清除共用的本机配置、登录状态、缓存和下载历史，默认保留。下载作品文件单独保留。程序内更新继续使用已签名的 ZIP 更新包。
 
@@ -134,6 +134,6 @@ powershell -ExecutionPolicy Bypass -File .\make-release.ps1 -Development
 
 由 **Xirti / Aperia** 开发与维护，项目主页为 [Xirti/Pixiv-Bulk-Image-Downloader](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader)。
 
-源码采用 [MIT License](LICENSE)，允许使用、和再分发，分发时须保留版权声明及许可文本。作品版权归各自创作者所有，请遵守作者授权与平台规则。MOKU 为独立开发项目。
+源码采用 [MIT License](LICENSE)，允许使用、修改和再分发，分发时须保留版权声明及许可文本。作品版权归各自创作者所有，请遵守作者授权与平台规则。MOKU 为独立开发项目。
 
 [使用声明](USAGE.md) · [隐私说明](PRIVACY.md) · [项目归属](NOTICE.md) · [第三方许可](THIRD_PARTY_NOTICES.md)

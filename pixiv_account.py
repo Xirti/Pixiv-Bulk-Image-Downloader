@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 from curl_cffi.requests.exceptions import RequestException
 from browser_transport import AsyncCurlPool, TransportClosedError
 from auth_store import CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHINE, ERROR_NOT_FOUND, advapi32, persistent_session_disabled
-from request_coordinator import RequestCoordinator, REQUEST_PRIORITY
+from request_coordinator import RequestCoordinator, REQUEST_PRIORITY, checked_lock
 from shared_request_budget import SharedRequestBudget
 from pixiv_adapter import PixivPolicyError
 
@@ -269,7 +269,9 @@ class AppAccount:
         self.transport.coordinator.session_connected()
         return self.snapshot()
 
-    def access(self, force=False, *, rejected=None, expected_epoch=None):
+    def access(self, force=False, *, rejected=None, expected_epoch=None, check=None):
+        check = check if check is not None else ACCOUNT_REQUEST_CHECK.get()
+        check()
         with self._lock:
             if expected_epoch is not None:
                 self._check(expected_epoch)
@@ -278,7 +280,11 @@ class AppAccount:
                 raise AccountError("reauth", "请先连接 Pixiv 账号")
             if not force and tokens.expires - self.clock() > 300:
                 return tokens, epoch
-        with self._refresh_lock:
+        def current():
+            self._check(epoch)
+            check()
+
+        with checked_lock(self._refresh_lock, current):
             with self._lock:
                 self._check(epoch)
                 tokens = self._tokens
@@ -290,11 +296,15 @@ class AppAccount:
             try:
                 raw = self.transport.request("POST", "/auth/token", form={**self.client_config,
                     "grant_type": "refresh_token", "refresh_token": tokens.refresh, "include_policy": "true"},
-                    check=lambda: self._check(epoch))
+                    check=current)
                 updated = Tokens.from_response(raw, previous=tokens, now=self.clock())
+                current()
                 self._commit(updated, epoch)
                 return updated, epoch
             except Exception as error:
+                # The caller's check may acquire the outer authorization lock.
+                # Never call it while holding the account's internal lock.
+                current()
                 with self._lock:
                     self._check(epoch)
                     self._refresh_error = str(error) if isinstance(error, AccountError) else "刷新暂时失败，请稍后重试"
@@ -307,7 +317,7 @@ class AppAccount:
     def request(self, method, path, *, form=None, expected_epoch=None, check=None):
         check=check or ACCOUNT_REQUEST_CHECK.get()
         check()
-        tokens, epoch = self.access(expected_epoch=expected_epoch)
+        tokens, epoch = self.access(expected_epoch=expected_epoch, check=check)
         if expected_epoch is not None:
             self._check(expected_epoch)
             if epoch != expected_epoch:
@@ -320,7 +330,7 @@ class AppAccount:
         except AccountError as error:
             if error.kind!="reauth":raise
             if method=="GET":
-                tokens, epoch = self.access(force=True, rejected=tokens, expected_epoch=epoch)
+                tokens, epoch = self.access(force=True, rejected=tokens, expected_epoch=epoch, check=check)
                 try:
                     return self.transport.request(method,path,form=form,bearer=tokens.access,check=current)
                 except AccountError as retry:

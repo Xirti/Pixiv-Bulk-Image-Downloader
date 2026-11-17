@@ -103,6 +103,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       adoptPreferences(data);
       notifySettings();lastSyncAttempt=0;
       if(wasAutomatic && !prefs.autoSync)await clearStarted();
+      if(!sameSession(revision,generation))throw new Error("账号已改变，请重新打开设置");
       if(!wasAutomatic && prefs.autoSync){accountPrepared=false;auxiliaryCompleted=0;void tick();}
       return {...prefs};
     });

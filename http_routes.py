@@ -1,0 +1,50 @@
+"""POST request limits, handler names and desktop authorization policy."""
+from types import MappingProxyType
+
+
+DESKTOP_AUTH_PATHS = frozenset({
+    '/api/desktop/auth/app-cancel',
+    '/api/desktop/auth/app-connect',
+    '/api/desktop/auth/context',
+    '/api/desktop/auth/logout',
+    '/api/desktop/auth/official-context',
+    '/api/desktop/auth/session',
+    '/api/desktop/update-restart',
+})
+
+POST_ROUTES = MappingProxyType({
+    '/api/updates': (2048, '_post_updates'),
+    '/api/desktop/update-restart': (1024, '_post_update_restart'),
+    '/api/ui/guide': (1024, '_post_guide_seen'),
+    '/api/network/policy': (1024, '_post_request_policy'),
+    '/api/settings': (16384, '_post_cloud'),
+    '/api/settings/pixiv': (2048, '_post_display_settings'),
+    '/api/cloud/read': (2048, '_post_cloud'),
+    '/api/cloud/write': (16384, '_post_cloud'),
+    '/api/cloud/sync': (2048, '_post_cloud'),
+    '/api/cloud/clear-cache': (2048, '_post_cloud'),
+    '/api/auth/logout': (4096, '_post_logout'),
+    '/api/auth/method': (1024, '_post_auth_method'),
+    '/api/desktop/auth/session': (4096, '_post_desktop_session'),
+    '/api/desktop/auth/logout': (4096, '_post_desktop_logout'),
+    '/api/desktop/auth/context': (1024, '_post_desktop_context'),
+    '/api/desktop/auth/app-connect': (1024, '_post_desktop_app_connect'),
+    '/api/desktop/auth/app-cancel': (8192, '_post_desktop_app_cancel'),
+    '/api/desktop/auth/official-context': (1024, '_post_official_context'),
+    '/api/account/seen': (65536, '_post_account_seen'),
+    '/api/account/callback': (16384, '_post_account_callback'),
+    '/api/system/select-folder': (4096, '_post_select_folder'),
+    '/api/library/history/clear': (4096, '_post_clear_history'),
+    '/api/library/history/delete': (65536, '_post_delete_history'),
+    '/api/library/history/open': (4096, '_post_open_history'),
+    '/api/workspace/basket': (8388608, '_post_save_basket'),
+    '/api/workspace/task': (4194304, '_post_save_task'),
+    '/api/workspace/task/delete': (4096, '_post_delete_task'),
+    '/api/workspace/task/migrate': (4096, '_post_migrate_task'),
+    '/api/workspace/recent': (8192, '_post_recent_search'),
+    '/api/pixiv/search/cancel': (4096, '_post_cancel_search'),
+    '/api/pixiv/ugoira/cancel': (4096, '_post_cancel_search'),
+    '/api/pixiv/download/cancel': (4096, '_post_cancel_download'),
+    '/api/pixiv/batch-download': (65536, '_post_pixiv_batch_download'),
+    '/api/pixiv/download': (16384, '_post_pixiv_download'),
+})

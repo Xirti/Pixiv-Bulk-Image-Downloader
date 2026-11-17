@@ -1,6 +1,7 @@
 param(
   [switch]$SkipBuild,
   [switch]$Development,
+  [string]$VerificationRecord = $env:MOKU_VERIFICATION_RECORD,
   [string]$ReleaseKey = $env:MOKU_RELEASE_KEY,
   [string]$Compiler = $env:MOKU_ISCC,
   [string]$WebViewInstaller,
@@ -10,6 +11,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 Set-Location -LiteralPath $Root
+if (-not $Development) {
+  if (-not $VerificationRecord) { throw 'Formal installers require -VerificationRecord (or MOKU_VERIFICATION_RECORD) from the engineering verification run.' }
+  python -B release_verification.py verify $VerificationRecord
+  if ($LASTEXITCODE -ne 0) { throw 'Engineering verification failed; run the source-matched checks again.' }
+}
 if (-not $Compiler) {
   $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
   if ($command) { $Compiler = $command.Source }
@@ -19,7 +25,7 @@ if (-not $Compiler -or -not (Test-Path -LiteralPath $Compiler -PathType Leaf)) {
 }
 if ($CodeSignThumbprint -and -not $TimestampUrl) { throw 'Windows signing requires -TimestampUrl' }
 if (-not $SkipBuild) {
-  & (Join-Path $Root 'build-portable.ps1') -Development:$Development -ReleaseKey $ReleaseKey -CodeSignThumbprint $CodeSignThumbprint -TimestampUrl $TimestampUrl
+  & (Join-Path $Root 'build-portable.ps1') -Development:$Development -VerificationRecord $VerificationRecord -ReleaseKey $ReleaseKey -CodeSignThumbprint $CodeSignThumbprint -TimestampUrl $TimestampUrl
   if ($LASTEXITCODE -ne 0) { throw 'Application build failed' }
 }
 $Payload = Join-Path $Root 'dist\MOKU'
@@ -31,6 +37,8 @@ if ($LASTEXITCODE -ne 0 -or $Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Insta
 $Manifest = Get-Content -LiteralPath (Join-Path $Payload 'BUILD_MANIFEST.json') -Raw | ConvertFrom-Json
 if ($Manifest.version -ne $Version) { throw 'Application version differs from source' }
 if (-not $Development) {
+  python -B release_verification.py verify $VerificationRecord --manifest (Join-Path $Payload 'BUILD_MANIFEST.json')
+  if ($LASTEXITCODE -ne 0) { throw 'Package verification evidence differs from current source.' }
   python -B sign-release.py verify-bundle --root $Payload --version $Version
   if ($LASTEXITCODE -ne 0) { throw 'Signed application verification failed' }
 }

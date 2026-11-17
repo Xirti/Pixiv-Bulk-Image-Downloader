@@ -91,6 +91,7 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   const syncButton=root.querySelector("[data-settings-sync]");
   const clearButton=root.querySelector("[data-settings-clear-cache]");
   let saving=false,clearing=false,lastProgress={},saved=null,preferencesLoaded=false;
+  let revision=0;
   const search=root.querySelector('[data-settings-search]'),heading=root.querySelector('[data-settings-heading]');
   const categories=[...root.querySelectorAll('[data-settings-category]')],panels=[...root.querySelectorAll('[data-settings-panel]')];
   let category=root.dataset.settingsCategory || 'general';
@@ -137,10 +138,20 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   syncButton.onclick=()=>syncNow();
   clearButton.onclick=async()=>{
     if(clearing)return;
+    const current=revision;
     clearing=true;clearButton.disabled=true;status.textContent="正在清除账号缓存…";
-    try{await clearCache();status.textContent="账号缓存已清除";}
-    catch(error){status.textContent=error.message;}
-    finally{clearing=false;update(saved || {},null,preferencesLoaded);}
+    try{
+      await clearCache();
+      if(current===revision)status.textContent="账号缓存已清除";
+    }catch(error){
+      if(current===revision)status.textContent=error.message;
+    }
+    finally{
+      if(current===revision){
+        clearing=false;
+        update(saved || {},null,preferencesLoaded);
+      }
+    }
   };
   fields.forEach(field=>field.addEventListener("input",()=>{
     if(field.dataset.setting==='autoLoadPages' && !field.checked){
@@ -150,8 +161,15 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   }));
   root.querySelector("[data-settings-browse]").onclick=async()=>{
     const field=root.querySelector('[data-setting="saveRoot"]');
-    try{const data=await browse(field.value);if(data.cancelled)return;field.value=data.selected;edited(field);}
-    catch(error){status.textContent=error.message;}
+    const current=revision;
+    try{
+      const data=await browse(field.value);
+      if(current!==revision || data.cancelled)return;
+      field.value=data.selected;
+      edited(field);
+    }catch(error){
+      if(current===revision)status.textContent=error.message;
+    }
   };
   button.onclick=async()=>{
     if(saving)return;
@@ -160,10 +178,28 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     if(changes.syncMinutes!==undefined && (!/^[0-9]+$/.test(changes.syncMinutes) || BigInt(changes.syncMinutes)<3n)){
       status.textContent="同步间隔至少为 3 分钟，请输入整数。";root.querySelector('[data-setting="syncMinutes"]').focus();return;
     }
+    const current=revision;
     saving=true;button.disabled=true;jump.disabled=true;fields.forEach(field=>field.disabled=true);
-    try{const value=await save(changes);dirty.clear();update(value);status.textContent="设置已保存";}
-    catch(error){status.textContent=error.message;report(error.message);}
-    finally{saving=false;button.disabled=!preferencesLoaded;jump.disabled=!preferencesLoaded;fields.forEach(field=>field.disabled=!preferencesLoaded);syncDependencies();}
+    try{
+      const value=await save(changes);
+      if(current!==revision)return;
+      dirty.clear();
+      update(value);
+      status.textContent="设置已保存";
+    }catch(error){
+      if(current===revision){
+        status.textContent=error.message;
+        report(error.message);
+      }
+    }finally{
+      if(current===revision){
+        saving=false;
+        button.disabled=!preferencesLoaded;
+        jump.disabled=!preferencesLoaded;
+        fields.forEach(field=>field.disabled=!preferencesLoaded);
+        syncDependencies();
+      }
+    }
   };
   function update(value,progress=null,loaded=true){
     preferencesLoaded=loaded;
@@ -188,5 +224,24 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     syncButton.disabled=action.disabled;
     if(sync.textContent!==action.status)sync.textContent=action.status;
   }
-  return {update,get dirty(){return dirty.size>0 || saving;},reset:()=>{dirty.clear();saved=null;preferencesLoaded=false;status.textContent="";jump.hidden=true;}};
+  return {
+    update,
+    get dirty(){return dirty.size>0 || saving;},
+    reset:()=>{
+      revision++;
+      dirty.clear();
+      saving=false;
+      clearing=false;
+      saved=null;
+      lastProgress={};
+      preferencesLoaded=false;
+      status.textContent="";
+      jump.hidden=true;
+      button.disabled=true;
+      jump.disabled=true;
+      clearButton.disabled=true;
+      fields.forEach(field=>field.disabled=true);
+      syncDependencies();
+    },
+  };
 };
