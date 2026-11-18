@@ -17,10 +17,16 @@ import time
 from pixiv_adapter import PixivPolicyError
 from download_feedback import DownloadFeedback
 from request_rhythm import RequestRhythm
-from shared_request_budget import RequestDeferredError, SharedRequestBudget, retry_after_seconds
+from shared_request_budget import ReadPriority, RequestDeferredError, SharedRequestBudget, priority_value, retry_after_seconds
 
 
 REQUEST_PRIORITY = ContextVar("pixiv_request_priority", default=0)
+
+
+class TrackedReadEvent(threading.Event):
+    def __init__(self):
+        super().__init__()
+        self.priority = ReadPriority()
 
 
 @contextmanager
@@ -38,7 +44,7 @@ def checked_lock(lock, check):
 
 @dataclass(eq=False)
 class _Ticket:
-    priority: int
+    priority: int | ReadPriority
     created: float
 
 
@@ -232,7 +238,7 @@ class RequestCoordinator:
     @staticmethod
     def _first(queue, now):
         # Age background work toward foreground priority to bound starvation.
-        return min(queue, key=lambda ticket: (max(0, ticket.priority - (now - ticket.created) / 5), ticket.created))
+        return min(queue, key=lambda ticket: (max(0, priority_value(ticket.priority) - (now - ticket.created) / 5), ticket.created))
 
     def _check_state(self, priority):
         if self._blocked:
@@ -276,16 +282,17 @@ class RequestCoordinator:
     def _check_shared_state(self, check, priority):
         check()
         with self._condition:
-            self._check_state(priority)
+            self._check_state(priority_value(priority))
 
-    def before_send(self, image_only: bool, check, *, priority: int = 0, activity: str = ""):
+    def before_send(self, image_only: bool, check, *, priority: int | ReadPriority = 0, activity: str = ""):
         lane = "image" if image_only else "api"
-        profile_lane = "download" if image_only and priority == 1 else lane
+        profile_lane = "download" if image_only and priority_value(priority) == 1 else lane
         if self._shared is not None:
             with self._condition:
-                self._check_state(priority)
+                value = priority_value(priority)
+                self._check_state(value)
                 _, interval, jitter = self.PROFILES[self._mode][profile_lane]
-                delay = self._rhythm.interval(self._mode, lane, priority, time.monotonic(), interval, jitter, activity)
+                delay = self._rhythm.interval(self._mode, lane, value, time.monotonic(), interval, jitter, activity)
                 backoff = self._backoff
             self._shared.before_send(image_only, lambda: self._check_shared_state(check, priority), priority=priority, delay=delay, backoff=backoff)
             with self._condition:
@@ -299,18 +306,19 @@ class RequestCoordinator:
             while True:
                 check()
                 with self._condition:
-                    self._check_state(priority)
+                    value = priority_value(priority)
+                    self._check_state(value)
                     now = time.monotonic()
                     elapsed = max(0.0, now - self._credit_at[lane])
                     capacity = self._capacity(lane)
                     refill = self._refill_interval[lane] * (2 ** self._backoff)
                     self._credits[lane] = min(capacity, self._credits[lane] + elapsed / refill)
                     self._credit_at[lane] = now
-                    foreground_burst = self._mode != "safe" and priority == 0 and not self._backoff
+                    foreground_burst = self._mode != "safe" and value == 0 and not self._backoff
                     timing_ready = now >= (self._burst_after[lane] if foreground_burst else self._next_send[lane])
                     if self._first(queue, now) is ticket and self._credits[lane] >= 1 and timing_ready:
                         _, interval, jitter = self.PROFILES[self._mode][profile_lane]
-                        delay = self._rhythm.interval(self._mode, lane, priority, now, interval, jitter, activity)
+                        delay = self._rhythm.interval(self._mode, lane, value, now, interval, jitter, activity)
                         self._refill_interval[lane] = delay
                         self._next_send[lane] = now + delay * (2 ** self._backoff)
                         self._burst_after[lane] = now + (.04 if lane == "api" else .025)
@@ -324,7 +332,7 @@ class RequestCoordinator:
                 self._condition.notify_all()
 
     @contextmanager
-    def slot(self, image_only: bool, check, *, download: bool = False, priority: int = 0):
+    def slot(self, image_only: bool, check, *, download: bool = False, priority: int | ReadPriority = 0):
         lane = "download" if image_only and download else "image" if image_only else "api"
         ticket = _Ticket(priority, time.monotonic())
         acquired = False
@@ -338,7 +346,7 @@ class RequestCoordinator:
             while True:
                 check()
                 with self._condition:
-                    self._check_state(priority)
+                    self._check_state(priority_value(priority))
                     now = time.monotonic()
                     if now >= deadline:
                         raise RequestDeferredError("request_queue", 2)

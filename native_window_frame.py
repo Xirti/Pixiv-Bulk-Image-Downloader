@@ -83,6 +83,13 @@ class NativeWindowFrame:
     def maximized(self) -> bool:
         return bool(self.user32.IsZoomed(self.hwnd))
 
+    @property
+    def dpi(self) -> int:
+        value = self.user32.GetDpiForWindow(self.hwnd)
+        if not value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return value
+
     def command(self, command: int) -> None:
         self.user32.SendMessageW(self.hwnd, 0x0112, command, 0)
 
@@ -99,6 +106,7 @@ class NativeWindowFrame:
             self.user32.SendMessageW(self.hwnd, 0x0112, 0xF000 | edge, 0)
 
     def _window_proc(self, hwnd, message, wparam, lparam, subclass_id, reference) -> int:
+        result = None
         try:
             if message == 0x0083:  # WM_NCCALCSIZE: the custom caption fills the window.
                 return 0
@@ -146,4 +154,5 @@ class NativeWindowFrame:
                 self.comctl32.RemoveWindowSubclass(hwnd, self._callback, _SUBCLASS_ID)
         except Exception:
             LOG.exception("Native window frame message failed: %s", message)
-        return self.comctl32.DefSubclassProc(hwnd, message, wparam, lparam)
+        # The next handler may already have processed this message before our adjustment failed.
+        return result if result is not None else self.comctl32.DefSubclassProc(hwnd, message, wparam, lparam)

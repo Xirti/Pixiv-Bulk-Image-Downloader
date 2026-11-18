@@ -21,7 +21,7 @@ globalThis.mediaBudget=(()=>{
   function forget(image){if(entries.delete(image))image.removeEventListener("load",schedule);}
   function track(image,drop,{priority=0,busy=()=>false}={}){
     if(!entries.has(image))image.addEventListener("load",schedule);
-    entries.set(image,{drop,priority,busy,touched:++clock,bytes:estimate(image)});schedule();
+    entries.set(image,{drop,priority,busy,touched:++clock});schedule();
   }
   return {track,forget,schedule,configure(mode){maximum=(mode==="low"?128:256)*1024*1024;schedule();},
     snapshot(){return {images:entries.size,estimatedBytes:[...entries.keys()].reduce((n,image)=>n+estimate(image),0),budgetBytes:maximum};}};

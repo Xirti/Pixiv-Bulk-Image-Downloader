@@ -60,7 +60,7 @@ from workspace_store import TaskConflictError, TaskCapacityError, WorkspaceCapac
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from read_scope import ReadScopes
 from ugoira_export import MAX_ARCHIVE_BYTES as MAX_UGOIRA_BYTES, MAX_EXPANDED_BYTES as MAX_UGOIRA_TEMP_BYTES, UgoiraCancelledError, UgoiraExportError, export_formats, export_ugoira, require_mp4_encoder
-from request_coordinator import REQUEST_PRIORITY, RequestCoordinator, RequestDeferredError, RequestBlockedError
+from request_coordinator import REQUEST_PRIORITY, RequestCoordinator, RequestDeferredError, RequestBlockedError, TrackedReadEvent
 from browser_transport import BrowserTransport
 from browser_profile import load_browser_profile
 from shared_request_budget import SharedRequestBudget
@@ -301,6 +301,7 @@ AUTHOR_RESOLUTION_CACHE: OrderedDict[str, tuple[float, str, str]] = OrderedDict(
 AUTHOR_RESOLUTION_CACHE_LOCK = threading.Lock()
 SEARCH_REQUESTS: OrderedDict[str, dict] = OrderedDict()
 SEARCH_REQUESTS_LOCK = threading.Lock()
+PENDING_READ_PROMOTIONS: OrderedDict[str, float] = OrderedDict()
 AUTHORIZATION_GENERATION = 0
 BROWSING_GENERATION = 0
 BROWSING_REQUEST_GENERATION = ContextVar("browsing_request_generation", default=None)
@@ -359,7 +360,7 @@ def _search_request_capacity_available_locked() -> bool:
     return sum(bool(entry["active"]) for entry in SEARCH_REQUESTS.values()) < MAX_TRACKED_SEARCH_REQUESTS
 
 
-def register_search_request(request_id: str) -> threading.Event:
+def register_search_request(request_id: str) -> TrackedReadEvent:
     clean = parse_search_request_id(request_id, required=True)
     now = time.monotonic()
     with SEARCH_REQUESTS_LOCK:
@@ -372,7 +373,9 @@ def register_search_request(request_id: str) -> threading.Event:
             if entry is not None:
                 SEARCH_REQUESTS[clean] = entry
             raise SearchRequestLimitError("同时进行的搜索过多，请先停止正在运行的搜索")
-        event = entry["event"] if entry is not None else threading.Event()
+        event = entry["event"] if entry is not None else TrackedReadEvent()
+        if PENDING_READ_PROMOTIONS.pop(clean, 0) > now:
+            event.priority.promote()
         SEARCH_REQUESTS[clean] = {
             "event": event,
             "active": True,
@@ -385,10 +388,11 @@ def cancel_search_request(request_id: object) -> bool:
     clean = parse_search_request_id(request_id, required=True)
     now = time.monotonic()
     with SEARCH_REQUESTS_LOCK:
+        PENDING_READ_PROMOTIONS.pop(clean, None)
         _prune_search_requests_locked(now)
         entry = SEARCH_REQUESTS.pop(clean, None)
         found = entry is not None and bool(entry["active"])
-        event = entry["event"] if entry is not None else threading.Event()
+        event = entry["event"] if entry is not None else TrackedReadEvent()
         event.set()
         SEARCH_REQUESTS[clean] = {
             "event": event,
@@ -397,6 +401,21 @@ def cancel_search_request(request_id: object) -> bool:
         }
         _prune_search_requests_locked(now)
         return found
+
+
+def promote_read_request(request_id: object) -> None:
+    clean = parse_search_request_id(request_id, required=True)
+    with SEARCH_REQUESTS_LOCK:
+        entry = SEARCH_REQUESTS.get(clean)
+        if entry is not None:
+            if entry["active"] and not entry["event"].is_set():
+                entry["event"].priority.promote()
+            return
+        # GET and POST travel independently. Retain a bounded early signal.
+        PENDING_READ_PROMOTIONS.pop(clean, None)
+        PENDING_READ_PROMOTIONS[clean] = time.monotonic() + SEARCH_CANCEL_TOMBSTONE_SECONDS
+        if len(PENDING_READ_PROMOTIONS) > MAX_TRACKED_SEARCH_REQUESTS:
+            PENDING_READ_PROMOTIONS.popitem(last=False)
 
 
 def release_search_request(request_id: str, event: threading.Event) -> None:
@@ -422,6 +441,7 @@ def cancel_all_search_requests() -> None:
         for entry in SEARCH_REQUESTS.values():
             entry["event"].set()
         SEARCH_REQUESTS.clear()
+        PENDING_READ_PROMOTIONS.clear()
 
 
 def raise_if_search_cancelled(cancel_event: threading.Event | None) -> None:
@@ -1668,7 +1688,7 @@ def _touch_search_session(session_key: tuple) -> dict:
         session = SEARCH_SESSIONS.pop(session_key, None)
         if session is None:
             session = {
-                "items": [], "seen": set(), "baseIndex": 0,
+                "items": [], "baseIndex": 0,
                 "sourceDone": {}, "budgetExhausted": False, "truncatedDates": set(),
             }
         session["touched"] = now
@@ -1697,6 +1717,29 @@ def assert_search_commit_allowed(
     raise_if_search_cancelled(cancel_event)
     if SEARCH_SESSIONS.get(session_key) is not session:
         raise SearchCancelledError("搜索缓存已重置")
+
+
+def _publish_search_pages(session_key, session, page, page_rows, authorization_epoch, *,
+                          prefetch, authorize_images=True):
+    """Publish the retained window while the caller holds the search commit guard."""
+    SEARCH_PAGE_CACHE.store_pages(session_key, page, page_rows)
+    selected = SEARCH_PAGE_CACHE.get_page(session_key, page) or []
+    available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
+    remove_count = result_window_trim_count(
+        len(session["items"]), base_index=session["baseIndex"], current_page=page,
+        per_page=SEARCH_PER_PAGE, keep_behind=SEARCH_KEEP_BEHIND,
+    )
+    if remove_count:
+        del session["items"][:remove_count]
+        session["baseIndex"] += remove_count
+    if prefetch:
+        items = []
+    elif authorize_images:
+        items = [authorize_item_images(copy.deepcopy(item), search_session=session_key, search_page=page,
+                                      authorization_epoch=authorization_epoch) for item in selected]
+    else:
+        items = copy.deepcopy(selected)
+    return items, available_pages, available_pages[-1] if available_pages else 0
 
 
 def _trim_history_source(session_key: tuple, tag: str, mode: str) -> None:
@@ -1993,7 +2036,6 @@ def search_user_results(
                 end = min(result_index.emitted_count, (page + SEARCH_PREFETCH_AHEAD) * SEARCH_PER_PAGE)
                 session["items"] = result_index.read_results(start, end)
                 session["baseIndex"] = start
-                session["seen"] = {item["id"] for item in session["items"]}
         if "profileIds" not in session or session.get("targetUserId") != user_id:
             profile_ids = (
                 load_user_profile_ids(user_id, work_type=work_type)
@@ -2055,7 +2097,6 @@ def search_user_results(
                 )
                 committed = result_index.append_results(incoming)
                 session["items"].extend(committed)
-                session["seen"].update(candidate["id"] for candidate in committed)
                 # Row conversion is part of consuming this batch. Do not skip the
                 # IDs if an unexpected malformed field aborts conversion midway.
                 session["profileOffset"] = start + len(batch_ids)
@@ -2087,30 +2128,9 @@ def search_user_results(
             assert_search_commit_allowed(
                 session_key, session, scope, authorization_epoch, cancel_event,
             )
-            SEARCH_PAGE_CACHE.store_pages(session_key, page, page_rows)
-            selected = SEARCH_PAGE_CACHE.get_page(session_key, page) or []
-            available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
-            remove_count = result_window_trim_count(
-                len(session["items"]),
-                base_index=int(session["baseIndex"]),
-                current_page=page,
-                per_page=SEARCH_PER_PAGE,
-                keep_behind=SEARCH_KEEP_BEHIND,
+            authorized_items, available_pages, preloaded_through = _publish_search_pages(
+                session_key, session, page, page_rows, authorization_epoch, prefetch=prefetch,
             )
-            if remove_count:
-                del session["items"][:remove_count]
-                session["baseIndex"] += remove_count
-                session["seen"] = {str(item["id"]) for item in session["items"]}
-            authorized_items = [] if prefetch else [
-                authorize_item_images(
-                    copy.deepcopy(item),
-                    search_session=session_key,
-                    search_page=page,
-                    authorization_epoch=authorization_epoch,
-                )
-                for item in selected
-            ]
-            preloaded_through = SEARCH_PAGE_CACHE.preloaded_through(session_key)
         if scope in {"r18", "r18g", "all"}:
             try:
                 assert_authorization_generation(authorization_epoch)
@@ -2282,7 +2302,6 @@ def search_pixiv_results(
                 end = min(result_index.emitted_count, (page + SEARCH_PREFETCH_AHEAD) * SEARCH_PER_PAGE)
                 session["items"] = result_index.read_results(start, end)
                 session["baseIndex"] = start
-                session["seen"] = {item["id"] for item in session["items"]}
             elif page < first_retained_page:
                 _drop_search_session(session_key)
                 session = _touch_search_session(session_key)
@@ -2308,7 +2327,6 @@ def search_pixiv_results(
                     max(60, desired_items - absolute_loaded),
                 )
                 session["items"].extend(ready)
-                session["seen"].update(item["id"] for item in ready)
             absolute_loaded = session["identityIndex"].emitted_count
             if absolute_loaded >= desired_items:
                 break
@@ -2422,7 +2440,6 @@ def search_pixiv_results(
                     max(60, desired_items - absolute_loaded),
                 )
                 session["items"].extend(ready)
-                session["seen"].update(item["id"] for item in ready)
                 for source_tag, source_mode, next_offset in source_commits:
                     SEARCH_SOURCE_OFFSETS[(session_key, source_tag, source_mode)] = next_offset
             for source_tag, source_mode, _next_offset in source_commits:
@@ -2462,34 +2479,13 @@ def search_pixiv_results(
             assert_search_commit_allowed(
                 session_key, session, scope, authorization_epoch, cancel_event,
             )
-            SEARCH_PAGE_CACHE.store_pages(session_key, page, page_rows)
-            selected = SEARCH_PAGE_CACHE.get_page(session_key, page) or []
-            available_pages = SEARCH_PAGE_CACHE.available_pages(session_key)
-
-            remove_count = result_window_trim_count(
-                len(session["items"]),
-                base_index=int(session["baseIndex"]),
-                current_page=page,
-                per_page=SEARCH_PER_PAGE,
-                keep_behind=SEARCH_KEEP_BEHIND,
-            )
-            if remove_count:
-                del session["items"][:remove_count]
-                session["baseIndex"] += remove_count
-                session["seen"] = {str(item["id"]) for item in session["items"]}
             has_more = (absolute_result_count > page * SEARCH_PER_PAGE
                         or any(not session["sourceDone"].get(source) for source in sources)
                         or bool(session["identityIndex"].pending_count))
-            authorized_items = [] if prefetch else [
-                authorize_item_images(
-                    copy.deepcopy(item),
-                    search_session=session_key,
-                    search_page=page,
-                    authorization_epoch=authorization_epoch,
-                )
-                for item in selected
-            ] if authorize_images else copy.deepcopy(selected)
-            preloaded_through = SEARCH_PAGE_CACHE.preloaded_through(session_key)
+            authorized_items, available_pages, preloaded_through = _publish_search_pages(
+                session_key, session, page, page_rows, authorization_epoch,
+                prefetch=prefetch, authorize_images=authorize_images,
+            )
         if scope in {"r18", "r18g", "all"}:
             try:
                 assert_authorization_generation(authorization_epoch)
@@ -4159,6 +4155,13 @@ class Handler(SimpleHTTPRequestHandler):
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         return self.send_json({"ok": True, "cancelled": found})
+
+    def _post_promote_read(self, data: dict):
+        try:
+            promote_read_request(data.get("requestId"))
+        except SearchInputError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        return self.send_json({"ok": True})
 
     def _post_cancel_download(self, data: dict):
         request_id = data.get("requestId")

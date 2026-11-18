@@ -205,7 +205,7 @@ class PopularityService:
                 raise AccountError("cache_miss", "排序快照已清理，请重新准备")
             if job and job["descriptor"] != descriptor:
                 raise AccountError("source_changed", "排序快照与当前条件不符")
-            if job is not None:
+            if job is not None and not job["ready"]:
                 job = copy.deepcopy(job)
             if job is None:
                 job = self._new(kind, uid, batch, mode, work_type, include_ai, start, end, method, generation)

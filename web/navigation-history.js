@@ -1,5 +1,22 @@
 "use strict";
 
+globalThis.waitForNavigationFrame = function (signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve,reject)=>{
+    const clean=()=>{
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      signal.removeEventListener("abort",abort);
+    };
+    const finish=()=>{clean();resolve();};
+    const abort=()=>{clean();reject(signal.reason);};
+    // Layout reads can complete even when the renderer stops producing frames.
+    const frame=requestAnimationFrame(finish);
+    const timer=setTimeout(finish,100);
+    signal.addEventListener("abort",abort,{once:true});
+  });
+};
+
 // Page navigation owns a bounded timeline, not selection or download state.
 globalThis.createNavigationHistory = function ({capture,restore,changed,allowed,validate=()=>{},prune=()=>{},maxEntries=30}) {
   let entries=[],cursor=-1,restoring=false,revision=0,activeRestore=null;
@@ -20,16 +37,11 @@ globalThis.createNavigationHistory = function ({capture,restore,changed,allowed,
         scope.check();
         return value;
       },
-      afterPaint(paint){
+      async afterPaint(paint){
         scope.check();
-        return new Promise((resolve,reject)=>{
-          const abort=()=>{cancelAnimationFrame(frame);reject(cancelled());};
-          const frame=requestAnimationFrame(()=>{
-            controller.signal.removeEventListener("abort",abort);
-            try{scope.check();resolve(paint());}catch(error){reject(error);}
-          });
-          controller.signal.addEventListener("abort",abort,{once:true});
-        });
+        await waitForNavigationFrame(scope.signal);
+        scope.check();
+        return paint();
       },
     };
     try{scope.check();await restore(state,scope);scope.check();}

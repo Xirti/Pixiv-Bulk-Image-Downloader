@@ -19,6 +19,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   let updatePreferences={detect:true,dots:true},updates={public:{},private:{}},checkingUpdates=null;
   const acknowledged=new Map();
   const pendingUpdateScopes=new Set();
+  const completedScans=new Map();
+  const obsoletePage=(scan,scope,tag,offset)=>Boolean(tag) || !scan[scope]?.includes(offset);
   let relationVersion=0;
   let scrollFrame=null,restoringScroll=false,restoreTop=null;
   function remember(){
@@ -35,9 +37,13 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   async function read(view,params={},options={}){
     let current=params;
     for(let attempt=0;attempt<2;attempt++){
-      const version=relationVersion;
+      const version=relationVersion,scan=completedScans.get(view);
       const value=await reads.read(`/api/account/${view}?${new URLSearchParams(current)}`,options);
-      if(version===relationVersion)return value;
+      const latest=completedScans.get(view),offset=Number(params.offset);
+      if(scan!==latest && latest && offset>0 && obsoletePage(latest,params.scope,params.tag,offset)){
+        throw Object.assign(new Error("账号分页已更新，请返回第一页"),{errorKind:"page_retired"});
+      }
+      if(version===relationVersion && scan===latest)return value;
       // The response predates a confirmed relationship change. Read the
       // repaired server cache; only this overlapping read needs replacement.
       current={...params};delete current.refresh;
@@ -53,24 +59,36 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     const version=backgroundRevision,signal=backgroundController.signal,contentMode=mode();
     const run=async()=>{
       if(version!==backgroundRevision || signal.aborted || !signedIn())return;
-      const valid=()=>version===backgroundRevision && !signal.aborted && signedIn() && contentMode===mode();
+      const currentSession=()=>version===backgroundRevision && !signal.aborted && signedIn() && contentMode===mode();
+      const valid=()=>currentSession() && profile?.connected;
       const params={background:"1",...(!network?{cached:"1"}:{}),...(refresh?{refresh:"1"}:{})};
       if(!page || !profile){
+        const before=profile;
         const value=await read("profile",params,{signal});
-        if(!valid())return;
+        if(!currentSession())return;
         if(value.cached===false || !value.connected)return;
-        profile=value;connectionChanged(profile);
+        if(profile===before){profile=value;connectionChanged(profile);}
       }
+      if(!valid())return;
+      let retired=null;
       if(completed){
         const view=page.kind==="bookmark"?"bookmarks":"following";
-        for(const key of cache.keys()){
-          const [type,scope,tag,offset]=JSON.parse(key);
-          if(type===view && (tag || !completed[scope]?.includes(offset)))cache.delete(key);
+        completedScans.set(view,completed);
+        const obsolete=(scope,tag,offset)=>obsoletePage(completed,scope,tag,offset);
+        for(const pages of [cache,nextReads]){
+          for(const key of pages.keys()){
+            const [type,scope,tag,offset]=JSON.parse(key);
+            if(type===view && obsolete(scope,tag,offset))pages.delete(key);
+          }
         }
+        const saved=positions.get(view);
+        if(saved && obsolete(saved.scope,saved.tag,saved.offset))positions.delete(view);
+        if(state.view===view && obsolete(state.scope,state.tag,state.offset))retired={revision,data};
       }
       const images=[];
       const failures=[];
       if(!page && !network && updatePreferences.detect)await checkUpdates({network:false});
+      if(!valid())return;
       if(!page || refresh){
         const entries=[{id:`self:${profile.uid}`,thumb:profile.avatar,title:profile.name},{id:`cover:${profile.uid}`,thumb:profile.background,title:""}];
         images.push(()=>avatars.prepare("account-self",entries,signal,{warm:"account"}));
@@ -82,33 +100,40 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       for(const target of pages){
         if(!valid())return;
         const relation=["bookmarks","following"].includes(target.view);
+        const key=JSON.stringify([target.view,target.scope,"",target.offset,contentMode]),before=cache.get(key);
         let value;
         try{value=await read(target.view,{scope:target.scope,offset:String(target.offset),tag:"",mode:contentMode,
           background:"1",...(relation || !network?{cached:"1"}:{}),...(!relation && refresh?{refresh:"1"}:{})},{signal});}
         catch(problem){if(signal.aborted)throw problem;failures.push(`${labels[target.view]}：${problem.message}`);continue;}
         if(!valid())return;
-        if(value.cached===false)continue;
-        cachePage(JSON.stringify([target.view,target.scope,"",target.offset,contentMode]),value);
+        if(value.cached===false || cache.get(key)!==before)continue;
+        cachePage(key,value);
         if(target.offset===0){
           if(value.items)images.push(()=>worksCache.prepare("account-works",value.items,signal,{warm:"account"}));
           if(value.people)images.push(()=>avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"}));
         }
       }
       if(!page){
-        for(const view of ["tags",...(profile.workCount===0?[]:["works"])]){
+        if(!valid())return;
+        const catalog=profile;
+        for(const view of ["tags",...(catalog.workCount===0?[]:["works"])]){
+          const before=view==="tags"?tags:own;
           let value;
           try{value=await read(view,{...params,mode:contentMode},{signal});}
           catch(problem){if(signal.aborted)throw problem;failures.push(`${view==="tags"?"收藏标签":"本人作品"}：${problem.message}`);continue;}
           if(!valid())return;
           if(value.cached===false)continue;
-          if(view==="tags")tags=value;
-          else{own=value;ownMode=contentMode;images.push(()=>ownCache.prepare("account-own-works",value.items,signal,{warm:"account"}));}
+          if(view==="tags"){
+            if(tags===before)tags=value;
+          }else if(own===before){own=value;ownMode=contentMode;images.push(()=>ownCache.prepare("account-own-works",value.items,signal,{warm:"account"}));}
         }
-        if(profile.workCount===0){own={items:[]};ownMode=contentMode;}
+        if(profile===catalog && catalog.workCount===0){own={items:[]};ownMode=contentMode;}
       }
       // Adopt a synchronized visible page while preserving its scroll position.
-      if(valid() && active && !pending){
-        if(state.view==="home")render();
+      if(valid() && active && !controller){
+        if(retired && revision===retired.revision && data===retired.data && !cache.has(pageKey())){
+          await returnToFirstPage();
+        }else if(state.view==="home")render();
         else if(state.view!=="settings" && (page || refresh || !data)){
           const available=cache.get(pageKey());if(available && available!==data){data=available;render();}
         }
@@ -127,11 +152,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     const key=JSON.stringify([target.view,target.scope,target.tag,target.offset,contentMode]);
     if(cache.has(key) || nextReads.has(key))return;
     const reading=read(target.view,{scope:target.scope,offset:String(target.offset),tag:target.tag,mode:contentMode,background:"1"},{signal}).then(async value=>{
-      if(version!==backgroundRevision || signal.aborted || contentMode!==mode())return;
+      if(version!==backgroundRevision || signal.aborted || contentMode!==mode() || nextReads.get(key)!==reading || cache.has(key))return;
       cachePage(key,value);
       if(value.items)await worksCache.prepare("account-works",value.items,signal,{warm:"account"});
       if(value.people)await avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"});
-    }).catch(problem=>{if(!signal.aborted && version===backgroundRevision)report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
+    }).catch(problem=>{if(!signal.aborted && version===backgroundRevision && nextReads.get(key)===reading && problem.errorKind!=="page_retired")report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
     nextReads.set(key,reading);
   }
   const artworkContext=item=>({context:{kind:"pid",value:item.id},resultPage:state.page});
@@ -317,7 +342,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     error="";data=cache.get(key) || null;
     if(data)cachePage(key,data);
     if(!refresh && profile?.connected && (state.view==="home"?own && ownMode===mode():state.view!=="settings" && data && (state.view!=="bookmarks" || tags))){
-      pending=false;render();prepareNext();return;
+      controller=null;pending=false;render();prepareNext();return;
     }
     pending=!data;
     if(ownMode!==mode())own=null;
@@ -358,8 +383,16 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       }
       if(version!==revision)return;
       if(profile.authorization?.error)error=profile.authorization.error;
-    }catch(problem){if(version!==revision || signal.aborted)return;error=problem.message || "账号读取失败，请刷新重试";}
-    finally{if(version===revision){pending=false;render();prepareNext();}}
+    }catch(problem){
+      if(version!==revision || signal.aborted)return;
+      if(state.offset>0 && problem.errorKind==="page_retired")return returnToFirstPage();
+      error=problem.message || "账号读取失败，请刷新重试";
+    }
+    finally{if(version===revision){controller=null;pending=false;render();prepareNext();}}
+  }
+  function returnToFirstPage(){
+    state={...state,offset:0,page:1,trail:[],scroll:0};restoreTop=0;
+    return load();
   }
   async function navigate(view,options={}){
     if(!allowed())return;
@@ -375,9 +408,9 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   function clear(keepView=false,keepScroll=false){
     if(keepScroll)remember();
     void stopBackground();
-    controller?.abort();reads.clear();revision++;profile=null;tags=null;data=null;own=null;ownMode=null;
+    controller?.abort();controller=null;reads.clear();revision++;profile=null;tags=null;data=null;own=null;ownMode=null;
     state=keepView?{...state,offset:0,page:1,trail:[],scroll:keepScroll?state.scroll:0}:empty();restoreTop=state.scroll;positions.clear();
-    updates={public:{},private:{}};acknowledged.clear();pendingUpdateScopes.clear();checkingUpdates=null;
+    updates={public:{},private:{}};acknowledged.clear();pendingUpdateScopes.clear();completedScans.clear();checkingUpdates=null;
     interaction.clear();ownInteraction.clear();
     cache.clear();worksCache.clear();ownCache.clear();avatars.clear();
     for(const node of [header,ownGrid,peopleRoot,grid])node.innerHTML="";
@@ -394,7 +427,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       relationVersion++;
       if(kind==='follow')for(const scope of ['public','private'])if(!value.active || value.privacy && value.privacy!==scope)delete updates[scope][id];
       const view=kind==="bookmark"?"bookmarks":"following",field=kind==="bookmark"?"items":"people";
-      const existing=[...cache.values()].flatMap(page=>page[field] || []).find(row=>row.id===id);
+      let existing;
+      for(const page of cache.values()){
+        existing=page[field]?.find(row=>row.id===id);
+        if(existing)break;
+      }
       const record=existing || (kind==="bookmark"?getWork(id):getAuthor(id));
       if(kind==="follow")for(const [key,page] of cache)if(JSON.parse(key)[0]==="followers"){
         for(const person of page.people || [])if(person.id===id)person.following=value.active;
@@ -402,11 +439,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       for(const [key,page] of cache){
         const [type,scope,tag,offset,contentMode]=JSON.parse(key);
         if(type!==view || !page[field])continue;
-        const rows=page[field],old=rows.length;
+        const rows=page[field],present=rows.some(row=>row.id===id);
         const membership=relation=>{
           if(!relation?.known)return null;
           if(!relation.active || relation.privacy && relation.privacy!==scope)return false;
-          if(!relation.privacy && !rows.some(row=>row.id===id))return null;
+          if(!relation.privacy && !present)return null;
           if(kind==="bookmark"){
             if(tag){if(relation.tags===null)return null;if(!relation.tags.includes(tag))return false;}
             if(contentMode!=="all"){
@@ -417,13 +454,10 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
           return true;
         };
         const previousMember=membership(previous),nextMember=membership(value);
-        const fits=nextMember===true || nextMember===null && rows.some(row=>row.id===id);
-        const next=rows.filter(row=>row.id!==id || fits);
-        if(fits && !offset && record && !next.some(row=>row.id===id))next.unshift({...record,...(kind==="follow"?{following:true}:{})});
-        if(next.length!==old || next.some((row,index)=>row!==rows[index])){
-          page[field]=next;
-        }
-        const delta=previousMember!==null && nextMember!==null?Number(nextMember)-Number(previousMember):next.length-old;
+        const fits=nextMember===true || nextMember===null && present;
+        if(present && !fits)page[field]=rows.filter(row=>row.id!==id);
+        else if(!present && fits && !offset && record)page[field]=[{...record,...(kind==="follow"?{following:true}:{})},...rows];
+        const delta=previousMember!==null && nextMember!==null?Number(nextMember)-Number(previousMember):page[field].length-rows.length;
         if(delta && Number.isInteger(page.total))page.total=Math.max(0,page.total+delta);
       }
       if(profile && previous?.known && (kind==="follow" || !value.active || value.privacy)){
@@ -450,7 +484,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       if(active)render();
     },
     invalidateConnection:()=>{profile=null;},
-    suspend:()=>{remember();active=false;statistics?.setVisible(false);controller?.abort();revision++;pending=false;interaction.reset({immediate:true});ownInteraction.reset({immediate:true});},
+    suspend:()=>{remember();active=false;statistics?.setVisible(false);controller?.abort();controller=null;revision++;pending=false;interaction.reset({immediate:true});ownInteraction.reset({immediate:true});},
     clear,clearCache:()=>clear(true),clearContent:()=>clear(true,true),
     label:()=>"我的账号"};
 };

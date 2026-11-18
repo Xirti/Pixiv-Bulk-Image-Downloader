@@ -28,6 +28,13 @@ if __name__ == "__main__" and getattr(sys, "frozen", False):
     except (OSError, ValueError) as exc:
         ctypes.windll.user32.MessageBoxW(None, str(exc), "MOKU", 0x30)
         raise SystemExit(1)
+    if not {"--apply-update", "--recover-update"}.intersection(sys.argv):
+        from update_install import hold_program_guard
+        try:
+            _program_guard = hold_program_guard(Path(sys.executable).resolve().parent)
+        except (OSError, ValueError) as exc:
+            ctypes.windll.user32.MessageBoxW(None, str(exc), "MOKU", 0x30)
+            raise SystemExit(1)
 
 
 def verify_startup_integrity() -> None:
@@ -72,9 +79,10 @@ if __name__ == "__main__" and "--apply-update" in sys.argv:
 
 if __name__ == "__main__" and "--recover-update" in sys.argv:
     verify_startup_integrity()
-    from update_install import run_recovery
+    from update_install import dispatch_recovery
     offset=sys.argv.index("--recover-update")
-    try:run_recovery(sys.argv[offset+1],int(sys.argv[offset+2]))
+    try:dispatch_recovery(sys.argv[offset+1:offset+3],
+                          helper=sys.executable if getattr(sys,"frozen",False) else None)
     except Exception as exc:
         ctypes.windll.user32.MessageBoxW(None,str(exc),"MOKU 恢复未完成",0x10)
         raise SystemExit(1)
@@ -317,6 +325,8 @@ def _start_webview(
     storage_path: Path,
     proxy: str,
     desktop_auth_token: str = "",
+    *,
+    on_ready=None,
 ) -> None:
     from desktop_client import start_desktop
 
@@ -330,6 +340,7 @@ def _start_webview(
             storage_path,
             proxy,
             desktop_auth_token=desktop_auth_token,
+            on_ready=on_ready,
         )
     finally:
         if inherited is not None:
@@ -416,6 +427,8 @@ def launch_desktop(
     url: str,
     proxy: str = "",
     desktop_auth_token: str = "",
+    *,
+    on_ready=None,
 ) -> None:
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
@@ -427,7 +440,7 @@ def launch_desktop(
     storage_path = Path(tempfile.mkdtemp(prefix="session-", dir=str(session_root)))
     try:
         with webview_profile_lease(storage_path):
-            _start_webview(url, storage_path, proxy, desktop_auth_token)
+            _start_webview(url, storage_path, proxy, desktop_auth_token, on_ready=on_ready)
     finally:
         remove_webview_profile(storage_path)
 
@@ -448,6 +461,8 @@ def run(argv: list[str] | None = None) -> int:
             return 1  # Never put callback query parameters into a fatal dialog or log.
 
     no_browser = options.serve_only or os.environ.get("MOKU_NO_BROWSER") == "1"
+    if options.update_confirm and no_browser:
+        raise RuntimeError("更新需要启动桌面窗口以确认安装")
 
     # Register process-owned resources before any fallible startup work.
     # ExitStack continues cleanup even if a preceding callback raises.
@@ -506,17 +521,21 @@ def run(argv: list[str] | None = None) -> int:
                 owns_backend = True
                 LOG.info("start pid=%s url=%s instance=%s", os.getpid(), url, server.INSTANCE_ID)
 
-        if options.update_confirm:
-            from update_install import confirm_startup
-            confirm_startup(Path(sys.executable).resolve().parent,options.update_confirm)
-        if getattr(sys, "frozen", False):
-            from installed_app import refresh_installed_version
-            from version import __version__
-            refresh_installed_version(Path(sys.executable).resolve().parent, __version__)
-        if owns_backend:
-            server.APP_UPDATES.allow_restart=not no_browser
-            server.APP_UPDATES.cleanup()
-            server.APP_UPDATES.start_scheduler()
+        def finish_startup():
+            if options.update_confirm:
+                from update_install import confirm_startup
+                confirm_startup(Path(sys.executable).resolve().parent, options.update_confirm)
+            if getattr(sys, "frozen", False):
+                from installed_app import refresh_installed_version
+                from version import __version__
+                refresh_installed_version(Path(sys.executable).resolve().parent, __version__)
+            if owns_backend:
+                server.APP_UPDATES.allow_restart=not no_browser
+                server.APP_UPDATES.cleanup()
+                server.APP_UPDATES.start_scheduler()
+
+        if not options.update_confirm:
+            finish_startup()
 
         try:
             if no_browser:
@@ -525,7 +544,8 @@ def run(argv: list[str] | None = None) -> int:
                 while thread and thread.is_alive():
                     thread.join(timeout=3600)
             else:
-                launch_desktop(url, server.PIXIV_PROXY, desktop_auth_token)
+                launch_desktop(url, server.PIXIV_PROXY, desktop_auth_token,
+                               on_ready=finish_startup if options.update_confirm else None)
         except KeyboardInterrupt:
             pass
     return 0

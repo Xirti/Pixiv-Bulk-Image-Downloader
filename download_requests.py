@@ -18,6 +18,13 @@ from download_execution import cancel_download_execution, download_execution
 Response = tuple[dict, int]
 
 
+def _fingerprint(route: str, scope: str, body: dict) -> str:
+    return hashlib.sha256(json.dumps(
+        [route, scope, body], sort_keys=True, ensure_ascii=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
 class DownloadRequestError(ValueError):
     def __init__(self, message: str, status: int = 400) -> None:
         super().__init__(message)
@@ -168,14 +175,9 @@ class DownloadRequests:
         if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,96}", request_id):
             raise DownloadRequestError("下载任务编号无效")
         normalized = {key: value for key, value in body.items() if key != "requestId"}
-        fingerprint = hashlib.sha256(json.dumps(
-            [route, scope, normalized], sort_keys=True, ensure_ascii=True,
-            separators=(",", ":"), allow_nan=False,
-        ).encode("utf-8")).hexdigest()
-        durable_fingerprint = hashlib.sha256(json.dumps(
-            [route, durable_scope if durable_scope is not None else scope, normalized],
-            sort_keys=True, ensure_ascii=True, separators=(",", ":"), allow_nan=False,
-        ).encode("utf-8")).hexdigest()
+        fingerprint = _fingerprint(route, scope, normalized)
+        receipt_scope = scope if durable_scope is None else durable_scope
+        durable_fingerprint = fingerprint if receipt_scope == scope else _fingerprint(route, receipt_scope, normalized)
         now = self._clock()
         # Active polls need only registry state. Disk verification belongs
         # outside this lock; a slow output directory must not stall other IDs.
@@ -224,7 +226,7 @@ class DownloadRequests:
                 entry.result = None
                 entry.active = True
             entry.cancel = cancel_event
-            entry.scope = durable_scope if durable_scope is not None else scope
+            entry.scope = receipt_scope
 
         result = None
         try:
@@ -254,7 +256,8 @@ class DownloadRequests:
             # Record publication before the caller tries writing the response:
             # a disconnected client must not lose an already-completed result.
             with self._lock:
-                entry.result = result if result is not None and result[1] == 200 else None
+                if self._path is None and result is not None and result[1] == 200:
+                    entry.result = result
                 entry.active = False
                 entry.cancel = None
                 entry.touched = self._clock()

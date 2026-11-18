@@ -4,16 +4,20 @@ globalThis.createDetailImageCache=function({fetchBytes,maxBytes=96*1024*1024,max
   const entries=new Map();let bytes=0,pinned=null;
   const key=(item,page)=>`${item.id}:${page}`;
   function drop(entry){
+    if(entries.get(entry.key)!==entry)return;
+    entries.delete(entry.key);
     clearTimeout(entry.timer);entry.controller.abort();
     if(entry.url){URL.revokeObjectURL(entry.url);bytes-=entry.size;}
-    if(entries.get(entry.key)===entry)entries.delete(entry.key);
   }
   function trim(size){
     if(size>maxBytes)throw new Error("原图超出预览缓存容量，可通过下载保存查看");
-    while(bytes+size>maxBytes || [...entries.values()].filter(e=>e.url).length>=maxImages){
-      const old=[...entries.values()].find(e=>e.url && e.key!==pinned);
+    let ready=0;
+    for(const entry of entries.values())if(entry.url)ready++;
+    while(bytes+size>maxBytes || ready>=maxImages){
+      let old;
+      for(const entry of entries.values())if(entry.url && entry.key!==pinned){old=entry;break;}
       if(!old)throw new Error("原图缓存空间不足，请关闭预览后重试");
-      drop(old);
+      drop(old);ready--;
     }
   }
   function peek(item,page){
@@ -21,7 +25,11 @@ globalThis.createDetailImageCache=function({fetchBytes,maxBytes=96*1024*1024,max
     if(entry?.url && Date.now()<entry.expires)return entry.url;
     return null;
   }
-  function pin(item,page){unpin();pinned=key(item,page);}
+  function pin(item,page){
+    const id=key(item,page);
+    if(pinned===id)return;
+    unpin();pinned=id;
+  }
   function unpin(){
     const previous=entries.get(pinned);pinned=null;
     if(previous && (!previous.url || Date.now()>=previous.expires))drop(previous);

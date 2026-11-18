@@ -9,7 +9,7 @@ from urllib.parse import urlencode, urlsplit, parse_qs
 import uuid
 import weakref
 
-from account_pages import source_body
+from account_pages import DiscoveryPage, source_body
 from pixiv_account import AccountError
 from pixiv_adapter import (PixivPolicyError, normalize_search_item, valid_pixiv_id,
                            small_full_preview_url, publication_date, publication_timestamp,
@@ -79,7 +79,7 @@ class DiscoveryService:
             epoch = self._epoch
         result = copy.deepcopy(stored) if stored else None
         if result is None:
-            result = self.pages.saved_cache.read(owner, method, ["discovery-feed", batch])
+            result = self.pages.saved_cache.read_discovery(owner, method, batch)
         self._check(generation, epoch)
         if result is None:
             raise AccountError("cache_miss", "原发现批次已清理，请刷新当前页面")
@@ -99,9 +99,7 @@ class DiscoveryService:
         self._feeds[key]=feed;self._feeds.move_to_end(key)
         while len(self._feeds)>32:self._feeds.popitem(last=False)
 
-    def _response(self, feed, owner, method, generation, offset, target):
-        items=feed["items"][offset:target]
-        has_more=target<len(feed["items"]) or any(feed["paths"].values()) or any(feed["pending"].values())
+    def _response(self, feed, owner, method, generation, offset, items, has_more):
         next_offset = offset + len(items) if has_more else None
         if feed["kind"] == "following" and items:
             # Join the snapshot to the current following list without changing
@@ -132,7 +130,7 @@ class DiscoveryService:
         else:
             paths = {"main":1}
         return {"batch":uuid.uuid4().hex,"kind":kind,"scope":scope,"mode":mode,"rankMode":rank,
-                "paths":paths,"pending":{key:[] for key in paths},"items":[],"seen":[],"sourceCount":0,
+                "paths":paths,"pending":{key:[] for key in paths},"items":[],"seen":set(),"sourceCount":0,
                 "edition":"","window":self._window(),"created":time.time(),"unavailable":0,"stagnant":0}
 
     def _app_batch(self, feed, stream, generation):
@@ -205,7 +203,8 @@ class DiscoveryService:
     def _fetch(self, feed, stream, owner, method, generation):
         raw = self._app_batch(feed,stream,generation) if method=="app" else self._web_batch(feed,stream,generation)
         result = []
-        seen = set(feed["seen"])
+        # All streams share this index, including items still waiting to be merged.
+        seen = feed["seen"]
         for row in raw:
             feed["sourceCount"] += 1
             try:
@@ -228,7 +227,6 @@ class DiscoveryService:
             if any(not states.get(item["userId"],{}).get("known") or states[item["userId"]]["active"] and states[item["userId"]].get("privacy") is None for item in result):
                 raise AccountError("sync_required", "请先在我的账号同步关注数据，再按公开范围筛选新作")
             result = [item for item in result if states[item["userId"]]["active"] and states[item["userId"]]["privacy"]==feed["scope"]]
-        feed["seen"] = list(seen)
         if feed["kind"]=="following":result.sort(key=lambda item:(item["sortDate"],int(item["id"])),reverse=True)
         if not result and feed["kind"]=="recommended":
             feed["stagnant"] += 1
@@ -253,28 +251,45 @@ class DiscoveryService:
             lock = self._locks.setdefault((owner,method,*descriptor),threading.RLock())
         with checked_lock(lock,lambda:self._check(generation,epoch)):
             current_key = ["discovery-current",*descriptor]
-            if not batch and not refresh:batch = self.pages.saved_cache.read(owner,method,current_key) or ""
+            if not batch and not refresh:batch = self.pages.saved_cache.discovery_batch(owner, method, descriptor)
             key = (owner,method,batch)
             with self._guard:stored = self._feeds.get(key)
-            if stored is None and batch and not refresh:stored = self.pages.saved_cache.read(owner,method,["discovery-feed",batch])
+            display_page = None
+            if stored is None and batch and not refresh:
+                stored = self.pages.saved_cache.read_discovery(owner, method, batch, page=(offset, 36, cached))
+                if isinstance(stored, DiscoveryPage):
+                    display_page, stored = stored, stored.feed
             if stored and [stored["kind"],stored["scope"],stored["mode"],stored["rankMode"]]!=descriptor:
                 raise AccountError("source_changed", "发现来源与批次不符")
-            if cached and (not stored or offset>=len(stored["items"]) and (any(stored["paths"].values()) or any(stored["pending"].values()))):
+            count = stored["_itemCount"] if display_page is not None else len(stored["items"]) if stored else 0
+            complete = stored is not None and not (any(stored["paths"].values()) or any(stored["pending"].values()))
+            if cached and (not stored or offset >= count and not complete):
                 return {"cached":False,"authorizationGeneration":generation}
             if not cached and not requested_batch and stored and kind=="ranking" and stored["window"]!=self._window():refresh=True
             if stored and not refresh:
-                if offset>len(stored["items"]):raise AccountError("page_missing", "请从已有页面继续翻页")
-                complete=not any(stored["paths"].values()) and not any(stored["pending"].values())
-                if cached or offset+36<=len(stored["items"]) or complete:
+                if offset > count:raise AccountError("page_missing", "请从已有页面继续翻页")
+                target = offset + 36
+                if display_page is not None or cached or target <= count or complete:
                     self._check(generation,epoch)
-                    with self._guard:self._retain(owner,method,stored,epoch)
-                    return self._response(stored,owner,method,generation,offset,offset+36)
-            feed = copy.deepcopy(stored) if stored and not refresh else self._new(kind,scope,mode,rank,method)
+                    if display_page is None:
+                        with self._guard:self._retain(owner,method,stored,epoch)
+                        items = stored["items"][offset:target]
+                    else:
+                        items = display_page.items
+                    return self._response(stored, owner, method, generation, offset, items, target < count or not complete)
             if batch and not stored and not refresh:
                 raise AccountError("cache_miss", "原发现批次已清除，请刷新当前页面")
+            previous = stored if not refresh else None
+            if previous is None:
+                feed = self._new(kind,scope,mode,rank,method)
+            else:
+                # Existing cards are immutable within a discovery batch. Only the
+                # working lists, cursor map and deduplication state are mutated.
+                feed = dict(previous, items=list(previous["items"]), seen=set(previous["seen"]),
+                            paths=dict(previous["paths"]), pending={key: list(rows) for key, rows in previous["pending"].items()},
+                            visitedPaths={key: list(paths) for key, paths in previous.get("visitedPaths", {}).items()})
             target = min(offset+36,len(feed["items"])) if cached else offset+36
             requests = 0
-            emitted={item["id"] for item in feed["items"]}
             while len(feed["items"]) < target:
                 for stream in feed["pending"]:
                     while not feed["pending"][stream] and feed["paths"][stream] is not None and requests<12:
@@ -286,9 +301,7 @@ class DiscoveryService:
                 available = [s for s in feed["pending"] if feed["pending"][s]]
                 if not available:break
                 chosen = max(available,key=lambda s:(feed["pending"][s][0]["sortDate"],int(feed["pending"][s][0]["id"]))) if kind=="following" else available[0]
-                item = feed["pending"][chosen].pop(0)
-                if item["id"] not in emitted:
-                    feed["items"].append(item);emitted.add(item["id"])
+                feed["items"].append(feed["pending"][chosen].pop(0))
             if offset>len(feed["items"]):raise AccountError("page_missing", "请从已有页面继续翻页")
             items = feed["items"][offset:target]
             has_more = target<len(feed["items"]) or any(feed["paths"].values()) or any(feed["pending"].values())
@@ -296,10 +309,14 @@ class DiscoveryService:
             with self.pages.publication(generation), self._guard:
                 if epoch != self._epoch:
                     raise AccountError("cache_cleared", "发现缓存已清除，请重新打开")
-                records = [(["discovery-feed",feed["batch"]],feed)]
-                if not batch or refresh:records.append((current_key,feed["batch"]))
-                self.pages.saved_cache.save_many(owner,method,records)
+                try:
+                    feed.update(self.pages.saved_cache.save_discovery(owner, method, feed, previous,
+                        current=current_key if not batch or refresh else None))
+                except AccountError as error:
+                    if error.kind == "cache_changed":
+                        self._feeds.pop(key, None)
+                    raise
                 if not stored or refresh:self.pages.saved_cache.retain_discovery(owner,method)
                 self._retain(owner,method,feed,epoch)
             if not items and has_more:raise AccountError("filtered", "当前范围暂未取得可展示作品，再次进入可继续读取，或调整范围")
-            return self._response(feed,owner,method,generation,offset,target)
+            return self._response(feed, owner, method, generation, offset, items, has_more)

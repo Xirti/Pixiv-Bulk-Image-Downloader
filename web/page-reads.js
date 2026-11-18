@@ -6,15 +6,27 @@ globalThis.createPageReads=function(request){
   function read(url,{signal}={}){
     if(signal?.aborted)return Promise.reject(signal.reason);
     const parsed=new URL(url,location.origin);
+    const background=parsed.searchParams.get("background")==="1";
     parsed.searchParams.delete("background");parsed.searchParams.sort();
     const key=parsed.pathname+parsed.search;
     let entry=pending.get(key);
     if(!entry){
       const controller=new AbortController();
-      entry={controller,readers:new Set()};pending.set(key,entry);
-      entry.promise=Promise.resolve().then(()=>request(url,{signal:controller.signal}));
+      entry={controller,readers:new Set(),url,background,started:false,promote:null};pending.set(key,entry);
+      entry.promise=Promise.resolve().then(()=>{
+        controller.signal.throwIfAborted();
+        entry.started=true;
+        return request(entry.url,{
+          signal:controller.signal,
+          onPromote:callback=>{entry.promote=callback;},
+        });
+      });
       const finished=()=>{if(pending.get(key)===entry)pending.delete(key);};
       entry.promise.then(finished,finished);
+    }else if(!background && entry.background){
+      entry.background=false;
+      if(entry.started)entry.promote?.();
+      else entry.url=url;
     }
     return new Promise((resolve,reject)=>{
       const finish=(result,value)=>{

@@ -50,7 +50,7 @@
 
 运行环境为 **Windows 10/11 x64**，需要 Microsoft Edge WebView2 Runtime 和可访问 Pixiv 的网络。
 
-1. 在 [发布页](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest) 选择安装版 `MOKU-Setup-v2.1.8-windows-x64.exe` 或便携版 `MOKU-v2.1.8-windows-x64.zip`。
+1. 在发布页选择 Windows x64 安装版或便携版。[下载最新版](https://github.com/Xirti/Pixiv-Bulk-Image-Downloader/releases/latest)
 2. 安装后启动 MOKU，或完整解压便携包后运行 `MOKU/MOKU.exe`。
 3. 打开「我的账号 → 资料」，选择 App 授权或网页登录，完成 Pixiv 登录。
 4. 搜索或进入「发现」，查看作品，将需要下载的图片加入采集篮。
@@ -79,12 +79,12 @@
 - **调整内容显示** — 网页登录后，在「设置 → 账号与通知 → Pixiv 浏览设置」调整 R-18／R-18G、敏感作品和 AI 作品显示，修改自动保存到 Pixiv。
 - **导出动图** — MP4 导出需要支持 `libx264` 的 FFmpeg，将其加入 `PATH` 后启动 MOKU。
 
-## v2.1.8
+## v2.1.9
 
-- 改进搜索翻页、作者返回与图片缓存复用。
-- 完善页面返回、失败恢复和多图详情的状态管理。
-- 修复切号后旧设置操作影响当前表单的问题。
-- 改进账号刷新取消、下载恢复和本机接口输入校验。
+- 发现页后台刷新后保留正在浏览的页码，新内容通过更新提示打开。
+- 修复账号同步后旧关注和收藏重新出现的问题。
+- 改进深分页、原图预览和下载结果恢复。
+- 更新中断时可通过恢复入口回到之前的版本。
 
 完整记录见 [更新日志](RELEASE_NOTES.md)。
 

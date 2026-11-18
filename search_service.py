@@ -330,7 +330,7 @@ def build_result_page_rows(
     for page_number in range(first_page, cache_through + 1):
         start = (page_number - 1) * size - base
         if start >= 0:
-            rows[page_number] = list(items[start:start + size])
+            rows[page_number] = items[start:start + size]
     return rows
 
 
@@ -404,7 +404,3 @@ class SearchPageCache:
         with self._lock:
             session = self._sessions.get(key)
             return sorted(session.pages) if session else []
-
-    def preloaded_through(self, key: Hashable) -> int:
-        pages = self.available_pages(key)
-        return pages[-1] if pages else 0

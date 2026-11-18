@@ -1,9 +1,48 @@
 """Build/runtime identity, independent of server startup and local storage."""
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
+from functools import cache
 import hashlib
 import sys
 from pathlib import Path
+
+
+@cache
+def _process_kernel():
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel.GetProcessTimes.restype = wintypes.BOOL
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    return kernel
+
+
+def process_identity(pid: int) -> int | None:
+    """Creation time identifies PID reuse. Access denial retains the lease."""
+    api = _process_kernel()
+    handle = api.OpenProcess(0x1000 | 0x100000, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:
+            return None
+        if error == 5:
+            return -1
+        raise ctypes.WinError(error)
+    try:
+        if api.WaitForSingleObject(handle, 0) == 0:
+            return None
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not api.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return (created.dwHighDateTime << 32) | created.dwLowDateTime
+    finally:
+        api.CloseHandle(handle)
 
 
 CODE_GENERATION_FILES = (

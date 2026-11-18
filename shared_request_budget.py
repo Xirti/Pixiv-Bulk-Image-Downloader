@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import ctypes
-from ctypes import wintypes
 from email.utils import parsedate_to_datetime
 import math
 import os
@@ -14,6 +12,7 @@ import time
 import uuid
 
 from pixiv_adapter import PixivPolicyError
+from runtime_identity import process_identity
 
 
 class RequestDeferredError(PixivPolicyError):
@@ -25,6 +24,23 @@ class RequestDeferredError(PixivPolicyError):
         super().__init__(message)
 
 
+class ReadPriority:
+    """One shared reader may promote its request once, including while queued."""
+    def __init__(self):
+        self._foreground = threading.Event()
+
+    def promote(self):
+        self._foreground.set()
+
+    @property
+    def value(self) -> int:
+        return 0 if self._foreground.is_set() else 1
+
+
+def priority_value(priority: int | ReadPriority) -> int:
+    return priority.value if isinstance(priority, ReadPriority) else priority
+
+
 def retry_after_seconds(value: str | None, *, now: float | None = None) -> float | None:
     if not value:
         return None
@@ -34,38 +50,6 @@ def retry_after_seconds(value: str | None, *, now: float | None = None) -> float
     except (ValueError, TypeError, OverflowError):
         return None
     return max(0.0, seconds) if math.isfinite(seconds) else None
-
-
-_KERNEL = ctypes.WinDLL("kernel32", use_last_error=True)
-_KERNEL.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-_KERNEL.OpenProcess.restype = wintypes.HANDLE
-_KERNEL.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
-_KERNEL.GetProcessTimes.restype = wintypes.BOOL
-_KERNEL.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-_KERNEL.WaitForSingleObject.restype = wintypes.DWORD
-_KERNEL.CloseHandle.argtypes = [wintypes.HANDLE]
-_KERNEL.CloseHandle.restype = wintypes.BOOL
-
-
-def process_identity(pid: int) -> int | None:
-    """Creation time identifies PID reuse. Access denial retains the lease."""
-    handle = _KERNEL.OpenProcess(0x1000 | 0x100000, False, pid)
-    if not handle:
-        error = ctypes.get_last_error()
-        if error == 87:
-            return None
-        if error == 5:
-            return -1
-        raise ctypes.WinError(error)
-    try:
-        if _KERNEL.WaitForSingleObject(handle, 0) == 0:
-            return None
-        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
-        if not _KERNEL.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        return (created.dwHighDateTime << 32) | created.dwLowDateTime
-    finally:
-        _KERNEL.CloseHandle(handle)
 
 
 class SharedRequestBudget:
@@ -242,14 +226,19 @@ class SharedRequestBudget:
         return first is not None and first[0] == token, safe
 
     @contextmanager
-    def slot(self, lane: str, check, *, priority: int = 0, maximum: int = 2):
+    def slot(self, lane: str, check, *, priority: int | ReadPriority = 0, maximum: int = 2):
         deadline = time.monotonic() + 15
-        with self._ticket("slot", lane, priority, check) as token:
+        queued_priority = priority_value(priority)
+        with self._ticket("slot", lane, queued_priority, check) as token:
             while True:
                 check()
                 if time.monotonic() >= deadline:
                     raise RequestDeferredError("request_queue", 2)
                 with self._transaction(check) as connection:
+                    value = priority_value(priority)
+                    if value != queued_priority:
+                        connection.execute("UPDATE tickets SET priority=? WHERE id=?", (value, token))
+                        queued_priority = value
                     first, safe = self._turn(connection, token, "slot", lane)
                     active = connection.execute("SELECT COUNT(*) FROM tickets WHERE kind='slot' AND lane=? AND running=1", (lane,)).fetchone()[0]
                     shared_maximum = 1 if safe else 2
@@ -267,12 +256,17 @@ class SharedRequestBudget:
 
     def before_send(self, image_only: bool, check, *, priority=0, delay=.275, backoff=0):
         lane = "image" if image_only else "api"
-        with self._ticket("send", lane, priority, check) as token:
+        queued_priority = priority_value(priority)
+        with self._ticket("send", lane, queued_priority, check) as token:
             while True:
                 check()
                 with self._transaction(check) as connection:
+                    value = priority_value(priority)
+                    if value != queued_priority:
+                        connection.execute("UPDATE tickets SET priority=? WHERE id=?", (value, token))
+                        queued_priority = value
                     first, safe = self._turn(connection, token, "send", lane)
-                    if safe and priority >= 2:
+                    if safe and value >= 2:
                         raise RequestDeferredError("background_paused", 1)
                     now = time.monotonic()
                     interval = max(delay, (1.5 if lane == "api" else .35) if safe else 0) * (2 ** backoff)
@@ -280,7 +274,7 @@ class SharedRequestBudget:
                     connection.execute("INSERT OR IGNORE INTO lanes VALUES(?,1,?,0,0,?)", (lane,now,interval))
                     credits, updated, next_send, burst_after, refill = connection.execute("SELECT credits,updated,next_send,burst_after,refill FROM lanes WHERE name=?", (lane,)).fetchone()
                     credits = min(capacity, credits + max(0,now-updated)/max(interval,refill))
-                    burst = not safe and not backoff and priority == 0
+                    burst = not safe and not backoff and value == 0
                     admitted = first and credits >= 1 and now >= (burst_after if burst else next_send)
                     connection.execute("UPDATE lanes SET credits=?,updated=?,refill=? WHERE name=?", (credits,now,interval,lane))
                     if admitted:

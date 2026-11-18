@@ -3,9 +3,10 @@
 globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,signedIn,generation,changed,openArtwork,openArtist,choose,selected,canChoose,installImages,attachUgoira,report,autoPrepare,browse,viewed=()=>{},backgroundAllowed=()=>true}) {
   const grid=root.querySelector('[data-discovery-grid]'),message=root.querySelector('[data-discovery-message]');
   const next=root.querySelector('[data-discovery-next]'),previous=root.querySelector('[data-discovery-prev]');
+  const update=root.querySelector('[data-discovery-update]');
   const cache=new Map(),positions=new Map(),staged=new Map(),nextReads=new Map();
   const latest=new Map(),sourceVersions=new Map(),attempts=new Map(),followingDirty=new Set();
-  const sortViews=new Map(),startedSources=new Set(),pausedSources=new Set();
+  const popularViews=new Map(),startedSources=new Set(),pausedSources=new Set();
   const previews=createPreviewImageCache({retainUnused:true,maxImages:480,reuseDetached:true});
   const initial=()=>({kind:'recommended',scope:'all',mode:'safe',rank:'day',offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:'',choice:'default',waiting:false});
   let state=initial(),data=null,rendered,active=false,pending=false,error='',revision=0,controller=null;
@@ -23,6 +24,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   const sourceKey=s=>JSON.stringify([s.kind,s.scope,s.mode,s.rank]);
   const pageKey=(s,batch=s.batch)=>JSON.stringify([sourceKey(s),batch,s.offset,s.order || "default",s.popularityIndex || ""]);
   const sourceVersion=key=>sourceVersions.get(key) || 0;
+  const ownsIdleView=(visit=revision)=>active && visit===revision && !pending && !sorting;
   const manual=()=>state.kind!=='following' && !browse.automatic();
   const japanDay=milliseconds=>Math.floor((milliseconds+9*3600000)/86400000);
   const interaction=createGalleryInteraction({grid,scrollSurface:root,allowed:()=>active && !pending && allowed(),report,
@@ -52,8 +54,20 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   function remember(){
     if(!active || !data)return;
     const record={state:structuredClone(state),data,scroll:root.scrollTop};
-    sortViews.set(`${sourceKey(state)}:${state.order || "default"}`,record);
-    if(state.order!=="popular")positions.set(sourceKey(state),record);
+    const views=state.order==='popular'?popularViews:positions;
+    views.set(sourceKey(state),record);
+  }
+  function replacePageReferences(previous,next){
+    for(const views of [positions,staged,popularViews]){
+      for(const [key,record] of views){
+        if(record.data!==previous)continue;
+        if(next)record.data=next;
+        else views.delete(key);
+      }
+    }
+    if(data!==previous)return false;
+    data=next;
+    return true;
   }
   function savePage(target,result) {
     const key=pageKey(target);
@@ -94,7 +108,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     const date=data?.edition;
     edition.textContent=state.kind==='ranking'?(date?`${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`:'站方未注明榜次日期 · 数字为来源序位'):'';
     if(data?.created)edition.title=`最近检查 ${new Date(data.created*1000).toLocaleString()}`;
-    root.querySelector('[data-discovery-update]').hidden=!staged.has(sourceKey(state));
+    update.hidden=!staged.has(sourceKey(state));
+    update.disabled=pending || sorting;
     sortControl.hidden=state.kind==='following';
     setPopularitySort(sortControl,state.choice || state.order || 'default',state.kind==='ranking'?'官方排序':'推荐顺序');
     setPopularityLoad(sortControl,true,pending || sorting,browse.buttonVisible(),Boolean(data) && !state.waiting && state.choice===state.order);
@@ -136,7 +151,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       if(version!==revision || signal.aborted || auth!==generation())return;
       data=result;state={...destination,batch:result.batch,offset:result.offset,...(refresh?{page:1,trail:[]}:{} )};
       if(refresh){restoreTop=root.scrollTop;if(followAtStart===followingVersion)followingDirty.delete(key);}
-      savePage(state,result);positions.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});staged.delete(key);
+      savePage(state,result);positions.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});
+      if(staged.get(key)?.state.batch===result.batch)staged.delete(key);
     }catch(problem){
       if(version!==revision || signal.aborted)return;
       error=problem.message || '发现读取失败，请右键刷新重试';
@@ -155,8 +171,15 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   }
   async function open(options={}){
     if(sessionGeneration!==generation()){clear();sessionGeneration=generation();}
-    remember();controller?.abort();const visit=++revision;pending=false;sorting=false;active=true;
-    await browse.ready();if(visit!==revision)return;
+    remember();controller?.abort();const visit=++revision;pending=true;sorting=false;active=true;
+    try {
+      await browse.ready();
+    } catch (problem) {
+      if(visit!==revision)return;
+      pending=false;error=problem.message || '发现设置读取失败，请重试';render();return;
+    }
+    if(visit!==revision)return;
+    pending=false;
     if(options.restore){
       state=structuredClone(options.restore);data=cache.get(pageKey(state)) || null;restoreTop=null;
       if(state.waiting){if(manual()){render();return;}await startLoad({restoring:true});return;}
@@ -165,9 +188,9 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     const target={...state,...options};
     if(target.kind!=='following')target.scope='all';
     if(target.kind!=='ranking')target.rank='day';else target.mode='safe';
-    const key=sourceKey(target),previousKey=sourceKey(state),choice=browse.order(target.kind),fresh=staged.get(key);
-    const normal=positions.get(key),popular=sortViews.get(`${key}:popular`);
-    const saved=fresh || (choice==='popular' && popular?.state.batch===normal?.state.batch?popular:null) || normal;
+    const key=sourceKey(target),previousKey=sourceKey(state),choice=browse.order(target.kind);
+    const normal=positions.get(key),popular=popularViews.get(key);
+    const saved=(choice==='popular' && popular?.state.batch===normal?.state.batch?popular:null) || normal;
     state=saved?structuredClone(saved.state):{...target,offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:''};
     state.choice=choice;state.waiting=manual();data=startedSources.has(key)?saved?.data || null:null;restoreTop=key===previousKey?saved?.scroll || 0:0;error='';
     if(key!==previousKey)root.scrollTop=0;
@@ -217,14 +240,14 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     savePage(nextState,result);
     const existing=positions.get(key);
     const record={state:nextState,data:result,scroll:0};
-    if(!existing || !active || sourceKey(state)!==key){positions.set(key,record);staged.delete(key);return;}
+    if(!existing){positions.set(key,record);staged.delete(key);return;}
     if(existing.state.batch===result.batch)return;
     const first=cache.get(pageKey({...existing.state,offset:0}));
     const same=first && first.edition===result.edition && first.items.map(item=>item.id).join(',')===result.items.map(item=>item.id).join(',');
     if(!same)staged.set(key,record);
   }
   async function reconcileFollowing(){
-    const signal=background.signal,auth=generation();let reload=false;
+    const signal=background.signal,auth=generation(),viewRevision=revision;let reload=false;
     for(const [key,page] of [...cache]){
       if(page.kind!=='following')continue;
       const [descriptor]=JSON.parse(key);
@@ -234,21 +257,19 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       try{
         const result=await readPage(target,{cached:'1',background:'1'},{signal});
         if(signal.aborted || auth!==generation())return;
-        if(sourceVersion(descriptor)!==version)continue;
+        if(sourceVersion(descriptor)!==version || cache.get(key)!==page)continue;
         if(result.cached===false){
           cache.delete(key);
-          for(const collection of [positions,staged,sortViews])for(const [identity,record] of collection)if(record.data===page)collection.delete(identity);
-          if(data===page){controller?.abort();revision++;pending=false;data=null;reload=true;render();}
+          if(replacePageReferences(page,null) && ownsIdleView(viewRevision)){reload=true;render();}
           continue;
         }
         const same=page.items.map(item=>item.id).join(',')===result.items.map(item=>item.id).join(',');
         if(same)continue;
         savePage(target,result);
-        for(const collection of [positions,staged,sortViews])for(const record of collection.values())if(record.data===page)record.data=result;
-        if(data===page){data=result;render();}
+        if(replacePageReferences(page,result) && ownsIdleView(viewRevision))render();
       }catch(problem){if(signal.aborted || auth!==generation())return;report(`关注新作状态核对失败：${problem.message}`);return;}
     }
-    if(reload && active && state.kind==='following')await load(true);
+    if(reload && ownsIdleView(viewRevision) && state.kind==='following')await load(true);
   }
   async function prepare({network=false,page=null,completed=null}={}){
     if(!signedIn())return;
@@ -257,7 +278,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     const auth=generation();
     if(sessionGeneration!==auth){clear();sessionGeneration=auth;}
     if(preparing){if(network)networkQueued=true;return preparing;}
-    const signal=background.signal;
+    const signal=background.signal,viewRevision=revision;
     const task=(async()=>{
       const targets=new Map();
       const rankingTargets=['day','week','month','week_rookie','week_original'].map(rank=>({...initial(),kind:'ranking',rank}));
@@ -286,12 +307,21 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
         }catch(problem){
           if(signal.aborted || auth!==generation())return;
           if(version!==sourceVersion(key))continue;
-          if(active && sourceKey(state)===key){error=problem.message;render();}
+          if(ownsIdleView(viewRevision) && sourceKey(state)===key && !error){error=problem.message;render();}
         }
       }
-      if(active){
-        if(!data && !state.waiting){const saved=positions.get(sourceKey(state));if(saved){state=structuredClone(saved.state);data=saved.data;}}
+      if(signal.aborted || auth!==generation() || !active)return;
+      if(ownsIdleView(viewRevision)){
+        const saved=positions.get(sourceKey(state));
+        // Preparing a source can seed the idle view, but cannot move its page or batch.
+        if(!data && !error && !state.waiting && saved && state.page===saved.state.page &&
+            pageKey(state,state.batch || saved.state.batch)===pageKey(saved.state)){
+          state={...state,batch:saved.state.batch};
+          data=saved.data;
+        }
         render();
+      }else{
+        update.hidden=!staged.has(sourceKey(state));
       }
     })().finally(()=>{if(preparing!==task)return;preparing=null;if(networkQueued && !signal.aborted){networkQueued=false;void prepare({network:true});}});
     preparing=task;return task;
@@ -303,10 +333,9 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       const filtered=page.items.filter(item=>item.userId!==id || relationship.active && (page.scope==='all' || relationship.privacy===page.scope));
       if(filtered.length===page.items.length)continue;
       const updated={...page,items:filtered};cache.set(key,updated);
-      for(const collection of [positions,staged,sortViews])for(const record of collection.values())if(record.data===page)record.data=updated;
-      if(data===page)data=updated;
+      replacePageReferences(page,updated);
     }
-    if(active && state.kind==='following'){render();void load(true);}
+    if(state.kind==='following' && ownsIdleView()){render();void load(true);}
   }
   async function loadPopularity(page){
     controller?.abort();controller=new AbortController();
@@ -327,7 +356,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       error=`${problem.message} · 可重新开启排序重试`;
       if(data && data.popularityIndex!==state.popularityIndex){
         const key=sourceKey(state),normal=positions.get(key);
-        sortViews.set(`${key}:popular`,{state:structuredClone(state),data,scroll:root.scrollTop});
+        popularViews.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});
         if(normal){state=structuredClone(normal.state);data=normal.data;}
       }
     }}
@@ -337,12 +366,12 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(!allowed() || pending || state.kind==='following' || !data)return;
     remember();controller?.abort();revision++;sorting=false;
     const key=sourceKey(state),top=root.scrollTop;
-    const saved=sortViews.get(`${key}:${order}`);
     if(order==='default'){
       const normal=staged.get(key) || positions.get(key);
       if(!normal)return;
       state={...structuredClone(normal.state),choice:order,waiting:false};data=normal.data;restoreTop=top;staged.delete(key);error='';render();return;
     }
+    const saved=popularViews.get(key);
     if(saved && saved.state.batch===state.batch){
       state={...structuredClone(saved.state),choice:order,waiting:false};data=saved.data;restoreTop=top;error='';render();
       if(data.popularityIndex!==state.popularityIndex)await loadPopularity(state.page);
@@ -373,13 +402,14 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   }
   function clear(){
     controller?.abort();revision++;void stopBackground();reads.clear();interaction.clear();previews.clear();cache.clear();positions.clear();staged.clear();latest.clear();attempts.clear();sourceVersions.clear();followingDirty.clear();
-    sortViews.clear();startedSources.clear();pausedSources.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active)render();
+    popularViews.clear();startedSources.clear();pausedSources.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active)render();
   }
   root.querySelectorAll('[data-discovery-tab]').forEach(button=>button.onclick=()=>void open({kind:button.dataset.discoveryTab}));
   root.querySelector('[data-discovery-scope]').onchange=e=>void open({scope:e.target.value});
   root.querySelectorAll('[data-discovery-rank]').forEach(button=>button.onclick=()=>void open({rank:button.dataset.discoveryRank}));
   root.querySelector('[data-discovery-mode]').onchange=e=>void open({mode:e.target.value});
-  root.querySelector('[data-discovery-update]').onclick=()=>{
+  update.onclick=()=>{
+    if(pending || sorting)return;
     const fresh=staged.get(sourceKey(state));if(!fresh)return;
     controller?.abort();revision++;pending=false;sorting=false;error='';
     state={...structuredClone(fresh.state),choice:browse.order(fresh.state.kind),waiting:false};

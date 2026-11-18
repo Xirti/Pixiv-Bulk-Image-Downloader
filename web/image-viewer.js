@@ -4,7 +4,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   let image=dialog.querySelector("img");
   const count=dialog.querySelector("[data-stage-count]"),original=dialog.querySelector("[data-stage-original]");
   const status=dialog.querySelector("[data-stage-status]"),retry=dialog.querySelector("[data-stage-retry]");
-  let current=null,revision=0,size="large",originalView=false,working=null,displayed=-1,manualSize=false,pendingSize=false;
+  let current=null,revision=0,size="large",originalView=false,busy=false,displayed=-1,manualSize=false,pendingSize=false;
   function resize(){
     if(!current || !dialog.open)return;
     const frame=current.item.pageImages?.[current.page];
@@ -35,13 +35,13 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   }
   function preview(context,page,source){
     let entry=context.previews.get(page);
-    if(entry?.error){context.previews.delete(page);entry=null;}
+    if(entry?.failed){context.previews.delete(page);entry=null;}
     if(entry){context.previews.delete(page);context.previews.set(page,entry);return entry.promise;}
     if(!source)return Promise.reject(new Error("这张图片暂未提供预览，可尝试查看原图"));
     const node=new Image();node.decoding="async";
-    entry={image:node,error:null,promise:null};context.previews.set(page,entry);
+    entry={image:node,failed:false,promise:null};context.previews.set(page,entry);
     node.src=source;
-    entry.promise=node.decode().then(()=>node,error=>{entry.error=error;throw error;});
+    entry.promise=node.decode().then(()=>node,error=>{entry.failed=true;throw error;});
     // Keep the visible page and target. Idle preview nodes have a small local budget.
     for(const [index,old] of context.previews){
       if(context.previews.size<=6)break;
@@ -54,7 +54,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     const next=(context.page+1)%context.item.pages,source=context.item.pageImages[next]?.regular;
     if(!source || context.previews.has(next))return;
     // The entry records background failure; an explicit visit retries it.
-    void preview(context,next,source).catch(error=>{context.preloadError={page:next,error};});
+    void preview(context,next,source).catch(()=>{});
   }
   function syncPages(context){
     count.textContent=`${context.page+1} / ${context.item.pages}`;
@@ -93,7 +93,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   async function paint(context=current,version=revision,refresh=false){
     const page=context.page;
     original.hidden=!context.allowOriginal;
-    cache.pin(context.item,page);originalView=false;working="preview";
+    cache.pin(context.item,page);originalView=false;busy=true;
     image.style.visibility="hidden";displayed=-1;dialog.setAttribute("aria-busy","true");
     status.textContent=`正在加载第 ${page+1} 张…`;retry.hidden=true;
     original.textContent="查看原图";original.disabled=true;
@@ -110,13 +110,13 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
       if(context!==current || version!==revision || !dialog.open)return;
       status.textContent=`第 ${page+1} 张加载失败`;retry.hidden=false;report(error.message || "预览加载失败，请重试");
     }finally{
-      if(context===current && version===revision){working=null;original.disabled=false;dialog.setAttribute("aria-busy","false");}
+      if(context===current && version===revision){busy=false;original.disabled=false;dialog.setAttribute("aria-busy","false");}
     }
   }
   async function viewOriginal(){
-    if(!current || !current.allowOriginal || working || originalView)return;
+    if(!current || !current.allowOriginal || busy || originalView)return;
     const context=current,page=context.page,version=++revision;
-    working="original";original.disabled=true;retry.hidden=true;status.textContent="原图加载中…";
+    busy=true;original.disabled=true;retry.hidden=true;status.textContent="原图加载中…";
     try{
       const item=await detail(context);if(!item || context!==current || version!==revision || !dialog.open)return;
       let url=cache.peek(item,page);
@@ -137,7 +137,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
       if(context!==current || version!==revision || !dialog.open)return;
       cache.invalidate(context.item,page);status.textContent="原图加载失败，可重试";
       report(error.message || "原图加载失败");
-    }finally{if(context===current && version===revision){working=null;original.disabled=originalView;}}
+    }finally{if(context===current && version===revision){busy=false;original.disabled=originalView;}}
   }
   function turn(direction){
     if(!current || current.item.pages<2)return;
@@ -152,9 +152,8 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     // Prepare only the next preview of a multi-page work, never its original.
     if(item.pages>1 && !item.pageImages){
       const context=current,version=revision;
-      void detail(context).then(ready=>{if(ready && context===current)warm(context);}).catch(error=>{
-        context.detailError=error;
-        if(context===current && version===revision && !working)status.textContent="后续图片准备失败，可点击箭头重试";
+      void detail(context).then(ready=>{if(ready && context===current)warm(context);}).catch(()=>{
+        if(context===current && version===revision && !busy)status.textContent="后续图片准备失败，可点击箭头重试";
       });
     }
   }
@@ -167,7 +166,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   });
   dialog.addEventListener("close",()=>{
     if(dialog.open)return;
-    const previous=current;current=null;revision++;working=null;displayed=-1;
+    const previous=current;current=null;revision++;busy=false;displayed=-1;
     cache.unpin();retry.hidden=true;dialog.setAttribute("aria-busy","false");
     previous?.opener?.isConnected && previous.opener.focus({preventScroll:true});previous?.onClose?.();
     release(previous);image.removeAttribute("src");

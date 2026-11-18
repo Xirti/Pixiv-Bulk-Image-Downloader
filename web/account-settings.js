@@ -84,13 +84,13 @@ globalThis.createPixivDisplaySettings = function ({root,request,session,reconcil
 };
 
 globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,clearCache}) {
-  const fields=[...root.querySelectorAll("[data-setting]")],dirty=new Set();
+  const fields=[...root.querySelectorAll("[data-setting]")],dirty=new Map();
   const status=root.querySelector("[data-settings-status]"),sync=root.querySelector("[data-sync-status]");
   const button=root.querySelector("[data-settings-save]");
   const jump=root.querySelector("[data-settings-jump]");
   const syncButton=root.querySelector("[data-settings-sync]");
   const clearButton=root.querySelector("[data-settings-clear-cache]");
-  let saving=false,clearing=false,lastProgress={},saved=null,preferencesLoaded=false;
+  let saving=null,clearing=false,lastProgress={},saved=null,preferencesLoaded=false;
   let revision=0;
   const search=root.querySelector('[data-settings-search]'),heading=root.querySelector('[data-settings-heading]');
   const categories=[...root.querySelectorAll('[data-settings-category]')],panels=[...root.querySelectorAll('[data-settings-panel]')];
@@ -125,8 +125,9 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   }
   const valueOf=field=>field.type==="checkbox"?field.checked:field.value.trim();
   function edited(field){
-    if(saved && valueOf(field)===saved[field.dataset.setting])dirty.delete(field.dataset.setting);
-    else dirty.add(field.dataset.setting);
+    const key=field.dataset.setting,value=valueOf(field),submitted=saving?.get(key);
+    if(saved && value===saved[key] && (!submitted || submitted.value===value))dirty.delete(key);
+    else dirty.set(key,{value});
     status.textContent=dirty.size?"有未保存的设置":"";jump.hidden=dirty.size===0;
   }
   jump.onclick=()=>{
@@ -173,19 +174,21 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   };
   button.onclick=async()=>{
     if(saving)return;
-    const changes=Object.fromEntries(fields.filter(field=>dirty.has(field.dataset.setting)).map(field=>[field.dataset.setting,valueOf(field)]));
+    const submitted=new Map(dirty);
+    const changes=Object.fromEntries([...submitted].map(([key,edit])=>[key,edit.value]));
     if(!Object.keys(changes).length){status.textContent="设置已保存";return;}
     if(changes.syncMinutes!==undefined && (!/^[0-9]+$/.test(changes.syncMinutes) || BigInt(changes.syncMinutes)<3n)){
       status.textContent="同步间隔至少为 3 分钟，请输入整数。";root.querySelector('[data-setting="syncMinutes"]').focus();return;
     }
     const current=revision;
-    saving=true;button.disabled=true;jump.disabled=true;fields.forEach(field=>field.disabled=true);
+    saving=submitted;button.disabled=true;jump.disabled=true;fields.forEach(field=>field.disabled=true);
     try{
       const value=await save(changes);
       if(current!==revision)return;
-      dirty.clear();
+      for(const [key,edit] of submitted)if(dirty.get(key)===edit)dirty.delete(key);
+      saving=null;
       update(value);
-      status.textContent="设置已保存";
+      status.textContent=dirty.size?"本次设置已保存，另有未保存的改动":"设置已保存";
     }catch(error){
       if(current===revision){
         status.textContent=error.message;
@@ -193,7 +196,7 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
       }
     }finally{
       if(current===revision){
-        saving=false;
+        saving=null;
         button.disabled=!preferencesLoaded;
         jump.disabled=!preferencesLoaded;
         fields.forEach(field=>field.disabled=!preferencesLoaded);
@@ -205,15 +208,16 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     preferencesLoaded=loaded;
     if(progress!==null)lastProgress=progress;
     progress=lastProgress;
-    button.disabled=!loaded || saving;
-    jump.disabled=!loaded || saving;
+    button.disabled=!loaded || Boolean(saving);
+    jump.disabled=!loaded || Boolean(saving);
     clearButton.disabled=!loaded || clearing;
-    fields.forEach(field=>field.disabled=!loaded || saving);
+    fields.forEach(field=>field.disabled=!loaded || Boolean(saving));
     if(loaded){
       saved=value;
       for(const field of fields){
         const key=field.dataset.setting,next=value[key];
-        if(dirty.has(key)){if(valueOf(field)===next)dirty.delete(key);else continue;}
+        // Keep drafts through intermediate preference notifications while a save is pending.
+        if(dirty.has(key)){if(!saving && valueOf(field)===next)dirty.delete(key);else continue;}
         if(field.type==="checkbox")field.checked=next;
         else if(field.value!==String(next))field.value=next;
       }
@@ -226,11 +230,11 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   }
   return {
     update,
-    get dirty(){return dirty.size>0 || saving;},
+    get dirty(){return dirty.size>0 || Boolean(saving);},
     reset:()=>{
       revision++;
       dirty.clear();
-      saving=false;
+      saving=null;
       clearing=false;
       saved=null;
       lastProgress={};

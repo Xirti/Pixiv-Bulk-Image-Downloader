@@ -8,7 +8,7 @@ import threading
 
 from account_pages import ACCOUNT_CACHE_ONLY
 from pixiv_account import ACCOUNT_REQUEST_CHECK, AccountError
-from request_coordinator import REQUEST_PRIORITY
+from request_coordinator import REQUEST_PRIORITY, TrackedReadEvent
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,8 @@ class ReadScopes:
                 token = ACCOUNT_REQUEST_CHECK.set(lease.check)
                 bindings.callback(ACCOUNT_REQUEST_CHECK.reset, token)
                 if priority is not None:
+                    if priority == 1 and isinstance(cancel_event, TrackedReadEvent):
+                        priority = cancel_event.priority
                     token = REQUEST_PRIORITY.set(priority)
                     bindings.callback(REQUEST_PRIORITY.reset, token)
                 if cache_only is not None:

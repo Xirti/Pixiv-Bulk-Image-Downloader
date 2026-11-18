@@ -173,10 +173,12 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Code: Integer;
 begin
-  if (CurUninstallStep = usUninstall) and PurgeUserData then
+  if CurUninstallStep <> usUninstall then exit;
+  if PurgeUserData then
     if not Exec(ExpandConstant('{app}\app\MOKU.exe'), '--uninstall-data', '',
       SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
       RaiseException('个人数据清理失败，请处理提示后重试卸载。');
+  if OwnsRecoveryEntry then RemoveComponent(RecoveryEntryPath);
 end;
 
 function InitializeSetup: Boolean;

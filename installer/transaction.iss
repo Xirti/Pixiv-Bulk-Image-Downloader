@@ -6,6 +6,7 @@
 const
   UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1';
   BackupMarker = 'MOKU installer transaction 2';
+  RecoveryEntryName = 'MOKU-Recover.lnk';
 var
   TransactionPrepared: Boolean;
   TransactionCommitted: Boolean;
@@ -16,6 +17,11 @@ function FileAttributes(Name: String): LongWord;
 function BackupRoot: String;
 begin
   Result := ExpandConstant('{app}\.moku-install-backup');
+end;
+
+function RecoveryEntryPath: String;
+begin
+  Result := ExpandConstant('{app}\app\') + RecoveryEntryName;
 end;
 
 function ComponentNames: TStringList;
@@ -48,6 +54,45 @@ begin
     if (Attributes <> $FFFFFFFF) and ((Attributes and $400) <> 0) then
       RaiseException('安装路径包含链接，请选择普通文件夹。');
     Name := ExtractFileDir(Name);
+  end;
+end;
+
+function OwnsRecoveryEntry: Boolean;
+var
+  Attributes: LongWord;
+  Entry: TFindRec;
+  Journal, DigestField: String;
+  Raw: AnsiString;
+  Size: Int64;
+begin
+  Result := False;
+  CheckParents(ExpandConstant('{app}\app'));
+  Attributes := FileAttributes(RecoveryEntryPath);
+  if (Attributes = $FFFFFFFF) or ((Attributes and ($400 or FILE_ATTRIBUTE_DIRECTORY)) <> 0) then exit;
+  if not FileSize64(RecoveryEntryPath, Size) or (Size > 65536) then exit;
+  // Match the digest recorded by update_install.py before replacement began.
+  DigestField := '"recoveryEntrySha256": "' + Lowercase(GetSHA256OfFile(RecoveryEntryPath)) + '"';
+  if FindFirst(ExpandConstant('{app}\.moku-update-*'), Entry) then
+  begin
+    try
+      repeat
+        if (Length(Entry.Name) = 29) and
+          ((Entry.Attributes and ($400 or FILE_ATTRIBUTE_DIRECTORY)) = FILE_ATTRIBUTE_DIRECTORY) then
+        begin
+          Journal := ExpandConstant('{app}\') + Entry.Name + '\transaction.json';
+          Attributes := FileAttributes(Journal);
+          if (Attributes <> $FFFFFFFF) and ((Attributes and ($400 or FILE_ATTRIBUTE_DIRECTORY)) = 0) and
+            FileSize64(Journal, Size) and (Size <= 65536) and LoadStringFromFile(Journal, Raw) and
+            (Pos(DigestField, String(Raw)) > 0) then
+          begin
+            Result := True;
+            exit;
+          end;
+        end;
+      until not FindNext(Entry);
+    finally
+      FindClose(Entry);
+    end;
   end;
 end;
 
@@ -243,6 +288,8 @@ begin
       FindClose(Entry);
     end;
   end;
+  Source := BackupRoot + '\recovery\' + RecoveryEntryName;
+  if FileExists(Source) then MoveEntry(Source, RecoveryEntryPath);
   if FindFirst(ExpandConstant('{app}\unins*.*'), Entry) then
   begin
     try
@@ -319,6 +366,8 @@ begin
   end;
   if not SaveStringToFile(BackupRoot + '\snapshot-ready', BackupMarker, False) then
     RaiseException('无法提交旧组件备份。');
+  if OwnsRecoveryEntry then
+    MoveEntry(RecoveryEntryPath, BackupRoot + '\recovery\' + RecoveryEntryName);
   if FindFirst(ExpandConstant('{app}\.moku-update-*'), Entry) then
   begin
     try

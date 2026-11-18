@@ -19,7 +19,9 @@ import urllib.parse
 import urllib.request
 
 from update_package import MANAGED, MAX_ARCHIVE, UpdateError, extract_package, verify_bundle, version_key
-from release_security import MAX_METADATA, RELEASE_METADATA, RELEASE_SIGNATURE, verify_release
+from release_security import MAX_METADATA, RELEASE_METADATA, RELEASE_SIGNATURE, read_bounded, verify_release
+from runtime_identity import process_identity
+from update_install import work_root, write_json
 from version import __version__
 from edition_profile import PROJECT_REPOSITORY
 
@@ -74,8 +76,7 @@ class AppUpdates:
         self.path=Path(path);self.lock=threading.RLock();self.gate=threading.RLock()
         self.frozen=bool(getattr(sys,"frozen",False))
         self.install_root=Path(install_root or (Path(sys.executable).parent if self.frozen else Path(__file__).parent)).resolve()
-        identity=hashlib.sha256(str(self.install_root).casefold().encode()).hexdigest()[:16]
-        self.work=self.install_root.parent/(".moku-update-"+identity)
+        self.work=work_root(self.install_root)
         self.opener=opener or urllib.request.build_opener(_ReleaseRedirects())
         self.options={"channel":"stable","automatic":False}
         config_error=""
@@ -193,7 +194,8 @@ class AppUpdates:
             self.work.mkdir(exist_ok=True)
             if self.work.is_symlink() or getattr(self.work,"is_junction",lambda:False)():raise UpdateError("更新目录不能是链接")
             job=Path(tempfile.mkdtemp(prefix="package-",dir=self.work));archive=job/"release.zip"
-            (job/"job.json").write_text(json.dumps({"target":str(self.install_root)}),encoding="utf-8")
+            pid = os.getpid()
+            write_json(job / "job.json", {"target": str(self.install_root), "owner": [pid, process_identity(pid)]})
             metadata=verify_release(release["signedMetadata"].encode("utf-8"),release["metadataSignature"].encode("utf-8"),release["version"])
             (job/RELEASE_METADATA).write_text(release["signedMetadata"],encoding="utf-8",newline="\n")
             (job/RELEASE_SIGNATURE).write_text(release["metadataSignature"],encoding="utf-8",newline="\n")
@@ -209,9 +211,13 @@ class AppUpdates:
             with self.lock:self.state["phase"]="verifying"
             extract_package(archive,job/"MOKU",release["version"],expected_manifest_sha256=metadata["manifestSha256"],cancel_event=self.cancel)
             if self.cancel.is_set():raise UpdateError("已取消更新下载")
-            archive.unlink();self.bundle=job/"MOKU"
-            self.cleanup()
-            with self.lock:self.state.update(phase="ready",error="")
+            archive.unlink()
+            self.cleanup(keep=job)
+            with self.lock:
+                if self.cancel.is_set():
+                    raise UpdateError("已取消更新下载")
+                self.bundle = job / "MOKU"
+                self.state.update(phase="ready", error="")
         except Exception as exc:
             LOG.warning("update %s failed: %s",action,exc)
             if job and job.is_relative_to(self.work) and job.parent==self.work:
@@ -249,9 +255,17 @@ class AppUpdates:
                 if source.is_dir():shutil.copytree(source,helper/name)
                 elif source.is_file():shutil.copy2(source,helper/name)
             plan={"target":str(self.install_root),"bundle":str(self.bundle),"version":self.state["release"]["version"],"pid":os.getpid()}
-            plan_path=helper.parent/"plan.json";plan_path.write_text(json.dumps(plan),encoding="utf-8")
-            subprocess.Popen([str(helper/"MOKU.exe"),"--apply-update",str(plan_path)],cwd=helper,
+            plan_path=helper.parent/"plan.json"
+            write_json(plan_path, plan)
+            process = subprocess.Popen([str(helper/"MOKU.exe"),"--apply-update",str(plan_path)],cwd=helper,
                 creationflags=subprocess.CREATE_NO_WINDOW,close_fds=True)
+            try:
+                marker = helper.parent / "job.json"
+                ownership = json.loads(read_bounded(marker))
+                ownership["helperProcess"] = [process.pid, process_identity(process.pid)]
+                write_json(marker, ownership)
+            except (OSError, ValueError) as error:
+                LOG.warning("Update helper ownership could not be recorded: %s", error)
             self.restarting=True;self.state["phase"]="restarting"
             return {"ok":True}
 
@@ -264,21 +278,62 @@ class AppUpdates:
                     except UpdateError:pass  # A foreground operation acquired it first.
         threading.Thread(target=schedule,name="moku-update-check",daemon=True).start()
 
-    def cleanup(self):
-        """Retain the newest staged helper and one binary rollback copy."""
+    def cleanup(self, *, keep=None):
+        """Retire only abandoned staging jobs, retaining one for diagnostics."""
         if not self.work.is_dir() or self.work.resolve()!=self.work:return
+        journal = self.work / "transaction.json"
+        if journal.exists():
+            try:
+                record = json.loads(read_bounded(journal))
+            except (OSError, ValueError) as error:
+                LOG.warning("Update staging cleanup deferred: %s", error)
+                return
+            if not isinstance(record, dict) or record.get("target") != str(self.install_root):
+                LOG.warning("Update staging cleanup deferred: invalid transaction owner")
+                return
+            recovery = None
+            if record.get("phase") in ("installing", "awaiting-start"):
+                helper = record.get("helper")
+                if not isinstance(helper, str):
+                    LOG.warning("Update staging cleanup deferred: missing recovery helper")
+                    return
+                recovery = Path(helper).parent.parent
+        else:
+            recovery = None
+        with self.lock:
+            ready = self.bundle.parent if self.bundle is not None else None
         jobs=[]
         for path in self.work.glob("package-*"):
             marker=path/"job.json"
-            if path.resolve()!=path or not path.is_dir() or not marker.is_file():continue
+            if path in (keep, ready, recovery) or path.resolve()!=path or not path.is_dir() or not marker.is_file():
+                continue
             try:
-                if json.loads(marker.read_text(encoding="utf-8"))!={"target":str(self.install_root)}:continue
-                jobs.append(path)
+                record = json.loads(read_bounded(marker))
+                if not isinstance(record, dict) or record.get("target") != str(self.install_root):
+                    continue
+                if any(self._owner_running(record.get(field)) for field in ("owner", "helperProcess")):
+                    continue
+                plan = path / "plan.json"
+                # The parent publishes the plan before Popen can report a PID.
+                if plan.is_file() and time.time() - plan.stat().st_mtime < 600:
+                    continue
+                jobs.append((path.stat().st_mtime, path))
             except (OSError,ValueError) as exc:LOG.warning("update cleanup marker could not be read: %s",exc)
-        jobs.sort(key=lambda path:path.stat().st_mtime,reverse=True)
-        for path in jobs[1:]:
+        jobs.sort(reverse=True)
+        for _, path in jobs[1:]:
             try:shutil.rmtree(path)
             except OSError as exc:LOG.warning("old update staging cleanup deferred: %s",exc)
+
+    @staticmethod
+    def _owner_running(stamp):
+        if stamp is None:
+            return False
+        if (not isinstance(stamp, list) or len(stamp) != 2 or type(stamp[0]) is not int
+                or not 0 < stamp[0] <= 0xffffffff or (stamp[1] is not None and type(stamp[1]) is not int)):
+            raise ValueError("invalid update process ownership")
+        pid, recorded = stamp
+        current = process_identity(pid)
+        return current is not None and (current == recorded or current == -1 or recorded == -1)
 
     def close(self):
         with self.lock:

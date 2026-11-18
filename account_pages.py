@@ -3,6 +3,7 @@ from collections import OrderedDict
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 import copy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
@@ -23,6 +24,8 @@ from artist_service import normalize_artist
 from request_coordinator import checked_lock
 
 ACCOUNT_CACHE_ONLY = ContextVar("account_cache_only", default=False)
+RELATION_VIEWS = frozenset({"bookmarks", "following"})
+_DISPLAY_PENDING_KEY = json.dumps(["web-display-pending"])
 
 
 class HomepageIdentity(HTMLParser):
@@ -127,6 +130,28 @@ class VisitStore:
             connection.execute("DELETE FROM author_scopes WHERE owner=?", (owner,))
 
 
+@dataclass(frozen=True)
+class DiscoveryPage:
+    feed: dict
+    items: list
+
+
+@dataclass(frozen=True)
+class AccountContinuation:
+    path: str
+    params: list
+    position: int
+    current: str
+    scan: str
+    following: str | None
+
+
+@dataclass(frozen=True)
+class AppRelationPage:
+    data: dict
+    cursor: AccountContinuation
+
+
 class AccountCache:
     """Account metadata survives navigation/restarts; image capabilities are added only at response time."""
     def __init__(self, path):
@@ -155,17 +180,162 @@ class AccountCache:
 
     def read(self, owner, method, key):
         with self.lock, closing(self._connect()) as db:
-            if self._is_display_key(key) or key == ["web-display-settings"]:
+            if self._is_display_key(key):
+                self._begin_display_cache(db, owner, method)
+            elif key == ["web-display-settings"]:
                 db.execute("BEGIN")
-                pending = db.execute("SELECT 1 FROM cached WHERE owner=? AND method=? AND key=?",
-                    (owner, method, json.dumps(["web-display-pending"]))).fetchone()
-                if pending:
-                    if key == ["web-display-settings"]:
-                        return None
-                    raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
+                if self._display_update_pending(db, owner, method):
+                    return None
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
                              (owner, method, json.dumps(key))).fetchone()
             return json.loads(row[0]) if row else None
+
+    def discovery_batch(self, owner, method, descriptor):
+        """A separate pointer keeps the old cache readable after a rollback."""
+        current = ["discovery-current", *descriptor]
+        current_key, paged_key = json.dumps(current), json.dumps([*current, "pages"])
+        with self.lock, closing(self._connect()) as db:
+            self._begin_display_cache(db, owner, method)
+            pointers = dict(db.execute("SELECT key,payload FROM cached WHERE owner=? AND method=? AND key IN (?,?)",
+                (owner, method, current_key, paged_key)))
+            if len(pointers) < 2:
+                return json.loads(next(iter(pointers.values()))) if pointers else ""
+            # A legacy version may have fetched a newer batch after rollback.
+            candidates = []
+            for paged, pointer in enumerate((current_key, paged_key)):
+                batch = json.loads(pointers[pointer])
+                key = ["discovery-feed", batch]
+                if paged:
+                    key.append("pages")
+                row = db.execute("SELECT json_extract(payload,'$.created') FROM cached WHERE owner=? AND method=? AND key=?",
+                    (owner, method, json.dumps(key))).fetchone()
+                if row is not None:
+                    candidates.append((row[0], paged, batch))
+            return max(candidates)[2] if candidates else ""
+
+    @classmethod
+    def _begin_display_cache(cls, db, owner, method, *, write=False):
+        db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        if cls._display_update_pending(db, owner, method):
+            raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
+
+    def read_discovery(self, owner, method, batch, *, page=None):
+        key = ["discovery-feed", batch]
+        with self.lock, closing(self._connect()) as db:
+            self._begin_display_cache(db, owner, method)
+            header = json.dumps([*key, "pages"])
+            row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, header)).fetchone()
+            if row is None:
+                legacy = db.execute("SELECT rowid,payload FROM cached WHERE owner=? AND method=? AND key=?",
+                    (owner, method, json.dumps(key))).fetchone()
+                if legacy is None:
+                    return None
+                rowid, payload = legacy
+                feed = json.loads(payload)
+                feed["_legacy_rowid"] = rowid
+                return feed
+            feed = json.loads(row[0])
+            if page is not None and feed.get("_offsetCheckpoint") == feed["_checkpoint"]:
+                offset, limit, cached = page
+                target = offset + limit
+                if cached or target <= feed["_itemCount"] or not (any(feed["paths"].values()) or any(feed["pending"].values())):
+                    items = []
+                    if offset < feed["_itemCount"]:
+                        # The last chunk beginning at or before offset can overlap the page.
+                        for start, payload in db.execute("""SELECT r.start_offset, p.payload
+                            FROM discovery_offsets r JOIN discovery_pages p USING(owner, method, header, checkpoint)
+                            WHERE r.owner=? AND r.method=? AND r.header=? AND r.start_offset<?
+                            AND r.start_offset >= (SELECT MAX(start_offset) FROM discovery_offsets
+                                WHERE owner=? AND method=? AND header=? AND start_offset<=?)
+                            ORDER BY r.start_offset""",
+                            (owner, method, header, target, owner, method, header, offset)):
+                            chunk, _, _ = json.loads(payload)
+                            items.extend(chunk[max(0, offset - start):target - start])
+                    return DiscoveryPage(feed, items)
+            feed.update(items=[], seen=set(), visitedPaths={})
+            for (payload,) in db.execute("SELECT payload FROM discovery_pages WHERE owner=? AND method=? AND header=? ORDER BY checkpoint",
+                    (owner, method, header)):
+                items, seen, visited = json.loads(payload)
+                feed["items"].extend(items)
+                feed["seen"].update(seen)
+                for stream, paths in visited.items():
+                    feed["visitedPaths"].setdefault(stream, []).extend(paths)
+            return feed
+
+    def save_discovery(self, owner, method, feed, previous, *, current=None):
+        key = ["discovery-feed", feed["batch"]]
+        if previous is not None and "_legacy_rowid" in previous:
+            return self._save_legacy_discovery(owner, method, key, feed, previous["_legacy_rowid"])
+        header = json.dumps([*key, "pages"])
+        checkpoint = previous["_checkpoint"] if previous else 0
+        prefix = previous
+        visited = {stream: paths[len(prefix.get("visitedPaths", {}).get(stream, ())) if prefix else 0:]
+                   for stream, paths in feed.get("visitedPaths", {}).items()}
+        start = len(prefix["items"]) if prefix else 0
+        page = json.dumps([feed["items"][start:],
+                           sorted(feed["seen"].difference(prefix["seen"]) if prefix else feed["seen"]),
+                           visited], ensure_ascii=False)
+        metadata = {name: value for name, value in feed.items() if name not in {"items", "seen", "visitedPaths"}}
+        metadata["_checkpoint"] = checkpoint + 1
+        metadata["_offsetCheckpoint"] = checkpoint + 1
+        metadata["_itemCount"] = len(feed["items"])
+        rows = [(owner, method, header, json.dumps(metadata, ensure_ascii=False))]
+        if current is not None:
+            rows.append((owner, method, json.dumps([*current, "pages"]), json.dumps(feed["batch"])))
+        with self.lock, closing(self._connect()) as db, db:
+            self._begin_display_cache(db, owner, method, write=True)
+            db.execute("""CREATE TABLE IF NOT EXISTS discovery_pages (
+                owner TEXT, method TEXT, header TEXT, checkpoint INTEGER, payload TEXT NOT NULL,
+                PRIMARY KEY(owner,method,header,checkpoint))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS discovery_offsets (
+                owner TEXT, method TEXT, header TEXT, start_offset INTEGER, checkpoint INTEGER,
+                PRIMARY KEY(owner,method,header,start_offset))""")
+            # Legacy clear and display-setting operations also delete these headers.
+            db.execute("""CREATE TRIGGER IF NOT EXISTS delete_discovery_pages AFTER DELETE ON cached
+                WHEN json_extract(OLD.key,'$[0]')='discovery-feed' AND json_extract(OLD.key,'$[2]')='pages'
+                BEGIN DELETE FROM discovery_pages WHERE owner=OLD.owner AND method=OLD.method AND header=OLD.key; END""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS delete_discovery_offsets AFTER DELETE ON cached
+                WHEN json_extract(OLD.key,'$[0]')='discovery-feed' AND json_extract(OLD.key,'$[2]')='pages'
+                BEGIN DELETE FROM discovery_offsets WHERE owner=OLD.owner AND method=OLD.method AND header=OLD.key; END""")
+            stored = db.execute("SELECT json_extract(payload,'$._checkpoint') FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, header)).fetchone()
+            if (stored[0] if stored else 0) != checkpoint:
+                raise AccountError("cache_changed", "发现批次已改变，请重试")
+            if previous is not None and previous.get("_offsetCheckpoint") != checkpoint:
+                # Earlier paged snapshots can be indexed without rewriting their payloads.
+                db.execute("DELETE FROM discovery_offsets WHERE owner=? AND method=? AND header=?",
+                    (owner, method, header))
+                db.execute("""INSERT INTO discovery_offsets
+                    SELECT owner,method,header,SUM(size) OVER (ORDER BY checkpoint)-size,checkpoint
+                    FROM (SELECT owner,method,header,checkpoint,json_array_length(payload,'$[0]') AS size
+                        FROM discovery_pages WHERE owner=? AND method=? AND header=?) WHERE size>0""",
+                    (owner, method, header))
+            db.execute("INSERT INTO discovery_pages VALUES(?,?,?,?,?)",
+                (owner, method, header, checkpoint + 1, page))
+            if start < metadata["_itemCount"]:
+                db.execute("INSERT INTO discovery_offsets VALUES(?,?,?,?,?)",
+                    (owner, method, header, start, checkpoint + 1))
+            # UPSERT avoids REPLACE's delete trigger when recursive_triggers is enabled.
+            db.executemany("INSERT INTO cached VALUES(?,?,?,?) ON CONFLICT(owner,method,key) DO UPDATE SET payload=excluded.payload",
+                rows)
+        return {"_checkpoint": checkpoint + 1, "_offsetCheckpoint": checkpoint + 1,
+                "_itemCount": metadata["_itemCount"]}
+
+    def _save_legacy_discovery(self, owner, method, key, feed, previous_rowid):
+        # Continue an existing old-format batch in place so a downgraded
+        # application can resume it too. Refreshes create new paged batches.
+        snapshot = dict(feed, seen=sorted(feed["seen"]))
+        snapshot.pop("_legacy_rowid")
+        with self.lock, closing(self._connect()) as db, db:
+            self._begin_display_cache(db, owner, method, write=True)
+            stored = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, json.dumps(key))).fetchone()
+            if stored != (previous_rowid,):
+                raise AccountError("cache_changed", "发现批次已改变，请重试")
+            inserted = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
+                (owner, method, json.dumps(key), json.dumps(snapshot, ensure_ascii=False)))
+            return {"_legacy_rowid": inserted.lastrowid}
 
     def save(self, owner, method, key, value):
         self.save_many(owner,method,[(key,value)])
@@ -179,18 +349,23 @@ class AccountCache:
         pages = list(pages)
         with self.lock, closing(self._connect()) as db, db:
             if any(self._is_display_key(key) for key, _ in pages):
-                db.execute("BEGIN IMMEDIATE")
-                if db.execute("SELECT 1 FROM cached WHERE owner=? AND method=? AND key=?",
-                        (owner, method, json.dumps(["web-display-pending"]))).fetchone():
-                    raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
+                self._begin_display_cache(db, owner, method, write=True)
             self._save_rows(db,owner,method,pages)
 
     def read_cursor(self, owner, method, key):
-        raw_key, state_key = json.dumps(key), json.dumps(["cursor-state", *key[1:]])
         with self.lock, closing(self._connect()) as db:
-            values = {name: json.loads(payload) for name,payload in db.execute(
-                "SELECT key,payload FROM cached WHERE owner=? AND method=? AND key IN (?,?)",
-                (owner,method,raw_key,state_key))}
+            checkpoint = self._read_cursor(db, owner, method, key)
+        if checkpoint is None:
+            return None
+        path, scan = checkpoint
+        return path, scan or uuid.uuid4().hex
+
+    @staticmethod
+    def _read_cursor(db, owner, method, key):
+        raw_key, state_key = json.dumps(key), json.dumps(["cursor-state", *key[1:]])
+        values = {name: json.loads(payload) for name,payload in db.execute(
+            "SELECT key,payload FROM cached WHERE owner=? AND method=? AND key IN (?,?)",
+            (owner,method,raw_key,state_key))}
         path = values.get(raw_key)
         if path is None:
             return None
@@ -200,24 +375,61 @@ class AccountCache:
         if state is not None and (not isinstance(state,dict) or not isinstance(state.get("path"),str)
                 or not isinstance(state.get("scan"),str) or not re.fullmatch(r"[a-f0-9]{32}",state["scan"])):
             raise AccountError("cursor","账号分页检查点格式异常，请刷新")
-        return path,state["scan"] if state is not None and state["path"]==path else uuid.uuid4().hex
+        return path,state["scan"] if state is not None and state["path"]==path else None
 
-    def save_cursor(self, owner, method, key, current, position, scan, following):
+    def relation_version(self, owner, method, key):
+        with self.lock, closing(self._connect()) as db:
+            return self._relation_version(db, owner, method, key)
+
+    @staticmethod
+    def _relation_version(db, owner, method, key):
+        epoch_key = json.dumps(["relation-cache-epoch", key[1]])
+        page_key = json.dumps(key)
+        rows = {encoded: (rowid, epoch) for encoded, rowid, epoch in db.execute(
+            "SELECT key,rowid,CASE WHEN key=? THEN payload END FROM cached WHERE owner=? AND method=? AND key IN (?,?)",
+            (epoch_key, owner, method, epoch_key, page_key))}
+        return rows.get(epoch_key, (None, None))[1], rows.get(page_key, (None, None))[0]
+
+    @staticmethod
+    def _advance_relation_epochs(db, owner, method, views):
+        AccountCache._save_rows(db, owner, method, [
+            (["relation-cache-epoch", view], uuid.uuid4().hex) for view in views])
+
+    def save_relation_page(self, owner, method, key, result, expected, cursor):
         with self.lock, closing(self._connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM cursor_visits WHERE owner=? AND method=? AND scan=? AND path=? AND position<=?",
-                    (owner,method,scan,following,position)).fetchone():
-                raise AccountError("cursor","账号列表续页出现循环，请刷新后重试")
-            new_scan = db.execute("SELECT 1 FROM cursor_visits WHERE owner=? AND method=? AND scan=? LIMIT 1",
-                (owner,method,scan)).fetchone() is None
-            db.execute("INSERT INTO cursor_visits VALUES(?,?,?,?,?) ON CONFLICT(owner,method,scan,path) "
-                "DO UPDATE SET position=MIN(position,excluded.position)",(owner,method,scan,current,position))
-            self._save_rows(db,owner,method,[(key,following),(["cursor-state",*key[1:]],{"path":following,"scan":scan})])
-            if new_scan:
-                obsolete = db.execute("SELECT scan FROM cursor_visits WHERE owner=? AND method=? GROUP BY scan "
-                    "ORDER BY MAX(rowid) DESC LIMIT -1 OFFSET 32",(owner,method)).fetchall()
-                db.executemany("DELETE FROM cursor_visits WHERE owner=? AND method=? AND scan=?",
-                    [(owner,method,identity) for (identity,) in obsolete])
+            if self._is_display_key(key):
+                self._begin_display_cache(db, owner, method, write=True)
+            else:
+                db.execute("BEGIN IMMEDIATE")
+            if self._relation_version(db, owner, method, key) != expected:
+                raise AccountError("cache_changed", "账号列表已更新，请重新打开页面")
+            self._save_rows(db, owner, method, [(key, result)])
+            if cursor is not None:
+                self._save_cursor(db, owner, method, ["cursor", cursor.path, cursor.params, result["nextOffset"]],
+                    cursor.current, cursor.position, cursor.scan, cursor.following)
+
+    def _save_cursor(self, db, owner, method, key, current, position, scan, following):
+        if position:
+            parent = self._read_cursor(db, owner, method, [*key[:-1], position])
+            if parent is None:
+                raise AccountError("page_retired", "账号分页已更新，分页记录已清理，请返回第一页")
+            if parent not in ((current, scan), (current, None)):
+                raise AccountError("cache_changed", "账号分页已更新，请返回第一页")
+        if following is None:
+            return
+        if db.execute("SELECT 1 FROM cursor_visits WHERE owner=? AND method=? AND scan=? AND path=? AND position<=?",
+                (owner,method,scan,following,position)).fetchone():
+            raise AccountError("cursor","账号列表续页出现循环，请刷新后重试")
+        new_scan = db.execute("SELECT 1 FROM cursor_visits WHERE owner=? AND method=? AND scan=? LIMIT 1",
+            (owner,method,scan)).fetchone() is None
+        db.execute("INSERT INTO cursor_visits VALUES(?,?,?,?,?) ON CONFLICT(owner,method,scan,path) "
+            "DO UPDATE SET position=MIN(position,excluded.position)",(owner,method,scan,current,position))
+        self._save_rows(db,owner,method,[(key,following),(["cursor-state",*key[1:]],{"path":following,"scan":scan})])
+        if new_scan:
+            obsolete = db.execute("SELECT scan FROM cursor_visits WHERE owner=? AND method=? GROUP BY scan "
+                "ORDER BY MAX(rowid) DESC LIMIT -1 OFFSET 32",(owner,method)).fetchall()
+            db.executemany("DELETE FROM cursor_visits WHERE owner=? AND method=? AND scan=?",
+                [(owner,method,identity) for (identity,) in obsolete])
 
     def retain_discovery(self, owner, method, limit=32):
         with self.lock, closing(self._connect()) as db, db:
@@ -242,8 +454,10 @@ class AccountCache:
 
     def clear(self, owner):
         with self.lock, closing(self._connect()) as db, db:
-            db.execute("DELETE FROM cached WHERE owner=? AND key<>?", (owner, json.dumps(["web-display-pending"])))
+            db.execute("DELETE FROM cached WHERE owner=? AND key<>?", (owner, _DISPLAY_PENDING_KEY))
             db.execute("DELETE FROM cursor_visits WHERE owner=?",(owner,))
+            for method in ("app", "web"):
+                self._advance_relation_epochs(db, owner, method, sorted(RELATION_VIEWS))
 
     @staticmethod
     def _is_display_key(key):
@@ -256,19 +470,24 @@ class AccountCache:
             "((json_extract(key,'$[0]')='data' AND json_extract(key,'$[1]') IN ('bookmarks','works')) "
             "OR json_extract(key,'$[0]') IN ('discovery-current','discovery-feed','popularity-current','popularity-index'))",
             (owner, method))
+        AccountCache._advance_relation_epochs(db, owner, method, ("bookmarks",))
 
     def begin_display_update(self, owner, method):
         with self.lock, closing(self._connect()) as db, db:
             db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
-                (owner, method, json.dumps(["web-display-pending"]), json.dumps({"started": time.time()})))
+                (owner, method, _DISPLAY_PENDING_KEY, json.dumps({"started": time.time()})))
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, json.dumps(["web-display-settings"])))
             self._delete_display_pages(db, owner, method)
 
     def display_update_pending(self, owner, method):
         with self.lock, closing(self._connect()) as db:
-            return db.execute("SELECT 1 FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, json.dumps(["web-display-pending"]))).fetchone() is not None
+            return self._display_update_pending(db, owner, method)
+
+    @staticmethod
+    def _display_update_pending(db, owner, method):
+        return db.execute("SELECT 1 FROM cached WHERE owner=? AND method=? AND key=?",
+            (owner, method, _DISPLAY_PENDING_KEY)).fetchone() is not None
 
     def finish_display_update(self, owner, method, state):
         with self.lock, closing(self._connect()) as db, db:
@@ -276,7 +495,7 @@ class AccountCache:
                 (owner, method, json.dumps(["web-display-settings"]), json.dumps(state)))
             self._delete_display_pages(db, owner, method)
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, json.dumps(["web-display-pending"])))
+                (owner, method, _DISPLAY_PENDING_KEY))
 
     def entries(self, owner, method, views=None):
         with self.lock, closing(self._connect()) as db:
@@ -289,21 +508,40 @@ class AccountCache:
             (" AND json_extract(key,'$[1]') IN ("+','.join('?' for _ in views)+')' if views is not None else ""),
             (owner,method,'["data",%',*views) if views is not None else (owner,method,'["data",%'))]
 
-    def update_entries(self, owner, method, views, update):
+    def update_entries(self, owner, method, views, update, *, relation_view):
         with self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             patches = update(self._read_entries(db,owner,method,views))
             self._save_rows(db,owner,method,patches)
+            # An overlapping read can still have rows that no cached page contains yet.
+            self._advance_relation_epochs(db, owner, method, (relation_view,))
         return patches
 
-    def page_keys(self,owner,method,view):
-        with self.lock, closing(self._connect()) as db:
-            return [json.loads(row[0]) for row in db.execute("SELECT key FROM cached WHERE owner=? AND method=? AND key LIKE ? "
-                "AND json_extract(key,'$[1]')=?",(owner,method,'["data",%',view))]
-
-    def remove(self, owner, method, keys):
+    def finish_relation_scan(self, owner, method, view, app_path, retained):
+        """Retire obsolete list pages and their continuation keys together."""
         with self.lock, closing(self._connect()) as db, db:
-            db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?",[(owner,method,json.dumps(key)) for key in keys])
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute("""SELECT key FROM cached WHERE owner=? AND method=? AND
+                ((json_extract(key,'$[0]')='data' AND json_extract(key,'$[1]')=?)
+                OR (json_extract(key,'$[0]') IN ('cursor','cursor-state') AND json_extract(key,'$[1]')=?))""",
+                (owner, method, view, app_path if method == "app" else None)).fetchall()
+            removed = []
+            for (encoded,) in rows:
+                key = json.loads(encoded)
+                if key[0] == "data":
+                    scope, offset = key[3:5]
+                    tag = key[5] if view == "bookmarks" else ""
+                else:
+                    params, offset = dict(key[2]), key[3]
+                    scope, tag = params.get("restrict"), params.get("tag", "")
+                    if scope not in retained:
+                        continue
+                if tag or offset not in retained.get(scope, ()):
+                    removed.append((encoded, key))
+            db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
+                ((owner, method, encoded) for encoded, _ in removed))
+            self._advance_relation_epochs(db, owner, method, (view,))
+        return [key for _, key in removed if key[0] == "data"]
 
     def discard_relations(self, owner, method, views):
         with self.lock, closing(self._connect()) as db, db:
@@ -311,6 +549,7 @@ class AccountCache:
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND (key LIKE ? OR "
                 "key LIKE ? OR (key LIKE ? AND json_extract(key,'$[1]') IN (" + ','.join('?' for _ in views) + ')))',
                 (owner, method, '["cursor",%', '["cursor-state",%', '["data",%', *views))
+            self._advance_relation_epochs(db, owner, method, sorted(RELATION_VIEWS & views))
 
 
 class AccountPages:
@@ -325,7 +564,6 @@ class AccountPages:
         self._account = None
         self._lock = threading.RLock()
         self._cache = OrderedDict()
-        self._cursors = OrderedDict()
         self._cache_revision = 0
         self._loads = {}
         self._versions = {}
@@ -359,7 +597,6 @@ class AccountPages:
         with self._lock:
             self._cache_revision += 1
             self._cache.clear()
-            self._cursors.clear()
             self._versions.clear()
             account = self._account
         if account:
@@ -421,56 +658,67 @@ class AccountPages:
     def _load_cached(self, key, load, refresh=False):
         persistent = len(key) > 2
         method = self.method()
+        durable_key = ["data", *key[1:]] if persistent else None
         with self._lock:
             cache_revision = self._cache_revision
             version = self._versions.get(key,0)
             cached = self._cache.get(key)
             if cached and not refresh:
                 self._cache.move_to_end(key)
+
+        def check_version(*, use_newer=False):
+            # Caller holds _lock, including while finding a replacement page.
+            if cache_revision != self._cache_revision:
+                raise AccountError("cache_cleared", "账号缓存已清除，请重新打开页面")
+            if version == self._versions.get(key, 0):
+                return None
+            if use_newer:
+                current = self._updated_cached(key, method)
+                if current is not None:
+                    return current
+            raise AccountError("cache_changed", "账号列表已更新，请重新打开页面")
+
         if cached and not refresh:
             result = copy.deepcopy(cached[1])
             self.check(key[0])
             with self._lock:
-                if cache_revision!=self._cache_revision:
-                    raise AccountError("cache_cleared","账号缓存已清除，请重新打开页面")
-                if version!=self._versions.get(key,0):
-                    raise AccountError("cache_changed","账号列表已更新，请重新打开页面")
+                check_version()
             return result
         if persistent and not refresh:
-            cached = self.saved_cache.read(str(key[2]), method, ["data", *key[1:]])
+            cached = self.saved_cache.read(str(key[2]), method, durable_key)
             if cached is not None:
                 with self.publication(key[0]), self._lock:
-                    if cache_revision!=self._cache_revision:raise AccountError("cache_cleared","账号缓存已清除，请重新打开页面")
-                    if version!=self._versions.get(key,0):
-                        current=self._updated_cached(key,method)
-                        if current is not None:return current
-                        raise AccountError("cache_changed","账号列表已更新，请重新打开页面")
+                    current = check_version(use_newer=True)
+                    if current is not None:
+                        return current
                     self._remember_cache(key,cached)
                 return cached
         if ACCOUNT_CACHE_ONLY.get():
             raise AccountError("cache_miss", "账号数据尚未在本地准备好")
+        relation = persistent and key[1] in RELATION_VIEWS
+        if relation:
+            stamp = self.saved_cache.relation_version(str(key[2]), method, durable_key)
         previous_check = ACCOUNT_REQUEST_CHECK.get()
         def check_read():
             previous_check()
             with self._lock:
-                if cache_revision != self._cache_revision:
-                    raise AccountError("cache_cleared", "账号缓存已清除，请重新打开页面")
-                if version != self._versions.get(key,0):
-                    raise AccountError("cache_changed", "账号列表已更新，请重新打开页面")
+                check_version()
         token = ACCOUNT_REQUEST_CHECK.set(check_read)
         try:
             result = load()
         finally:
             ACCOUNT_REQUEST_CHECK.reset(token)
         with self.publication(key[0]), self._lock:
-            if cache_revision != self._cache_revision:
-                raise AccountError("cache_cleared", "账号缓存已清除，请重新打开页面")
-            if version!=self._versions.get(key,0):
-                current=self._updated_cached(key,method)
-                if current is not None:return current
-                raise AccountError("cache_changed","账号列表已更新，请重新打开页面")
-            if persistent:
-                self.saved_cache.save(str(key[2]), method, ["data", *key[1:]], result)
+            current = check_version(use_newer=True)
+            if current is not None:
+                return current
+            if relation:
+                cursor = None
+                if isinstance(result, AppRelationPage):
+                    cursor, result = result.cursor, result.data
+                self.saved_cache.save_relation_page(str(key[2]), method, durable_key, result, stamp, cursor)
+            elif persistent:
+                self.saved_cache.save(str(key[2]), method, durable_key, result)
             self._remember_cache(key,result)
         return result
 
@@ -486,6 +734,9 @@ class AccountPages:
 
     def _remember_cache(self,key,value):
         # Caller holds _lock. Eviction releases RAM; the durable page remains.
+        # Relation pages are changed by independent synchronizers on the same database.
+        if key[1] in RELATION_VIEWS:
+            return
         self._cache[key]=(time.monotonic(),copy.deepcopy(value));self._cache.move_to_end(key)
         while len(self._cache)>128:
             old=next((identity for identity in self._cache if identity[1] not in {"owner","profile","profile-web","updates","tags"}),None)
@@ -496,7 +747,6 @@ class AccountPages:
         with self._lock:
             self._cache_revision += 1
             self._cache = OrderedDict((key, value) for key, value in self._cache.items() if key[1] == "owner")
-            self._cursors.clear()
             self._versions.clear()
             self.saved_cache.clear(owner)
             self.visits.clear(owner)
@@ -512,11 +762,9 @@ class AccountPages:
             key = (generation, view, owner, scope, offset, "", mode) if kind == "bookmark" else (generation, view, owner, scope, offset)
             pages.append((key, page))
         stored = [(["data", *key[1:]], page) for key, page in pages]
-        cursor_key = None
         if method == "app" and next_cursor is not None:
             path = "/v1/user/bookmarks/illust" if kind == "bookmark" else "/v1/user/following"
             params = {"user_id":owner, "restrict":scope, "filter":"for_android"}
-            cursor_key = (generation,path,tuple(sorted(params.items())))
             stored.append((["cursor",path,sorted(params.items()),next_offset],next_cursor))
             cursor_scan = uuid.uuid4().hex
             stored.append((["cursor-state",path,sorted(params.items()),next_offset],{"path":next_cursor,"scan":cursor_scan}))
@@ -525,9 +773,6 @@ class AccountPages:
             for key, page in pages:
                 self._versions[key]=self._versions.get(key,0)+1
                 self._remember_cache(key,page)
-            if cursor_key is not None:
-                self._cursors[cursor_key,next_offset] = (next_cursor,cursor_scan)
-                while len(self._cursors)>256:self._cursors.popitem(last=False)
 
     def discard_relation_pages(self, owner, method, generation):
         """Recover derived pages after an interrupted cross-database publication."""
@@ -537,7 +782,6 @@ class AccountPages:
             self._cache_revision += 1
             self._cache = OrderedDict((key, value) for key, value in self._cache.items()
                 if len(key) < 3 or key[2] != owner or key[1] not in views)
-            self._cursors.clear()
             self._versions.clear()
 
     @staticmethod
@@ -566,14 +810,19 @@ class AccountPages:
 
     def finish_scan(self, owner, method, kind, offsets, generation):
         view="bookmarks" if kind=="bookmark" else "following"
+        path="/v1/user/bookmarks/illust" if kind=="bookmark" else "/v1/user/following"
+        retained = {scope: set(values) for scope, values in offsets.items()}
         with self.publication(generation), self._lock:
-            obsolete=[key for key in self.saved_cache.page_keys(owner,method,view) if
-                key[4] not in offsets.get(key[3],[]) or kind=="bookmark" and key[5]]
-            self.saved_cache.remove(owner,method,obsolete)
+            removed = self.saved_cache.finish_relation_scan(owner, method, view, path, retained)
+            obsolete = {(generation, *key[1:]) for key in removed}
+            for key in self._cache.keys() | self._loads.keys():
+                if len(key) < 5 or key[:3] != (generation, view, owner):
+                    continue
+                if key[4] not in retained.get(key[3], ()) or kind == "bookmark" and key[5]:
+                    obsolete.add(key)
             for key in obsolete:
-                memory_key=(generation,*key[1:])
-                self._cache.pop(memory_key,None)
-                self._versions[memory_key]=self._versions.get(memory_key,0)+1
+                self._cache.pop(key, None)
+                self._versions[key] = self._versions.get(key, 0) + 1
 
     def note_relation(self, owner, method, kind, target, before, after, *, repair=False):
         """Patch cached pages after a confirmed write; do not invalidate unrelated pages."""
@@ -588,10 +837,11 @@ class AccountPages:
                 if key[1] == view:
                     scope,offset = key[3:5]
                     rows = page[field]
+                    present = any(row["id"] == target for row in rows)
                     tag,mode = key[5:7] if kind=="bookmark" else ("","all")
                     def membership(state):
                         if not state["active"] or state["privacy"] is not None and state["privacy"]!=scope:return False
-                        if state["privacy"] is None and not any(row["id"]==target for row in rows):return None
+                        if state["privacy"] is None and not present:return None
                         if tag:
                             if state["tags"] is None:return None
                             if tag not in state["tags"]:return False
@@ -600,15 +850,16 @@ class AccountPages:
                             if not matches_content_mode(record["restriction"],mode):return False
                         return True
                     previous_member,next_member=membership(before),membership(after)
-                    fits = next_member is True or next_member is None and any(row["id"]==target for row in rows)
-                    updated = [row for row in rows if row["id"]!=target or fits]
-                    if fits and offset==0 and record and not any(row["id"]==target for row in updated):updated.insert(0,record)
-                    if updated!=rows:
-                        page[field]=updated
+                    fits = next_member is True or next_member is None and present
+                    if present and not fits:
+                        page[field] = [row for row in rows if row["id"] != target]
+                        changed=True
+                    elif fits and not present and offset==0 and record:
+                        page[field] = [record, *rows]
                         changed=True
                     # A sweep may return an old row after a newer local write. It
                     # repairs that page; it is not another relationship transition.
-                    delta=int(next_member)-int(previous_member) if not repair and previous_member is not None and next_member is not None else len(updated)-len(rows)
+                    delta=int(next_member)-int(previous_member) if not repair and previous_member is not None and next_member is not None else len(page[field])-len(rows)
                     if delta and page.get("total") is not None:
                         page["total"]=max(0,page["total"]+delta);changed=True
                 elif key[1]=="followers" and kind=="follow":
@@ -637,7 +888,7 @@ class AccountPages:
                     patches.append((key,page))
             return patches
         with self.publication(generation), self._lock:
-            patches = self.saved_cache.update_entries(owner,method,views,patch_entries)
+            patches = self.saved_cache.update_entries(owner,method,views,patch_entries,relation_view=view)
             for key,page in patches:
                 memory_key=(generation,*key[1:])
                 self._versions[memory_key]=self._versions.get(memory_key,0)+1
@@ -826,14 +1077,11 @@ class AccountPages:
         unique={item["id"]:item for item in rows if matches_content_mode(item["restriction"],mode)}
         return {"items":sorted(unique.values(),key=lambda item:(item["sortDate"],int(item["id"])),reverse=True)[:6]}
 
-    def _app_page(self,path,params,offset,generation,rows_key):
-        key=(generation,path,tuple(sorted(params.items())))
-        with self._lock:
-            cache_revision=self._cache_revision
-            checkpoint=self._cursors.get((key,offset)) if offset else (path+"?"+urlencode(params),uuid.uuid4().hex)
-        if not checkpoint and offset:
-            checkpoint=self.saved_cache.read_cursor(str(params["user_id"]),self.method(),["cursor",path,sorted(params.items()),offset])
-        if not checkpoint:raise AccountError("cursor","分页记录已清理，请返回第一页刷新")
+    def _app_page(self,path,params,offset,rows_key):
+        packed = sorted(params.items())
+        checkpoint = (self.saved_cache.read_cursor(params["user_id"], "app", ["cursor",path,packed,offset])
+            if offset else (path+"?"+urlencode(params),uuid.uuid4().hex))
+        if not checkpoint:raise AccountError("page_retired","分页记录已清理，请返回第一页刷新")
         cursor,cursor_scan=checkpoint
         raw=self.account().request("GET",cursor)
         rows=raw.get(rows_key)
@@ -853,24 +1101,19 @@ class AccountPages:
                         or not previous[0].isascii() or not previous[0].isdecimal() or int(positions[0])<=int(previous[0])):
                     raise AccountError("cursor","App 列表续页位置未前进")
         next_offset=offset+len(rows) if next_path else None
-        if next_path:
-            with self.publication(generation), self._lock:
-                if cache_revision!=self._cache_revision:raise AccountError("cache_cleared","账号缓存已清除，请重新打开页面")
-                self.saved_cache.save_cursor(str(params["user_id"]),self.method(),["cursor",path,sorted(params.items()),next_offset],
-                    cursor,offset,cursor_scan,next_path)
-                self._cursors[key,next_offset]=(next_path,cursor_scan)
-                while len(self._cursors)>256:self._cursors.popitem(last=False)
-        return rows,next_offset
+        return rows, next_offset, AccountContinuation(path, packed, offset, cursor, cursor_scan, next_path)
 
     def _app_people(self,owner,scope,offset,generation):
-        rows,next_offset=self._app_page("/v1/user/following",{"user_id":owner,"restrict":scope,"filter":"for_android"},offset,generation,"user_previews")
-        return self.relation_page("app","follow",rows,offset=offset,next_offset=next_offset)
+        rows,next_offset,cursor=self._app_page("/v1/user/following",{"user_id":owner,"restrict":scope,"filter":"for_android"},offset,"user_previews")
+        page = self.relation_page("app","follow",rows,offset=offset,next_offset=next_offset)
+        return AppRelationPage(page, cursor)
 
     def _app_bookmarks(self,owner,scope,offset,tag,mode,generation):
         params={"user_id":owner,"restrict":scope,"filter":"for_android"}
         if tag:params["tag"]=tag
-        rows,next_offset=self._app_page("/v1/user/bookmarks/illust",params,offset,generation,"illusts")
-        return self.relation_page("app","bookmark",rows,offset=offset,next_offset=next_offset,mode=mode)
+        rows,next_offset,cursor=self._app_page("/v1/user/bookmarks/illust",params,offset,"illusts")
+        page = self.relation_page("app","bookmark",rows,offset=offset,next_offset=next_offset,mode=mode)
+        return AppRelationPage(page, cursor)
 
     def _app_tags(self):
         result={}

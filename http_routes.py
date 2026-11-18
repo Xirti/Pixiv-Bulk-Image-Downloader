@@ -43,6 +43,7 @@ POST_ROUTES = MappingProxyType({
     '/api/workspace/task/migrate': (4096, '_post_migrate_task'),
     '/api/workspace/recent': (8192, '_post_recent_search'),
     '/api/pixiv/search/cancel': (4096, '_post_cancel_search'),
+    '/api/pixiv/read/promote': (4096, '_post_promote_read'),
     '/api/pixiv/ugoira/cancel': (4096, '_post_cancel_search'),
     '/api/pixiv/download/cancel': (4096, '_post_cancel_download'),
     '/api/pixiv/batch-download': (65536, '_post_pixiv_batch_download'),

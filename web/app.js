@@ -860,6 +860,20 @@ function nextSearchRequestId() {
   return `${Date.now().toString(36)}-${searchRequestSequence.toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
+async function chooseSaveFolder(initial) {
+  try {
+    // The native helper may wait five minutes for a choice; leave time for the HTTP response.
+    return await fetchJson("/api/system/select-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial }),
+    }, 305000);
+  } catch (error) {
+    if (error.timedOut) throw new Error("目录选择超时，请重新打开目录选择窗口");
+    throw error;
+  }
+}
+
 async function notifySearchCancellation(requestId, endpoint = "/api/pixiv/search/cancel") {
   if (!requestId || !requestToken) return;
   try {
@@ -1717,7 +1731,7 @@ const cloudControls=createCloudControls({
 });
 settingsView=createAccountSettings({root:$("[data-account-settings]"),save:patch=>cloudControls.savePreferences(patch),
   syncNow:()=>cloudControls.refresh(),clearCache:()=>cloudControls.clearCache(),
-  browse:initial=>fetchJson("/api/system/select-folder",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({initial})},60000),
+  browse:chooseSaveFolder,
   report:announceToast});
 pixivDisplayView=createPixivDisplaySettings({root:$("[data-pixiv-display]"),request:requestAccount,
   session:()=>({logged:lastKnownLoggedIn===true,method:loginMethod,generation:lastKnownAuthorizationGeneration,browsingGeneration:lastKnownBrowsingGeneration}),
@@ -1962,11 +1976,25 @@ const galleryInteraction = createGalleryInteraction({
 });
 
 async function requestAccount(url,options={}) {
-  if(options.method && options.method!=="GET")return fetchJson(url,options,60000);
+  const {onPromote,...fetchOptions}=options;
+  if(fetchOptions.method && fetchOptions.method!=="GET")return fetchJson(url,fetchOptions,60000);
   const id=nextSearchRequestId(),cancel=()=>notifySearchCancellation(id);
-  options.signal?.throwIfAborted();options.signal?.addEventListener("abort",cancel,{once:true});
-  try{return await fetchJson(`${url}${url.includes("?")?"&":"?"}requestId=${encodeURIComponent(id)}`,options,url.startsWith("/api/popularity?")?90000:60000);}
-  finally{options.signal?.removeEventListener("abort",cancel);}
+  const {signal}=fetchOptions;
+  signal?.throwIfAborted();
+  signal?.addEventListener("abort",cancel,{once:true});
+  onPromote?.(()=>{
+    void fetchJson("/api/pixiv/read/promote",{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:id}),signal,
+    },5000).catch(()=>{
+      // The original request can still finish with its original priority.
+    });
+  });
+  try{return await fetchJson(`${url}${url.includes("?")?"&":"?"}requestId=${encodeURIComponent(id)}`,fetchOptions,url.startsWith("/api/popularity?")?90000:60000);}
+  catch(error){
+    if(error.timedOut && !signal?.aborted)void cancel();
+    throw error;
+  }
+  finally{signal?.removeEventListener("abort",cancel);}
 }
 const downloadStatistics=createDownloadStatistics({root:$("#downloadStatistics"),request:fetchJson});
 const accountView=createAccountPage({root:$("#accountPage"),request:requestAccount,escape:esc,statistics:downloadStatistics,
@@ -2555,7 +2583,7 @@ async function refreshCurrentPage() {
       refreshDetailControls(fresh,basketPageOpen());
       if(!basketPageOpen())normalDetailView.restorePage(state.normal?.page || 0);
     }
-    current();await new Promise(resolve=>requestAnimationFrame(resolve));current();applyPageScroll(state);
+    current();await waitForNavigationFrame(controller.signal);current();applyPageScroll(state);
   }catch(error){if(!controller.signal.aborted && revision===navigationRevision)showTaskDock("刷新失败",error.message || "请稍后重试",5000);}
   finally{if(pageRefreshController===controller){pageRefreshController=null;pageRefreshPending=false;syncSearchScopedControls();queueNavigationRecord();}}
 }
@@ -3887,11 +3915,7 @@ $("#browseFolder").onclick = async () => {
     if (window.pywebview?.api?.select_folder) {
       data = await window.pywebview.api.select_folder();
     } else {
-      data = await fetchJson("/api/system/select-folder", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ initial: $("#saveRoot").value }),
-      }, 300000);
+      data = await chooseSaveFolder($("#saveRoot").value);
     }
     if (data.error) throw new Error(data.error);
     if (data.selected) {
@@ -4321,3 +4345,4 @@ void fetchJson("/api/ui/guide").then(state => {
   showAppDialog(helpDialog);
   announceToast(error.message);
 });
+document.documentElement.dataset.mokuReady = "1";

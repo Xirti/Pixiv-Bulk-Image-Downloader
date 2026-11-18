@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import Future
 from contextlib import contextmanager
 import threading
 import time
@@ -485,8 +486,6 @@ def selected_webview_proxy(proxy: str, *, background_timers: bool = False):
 
 def _fit_main_window(window) -> None:
     """Set a centred restore size, then fill the monitor work area before first show."""
-    import ctypes
-    from ctypes import wintypes
     from System.Drawing import Size
     from System.Windows.Forms import FormStartPosition, FormWindowState, Screen
     from native_window_frame import NativeWindowFrame
@@ -502,13 +501,7 @@ def _fit_main_window(window) -> None:
 
     window._native_frame = NativeWindowFrame(native, browser_navigation=browser_navigation)
     area = Screen.FromHandle(native.Handle).WorkingArea
-    get_dpi = ctypes.windll.user32.GetDpiForWindow
-    get_dpi.argtypes = [wintypes.HWND]
-    get_dpi.restype = wintypes.UINT
-    dpi = get_dpi(native.Handle.ToInt64())
-    if not dpi:
-        raise ctypes.WinError()
-    scale = dpi / 96.0
+    scale = window._native_frame.dpi / 96.0
     width = int(min(1180 * scale, area.Width * .88))
     height = int(min(760 * scale, area.Height * .88))
     native.StartPosition = FormStartPosition.Manual
@@ -522,9 +515,9 @@ def start_desktop(
     url: str,
     storage_path: Path,
     proxy: str = "",
-    startup: Callable | None = None,
     *,
     desktop_auth_token: str = "",
+    on_ready: Callable[[], None] | None = None,
 ) -> None:
     environment_proxy = normalize_loopback_proxy(os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or "")
     native_override = environment_proxy if environment_proxy == normalize_loopback_proxy(proxy) else ""
@@ -551,10 +544,38 @@ def start_desktop(
     window.events.before_show += _fit_main_window
     api._window = window
     storage_path.mkdir(parents=True, exist_ok=True)
+    start_options = dict(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
     # Windows proxy selection remains dynamic in the native browser. Only an
     # explicit environment proxy needs bridging: WebView2 ignores HTTPS_PROXY.
     with selected_webview_proxy(native_override, background_timers=True):
-        if startup is None:
-            webview.start(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
-        else:
-            webview.start(startup, args=[window], gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
+        if on_ready is None:
+            webview.start(**start_options)
+            return
+        confirmation = Future()
+
+        def confirm_when_ready():
+            try:
+                deadline = time.monotonic() + 25
+                while not window.events.loaded.wait(.1):
+                    if window.events.closed.is_set() or time.monotonic() >= deadline:
+                        raise RuntimeError("新版桌面页面未能完成加载")
+                if window.events.closed.is_set() or not window.evaluate_js(
+                    "document.documentElement.dataset.mokuReady === '1' && "
+                    "typeof window.pywebview?.api?.window_action === 'function'"
+                ):
+                    raise RuntimeError("新版桌面页面未能初始化")
+                on_ready()
+            except Exception as error:
+                confirmation.set_exception(error)
+                if not window.events.closed.is_set():
+                    window.destroy()
+            else:
+                confirmation.set_result(None)
+
+        webview.start(confirm_when_ready, **start_options)
+        try:
+            confirmation.result(timeout=2)
+        except TimeoutError as error:
+            if confirmation.done():
+                raise
+            raise RuntimeError("新版桌面窗口在确认前关闭") from error
