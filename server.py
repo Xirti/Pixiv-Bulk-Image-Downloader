@@ -487,6 +487,7 @@ def _adopt_shared_logout(revision: str) -> None:
     clear_authorized_state(force=True)
     ACCOUNTS.forget_credentials()
     forget_local_session()
+    ACCOUNT_AUTH.close()
 
 
 def _adopt_shared_authorization() -> None:

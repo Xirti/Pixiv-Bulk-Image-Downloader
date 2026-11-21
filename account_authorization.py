@@ -6,6 +6,7 @@ from ctypes import wintypes
 import hashlib
 import hmac
 import json
+import logging
 from pathlib import Path
 import queue
 import secrets
@@ -94,6 +95,7 @@ class AccountAuthorization:
         self.pages = pages
         self.lock = threading.RLock()
         self.flow = None
+        self._retired_flow = None
 
     def begin(self, port, token, generation):
         self.pages.check(generation)
@@ -102,6 +104,7 @@ class AccountAuthorization:
                 if self.flow["generation"] != generation:
                     raise AccountError("revoked", "账号状态已改变，请重新打开我的账号")
                 return self.flow["authorizeUrl"]
+            self._remove_retired_callback()
             try:account = self.pages.account()
             except AccountError as error:
                 if error.kind!="invalid_credential":raise
@@ -228,35 +231,52 @@ class AccountAuthorization:
     def _cleanup(self, flow):
         if self.flow is not flow:
             return
-        with protocol_guard():
-            try:
-                current = owner = None
+        self.flow = None
+        self._retired_flow = flow
+        self._try_cleanup()
+
+    def _try_cleanup(self):
+        if self._retired_flow is None:
+            return
+        try:
+            with protocol_guard():
+                self._remove_retired_callback()
+        except AccountError as error:
+            if error.kind != "authorization_busy":
+                raise
+            logging.getLogger("moku.http").info("App authorization callback cleanup deferred")
+
+    def _remove_retired_callback(self):
+        """Reclaim the retired registration under the shared protocol guard."""
+        flow = self._retired_flow
+        if flow is None:
+            return
+        current = owner = None
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROTOCOL + r"\shell\open\command") as key:
+                current = winreg.QueryValueEx(key, "")[0]
+        except FileNotFoundError:
+            pass
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROTOCOL) as key:
+                owner = winreg.QueryValueEx(key, "MOKU Owner")[0]
+        except FileNotFoundError:
+            pass
+        path = callback_file()
+        try:
+            owned_file = path.read_text(encoding="utf-8") == flow["callback"]
+        except FileNotFoundError:
+            owned_file = False
+        owned_key = owner == flow["state"] or owner is None and flow.get("registered") and owned_file
+        if owned_key and current in (None, flow["command"]):
+            for suffix in (r"\shell\open\command", r"\shell\open", r"\shell", ""):
                 try:
-                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROTOCOL + r"\shell\open\command") as key:
-                        current = winreg.QueryValueEx(key, "")[0]
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, PROTOCOL + suffix)
                 except FileNotFoundError:
                     pass
-                try:
-                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PROTOCOL) as key:
-                        owner = winreg.QueryValueEx(key, "MOKU Owner")[0]
-                except FileNotFoundError:
-                    pass
-                path = callback_file()
-                try:
-                    owned_file = path.read_text(encoding="utf-8") == flow["callback"]
-                except FileNotFoundError:
-                    owned_file = False
-                owned_key = owner == flow["state"] or owner is None and flow.get("registered") and owned_file
-                if owned_key and current in (None, flow["command"]):
-                    for suffix in (r"\shell\open\command", r"\shell\open", r"\shell", ""):
-                        try:
-                            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, PROTOCOL + suffix)
-                        except FileNotFoundError:
-                            pass
-                if owned_file:
-                    path.unlink(missing_ok=True)
-            finally:
-                self.flow = None
+        if owned_file:
+            path.unlink(missing_ok=True)
+        self._retired_flow = None
 
     def close(self):
         with self.lock:
@@ -267,3 +287,5 @@ class AccountAuthorization:
                     self._cleanup(self.flow)
                 finally:
                     self.pages.auth_status = {"pending": False, "error": ""}
+            else:
+                self._try_cleanup()
