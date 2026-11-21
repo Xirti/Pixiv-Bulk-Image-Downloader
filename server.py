@@ -1724,7 +1724,10 @@ def _observe_web_policy(owner=None):
         # still has the same official settings.
         revision = revision if revision is not None else old_revision
         flags = flags if flags is not None else old_flags
-        if (revision, pending, flags) != (old_revision, old_pending, old_flags):
+        # Learning the flags for the first time does not change them. Explicit
+        # policy writes and pending transitions still revoke in-flight work.
+        if ((revision, pending) != (old_revision, old_pending)
+                or old_flags is not None and flags != old_flags):
             _invalidate_browsing_state()
     OBSERVED_WEB_POLICY = identity, revision, pending, flags
     return pending is not None
