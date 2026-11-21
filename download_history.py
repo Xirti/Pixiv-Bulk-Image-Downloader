@@ -13,6 +13,17 @@ from pathlib import Path
 from edition_profile import DATA_FOLDER
 
 
+ReceiptRow = tuple[str, str, str, str]
+
+
+def create_receipt_table(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS completed (
+            id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, files TEXT NOT NULL
+        )
+    """)
+
+
 def history_path() -> Path:
     override = os.getenv("MOKU_LIBRARY_DIR")
     directory = Path(override) if override else Path(os.environ["LOCALAPPDATA"]) / DATA_FOLDER / "library"
@@ -71,8 +82,8 @@ class DownloadHistory:
         finally:
             connection.close()
 
-    def record(self, operation: str, rows: list[dict]) -> None:
-        if not rows:
+    def record(self, operation: str, rows: list[dict], *, receipt: ReceiptRow | None = None) -> None:
+        if not rows and receipt is None:
             return
         if not isinstance(operation, str) or not 1 <= len(operation) <= 128:
             raise ValueError("invalid history operation")
@@ -96,11 +107,30 @@ class DownloadHistory:
                 json.dumps(files, ensure_ascii=False),
             ))
         with self._lock, self._connection() as connection:
-            connection.executemany("""INSERT OR IGNORE INTO downloads
-                (operation, completed_at, artwork_id, title, artist, work_type, quality, format, pages, files)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", values)
-            connection.execute("""DELETE FROM downloads WHERE id IN
-                (SELECT id FROM downloads ORDER BY id DESC LIMIT -1 OFFSET ?)""", (self.max_records,))
+            if values:
+                connection.executemany("""INSERT OR IGNORE INTO downloads
+                    (operation, completed_at, artwork_id, title, artist, work_type, quality, format, pages, files)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", values)
+                connection.execute("""DELETE FROM downloads WHERE id IN
+                    (SELECT id FROM downloads ORDER BY id DESC LIMIT -1 OFFSET ?)""", (self.max_records,))
+            if receipt is not None:
+                create_receipt_table(connection)
+                connection.execute("INSERT OR REPLACE INTO completed VALUES (?, ?, ?, ?)", receipt)
+
+    @contextmanager
+    def recovery_journal(self):
+        """Open the temporary completion records if this history has any."""
+        with self._lock:
+            if not self.path.exists():
+                yield None
+                return
+            with self._connection() as connection:
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='completed'"
+                ).fetchone() is None:
+                    yield None
+                    return
+                yield connection
 
     def list(self, *, page: int = 1, per_page: int = 20, query: str = "") -> dict:
         if type(page) is not int or not 1 <= page <= 100000 or type(per_page) is not int or not 1 <= per_page <= 50:

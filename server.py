@@ -49,7 +49,7 @@ from auth_store import (
 from folder_picker import select_folder
 from login_context import load_login_context, parse_login_context, save_login_context
 from download_execution import DownloadExecutionBusy, begin_download_publication
-from download_requests import DownloadRequestError, DownloadRequests
+from download_requests import DownloadRequestError, DownloadRequests, publication_receipt
 from download_admission import DownloadAdmission
 from http_routes import POST_ROUTES, DESKTOP_AUTH_PATHS
 from file_publish import (
@@ -132,8 +132,9 @@ FOLDER_PICKER_LOCK = threading.Lock()
 # server may create many request threads, but only a small bounded number may
 # consume Pixiv bandwidth and local staging/publish resources at once.
 WORKSPACE_STORE = WorkspaceStore(history_path().with_name("workspace.sqlite3"))
-DOWNLOAD_REQUESTS = DownloadRequests(path=history_path().with_name("requests.sqlite3"), workspace=WORKSPACE_STORE)
 DOWNLOAD_HISTORY = DownloadHistory(history_path())
+DOWNLOAD_REQUESTS = DownloadRequests(path=history_path().with_name("requests.sqlite3"),
+                                     workspace=WORKSPACE_STORE, history=DOWNLOAD_HISTORY)
 LOCAL_CATALOG = LocalCatalog(history_path().with_name("catalog.sqlite3"))
 GUIDE_SEEN_MARKER = history_path().with_name("guide-v1.seen")
 REQUEST_COORDINATOR = RequestCoordinator(history_path().with_name("request-settings.json"), shared=SharedRequestBudget())
@@ -4585,12 +4586,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _record_download_history(
-        groups: list[tuple[dict, list[int], int]], saved: list[str],
+        groups: list[tuple[dict, list[int], int]], result: dict,
         save_root: Path, quality: str, ugoira_format: str,
     ) -> str:
         # This is auxiliary metadata AFTER publication. Never retry a successful
         # download because the library is locked, full, corrupt, or unavailable.
         try:
+            saved = result["saved"]
             rows = []
             offset = 0
             for item, pages, file_count in groups:
@@ -4604,7 +4606,8 @@ class Handler(SimpleHTTPRequestHandler):
                 })
             if groups and offset != len(saved):
                 raise ValueError("history publication mismatch")
-            DOWNLOAD_HISTORY.record(secrets.token_hex(24), rows)
+            receipt = publication_receipt({**result, "historyWarning": ""}, save_root)
+            DOWNLOAD_HISTORY.record(secrets.token_hex(24), rows, receipt=receipt)
         except Exception:
             HTTP_LOG.warning("文件已保存，但下载历史写入失败")
             return "文件已保存，但下载历史记录失败"
@@ -4891,8 +4894,10 @@ class Handler(SimpleHTTPRequestHandler):
                 "catalogWarning": self._record_download_catalog(history_groups, public_saved, save_root, quality,
                                                                ugoira_format, create_folder, download_context, group_artworks),
                 "cleanupPending": cleanup_pending,
-                "historyWarning": self._record_download_history(history_groups, public_saved, save_root, quality, ugoira_format),
             }
+            response_payload["historyWarning"] = self._record_download_history(
+                history_groups, response_payload, save_root, quality, ugoira_format,
+            )
             response_status = 200
         except AuthorizationRevokedError as exc:
             response_payload = {"error": str(exc)}
@@ -4979,8 +4984,11 @@ class Handler(SimpleHTTPRequestHandler):
                                                                public_saved, save_root, quality, ugoira_format,
                                                                create_folder, download_context, group_artworks),
                 "cleanupPending": cleanup_pending,
-                "historyWarning": self._record_download_history([(item, pages_to_save, len(public_saved))] if pages_to_save else [], public_saved, save_root, quality, ugoira_format),
             }
+            response_payload["historyWarning"] = self._record_download_history(
+                [(item, pages_to_save, len(public_saved))] if pages_to_save else [],
+                response_payload, save_root, quality, ugoira_format,
+            )
             response_status = 200
         except AuthorizationRevokedError as exc:
             response_payload = {"error": str(exc)}

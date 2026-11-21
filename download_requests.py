@@ -11,17 +11,35 @@ from pathlib import Path
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from local_catalog import artifact_file_state
 from download_execution import (
     cancel_download_execution, download_execution, download_execution_active, download_migration_guard,
 )
+from download_history import DownloadHistory, ReceiptRow, create_receipt_table
 from workspace_store import WorkspaceStore
 
 
 Response = tuple[dict, int]
 RECEIPT_LIMIT = 2000
+_PUBLICATION_ID: ContextVar[tuple[str, str] | None] = ContextVar("download_publication_identity", default=None)
+
+
+def _receipt_row(request_id: str, fingerprint: str, payload: dict, root: Path) -> ReceiptRow:
+    files = []
+    for relative in dict.fromkeys(payload.get("saved", []) + payload.get("skippedFiles", [])):
+        info = artifact_file_state(root / relative)
+        files.append([info["path"], info["size"], info["mtime"]])
+    return request_id, fingerprint, json.dumps(payload, ensure_ascii=False), json.dumps(files, ensure_ascii=False)
+
+
+def publication_receipt(payload: dict, root: Path) -> ReceiptRow | None:
+    identity = _PUBLICATION_ID.get()
+    if identity is not None:
+        return _receipt_row(*identity, payload, root)
+    return None
 
 
 def _fingerprint(route: str, scope: str, body: dict) -> str:
@@ -70,6 +88,7 @@ class DownloadRequests:
         clock: Callable[[], float] = time.monotonic,
         path: Path | None = None,
         workspace: WorkspaceStore | None = None,
+        history: DownloadHistory | None = None,
     ) -> None:
         if max_entries < 1 or ttl_seconds <= 0:
             raise ValueError("invalid download recovery limits")
@@ -80,25 +99,48 @@ class DownloadRequests:
         self._lock = threading.Lock()
         self._path = Path(path) if path is not None else None
         self._workspace = workspace
+        self._history = history
 
     def _journal_connection(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self._path, timeout=2)
         try:
-            connection.execute("CREATE TABLE IF NOT EXISTS completed (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, files TEXT NOT NULL)")
+            create_receipt_table(connection)
         except BaseException:
             connection.close()
             raise
         return connection
 
     def _read_success(self, request_id: str, fingerprint: str) -> Response | None:
-        if self._path is None or not self._path.exists():
-            return None
-        connection = self._journal_connection()
-        try:
-            row = connection.execute("SELECT fingerprint,result,files FROM completed WHERE id=?", (request_id,)).fetchone()
-        finally:
-            connection.close()
+        lookup = "SELECT fingerprint, result, files FROM completed WHERE id=?"
+        recovery_error = None
+        if self._history is not None:
+            try:
+                with self._history.recovery_journal() as connection:
+                    row = connection.execute(lookup, (request_id,)).fetchone() if connection is not None else None
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                recovery_error = exc
+            else:
+                if row is not None:
+                    # A pending publication record belongs to the last attempt.
+                    return self._verify_receipt(row, fingerprint)
+        if self._path is not None and self._path.exists():
+            connection = self._journal_connection()
+            try:
+                row = connection.execute(lookup, (request_id,)).fetchone()
+            finally:
+                connection.close()
+            result = self._verify_receipt(row, fingerprint)
+            if result is not None:
+                return result
+        if recovery_error is not None:
+            if isinstance(recovery_error, ValueError):
+                raise DownloadRequestError("暂时无法核对下载回执，请继续原任务重试", 503) from recovery_error
+            raise recovery_error
+        return None
+
+    @staticmethod
+    def _verify_receipt(row, fingerprint: str) -> Response | None:
         if not row:
             return None
         if row[0] != fingerprint:
@@ -150,16 +192,11 @@ class DownloadRequests:
     def _write_success(self, request_id: str, fingerprint: str, result: Response, root: Path) -> None:
         if self._path is None:
             return
-        files = []
-        for relative in dict.fromkeys(result[0].get("saved", []) + result[0].get("skippedFiles", [])):
-            file = root / relative
-            info = artifact_file_state(file)
-            files.append([info["path"], info["size"], info["mtime"]])
+        receipt = _receipt_row(request_id, fingerprint, result[0], root)
         connection = self._journal_connection()
         try:
             with connection:
-                connection.execute("INSERT OR REPLACE INTO completed VALUES (?,?,?,?)",
-                                   (request_id, fingerprint, json.dumps(result[0], ensure_ascii=False), json.dumps(files, ensure_ascii=False)))
+                connection.execute("INSERT OR REPLACE INTO completed VALUES (?,?,?,?)", receipt)
             self._prune_receipts(connection)
         finally:
             connection.close()
@@ -181,6 +218,19 @@ class DownloadRequests:
             # The new receipt is already committed. Retry maintenance on a
             # later success, after the queue can be read safely.
             logging.getLogger("moku.http").warning("Download receipt pruning deferred: %s", exc)
+
+    def _finish_recovery(self, request_id: str, *, receipt_saved: bool) -> None:
+        if self._history is None:
+            return
+        try:
+            with self._history.recovery_journal() as connection:
+                if connection is not None:
+                    if receipt_saved:
+                        with connection:
+                            connection.execute("DELETE FROM completed WHERE id=?", (request_id,))
+                    self._prune_receipts(connection)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            logging.getLogger("moku.http").warning("Download recovery cleanup deferred: %s", exc)
 
     def probe(
         self, request_id: object, route: str, body: dict, *, scope: str,
@@ -300,7 +350,11 @@ class DownloadRequests:
                     # lookup but before mutex acquisition. Recheck as owner.
                     result = self._confirm_receipt(request_id, durable_fingerprint)
                     if result is None:
-                        result = operation()
+                        token = _PUBLICATION_ID.set((request_id, durable_fingerprint) if self._history is not None else None)
+                        try:
+                            result = operation()
+                        finally:
+                            _PUBLICATION_ID.reset(token)
                         if result[1] == 200:
                             try:
                                 raw_root = str(body.get("saveRoot") or "").strip()
@@ -308,6 +362,9 @@ class DownloadRequests:
                                                     Path(raw_root).expanduser() if raw_root else Path(output_root or "."))
                             except (OSError, sqlite3.Error):
                                 result[0]["recoveryWarning"] = "文件已保存，但重启后可能需要重新检查这批下载"
+                                self._finish_recovery(request_id, receipt_saved=False)
+                            else:
+                                self._finish_recovery(request_id, receipt_saved=True)
             return result
         finally:
             # Record publication before the caller tries writing the response:
