@@ -32,6 +32,10 @@ _KERNEL.CloseHandle.argtypes = [wintypes.HANDLE]
 _KERNEL.CloseHandle.restype = wintypes.BOOL
 
 
+class DownloadExecutionBusy(TimeoutError):
+    """Another process is changing the execution state of this request."""
+
+
 def _name(path: Path, request_id: str, scope: str | None = None) -> str:
     parts = [os.path.normcase(str(path.resolve())), request_id]
     if scope is not None:
@@ -75,6 +79,14 @@ def _mutex(name: str, timeout_ms: int):
 
 
 @contextmanager
+def _registration(name: str):
+    with _mutex(name + ".registration", 1000) as registered:
+        if not registered:
+            raise DownloadExecutionBusy("正在核对下载任务，请稍后按原任务重试")
+        yield
+
+
+@contextmanager
 def download_execution(path: Path, request_id: str, scope: str, cancel: threading.Event | None):
     """Own one request until its receipt is stored; competing writers get False.
 
@@ -85,9 +97,7 @@ def download_execution(path: Path, request_id: str, scope: str, cancel: threadin
     with ExitStack() as cleanup:
         # A probe must see the owner as soon as a subsequent writer can see
         # the occupied mutex. The registration lock covers only native handles.
-        with _mutex(name + ".registration", 1000) as registered:
-            if not registered:
-                raise TimeoutError("下载状态通道繁忙，请重试")
+        with _registration(name):
             owner = cleanup.enter_context(_mutex(name, 0))
             if owner:
                 running = _KERNEL.CreateEventW(None, True, False, name + ".running")
@@ -123,9 +133,7 @@ def download_execution(path: Path, request_id: str, scope: str, cancel: threadin
 
 def download_execution_active(path: Path, request_id: str, scope: str) -> bool:
     name = _name(path, request_id)
-    with _mutex(name + ".registration", 1000) as registered:
-        if not registered:
-            raise TimeoutError("下载状态通道繁忙，请重试")
+    with _registration(name):
         # An older running desktop only exposes its account-bound cancel event.
         for event_name in (name + ".running", _name(path, request_id, scope)):
             handle = _KERNEL.OpenEventW(0x00100000, False, event_name)
@@ -136,6 +144,14 @@ def download_execution_active(path: Path, request_id: str, scope: str) -> bool:
             if error != 2:
                 raise ctypes.WinError(error)
     return False
+
+
+@contextmanager
+def download_migration_guard(path: Path, request_id: str):
+    """Exclude execution of a queue head until its replacement is committed."""
+    name = _name(path, request_id)
+    with _registration(name), _mutex(name, 0) as available:
+        yield available
 
 
 def cancel_download_execution(path: Path, request_id: str, scope: str) -> bool:

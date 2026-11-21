@@ -9,10 +9,13 @@ import sqlite3
 from pathlib import Path
 from collections import OrderedDict
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from local_catalog import artifact_file_state
-from download_execution import cancel_download_execution, download_execution, download_execution_active
+from download_execution import (
+    cancel_download_execution, download_execution, download_execution_active, download_migration_guard,
+)
 
 
 Response = tuple[dict, int]
@@ -187,6 +190,9 @@ class DownloadRequests:
         except (OSError, sqlite3.Error):
             receipt = self._confirm_receipt(request_id, durable_fingerprint)
         return receipt if receipt is not None else ({}, 204)
+
+    def migration_guard(self, request_id: str):
+        return nullcontext(True) if self._path is None else download_migration_guard(self._path, request_id)
 
     def cancel(self, request_id: str, scope: str) -> bool:
         if self._path is not None:

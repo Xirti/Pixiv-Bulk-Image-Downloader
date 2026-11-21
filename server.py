@@ -48,6 +48,7 @@ from auth_store import (
 )
 from folder_picker import select_folder
 from login_context import load_login_context, parse_login_context, save_login_context
+from download_execution import DownloadExecutionBusy
 from download_requests import DownloadRequestError, DownloadRequests
 from download_admission import DownloadAdmission
 from http_routes import POST_ROUTES, DESKTOP_AUTH_PATHS
@@ -4192,6 +4193,8 @@ class Handler(SimpleHTTPRequestHandler):
                 payload, status = {"error": "下载已暂停，重新打开后可继续", "retryable": True}, 503
             except DownloadRequestError as exc:
                 payload, status = {"error": str(exc), "requestIdConflict": exc.status == 409}, exc.status
+            except DownloadExecutionBusy as exc:
+                payload, status = {"error": str(exc), "retryable": True}, 503
             except (TypeError, ValueError) as exc:
                 payload, status = {"error": "下载请求格式无效"}, 400
             except (OSError, sqlite3.Error):
@@ -4382,9 +4385,6 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "无法保存未完成任务"}, 500)
 
     def _post_migrate_task(self, data: dict):
-        # Workspace routes hold the authorization guard. A new operation first
-        # claims its request identity, then rechecks queue membership under the
-        # same guard; migration cannot race an old request into publication.
         try:
             generation = AUTHORIZATION_GENERATION
             scope = workspace_scope()
@@ -4396,60 +4396,73 @@ class Handler(SimpleHTTPRequestHandler):
             authorized, epoch = validated_authorization()
             if generation != AUTHORIZATION_GENERATION:
                 return self.send_json({"error": "Pixiv 账户状态已变更，请重新读取任务"}, 409)
-            updated = {**task, "remainingChunks": [], "chunkPolicy": "animation-artwork-v1"}
-            basket = {row["id"]: row["item"] for row in WORKSPACE_STORE.load(scope)["basket"]}
-            for chunk in task["remainingChunks"]:
-                single = task["kind"] == "single"
-                endpoint = task["taskOptions"]["endpoint"] if single else "/api/pixiv/batch-download"
-                body = ({**task["taskOptions"]["body"], "pages": chunk["groups"][0]["pages"]} if single
-                        else {**task["taskOptions"], "groups": chunk["groups"], "context": chunk["context"]})
-                body.update(requestId=chunk["requestId"], queueId=task["id"], scope=scope)
-                # 204 is a probe sentinel, never a successful download receipt.
-                result, status = DOWNLOAD_REQUESTS.probe(chunk["requestId"], endpoint, body,
-                                                        scope=str(epoch) if authorized else "public", durable_scope=scope,
-                                                        output_root=DOWNLOADS)
-                if status == 202:
-                    return self.send_json({"pending": True, "requestId": chunk["requestId"]}, 202)
-                if status == 200:
-                    updated["completedBatches"] += 1
-                    updated["savedCount"] += result.get("pages", chunk["pageCount"])
-                    updated["fileCount"] += len(result.get("saved", []))
-                    updated["skippedCount"] += result.get("skippedPages", 0)
-                    updated["firstSaved"] = updated["firstSaved"] or next(iter(result.get("saved", [])), "")
-                    if any(group["id"] == updated.get("conversionFailure", {}).get("artworkId") for group in chunk["groups"]):
-                        updated.pop("conversionFailure", None)
-                    continue
-                pieces, ordinary = [], []
-                for group in chunk["groups"]:
-                    if single or basket.get(group["id"], {}).get("workType") not in {"illustration", "manga"}:
-                        if ordinary:
-                            pieces.append(ordinary)
-                            ordinary = []
-                        pieces.append([group])
-                    else:
-                        ordinary.append(group)
-                if ordinary:
-                    pieces.append(ordinary)
-                if len(pieces) == 1:
-                    updated["remainingChunks"].append(chunk)
+            # A queued writer validates the current head while owning its ID.
+            # A change of head also changes the revision checked by save/delete.
+            head = task["remainingChunks"][0]["requestId"]
+            with DOWNLOAD_REQUESTS.migration_guard(head) as available:
+                if available:
+                    payload, status = self._migrate_download_task(task, scope, str(epoch) if authorized else "public")
                 else:
-                    updated["remainingChunks"].extend({"groups": groups, "pageCount": sum(len(g["pages"]) for g in groups),
-                                                        "requestId": secrets.token_hex(16), "context": chunk["context"]}
-                                                       for groups in pieces)
-            updated["totalBatches"] = updated["completedBatches"] + len(updated["remainingChunks"])
-            if updated["remainingChunks"]:
-                updated = WORKSPACE_STORE.save_task(updated, scope, expected=task)
-            else:
-                WORKSPACE_STORE.delete_task(task["id"], scope, revision=task.get("revision", 0))
-            return self.send_json({"task": updated})
+                    payload, status = {"pending": True, "requestId": head}, 202
+            return self.send_json(payload, status)
         except DownloadRequestError as exc:
             return self.send_json({"error": str(exc)}, exc.status)
+        except DownloadExecutionBusy as exc:
+            return self.send_json({"error": str(exc), "retryable": True}, 503)
         except TaskConflictError as exc:
             return self.send_json({"error": str(exc), "taskConflict": True}, 409)
         except ValueError:
             return self.send_json({"error": "任务迁移数据无效，请重新读取任务"}, 400)
         except (OSError, sqlite3.Error):
             return self.send_json({"error": "无法核对旧任务进度"}, 500)
+
+    def _migrate_download_task(self, task: dict, scope: str, auth_scope: str) -> tuple[dict, int]:
+        updated = {**task, "remainingChunks": [], "chunkPolicy": "animation-artwork-v1"}
+        basket = {row["id"]: row["item"] for row in WORKSPACE_STORE.load(scope)["basket"]}
+        for chunk in task["remainingChunks"]:
+            single = task["kind"] == "single"
+            endpoint = task["taskOptions"]["endpoint"] if single else "/api/pixiv/batch-download"
+            body = ({**task["taskOptions"]["body"], "pages": chunk["groups"][0]["pages"]} if single
+                    else {**task["taskOptions"], "groups": chunk["groups"], "context": chunk["context"]})
+            body.update(requestId=chunk["requestId"], queueId=task["id"], scope=scope)
+            # 204 is a probe sentinel, never a successful download receipt.
+            result, status = DOWNLOAD_REQUESTS.probe(chunk["requestId"], endpoint, body,
+                                                    scope=auth_scope, durable_scope=scope,
+                                                    output_root=DOWNLOADS)
+            if status == 202:
+                return {"pending": True, "requestId": chunk["requestId"]}, 202
+            if status == 200:
+                updated["completedBatches"] += 1
+                updated["savedCount"] += result.get("pages", chunk["pageCount"])
+                updated["fileCount"] += len(result.get("saved", []))
+                updated["skippedCount"] += result.get("skippedPages", 0)
+                updated["firstSaved"] = updated["firstSaved"] or next(iter(result.get("saved", [])), "")
+                if any(group["id"] == updated.get("conversionFailure", {}).get("artworkId") for group in chunk["groups"]):
+                    updated.pop("conversionFailure", None)
+                continue
+            pieces, ordinary = [], []
+            for group in chunk["groups"]:
+                if single or basket.get(group["id"], {}).get("workType") not in {"illustration", "manga"}:
+                    if ordinary:
+                        pieces.append(ordinary)
+                        ordinary = []
+                    pieces.append([group])
+                else:
+                    ordinary.append(group)
+            if ordinary:
+                pieces.append(ordinary)
+            if len(pieces) == 1:
+                updated["remainingChunks"].append(chunk)
+            else:
+                updated["remainingChunks"].extend({"groups": groups, "pageCount": sum(len(g["pages"]) for g in groups),
+                                                    "requestId": secrets.token_hex(16), "context": chunk["context"]}
+                                                   for groups in pieces)
+        updated["totalBatches"] = updated["completedBatches"] + len(updated["remainingChunks"])
+        if updated["remainingChunks"]:
+            updated = WORKSPACE_STORE.save_task(updated, scope, expected=task)
+        else:
+            WORKSPACE_STORE.delete_task(task["id"], scope, revision=task.get("revision", 0))
+        return {"task": updated}, 200
 
     def _post_recent_search(self, data: dict):
         try:
