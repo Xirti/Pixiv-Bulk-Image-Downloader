@@ -1,9 +1,12 @@
 """Windows-owned download execution and cross-process cooperative cancellation."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager, ExitStack
+from contextvars import ContextVar
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass
 import hashlib
 import logging
 import os
@@ -34,6 +37,17 @@ _KERNEL.CloseHandle.restype = wintypes.BOOL
 
 class DownloadExecutionBusy(TimeoutError):
     """Another process is changing the execution state of this request."""
+
+
+@dataclass(frozen=True)
+class _Cancellation:
+    name: str
+    signal: int
+    event: threading.Event
+    resources: ExitStack
+
+
+_CURRENT_CANCELLATION: ContextVar[_Cancellation | None] = ContextVar("download_cancellation", default=None)
 
 
 def _name(path: Path, request_id: str, scope: str | None = None) -> str:
@@ -94,7 +108,7 @@ def download_execution(path: Path, request_id: str, scope: str, cancel: threadin
     process/thread exit. The cancellation event is scoped to the account.
     """
     name = _name(path, request_id)
-    with ExitStack() as cleanup:
+    with ExitStack() as cleanup, ExitStack() as cancellation:
         # A probe must see the owner as soon as a subsequent writer can see
         # the occupied mutex. The registration lock covers only native handles.
         with _registration(name):
@@ -117,18 +131,40 @@ def download_execution(path: Path, request_id: str, scope: str, cancel: threadin
                 event = _KERNEL.CreateEventW(None, True, False, event_name)
                 if not event:
                     raise ctypes.WinError(ctypes.get_last_error())
-                cleanup.callback(_KERNEL.CloseHandle, event)
+                cancellation.callback(_KERNEL.CloseHandle, event)
                 if not _KERNEL.ResetEvent(event):
                     raise ctypes.WinError(ctypes.get_last_error())
             stopped = _KERNEL.CreateEventW(None, True, False, None)
             if not stopped:
                 raise ctypes.WinError(ctypes.get_last_error())
-            cleanup.callback(_KERNEL.CloseHandle, stopped)
+            cancellation.callback(_KERNEL.CloseHandle, stopped)
             watcher = threading.Thread(target=_watch_cancel, args=(event, stopped, cancel),
                                        name="moku-download-cancel", daemon=True)
             watcher.start()
-            cleanup.callback(_stop_watcher, stopped, watcher)
+            cancellation.callback(_stop_watcher, stopped, watcher)
+            token = _CURRENT_CANCELLATION.set(_Cancellation(event_name, event, cancel, cancellation))
+            cancellation.callback(_CURRENT_CANCELLATION.reset, token)
         yield True
+
+
+def begin_download_publication(check: Callable[[], None]) -> None:
+    """Close the pause channel at the point the local publisher takes over."""
+    cancellation = _CURRENT_CANCELLATION.get()
+    if cancellation is None:
+        check()
+        return
+    with _mutex(cancellation.name + ".control", 1000) as registered:
+        if not registered:
+            raise DownloadExecutionBusy("无法确认暂停状态，请继续原任务重试")
+        signalled = _KERNEL.WaitForSingleObject(cancellation.signal, 0)
+        if signalled == 0:
+            cancellation.event.set()
+        elif signalled != 258:
+            raise ctypes.WinError(ctypes.get_last_error())
+        check()
+        # A pause shares this lock. It either signalled before the check, or
+        # finds the channel closed and cannot report a successful cancellation.
+        cancellation.resources.close()
 
 
 def download_execution_active(path: Path, request_id: str, scope: str) -> bool:

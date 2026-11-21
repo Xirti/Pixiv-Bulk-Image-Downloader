@@ -17,6 +17,7 @@ import os
 import secrets
 import tempfile
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -759,6 +760,7 @@ def publish_staged_files(
     save_root: Path | None = None,
     staging_locked: bool = False,
     public_paths: bool = False,
+    before_publish: Callable[[], None] | None = None,
 ) -> list[Path] | list[str]:
     """Serialize one complete local publish/rollback transaction.
 
@@ -773,7 +775,7 @@ def publish_staged_files(
     with PUBLISH_TRANSACTION_LOCK:
         return _publish_staged_files_locked(
             staging_root, staged, save_root=save_root,
-            staging_locked=staging_locked, public_paths=public_paths,
+            staging_locked=staging_locked, public_paths=public_paths, before_publish=before_publish,
         )
 
 
@@ -784,6 +786,7 @@ def _publish_staged_files_locked(
     save_root: Path | None = None,
     staging_locked: bool = False,
     public_paths: bool = False,
+    before_publish: Callable[[], None] | None = None,
 ) -> list[Path] | list[str]:
     """Publish a completed batch and restore every owned object on failure."""
     transactions: list[PublishedFileOwnership] = [
@@ -793,6 +796,8 @@ def _publish_staged_files_locked(
     created_dirs: list[Path] = []
     retained_parent_handles: list[int] = []
     try:
+        if before_publish is not None:
+            before_publish()
         for entry in staged:
             if isinstance(entry, PublishedFileOwnership):
                 ownership = entry

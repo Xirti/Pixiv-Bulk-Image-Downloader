@@ -48,7 +48,7 @@ from auth_store import (
 )
 from folder_picker import select_folder
 from login_context import load_login_context, parse_login_context, save_login_context
-from download_execution import DownloadExecutionBusy
+from download_execution import DownloadExecutionBusy, begin_download_publication
 from download_requests import DownloadRequestError, DownloadRequests
 from download_admission import DownloadAdmission
 from http_routes import POST_ROUTES, DESKTOP_AUTH_PATHS
@@ -3158,6 +3158,7 @@ def _stage_and_publish_download(
                 save_root=save_root,
                 staging_locked=True,
                 public_paths=True,
+                before_publish=lambda: begin_download_publication(lambda: raise_if_search_cancelled(cancel_event)),
             )
 
         if authorization_epochs or authorization_check:
