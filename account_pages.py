@@ -960,6 +960,7 @@ class AccountPages:
         persistent = len(key) > 2
         method = self.method()
         durable_key = ["data", *key[1:]] if persistent else None
+        web_relation_page = method == "web" and key[1] in {"following", "bookmarks"}
         with self._lock:
             cache_revision = self._cache_revision
             cached = self._cache.get(key) if not persistent else None
@@ -982,6 +983,8 @@ class AccountPages:
             if cached is not None:
                 self.check(key[0])
                 check_read()
+                if web_relation_page:
+                    self._check_web_relation_offset(key, cached)
                 return cached
         if ACCOUNT_CACHE_ONLY.get():
             raise AccountError("cache_miss", "账号数据尚未在本地准备好")
@@ -993,6 +996,8 @@ class AccountPages:
             result = load()
         finally:
             ACCOUNT_REQUEST_CHECK.reset(token)
+        if web_relation_page:
+            self._check_web_relation_offset(key, result)
         with self.publication(key[0]), self._lock:
             check_read()
             if persistent:
@@ -1005,6 +1010,15 @@ class AccountPages:
                 # Only the verified session owner is process-local.
                 self._cache[key] = (time.monotonic(), copy.deepcopy(result))
         return result
+
+    @staticmethod
+    def _check_web_relation_offset(key, page):
+        view, offset = key[1], key[4]
+        if not offset:
+            return
+        total = page["total"]
+        if total is not None and offset >= total and not page["people" if view == "following" else "items"]:
+            raise AccountError("page_retired", "账号分页已更新，请返回第一页刷新")
 
     def clear_cache(self, owner):
         with self._lock:

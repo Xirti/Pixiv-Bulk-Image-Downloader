@@ -21,6 +21,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   const pendingUpdateScopes=new Set();
   const completedScans=new Map();
   const obsoletePage=(scan,scope,tag,offset)=>Boolean(tag) || !scan[scope]?.includes(offset);
+  const retiredByScan=(before,latest,{scope,tag,offset})=>
+    offset>0 && latest && latest!==before && obsoletePage(latest,scope,tag,Number(offset));
   let relationVersion=0;
   let scrollFrame=null,restoringScroll=false,restoreTop=null;
   function remember(){
@@ -39,8 +41,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     for(let attempt=0;attempt<2;attempt++){
       const version=relationVersion,scan=completedScans.get(view);
       const value=await reads.read(`/api/account/${view}?${new URLSearchParams(current)}`,options);
-      const latest=completedScans.get(view),offset=Number(params.offset);
-      if(scan!==latest && latest && offset>0 && obsoletePage(latest,params.scope,params.tag,offset)){
+      const latest=completedScans.get(view);
+      if(retiredByScan(scan,latest,params)){
         throw Object.assign(new Error("账号分页已更新，请返回第一页"),{errorKind:"page_retired"});
       }
       if(version===relationVersion && scan===latest)return value;
@@ -339,6 +341,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
 
   async function load(refresh=false){
     controller?.abort();controller=new AbortController();const signal=controller.signal,version=++revision,key=pageKey();
+    const scan=completedScans.get(state.view);
+    const pageRetired=()=>retiredByScan(scan,completedScans.get(state.view),state);
     error="";data=cache.get(key) || null;
     if(data)cachePage(key,data);
     if(!refresh && profile?.connected && (state.view==="home"?own && ownMode===mode():state.view!=="settings" && data && (state.view!=="bookmarks" || tags))){
@@ -357,6 +361,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       }
       if(version!==revision)return;
       if(!profile.connected){data=null;return;}
+      if(pageRetired())return returnToFirstPage();
       if(state.view==="home"){
         if(profile.workCount===0){own={items:[]};ownMode=mode();}
         else if(!own || refresh || ownMode!==mode()){
@@ -382,6 +387,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         tags=value;
       }
       if(version!==revision)return;
+      if(pageRetired())return returnToFirstPage();
       if(profile.authorization?.error)error=profile.authorization.error;
     }catch(problem){
       if(version!==revision || signal.aborted)return;
