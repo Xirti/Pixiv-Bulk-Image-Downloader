@@ -3766,7 +3766,10 @@ class Handler(SimpleHTTPRequestHandler):
                 state = CLOUD.read(generation, kind, target)
                 return self.send_json({"state": state, "authorizationGeneration": generation})
             if action == "write":
-                intent = validate_intent(data)
+                try:
+                    intent = validate_intent(data)
+                except ValueError as error:
+                    return self.send_json({"error": str(error), "errorKind": "invalid_intent"}, 400)
                 with SEARCH_SESSION_LOCKS_GUARD:
                     assert_authorization_generation(generation)
                     scope = workspace_scope()

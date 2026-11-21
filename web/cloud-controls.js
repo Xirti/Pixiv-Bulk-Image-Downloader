@@ -12,6 +12,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   let sessionEpoch=0,settingsRevision=-1;
   let updatesBusy=false,lastUpdateCheck=0,updatesRemaining=false;
   const busy=new Set(),manual=new Set(),restart=new Set();
+  const pendingWrites=new Map();
   const painted=new WeakMap();
   const post=(path,data,timeout=90000)=>request(path,{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({...data,authorizationGeneration:session().generation})},timeout);
@@ -154,11 +155,17 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   }
   async function mutate(kind,id,state,active,privacy,tags,version){
     const revision=epoch,authorization=sessionEpoch,generation=session().generation,targetKey=key(kind,id);
+    const labelTags=active && kind==="bookmark" && tags!==null?[...new Set(tags)].sort():null;
+    const intentKey=JSON.stringify([generation,targetKey,active,active?privacy:null,labelTags]);
+    const pending=pendingWrites.get(intentKey);
+    const intent=pending || {kind,id,active,privacy,tags,expected:state.stamp || null,
+      requestId:crypto.randomUUID().replaceAll("-","")};
+    pendingWrites.set(intentKey,intent);
     busy.add(targetKey);paint();
     try{
-      const data=await post("/api/cloud/write",{kind,id,active,privacy,tags,expected:state.stamp || null,
-        requestId:crypto.randomUUID().replaceAll("-","")},120000);
+      const data=await post("/api/cloud/write",intent,120000);
       if(!sameSession(authorization,generation))return;
+      if(data.confirmed)pendingWrites.delete(intentKey);
       adoptPreferences(data.preferences);
       if(!sameEpoch(revision,generation)){notifySettings();void hydrate(true);return;}
       const current=apply(kind,id,data.state);
@@ -167,6 +174,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       if(version===popupVersion)close();
       report(active?`${kind==="bookmark"?"收藏":"关注"}已保存`:`已取消${kind==="bookmark"?"收藏":"关注"}`);
     }catch(error){
+      if(!sameSession(authorization,generation))return;
+      if(!pending && ["invalid_intent","conflict","tags_unknown","self","relation_busy"].includes(error.errorKind)){
+        pendingWrites.delete(intentKey);
+      }
       if(!sameEpoch(revision,generation))return;
       if(error.cloudState){
         const current=apply(kind,id,error.cloudState);changed(kind,id,current,state);
@@ -328,7 +339,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   function setSession(){
     const value=session(),next=JSON.stringify([value.logged,value.generation,value.method]);
     if(next===sessionKey)return;
-    sessionKey=next;epoch++;sessionEpoch++;close();busy.clear();manual.clear();restart.clear();
+    sessionKey=next;epoch++;sessionEpoch++;close();busy.clear();pendingWrites.clear();manual.clear();restart.clear();
     settingsRevision=-1;
     hydration=null;hydrationAgain=null;syncBusy=false;syncRequest=null;syncJob=null;clearing=false;clearJob=null;
     updatesBusy=false;lastUpdateCheck=0;updatesRemaining=false;
