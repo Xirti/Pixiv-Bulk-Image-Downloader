@@ -7,6 +7,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   let epoch=0,sessionKey="",settingsPromise=null,prefsLoaded=false,hydration=null,hydrationAgain=null,hydratingKey="",timer=null,syncError="";
   let popup=null,anchor=null,popupVersion=0,syncBusy=false,lastSyncAttempt=0,syncTurn=0;
   let autoNotBefore=0,syncRequest=null,syncJob=null,syncVersion=0;
+  let cacheRevision;
   let clearing=false,clearJob=null,accountPrepared=false,auxiliaryBusy=false,auxiliaryCompleted=0,auxiliaryError="";
   let preferenceWrites=Promise.resolve();
   let sessionEpoch=0,settingsRevision=-1;
@@ -144,6 +145,11 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
           data=await request(path,{},30000);
         }
         if(!sameEpoch(revision,generation) || data.authorizationGeneration!==generation)return;
+        if(typeof data.clearRevision==="string" && data.clearRevision!==cacheRevision){
+          const changedRevision=cacheRevision!==undefined;
+          cacheRevision=data.clearRevision;
+          if(changedRevision){states={bookmark:new Map(),follow:new Map()};cleared();}
+        }
         owner=data.owner;if(syncAtStart===syncVersion)syncState=data.sync;
         for(const kind of ["bookmark","follow"])for(const [id,state] of Object.entries(data.states[kind])){
           rememberState(kind,id,state);
@@ -360,12 +366,34 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     paint();
     if(updatesBusy)lastUpdateCheck=0;
     updatesBusy=false;auxiliaryBusy=false;
+    async function readRevision(){
+      const result=await request("/api/cloud/state?works=&authors=",{},30000);
+      if(generation!==session().generation || result.authorizationGeneration!==generation)throw new Error("账号已改变，请重新操作");
+      return result.clearRevision;
+    }
     try{
       await clearStarted();
       if(syncRequest)await Promise.allSettled([syncRequest]);
-      if(generation!==session().generation)throw new Error("账号已改变，请重新操作");
-      await post("/api/cloud/clear-cache",{},30000);
-      if(generation!==session().generation)throw new Error("账号已改变，请重新操作");
+      if(clearJob!==job || generation!==session().generation)throw new Error("账号已改变，请重新操作");
+      let before=cacheRevision;
+      try{before=await readRevision() ?? before;}
+      catch{
+        // A failed probe still allows a clear with a successful reply.
+      }
+      if(clearJob!==job || generation!==session().generation)throw new Error("账号已改变，请重新操作");
+      cacheRevision ??= before;
+      try{
+        const result=await post("/api/cloud/clear-cache",{},30000);
+        if(clearJob===job && typeof result.clearRevision==="string")cacheRevision=result.clearRevision;
+      }catch(error){
+        if(clearJob!==job || generation!==session().generation || before===undefined)throw error;
+        let after;
+        try{after=await readRevision();}
+        catch{throw error;}
+        if(clearJob!==job || typeof after!=="string" || before===after)throw error;
+        cacheRevision=after;
+      }
+      if(clearJob!==job || generation!==session().generation)throw new Error("账号已改变，请重新操作");
       states={bookmark:new Map(),follow:new Map()};syncState={};syncError="";auxiliaryError="";scanFailures.clear();
       lastUpdateCheck=0;updatesRemaining=false;
       auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;
@@ -391,6 +419,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     if(next===sessionKey)return;
     sessionKey=next;epoch++;sessionEpoch++;close();busy.clear();pendingWrites.clear();manual.clear();restart.clear();
     settingsRevision=-1;
+    cacheRevision=undefined;
     hydration=null;hydrationAgain=null;syncBusy=false;syncRequest=null;syncJob=null;clearing=false;clearJob=null;
     updatesBusy=false;lastUpdateCheck=0;updatesRemaining=false;
     void clearStarted();

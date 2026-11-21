@@ -3688,7 +3688,7 @@ class Handler(SimpleHTTPRequestHandler):
                 status = CLOUD_STATE.sync_status(owner, method)
             assert_authorization_generation(generation)
             return self.send_json({"states": result, "sync": status,
-                "owner": owner, "method": method, "authorizationGeneration": generation},
+                "owner": owner, "method": method, "authorizationGeneration": generation, "clearRevision": clear_revision},
                 publication=lambda: CLOUD.publication(generation, owner, method, revision=clear_revision))
         except (ValueError, sqlite3.Error, OSError, PixivPolicyError) as error:
             return self._cloud_error(error)
@@ -3767,8 +3767,8 @@ class Handler(SimpleHTTPRequestHandler):
                 def invalidate_displays():
                     DISCOVERY.invalidate()
                     POPULARITY.invalidate()
-                CLOUD.clear_cache(generation, invalidate_displays)
-                return self.send_json({"ok": True, "authorizationGeneration": generation})
+                revision = CLOUD.clear_cache(generation, invalidate_displays)
+                return self.send_json({"ok": True, "authorizationGeneration": generation, "clearRevision": revision})
             ensure_network_opener_current()
             owner, method = CLOUD.context(generation)
             with CLOUD.publication(generation, owner, method) as clear_revision:

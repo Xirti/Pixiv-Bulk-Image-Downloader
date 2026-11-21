@@ -134,13 +134,13 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(!pending){restoreTop=null;markViewed();changed();}
   }
   function syncSelection(){grid.querySelectorAll('[data-select]').forEach(box=>{box.checked=selected(data.items[Number(box.dataset.select)].id);box.disabled=!canChoose();});}
-  async function load(refresh=false){
+  async function load(refresh=false,restoreExpired=false){
     if(state.order==='popular' && !refresh){
       const local=cache.get(pageKey(state));
       if(local?.popularityIndex===state.popularityIndex){
         controller?.abort();revision++;data=local;pending=false;sorting=false;error='';render();return;
       }
-      return loadPopularity(state.page);
+      return loadPopularity(state.page,restoreExpired);
     }
     sorting=false;
     controller?.abort();controller=new AbortController();
@@ -160,6 +160,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       }});
     }catch(problem){
       if(version!==revision || signal.aborted)return;
+      if(restoreExpired && staleHistory(problem))return rebuildHistory(destination,problem.errorKind==='cache_cleared');
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
       error=problem.message || '发现读取失败，请右键刷新重试';
       state.waiting=true;
@@ -189,7 +190,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(options.restore){
       state=structuredClone(options.restore);data=cache.get(pageKey(state)) || null;restoreTop=null;
       if(state.waiting){if(manual()){render();return;}await startLoad({restoring:true});return;}
-      await load();return;
+      await load(false,Boolean(state.batch || state.popularityIndex));return;
     }
     const target={...state,...options};
     if(target.kind!=='following')target.scope='all';
@@ -352,7 +353,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }
     if(state.kind==='following' && ownsIdleView()){render();void load(true);}
   }
-  async function loadPopularity(page){
+  async function loadPopularity(page,restoreExpired=false){
     controller?.abort();controller=new AbortController();
     const signal=controller.signal,version=++revision,auth=generation(),destination=structuredClone(state);
     sorting=true;sortProgress='正在准备作品元数据…';error='';render();
@@ -368,6 +369,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
         offset:state.offset,nextOffset:page<result.pages?page*36:null};
       savePage(state,data);restoreTop=root.scrollTop;remember();
     }catch(problem){if(version===revision && !signal.aborted){
+      if(restoreExpired && staleHistory(problem))return rebuildHistory(destination,problem.errorKind==='cache_cleared');
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
       error=`${problem.message} · 可重新开启排序重试`;
       const expired=['cache_miss','source_changed','ranking_changed'].includes(problem.errorKind);
@@ -424,6 +426,19 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     preferences=nextPreferences;void stopBackground();
     if(active)render();
     if(loaded)void prepare({network:true});
+  }
+  const staleHistory=problem=>['cache_miss','cache_cleared','source_changed','ranking_changed'].includes(problem.errorKind);
+  function rebuildHistory(destination,cleared){
+    if(cleared)clear(false);
+    else{
+      const source=sourceKey(destination);
+      for(const pages of [cache,nextReads])for(const key of pages.keys())if(JSON.parse(key)[0]===source)pages.delete(key);
+      for(const pages of [latest,positions,staged,popularViews])pages.delete(source);
+      sourceVersions.set(source,sourceVersion(source)+1);
+    }
+    state={...destination,offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:'',waiting:false};
+    data=null;pending=false;sorting=false;restoreTop=0;
+    return startLoad({restoring:true});
   }
   function retireClearedView(destination,message){
     clear(false);

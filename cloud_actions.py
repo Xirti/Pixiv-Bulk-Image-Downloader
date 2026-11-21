@@ -284,6 +284,7 @@ class CloudActions:
             self.pages.clear_cache(owner)
             self.store.clear_account(owner)
             invalidate_displays()
+            return self.pages.saved_cache.clear_revision(owner)
 
     def _write(self, generation, owner, method, intent, before):
         kind, target, active, privacy = (intent[key] for key in ("kind", "id", "active", "privacy"))
