@@ -240,8 +240,8 @@ class DownloadRequests:
                     # lookup but before mutex acquisition. Recheck as owner.
                     try:
                         result = self._read_success(request_id, durable_fingerprint)
-                    except (OSError, sqlite3.Error):
-                        result = None
+                    except (OSError, sqlite3.Error) as exc:
+                        raise DownloadRequestError("暂时无法核对下载回执，请继续原任务重试", 503) from exc
                     if result is None:
                         result = operation()
                         if result[1] == 200:
