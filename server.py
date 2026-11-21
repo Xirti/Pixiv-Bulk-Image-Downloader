@@ -4716,9 +4716,12 @@ class Handler(SimpleHTTPRequestHandler):
                 authorized, epoch = self._download_authorization_snapshot()
                 scope = workspace_scope()
                 task = WORKSPACE_STORE.get_task(queued[0], scope, head=3)
-                if task["kind"] != "batch" or len(task["remainingChunks"]) < 2:
+                if task is None or task["kind"] != "batch":
                     return
-                upcoming = [chunk for chunk in task["remainingChunks"][1:1 + depth]
+                chunks = task["remainingChunks"]
+                if len(chunks) < 2 or chunks[0]["requestId"] != queued[1]:
+                    return
+                upcoming = [chunk for chunk in chunks[1:1 + depth]
                             if len(chunk["groups"]) == 1 and chunk["groups"][0]["pages"] == [0]]
                 options = task["taskOptions"]
                 quality = options.get("quality", "original")
