@@ -265,13 +265,14 @@ class DesktopApi:
                 try:
                     browser_context = login.evaluate_js("({userAgent:navigator.userAgent,languages:Array.from(navigator.languages)})")
                 except Exception:
-                    LOG.warning("Login browser metadata unavailable; continuing session authorization")
-                LOG.info("desktop auth accepted host=www.pixiv.net cookie_shape=eligible")
-                result = self._auth_request(
-                    "session", {"session": value, "remember": bool(remember),
-                                "authorizationGeneration": context["authorizationGeneration"],
-                                "browserContext": browser_context},
-                )
+                    LOG.warning("Login browser metadata unavailable")
+                LOG.info("desktop auth candidate host=www.pixiv.net cookie_shape=eligible")
+                payload = {"session": value, "remember": bool(remember),
+                           "authorizationGeneration": context["authorizationGeneration"],
+                           "browserContext": browser_context}
+                if login.events.closed.is_set():
+                    raise DesktopLoginCancelled("已取消 Pixiv 桌面登录")
+                result = self._auth_request("session", payload)
                 if not isinstance(result, dict) or not result.get("ok"):
                     return {
                         "ok": False,

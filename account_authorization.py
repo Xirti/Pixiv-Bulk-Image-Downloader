@@ -62,13 +62,13 @@ def decode_callback(value, state):
     if not (native or web) or parsed.fragment:
         raise ValueError("invalid_callback_destination")
     params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=12)
-    if "error" in params or len(params.get("code", [])) != 1 or len(params.get("state", [])) > 1:
+    if "error" in params or len(params.get("code", [])) != 1 or len(params.get("state", [])) != 1:
         raise ValueError("invalid_callback_fields")
     code = params["code"][0]
     if not 8 <= len(code) <= 1024 or not code.isascii() or any(char.isspace() for char in code):
         raise ValueError("invalid_callback_code")
-    echoed = params.get("state", [None])[0]
-    if echoed is not None and not hmac.compare_digest(echoed, state):
+    echoed = params["state"][0]
+    if not echoed.isascii() or not hmac.compare_digest(echoed, state):
         raise ValueError("callback_state_mismatch")
     return code
 
