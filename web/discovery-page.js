@@ -32,13 +32,14 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   const interaction=createGalleryInteraction({grid,scrollSurface:root,allowed:()=>active && !pending && allowed(),report,
     openArtwork:index=>{const item=data?.items[index];if(item)openArtwork(item,{context:{kind:'pid',value:item.id},resultPage:state.page});},openArtist:item=>openArtist(item.userId)});
   const query=(s,extra={})=>'/api/discovery?'+new URLSearchParams({kind:s.kind,scope:s.scope,mode:s.mode,rank:s.rank,offset:s.offset,batch:s.batch,...extra});
-  async function readPage(target,extra={},options={}){
+  async function readPage(target,extra={}, {signal,accept=result=>result}={}){
     let destination=target,parameters=extra;
     for(let attempt=0;attempt<2;attempt++){
       const version=followingVersion;
-      const result=await reads.read(query(destination,parameters),options);
+      const result=await reads.read(query(destination,parameters),{signal});
+      signal?.throwIfAborted();
       if(result.cached===false && attempt)throw new Error('关注新作缓存已清理，请刷新');
-      if(target.kind!=='following' || version===followingVersion || result.cached===false)return result;
+      if(target.kind!=='following' || version===followingVersion || result.cached===false)return accept(result);
       // Re-filter the same snapshot against the newly synchronized relations.
       destination={...target,batch:result.batch,offset:result.offset};
       parameters={cached:'1',...(extra.background?{background:extra.background}:{})};
@@ -150,12 +151,13 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(local && !refresh){data=local;pending=false;render();prepareNext();return;}
     pending=true;if(!refresh)data=null;render();
     try{
-      const result=await readPage(destination,refresh?{refresh:'1',batch:'',offset:'0',revision:String(version)}:{},{signal});
-      if(version!==revision || signal.aborted || auth!==generation())return;
-      data=result;state={...destination,batch:result.batch,offset:result.offset,...(refresh?{page:1,trail:[]}:{} )};
-      if(refresh){restoreTop=root.scrollTop;if(followAtStart===followingVersion)followingDirty.delete(key);}
-      savePage(state,result);positions.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});
-      if(staged.get(key)?.state.batch===result.batch)staged.delete(key);
+      await readPage(destination,refresh?{refresh:'1',batch:'',offset:'0',revision:String(version)}:{},{signal,accept(result){
+        if(version!==revision || auth!==generation())return;
+        data=result;state={...destination,batch:result.batch,offset:result.offset,...(refresh?{page:1,trail:[]}:{} )};
+        if(refresh){restoreTop=root.scrollTop;if(followAtStart===followingVersion)followingDirty.delete(key);}
+        savePage(state,result);positions.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});
+        if(staged.get(key)?.state.batch===result.batch)staged.delete(key);
+      }});
     }catch(problem){
       if(version!==revision || signal.aborted)return;
       error=problem.message || '发现读取失败，请右键刷新重试';
@@ -166,10 +168,10 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(state.waiting || state.order==='popular' || !active || document.hidden || !autoPrepare() || !data || data.nextOffset==null)return;
     const target={...state,offset:data.nextOffset},key=pageKey(target),signal=background.signal,auth=generation();
     if(cache.has(key) || nextReads.has(key))return;
-    const reading=readPage(target,{background:'1'},{signal}).then(async result=>{
-      if(signal.aborted || auth!==generation())return;
+    const reading=readPage(target,{background:'1'},{signal,async accept(result){
+      if(auth!==generation() || nextReads.get(key)!==reading)return;
       savePage(target,result);await previews.prepare(key,result.items,signal,{warm:'account'});
-    }).catch(problem=>{if(!signal.aborted && auth===generation())report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
+    }}).catch(problem=>{if(!signal.aborted && auth===generation())report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
     nextReads.set(key,reading);
   }
   async function open(options={}){

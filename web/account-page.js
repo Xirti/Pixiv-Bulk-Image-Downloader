@@ -37,16 +37,17 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     const current=pageKey();
     while(cache.size>128){const old=[...cache.keys()].find(identity=>identity!==current);cache.delete(old);}
   }
-  async function read(view,params={},options={}){
+  async function read(view,params={}, {signal,accept=value=>value}={}){
     let current=params;
     for(let attempt=0;attempt<2;attempt++){
       const version=relationVersion,scan=completedScans.get(view);
-      const value=await reads.read(`/api/account/${view}?${new URLSearchParams(current)}`,options);
+      const value=await reads.read(`/api/account/${view}?${new URLSearchParams(current)}`,{signal});
+      signal?.throwIfAborted();
       const latest=completedScans.get(view);
       if(retiredByScan(scan,latest,params)){
         throw Object.assign(new Error("账号分页已更新，请返回第一页"),{errorKind:"page_retired"});
       }
-      if(version===relationVersion && scan===latest)return value;
+      if(version===relationVersion && scan===latest)return accept(value);
       // The response predates a confirmed relationship change. Read the
       // repaired server cache; only this overlapping read needs replacement.
       current={...params};delete current.refresh;
@@ -69,10 +70,12 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       const params={background:"1",...(!network?{cached:"1"}:{}),...(refresh?{refresh:"1"}:{})};
       if(!page || !profile){
         const before=profile;
-        const value=await read("profile",params,{signal});
-        if(!currentSession())return;
-        if(value.cached===false || !value.connected)return;
-        if(profile===before){profile=value;connectionChanged(profile);}
+        const value=await read("profile",params,{signal,accept(result){
+          if(!currentSession() || result.cached===false || !result.connected)return null;
+          if(profile===before){profile=result;connectionChanged(profile);}
+          return result;
+        }});
+        if(!value)return;
       }
       if(!valid())return;
       let retired=null;
@@ -108,12 +111,14 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         const key=JSON.stringify([target.view,target.scope,"",target.offset,contentMode]),before=cache.get(key);
         let value;
         try{value=await read(target.view,{scope:target.scope,offset:String(target.offset),tag:"",mode:contentMode,
-          background:"1",...(relation || !network?{cached:"1"}:{}),...(!relation && refresh?{refresh:"1"}:{})},{signal});}
+          background:"1",...(relation || !network?{cached:"1"}:{}),...(!relation && refresh?{refresh:"1"}:{})},{signal,accept(result){
+            if(!valid() || result.cached===false || cache.get(key)!==before)return null;
+            cachePage(key,result);
+            return result;
+          }});}
         catch(problem){if(signal.aborted)throw problem;failures.push(`${labels[target.view]}：${problem.message}`);continue;}
         if(!valid())return;
-        if(value.cached===false || cache.get(key)!==before)continue;
-        cachePage(key,value);
-        if(target.offset===0){
+        if(value && target.offset===0){
           if(value.items)images.push(()=>worksCache.prepare("account-works",value.items,signal,{warm:"account"}));
           if(value.people)images.push(()=>avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"}));
         }
@@ -124,13 +129,16 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         for(const view of ["tags",...(catalog.workCount===0?[]:["works"])]){
           const before=view==="tags"?tags:own;
           let value;
-          try{value=await read(view,{...params,mode:contentMode},{signal});}
+          try{value=await read(view,{...params,mode:contentMode},{signal,accept(result){
+            if(!valid() || result.cached===false)return null;
+            if(view==="tags"){
+              if(tags===before)tags=result;
+            }else if(own===before){own=result;ownMode=contentMode;return result;}
+            return null;
+          }});}
           catch(problem){if(signal.aborted)throw problem;failures.push(`${view==="tags"?"收藏标签":"本人作品"}：${problem.message}`);continue;}
           if(!valid())return;
-          if(value.cached===false)continue;
-          if(view==="tags"){
-            if(tags===before)tags=value;
-          }else if(own===before){own=value;ownMode=contentMode;images.push(()=>ownCache.prepare("account-own-works",value.items,signal,{warm:"account"}));}
+          if(value)images.push(()=>ownCache.prepare("account-own-works",value.items,signal,{warm:"account"}));
         }
         if(profile===catalog && catalog.workCount===0){own={items:[]};ownMode=contentMode;}
       }
@@ -156,12 +164,12 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     const target={...state,offset:data.nextOffset},contentMode=mode(),signal=backgroundController.signal,version=backgroundRevision;
     const key=JSON.stringify([target.view,target.scope,target.tag,target.offset,contentMode]);
     if(cache.has(key) || nextReads.has(key))return;
-    const reading=read(target.view,{scope:target.scope,offset:String(target.offset),tag:target.tag,mode:contentMode,background:"1"},{signal}).then(async value=>{
+    const reading=read(target.view,{scope:target.scope,offset:String(target.offset),tag:target.tag,mode:contentMode,background:"1"},{signal,async accept(value){
       if(version!==backgroundRevision || signal.aborted || contentMode!==mode() || nextReads.get(key)!==reading || cache.has(key))return;
       cachePage(key,value);
       if(value.items)await worksCache.prepare("account-works",value.items,signal,{warm:"account"});
       if(value.people)await avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"});
-    }).catch(problem=>{if(!signal.aborted && version===backgroundRevision && nextReads.get(key)===reading && !["page_retired","page_rebased"].includes(problem.errorKind))report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
+    }}).catch(problem=>{if(!signal.aborted && version===backgroundRevision && nextReads.get(key)===reading && !["page_retired","page_rebased"].includes(problem.errorKind))report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
     nextReads.set(key,reading);
   }
   const artworkContext=item=>({context:{kind:"pid",value:item.id},resultPage:state.page});
@@ -195,7 +203,18 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         const refresh=network && usesCursor && (!continuing || pendingUpdateScopes.has(scope));
         let result;
         try{
-          result=await read('updates',{scope,background:'1',...(refresh?{refresh:'1'}:{cached:'1'})},{signal});
+          result=await read('updates',{scope,background:'1',...(refresh?{refresh:'1'}:{cached:'1'})},{signal,accept(value){
+            if(!valid() || value.cached===false || value.connected===false)return value;
+            combined ||= Boolean(value.combined);
+            if(usesCursor){if(value.hasMore)pendingUpdateScopes.add(scope);else pendingUpdateScopes.delete(scope);}
+            for(const [id,marker] of Object.entries(value.authors)){
+              if(updates[scope][id]?.latestObserved>marker.latestObserved)continue;
+              updates[scope][id]={...marker,isNew:marker.isNew && marker.latestObserved>(acknowledged.get(id) || '')};
+            }
+            for(const id of Object.keys(updates[scope]))if(!value.authors[id])delete updates[scope][id];
+            syncPeopleStatus();
+            return value;
+          }});
         }catch(problem){
           if(!valid())return {hasMore:false};
           if(refresh)pendingUpdateScopes.add(scope);
@@ -203,16 +222,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
           continue;
         }
         if(!valid())return {hasMore:false};
-        if(result.cached===false)continue;
         if(result.connected===false)return {hasMore:false};
-        combined ||= Boolean(result.combined);
-        if(usesCursor){if(result.hasMore)pendingUpdateScopes.add(scope);else pendingUpdateScopes.delete(scope);}
-        for(const [id,marker] of Object.entries(result.authors)){
-          if(updates[scope][id]?.latestObserved>marker.latestObserved)continue;
-          updates[scope][id]={...marker,isNew:marker.isNew && marker.latestObserved>(acknowledged.get(id) || '')};
-        }
-        for(const id of Object.keys(updates[scope]))if(!result.authors[id])delete updates[scope][id];
-        syncPeopleStatus();
       }
       if(failures.length)report(`新作检查未完成：${failures.join('；')}`);
       return {hasMore:pendingUpdateScopes.size>0};
@@ -371,9 +381,10 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       if(state.view==="settings"){await settingsReady();return;}
       if(!signedIn()){profile=null;data=null;connectionChanged(null);return;}
       if(!profile || refresh){
-        const value=await read("profile",refresh?{refresh:"1"}:{},{signal});
-        if(version!==revision)return;
-        profile=value;connectionChanged(profile);
+        await read("profile",refresh?{refresh:"1"}:{},{signal,accept(value){
+          if(version!==revision)return;
+          profile=value;connectionChanged(profile);
+        }});
       }
       if(version!==revision)return;
       if(!profile.connected){data=null;return;}
@@ -393,14 +404,14 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       }
       if(state.view!=="home" && (!data || refreshPage)){
         const query=new URLSearchParams({scope:state.scope,offset:String(state.offset),tag:state.tag,mode:mode(),...(refreshPage?{refresh:"1"}:{})});
-        const value=await read(state.view,Object.fromEntries(query),{signal});
-        if(version!==revision)return;data=value;cachePage(key,value);
-        pending=false;render();
+        await read(state.view,Object.fromEntries(query),{signal,accept(value){
+          if(version!==revision)return;
+          data=value;cachePage(key,value);pending=false;render();
+        }});
+        if(version!==revision)return;
       }
       if(state.view==="bookmarks" && (!tags || refresh)){
-        const value=await read("tags",refresh?{refresh:"1"}:{},{signal});
-        if(version!==revision || signal.aborted)return;
-        tags=value;
+        await read("tags",refresh?{refresh:"1"}:{},{signal,accept(value){if(version===revision)tags=value;}});
       }
       if(version!==revision)return;
       if(pageRetired())return returnToFirstPage();
@@ -539,10 +550,10 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       if(active)render();
       if(active && rereadPage && !controller)void load();
       const session=generation(),background=backgroundRevision;
-      const reread=(view,adopt)=>void read(view).then(result=>{
+      const reread=(view,adopt)=>void read(view,{},{accept(result){
         if(generation()!==session || backgroundRevision!==background)return;
         adopt(result);if(active)render();
-      }).catch(problem=>{
+      }}).catch(problem=>{
         if(generation()===session && backgroundRevision===background)report(`账号计数暂未核对：${problem.message}`);
       });
       if(rereadProfile){
