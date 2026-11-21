@@ -200,12 +200,15 @@ class CloudActions:
 
     def read(self, generation, kind, target):
         owner, method = self.context(generation)
+        peer = "web" if method == "app" else "app"
         with self._relationship_operation(generation, owner, kind, target):
             with self.publication(generation, owner, method) as revision:
                 previous = self._cached_relation(owner, method, kind, target)
+                peer_observed = self._cached_relation(owner, peer, kind, target)
             state = self._read(owner, method, kind, target, generation)
             with self.publication(generation, owner, method, revision=revision):
-                current, _ = self._adopt_observation(owner, method, kind, target, previous, state)
+                current, _ = self._adopt_observation(owner, method, peer, kind, target, previous, state,
+                                                     peer_observed=peer_observed)
                 return current
 
     @contextmanager
@@ -223,7 +226,8 @@ class CloudActions:
         works, authors = ([target], []) if kind == "bookmark" else ([], [target])
         return self.store.many(owner, method, works, authors)[kind][target]
 
-    def _adopt_observation(self, owner, method, kind, target, observed, state, *, before=None, before_pages=None):
+    def _adopt_observation(self, owner, method, peer, kind, target, observed, state, *,
+                           peer_observed, before=None, before_pages=None):
         """Compare the object's state under the same lock used to publish it."""
         current = self._cached_relation(owner, method, kind, target)
         fields = ("stamp", "touched", "bookmarkId")
@@ -231,17 +235,21 @@ class CloudActions:
             return current, (current.get("stamp") == relationship_stamp(state)
                              and current.get("bookmarkId") == state.get("bookmarkId"))
         previous = observed if before is None else {**before, "known": True}
-        return self._record(owner, method, kind, target, previous, state, before_pages=before_pages), True
+        return self._record(owner, method, peer, kind, target, previous, state,
+                            peer_observed=peer_observed, before_pages=before_pages), True
 
-    def _record(self, owner, method, kind, target, previous, state, *, before_pages=None):
+    def _record(self, owner, method, peer, kind, target, previous, state, *, peer_observed, before_pages=None):
         """Use one publication path for verified state and display-cache repairs."""
         repair_id = f"{kind}:{uuid.uuid4().hex}"
-        current = self.store.put(owner, method, kind, target, state, repair_id=repair_id)
-        repair = not previous["known"] or relationship_stamp(previous)==current["stamp"]
-        self.pages.note_relation(owner, method, kind, target, current if not previous["known"] else previous, current,
-                                 repair=repair, before_pages=before_pages if before_pages is not None else {})
-        self.store.finish_page_repairs(owner, method, [repair_id])
-        return current
+        states, peer_previous = self.store.put_verified(owner, method, peer, kind, target, state, repair_id,
+                                                         peer_observed=peer_observed)
+        for destination, current in states.items():
+            prior = previous if destination == method else peer_previous
+            repair = not prior["known"] or relationship_stamp(prior) == current["stamp"]
+            self.pages.note_relation(owner, destination, kind, target, prior if prior["known"] else current, current,
+                                     repair=repair, before_pages=(before_pages or {}).get(destination, {}))
+            self.store.finish_page_repairs(owner, destination, [repair_id])
+        return states[method]
 
     @contextmanager
     def publication(self, generation, owner, method, *, revision=None):
@@ -325,12 +333,14 @@ class CloudActions:
 
     def mutate(self, generation, scope, intent):
         owner, method = self.context(generation)
+        peer = "web" if method == "app" else "app"
         kind, target = intent["kind"], intent["id"]
         if kind == "follow" and target == owner:
             raise AccountError("self", "不能关注自己")
         with self._relationship_operation(generation, owner, kind, target):
             with self.publication(generation, owner, method) as revision:
                 cached = self._cached_relation(owner, method, kind, target)
+                peer_observed = self._cached_relation(owner, peer, kind, target)
             before = self._read(owner, method, kind, target, generation)
             signature = hashlib.sha256(json.dumps(intent, sort_keys=True).encode()).hexdigest()
             with self.publication(generation, owner, method, revision=revision):
@@ -338,12 +348,15 @@ class CloudActions:
                 if current.get("stamp") != cached.get("stamp"):
                     raise CloudActionError("conflict", "账号状态已更新，请核对后重新操作", state=current)
                 replay, result = self.store.operation(owner, method, intent["requestId"], signature)
-                page_versions = None if replay else self.pages.relation_page_versions(owner, method, kind)
+                page_versions = None if replay else {
+                    destination: self.pages.relation_page_versions(owner, destination, kind)
+                    for destination in ("web", "app")
+                }
 
             def record(state, observed=cached, *, before=None, before_pages=None):
                 with self.publication(generation, owner, method, revision=revision):
-                    return self._adopt_observation(owner, method, kind, target, observed, state,
-                                                   before=before, before_pages=before_pages)
+                    return self._adopt_observation(owner, method, peer, kind, target, observed, state,
+                                                   peer_observed=peer_observed, before=before, before_pages=before_pages)
 
             def complete(state):
                 preferences = (scope, {kind + "Last": intent["privacy"]} if intent["active"] else {})
@@ -396,6 +409,7 @@ class CloudActions:
                 if needs_write:
                     with self.publication(generation, owner, method, revision=revision):
                         observed = self._cached_relation(owner, method, kind, target)
+                        peer_observed = self._cached_relation(owner, peer, kind, target)
                     after = self._read(owner, method, kind, target, generation)
                 else:
                     after = before

@@ -239,6 +239,34 @@ class CloudState:
                 (owner, method, kind, target)).fetchone(), self._relation_revision(db))
         return current
 
+    def put_verified(self, owner, method, peer, kind, target, state, repair_id, *, peer_observed):
+        """Publish verified relationship facts to both methods in one transaction."""
+        with self._write() as db:
+            version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM relations").fetchone()[0]
+            revision = self._relation_revision(db)
+            select = "SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target=?"
+            prior = self._decode(db.execute(select, (owner, peer, kind, target)).fetchone(), revision)
+            shared = {**state, "bookmarkId":None}
+            if state["active"] and prior["active"]:
+                for field in ("privacy", "tags"):
+                    if shared.get(field) is None:
+                        shared[field] = prior[field]
+                # An App read does not carry the Web bookmark identifier.
+                shared["bookmarkId"] = prior["bookmarkId"] if peer == "web" else None
+            changes = {method: state}
+            fields = ("stamp", "touched", "bookmarkId")
+            peer_unchanged = all(prior.get(field) == peer_observed.get(field) for field in fields)
+            if peer_unchanged and (not prior["known"] or relationship_stamp(shared) != prior["stamp"]
+                                   or shared["bookmarkId"] != prior["bookmarkId"]):
+                changes[peer] = shared
+            for destination, value in changes.items():
+                self._put(db, owner, destination, kind, target, value, version)
+                db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, destination, repair_id))
+            revision = self._relation_revision(db)
+            current = {destination: self._decode(db.execute(select, (owner, destination, kind, target)).fetchone(), revision)
+                       for destination in changes}
+            return current, prior
+
     def pending_page_repairs(self, owner, method):
         with self.lock, closing(self._connect()) as db:
             return [row[0] for row in db.execute("SELECT token FROM page_repairs WHERE owner=? AND method=?", (owner, method))]
