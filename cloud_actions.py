@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.error import HTTPError
 
 from cloud_state import relationship_stamp
 from account_pages import HomepageIdentity, source_body
@@ -427,18 +428,40 @@ class CloudActions:
                 scan = self.store.sync_status(owner, method).get(kind)
                 if force or not scan or not scan["running"] or scan.get("displayRevision") != display_revision:
                     scan = self.store.begin_scan(owner, method, kind, display_revision=display_revision)
+                checking = len(scan["finished"]) == 2
+                if checking:
+                    targets = self.store.scan_verification_targets(owner, method, kind, scan)
             scope, offset = scan["scope"], scan["offset"]
             # Priority 2 is intentionally disabled in safe mode (image prefetch).
             # Relationship synchronization remains paced but usable in that mode.
             priority = REQUEST_PRIORITY.set(1)
             try:
-                entries, cursor, rows, total = self._scan_page(owner, method, kind, scope, scan["cursor"], generation,
-                    visited=scan["visitedPaths"].get(scope, []))
+                if checking:
+                    outcomes = []
+                    for target in targets:
+                        try:
+                            observed = self._read(owner, method, kind, target, generation)
+                        except AccountError as error:
+                            if error.kind != "invalid_data":
+                                raise
+                            observed = None
+                        except HTTPError as error:
+                            if error.code != 404:
+                                raise
+                            observed = None
+                        outcomes.append((target, observed))
+                else:
+                    entries, cursor, rows, total = self._scan_page(owner, method, kind, scope, scan["cursor"], generation,
+                        visited=scan["visitedPaths"].get(scope, []))
             finally:
                 REQUEST_PRIORITY.reset(priority)
             with self.publication(generation, owner, method, revision=revision):
                 if display_revision != self.pages.saved_cache.display_revision(owner, method):
                     raise AccountError("cache_cleared", "浏览设置已更新，请重新同步")
+                if checking:
+                    result = self.store.verify_scan_targets(owner, method, kind, scan, outcomes)
+                    page = None if result["running"] else {"kind":kind, "scope":scope, "offset":offset}
+                    return {**result, "page":page}
                 repair_id = f"{kind}:{uuid.uuid4().hex}"
                 result = self.store.scan_page(owner, method, kind, scan, entries, cursor, repair_id=repair_id)
                 self.pages.cache_scan_page(owner, method, kind, scope, offset, rows, cursor, total, generation,

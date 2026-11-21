@@ -212,21 +212,14 @@ class CloudState:
         with self.lock, closing(self._connect()) as db:
             db.execute("BEGIN")
             revision = self._relation_revision(db)
-            scans={row["kind"]:row["completed"] or 0 for row in db.execute(
-                "SELECT kind,json_extract(payload,'$.completed') AS completed FROM scans WHERE owner=? AND method=?",(owner,method))}
             for kind, targets in (("bookmark", works), ("follow", authors)):
-                completed=scans.get(kind,0);rows={}
+                rows={}
                 for offset in range(0,len(targets),400):
                     part=targets[offset:offset+400]
                     query="SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target IN ("+','.join('?' for _ in part)+')'
                     rows.update((row['target'],row) for row in db.execute(query,(owner,method,kind,*part)))
                 for target in targets:
-                    state = self._decode(rows.get(target), revision)
-                    if not state["known"] and completed:
-                        state = {"known": True, "active": False, "privacy": None, "tags": [], "touched": completed,
-                                 "relationRevision": revision}
-                        state["stamp"] = relationship_stamp(state)
-                    result[kind][target] = state
+                    result[kind][target] = self._decode(rows.get(target), revision)
         return result
 
     @staticmethod
@@ -269,9 +262,6 @@ class CloudState:
 
     def remember_active(self, owner, method, kind, targets, privacy):
         with self._write() as db:
-            scan=db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?",(owner,method,kind)).fetchone()
-            if scan and json.loads(scan[0]).get("completed"):
-                return
             version=db.execute("SELECT COALESCE(MAX(version),0)+1 FROM relations").fetchone()[0]
             for target in targets:
                 found=db.execute("SELECT 1 FROM relations WHERE owner=? AND method=? AND kind=? AND target=?",(owner,method,kind,target)).fetchone()
@@ -338,12 +328,22 @@ class CloudState:
         return state
 
     @staticmethod
-    def _complete_scan(db, owner, method, kind, scan):
+    def _unseen_targets(db, owner, method, kind, scan, limit):
+        return [row[0] for row in db.execute(
+            "SELECT target FROM relations WHERE owner=? AND method=? AND kind=? AND active AND version<=? "
+            "AND target>? AND NOT EXISTS (SELECT 1 FROM scan_seen AS seen WHERE seen.owner=relations.owner "
+            "AND seen.method=relations.method AND seen.kind=relations.kind AND seen.target=relations.target) "
+            "ORDER BY target LIMIT ?", (owner, method, kind, scan["version"], scan.get("verifiedThrough", ""), limit))]
+
+    def scan_verification_targets(self, owner, method, kind, scan):
+        with self.lock, closing(self._connect()) as db:
+            return self._unseen_targets(db, owner, method, kind, scan, 4)
+
+    def _complete_scan(self, db, owner, method, kind, scan):
+        if self._unseen_targets(db, owner, method, kind, scan, 1):
+            return
+        scan.pop("verifiedThrough", None)
         scan.update(running=False, completed=time.time(), cursor="")
-        db.execute("UPDATE relations SET active=0,privacy=NULL,tags='[]',bookmark_id=NULL,touched=? "
-                   "WHERE owner=? AND method=? AND kind=? AND version<=? AND target NOT IN "
-                   "(SELECT target FROM scan_seen WHERE owner=? AND method=? AND kind=?)",
-                   (scan["completed"], owner, method, kind, scan["version"], owner, method, kind))
         db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
 
     def scan_page(self, owner, method, kind, scan, items, next_cursor, *, repair_id=None):
@@ -400,3 +400,31 @@ class CloudState:
             db.execute("UPDATE scans SET payload=? WHERE owner=? AND method=? AND kind=?", (json.dumps(state), *key))
             db.execute("DELETE FROM page_repairs WHERE owner=? AND method=? AND token=?", (owner, method, repair_id))
             return state
+
+    def verify_scan_targets(self, owner, method, kind, scan, outcomes):
+        with self._write() as db:
+            key = owner, method, kind
+            row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", key).fetchone()
+            current = json.loads(row[0]) if row else {}
+            if (not current.get("running") or current["id"] != scan["id"] or current.get("pendingPage")
+                    or len(current["finished"]) != 2 or current.get("verifiedThrough") != scan.get("verifiedThrough")):
+                raise ScanConflictError("同步进度已更新，请重新同步")
+            for target, observed in outcomes:
+                if observed is None:
+                    continue
+                old = db.execute("SELECT version,privacy,tags,bookmark_id FROM relations "
+                                 "WHERE owner=? AND method=? AND kind=? AND target=? AND active", (*key, target)).fetchone()
+                if old is None or old["version"] > scan["version"]:
+                    continue
+                if observed["active"]:
+                    observed = {**observed, "privacy": observed["privacy"] or old["privacy"]}
+                    if observed.get("tags") is None:
+                        observed["tags"] = json.loads(old["tags"]) if old["tags"] is not None else None
+                    if observed.get("bookmarkId") is None:
+                        observed["bookmarkId"] = old["bookmark_id"]
+                self._put(db, *key, target, observed, scan["version"])
+            if outcomes:
+                current["verifiedThrough"] = outcomes[-1][0]
+            self._complete_scan(db, *key, current)
+            db.execute("UPDATE scans SET payload=? WHERE owner=? AND method=? AND kind=?", (json.dumps(current), *key))
+            return current

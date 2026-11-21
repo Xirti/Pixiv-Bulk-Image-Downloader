@@ -298,7 +298,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       restart.delete(due);syncState[due]=data.sync;syncVersion++;syncError="";syncTurn=due==="bookmark"?1:0;
       const preparePage=prefs.autoSync || manual.has(due);
       if(!data.sync.running)manual.delete(due);
-      if(preparePage)await prepareAccount({page:data.sync.page,completed:data.sync.running?null:data.sync.pageOffsets});
+      if(preparePage && data.sync.page)await prepareAccount({page:data.sync.page,completed:data.sync.running?null:data.sync.pageOffsets});
       if(!sameEpoch(revision,generation))return;
       await hydrate(true);notifySettings();
     }catch(error){
