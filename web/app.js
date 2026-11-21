@@ -47,6 +47,7 @@ let detailDownloadProgress = null;
 let batchDownloadProgress = null;
 let activeWorkspace = null;
 let accountOrigin = false;
+let renderedAuthorWorks = null;
 let contextReturns = {};
 let workspaceReturn = null;
 let resumableBatchTask = null;
@@ -2106,9 +2107,11 @@ function render() {
   grid.className = "grid";
   updateSelectionBar();
   if(galleryIntent && !items.length){
+    renderedAuthorWorks=null;
     galleryInteraction.clear();grid.innerHTML='<p class="empty-state">选好排序后，点击开始加载。</p>';return;
   }
   if (!items.length) {
+    renderedAuthorWorks=null;
     galleryInteraction.clear();
     grid.innerHTML = currentPageNeedsMoreResults()
       ? (searchOrderingPending
@@ -2131,6 +2134,26 @@ function render() {
       if (!accepted) box.checked = selection.has(items[Number(box.dataset.select)].id);
     };
   });
+  const author=activeSearchContext.kind==="uid"?activeSearchContext.value:null;
+  if(!author || !resultSelectionEnabled)renderedAuthorWorks=null;
+  else if(renderedAuthorWorks?.items!==items || renderedAuthorWorks.author!==author ||
+      renderedAuthorWorks.generation!==lastKnownAuthorizationGeneration){
+    renderedAuthorWorks={author,items,generation:lastKnownAuthorizationGeneration,acknowledged:false};
+  }
+  markAuthorWorksViewed();
+  });
+}
+
+function markAuthorWorksViewed(){
+  const shown=renderedAuthorWorks;
+  if(!shown || shown.acknowledged || shown.items!==items || document.hidden ||
+      searchSurface!=="gallery" || activeSearchContext.kind!=="uid" || activeSearchContext.value!==shown.author ||
+      activeScrollSurface()!==window || !lastKnownLoggedIn || shown.generation!==lastKnownAuthorizationGeneration)return;
+  shown.acknowledged=true;
+  void accountView.seenWorks(shown.items.filter(work=>work.userId===shown.author)).catch(()=>{
+    if(renderedAuthorWorks!==shown || shown.generation!==lastKnownAuthorizationGeneration)return;
+    shown.acknowledged=false;
+    showTaskDock("账户","作者作品查看状态暂未保存",4000);
   });
 }
 
@@ -2244,6 +2267,7 @@ function updateFloatingChrome() {
 // Keep page state intact while releasing media owned by inactive views.
 function syncPreviewResources({releaseIdle = false} = {}) {
   const surface = activeScrollSurface();
+  markAuthorWorksViewed();
   const normalVisible = !document.hidden && surface === $("#downloadPage");
   const basketVisible = !document.hidden && surface === $("#basketPage");
   normalDetailView.setVisible(normalVisible && !document.body.classList.contains("batch-mode"));

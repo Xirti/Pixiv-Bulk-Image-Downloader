@@ -247,8 +247,6 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   }
   function artist(person){
     if(!allowed())return;
-    const stamp=updates[state.scope][person.id]?.latestObserved || person.latestObserved;
-    if(stamp)void acknowledge({[person.id]:stamp}).catch(()=>report("作者查看状态暂未保存"));
     openArtist(person.id);
   }
   const interaction=createGalleryInteraction({grid,scrollSurface:root,allowed:()=>active && allowed() && !pending,
@@ -315,10 +313,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     tools.querySelectorAll("[data-scope]").forEach(button=>button.onclick=()=>navigate(state.view,{scope:button.dataset.scope,tag:""}));
     tools.querySelector("select")?.addEventListener("change",event=>navigate("bookmarks",{tag:event.target.value}));
     tools.querySelector("[data-account-updates]")?.addEventListener("click",async()=>{
-      const version=backgroundRevision;
-      const seen=Object.fromEntries(Object.entries(updates[state.scope]).filter(([,marker])=>marker.isNew).map(([id,marker])=>[id,marker.latestObserved]));
-      const opened=await openUpdates(state.scope);if(opened===false || version!==backgroundRevision)return;
-      try{await acknowledge(seen);}catch{report("新作查看状态暂未保存");}
+      try{await openUpdates(state.scope);}catch(problem){report(`新作暂未打开：${problem.message}`);}
     });
 
     peopleRoot.hidden=!p?.connected || !["following","followers"].includes(state.view);

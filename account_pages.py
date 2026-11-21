@@ -110,16 +110,22 @@ class VisitStore:
         with self.lock, closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             for author, stamp in dates.items():
+                row = connection.execute("SELECT seen,observed FROM author_seen WHERE owner=? AND author=?", (owner, author)).fetchone()
+                seed_existing = initial and row is not None and not row[0] and not connection.execute(
+                    "SELECT 1 FROM author_scopes WHERE owner=? AND author=? LIMIT 1", (owner, author)).fetchone()
                 if scope is not None:
                     connection.execute("INSERT OR IGNORE INTO author_scopes VALUES(?,?,?)", (owner,scope,author))
-                row = connection.execute("SELECT seen,observed FROM author_seen WHERE owner=? AND author=?", (owner, author)).fetchone()
                 if row is None:
                     connection.execute("INSERT INTO author_seen VALUES(?,?,?,?,?)", (owner, author, stamp if initial else "", stamp, time.time()))
                     markers[author] = not initial
                 else:
                     observed = max(stamp, row[1])
-                    connection.execute("UPDATE author_seen SET observed=?,touched=? WHERE owner=? AND author=?", (observed, time.time(), owner, author))
-                    markers[author] = observed > row[0]
+                    # Discovery can observe a work before the first scheduled check.
+                    # Seed only the timestamp that the initial check actually saw.
+                    seen = stamp if seed_existing else row[0]
+                    connection.execute("UPDATE author_seen SET seen=?,observed=?,touched=? WHERE owner=? AND author=?",
+                                       (seen, observed, time.time(), owner, author))
+                    markers[author] = observed > seen
         return markers
 
     def status(self, owner, scope=None):

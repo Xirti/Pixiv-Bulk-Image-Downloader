@@ -3854,7 +3854,7 @@ class Handler(SimpleHTTPRequestHandler):
                             dates[item["userId"]]=max(dates.get(item["userId"],""),stamp)
                     if dates and account is not None:
                         with CLOUD.publication(generation, *account, revision=clear_revision):
-                            ACCOUNTS.visits.observe(account[0], dates)
+                            ACCOUNTS.visits.observe(account[0], dates, initial=False)
                 _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
             return result
 
