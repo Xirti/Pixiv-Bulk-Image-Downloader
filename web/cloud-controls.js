@@ -28,10 +28,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     document.querySelectorAll("[data-cloud-kind][data-cloud-id]").forEach(button=>{
       const kind=button.dataset.cloudKind,id=button.dataset.cloudId,state=get(kind,id),pending=busy.has(key(kind,id));
       const self=kind==="follow" && id===owner;
-      const signature=JSON.stringify([kind,id,self,pending,logged,state.known,state.active,state.privacy]);
+      const signature=JSON.stringify([kind,id,self,pending,clearing,logged,state.known,state.active,state.privacy]);
       if(painted.get(button)===signature)return;
       button.hidden=self;
-      button.disabled=pending;
+      button.disabled=clearing || pending;
       button.classList.toggle("is-active",state.active===true);
       button.classList.toggle("is-unknown",logged && !state.known);
       button.classList.toggle("is-pending",pending);
@@ -136,7 +136,13 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     const revision=epoch,generation=session().generation,syncAtStart=syncVersion;
     const task=(async()=>{
       try{
-        const data=await request(`/api/cloud/state?${new URLSearchParams({works:works.join(","),authors:authors.join(",")})}`,{},30000);
+        const path=`/api/cloud/state?${new URLSearchParams({works:works.join(","),authors:authors.join(",")})}`;
+        let data;
+        try{data=await request(path,{},30000);}
+        catch(error){
+          if(error.errorKind!=="cache_cleared" || !sameEpoch(revision,generation))throw error;
+          data=await request(path,{},30000);
+        }
         if(!sameEpoch(revision,generation) || data.authorizationGeneration!==generation)return;
         owner=data.owner;if(syncAtStart===syncVersion)syncState=data.sync;
         for(const kind of ["bookmark","follow"])for(const [id,state] of Object.entries(data.states[kind])){
@@ -164,6 +170,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     return apply(kind,id,data.state);
   }
   async function mutate(kind,id,state,active,privacy,tags,version){
+    if(clearing)return;
     const revision=epoch,authorization=sessionEpoch,generation=session().generation,targetKey=key(kind,id);
     const labelTags=active && kind==="bookmark" && tags!==null?[...new Set(tags)].sort():null;
     const intentKey=JSON.stringify([generation,targetKey,active,active?privacy:null,labelTags]);
@@ -190,6 +197,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
         pendingWrites.delete(intentKey);
       }
       if(!sameEpoch(revision,generation))return;
+      if(error.errorKind==="cache_cleared")void hydrate(true);
       if(error.cloudState){
         const current=apply(kind,id,error.cloudState);changed(kind,id,current,state,null);
         if(error.errorKind==="conflict" && popup && version===popupVersion){
@@ -275,7 +283,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   }
   async function open(button,force){
     const {cloudKind:kind,cloudId:id}=button.dataset,targetKey=key(kind,id);
-    if(busy.has(targetKey))return;
+    if(clearing || busy.has(targetKey))return;
     if(!session().logged){login();report("请先登录 Pixiv，再进行云端操作");return;}
     close();
     if(force || !prefsLoaded || get(kind,id).active){editor(button,kind,id,get(kind,id));return;}
@@ -349,6 +357,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     clearing=true;clearJob=job;
     notifySettings();
     epoch++;close();manual.clear();restart.clear();busy.clear();hydration=null;hydrationAgain=null;
+    paint();
     if(updatesBusy)lastUpdateCheck=0;
     updatesBusy=false;auxiliaryBusy=false;
     try{
@@ -364,7 +373,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       cleared();paint();notifySettings();report("当前账号缓存已清除");
       completed=true;
     }finally{if(clearJob===job){
-      clearing=false;clearJob=null;notifySettings();
+      clearing=false;clearJob=null;notifySettings();paint();
       if(!completed && generation===session().generation)void hydrate(true);
     }}
   }

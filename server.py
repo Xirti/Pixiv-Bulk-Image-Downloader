@@ -27,7 +27,7 @@ import weakref
 import winreg
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -3360,27 +3360,28 @@ class Handler(SimpleHTTPRequestHandler):
         except PixivPolicyError:
             return str(WEB / "__not_found__")
 
-    def send_json(self, obj, code=200, *, before_send: Callable[[], None] | None = None):
+    def send_json(self, obj, code=200, *, before_send: Callable[[], None] | None = None, publication=None):
         if code == 502 and obj.get("errorKind") in {"upstream_rate_limit", "request_queue"}:
             code = 503
         raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         # Read ownership can change while the response is being encoded.
-        if before_send is not None:
-            before_send()
-        try:
-            if code == 502 and obj.get("errorKind") in {"verification_required", "authentication_required", "access_denied"}:
-                code = 403
-            self.send_response(code)
-            if obj.get("errorKind") == "upstream_rate_limit":
-                self.send_header("Retry-After", str(obj["retryAfterSeconds"]))
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
-            return
+        with publication() if publication is not None else nullcontext():
+            if before_send is not None:
+                before_send()
+            try:
+                if code == 502 and obj.get("errorKind") in {"verification_required", "authentication_required", "access_denied"}:
+                    code = 403
+                self.send_response(code)
+                if obj.get("errorKind") == "upstream_rate_limit":
+                    self.send_header("Retry-After", str(obj["retryAfterSeconds"]))
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                return
 
     def send_bytes(self, raw: bytes, content_type: str, cache_control: str) -> bool:
         try:
@@ -3682,23 +3683,30 @@ class Handler(SimpleHTTPRequestHandler):
             if not connected:
                 raise AccountError("reauth", "请先在我的账号登录")
             owner, method = CLOUD.context(generation)
-            with CLOUD.publication(generation, owner, method):
+            with CLOUD.publication(generation, owner, method) as clear_revision:
                 result = CLOUD_STATE.many(owner, method, works, authors)
                 status = CLOUD_STATE.sync_status(owner, method)
             assert_authorization_generation(generation)
             return self.send_json({"states": result, "sync": status,
-                "owner": owner, "method": method, "authorizationGeneration": generation})
+                "owner": owner, "method": method, "authorizationGeneration": generation},
+                publication=lambda: CLOUD.publication(generation, owner, method, revision=clear_revision))
         except (ValueError, sqlite3.Error, OSError, PixivPolicyError) as error:
             return self._cloud_error(error)
 
-    def _cloud_error(self, error):
+    def _cloud_error(self, error, *, publication=None):
         if isinstance(error, AccountError):
             payload = {"error": str(error), "errorKind": error.kind}
             if isinstance(error, CloudActionError):
                 payload.update(state=error.state, official=error.official)
-            return self.send_json(payload, 409 if error.kind in {
+            code = 409 if error.kind in {
                 "conflict", "revoked", "content_changed", "cache_cleared", "relation_busy", "settings_pending",
-            } else 502)
+            } else 502
+            if publication is not None and isinstance(error, CloudActionError):
+                try:
+                    return self.send_json(payload, code, publication=publication)
+                except (AccountError, sqlite3.Error, OSError) as stale:
+                    return self._cloud_error(stale)
+            return self.send_json(payload, code)
         if isinstance(error, ScanConflictError):
             return self.send_json({"error": str(error), "errorKind": "scan_conflict"}, 409)
         if isinstance(error, PixivPolicyError):
@@ -3744,6 +3752,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_cloud(self, data):
         action = urllib.parse.urlsplit(self.path).path.rsplit("/", 1)[-1]
+        publication = None
         try:
             if action == "settings":
                 changes = validate_preferences(data.get("settings"))
@@ -3761,10 +3770,14 @@ class Handler(SimpleHTTPRequestHandler):
                 CLOUD.clear_cache(generation, invalidate_displays)
                 return self.send_json({"ok": True, "authorizationGeneration": generation})
             ensure_network_opener_current()
+            owner, method = CLOUD.context(generation)
+            with CLOUD.publication(generation, owner, method) as clear_revision:
+                pass
+            publication = lambda: CLOUD.publication(generation, owner, method, revision=clear_revision)
             if action == "read":
                 kind, target = validate_target(data)
                 state = CLOUD.read(generation, kind, target)
-                return self.send_json({"state": state, "authorizationGeneration": generation})
+                return self.send_json({"state": state, "authorizationGeneration": generation}, publication=publication)
             if action == "write":
                 try:
                     intent = validate_intent(data)
@@ -3775,15 +3788,15 @@ class Handler(SimpleHTTPRequestHandler):
                     scope = workspace_scope()
                 result = CLOUD.mutate(generation, scope, intent)
                 assert_authorization_generation(generation)
-                return self.send_json({**result, "authorizationGeneration": generation})
+                return self.send_json({**result, "authorizationGeneration": generation}, publication=publication)
             kind = data.get("kind")
             if not isinstance(kind, str) or kind not in {"bookmark", "follow"} or type(data.get("force", False)) is not bool:
                 raise ValueError("同步参数无效")
             result = CLOUD.sync(generation, kind, data.get("force", False))
             assert_authorization_generation(generation)
-            return self.send_json({"sync": result, "authorizationGeneration": generation})
+            return self.send_json({"sync": result, "authorizationGeneration": generation}, publication=publication)
         except (ValueError, sqlite3.Error, OSError, PixivPolicyError) as error:
-            return self._cloud_error(error)
+            return self._cloud_error(error, publication=publication)
 
     def _post_official_context(self, data):
         author = data.get("author")
@@ -3800,7 +3813,7 @@ class Handler(SimpleHTTPRequestHandler):
         except (OSError, PixivPolicyError) as error:
             return self._cloud_error(error)
 
-    def _read_pixiv_response(self, query, action, read, *, priority=None, account_cache=False):
+    def _read_pixiv_response(self, query, action, read, *, priority=None, account_cache=False, cache_owned=False):
         """Own an authenticated read from registration through response publication."""
         try:
             request_id = query.get("requestId", [""])[0].strip()
@@ -3810,13 +3823,21 @@ class Handler(SimpleHTTPRequestHandler):
                     cache_only=query.get("cached", [""])[0] == "1" if account_cache else None) as lease:
                 generation, cancel_event = lease.generation, lease.cancel_event
                 ensure_network_opener_current()
+                reply_args = {}
+                args = (generation, cancel_event)
+                if cache_owned:
+                    account = CLOUD.context(generation)
+                    with CLOUD.publication(generation, *account) as clear_revision:
+                        pass
+                    args = (*args, account, clear_revision)
+                    reply_args["publication"] = lambda: CLOUD.publication(generation, *account, revision=clear_revision)
                 try:
-                    result = read(generation, cancel_event)
+                    result = read(*args)
                 except AccountError as error:
                     if not account_cache or error.kind != "cache_miss":
                         raise
                     result = {"cached": False, "authorizationGeneration": generation}
-                return self.send_json(result, before_send=lease.check)
+                return self.send_json(result, before_send=lease.check, **reply_args)
         except SearchRequestConflictError as error:
             return self.send_json({"error": str(error)}, 409)
         except (DiscoveryInputError, SearchInputError, SearchRequestLimitError) as error:
@@ -3824,6 +3845,8 @@ class Handler(SimpleHTTPRequestHandler):
         except SearchCancelledError:
             return self.send_json({"cancelled": True}, 499)
         except PIXIV_OPERATION_ERRORS as error:
+            if cache_owned and isinstance(error, AccountError) and error.kind == "cache_cleared":
+                return self.send_json(pixiv_error_payload(action + "读取", error), 409)
             return self.send_json(pixiv_error_payload(action + "读取", error), 502)
         except sqlite3.Error:
             return self.send_json({"error": f"{action}缓存读写失败，请检查本地资料目录"}, 500)
@@ -3836,29 +3859,25 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "发现分页无效"}, 400)
 
         kind = query.get("kind", ["recommended"])[0]
-        def read(generation, _cancel_event):
-            account = CLOUD.context(generation) if kind == "following" else None
-            if account is not None:
-                with CLOUD.publication(generation, *account) as clear_revision:
-                    pass
+        def read(generation, _cancel_event, account, clear_revision):
             result=DISCOVERY.read(generation=generation,kind=kind,account=account,
                 scope=query.get("scope",["all"])[0],mode=query.get("mode",["safe"])[0],rank=query.get("rank",["day"])[0],
                 offset=offset,batch=query.get("batch",[""])[0],
                 refresh=query.get("refresh",[""])[0]=="1",cached=query.get("cached",[""])[0]=="1")
             if "items" in result:
-                if result["kind"]=="following":
-                    dates={}
-                    for item in result["items"]:
-                        if item["sortDate"]:
-                            stamp=datetime.fromisoformat(item["sortDate"]).astimezone(timezone.utc).isoformat(timespec="seconds")
-                            dates[item["userId"]]=max(dates.get(item["userId"],""),stamp)
-                    if dates and account is not None:
-                        with CLOUD.publication(generation, *account, revision=clear_revision):
+                with CLOUD.publication(generation, *account, revision=clear_revision):
+                    if result["kind"]=="following":
+                        dates={}
+                        for item in result["items"]:
+                            if item["sortDate"]:
+                                stamp=datetime.fromisoformat(item["sortDate"]).astimezone(timezone.utc).isoformat(timespec="seconds")
+                                dates[item["userId"]]=max(dates.get(item["userId"],""),stamp)
+                        if dates:
                             ACCOUNTS.visits.observe(account[0], dates, initial=False)
-                _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
+                    _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
             return result
 
-        return self._read_pixiv_response(query, "发现", read)
+        return self._read_pixiv_response(query, "发现", read, cache_owned=True)
 
     def _get_popularity(self, request):
         query=urllib.parse.parse_qs(request.query)
@@ -3870,18 +3889,19 @@ class Handler(SimpleHTTPRequestHandler):
             page = int(query.get("page", ["1"])[0])
         except ValueError as error:
             return self.send_json({"error": str(error)}, 400)
-        def read(generation, cancel_event):
+        def read(generation, cancel_event, account, clear_revision):
             result=POPULARITY.read(generation=generation,kind=query.get("kind",[""])[0],
                 uid=query.get("uid",[""])[0],batch=query.get("batch",[""])[0],mode=query.get("mode",["safe"])[0],
                 work_type=query.get("workType",["all"])[0],include_ai=include_ai=="true",
                 start=query.get("startDate",[""])[0],end=query.get("endDate",[""])[0],
                 index=query.get("index",[""])[0],page=page,
                 refresh=query.get("refresh",[""])[0]=="1",query=query.get("query",[""])[0],
-                fuzzy=fuzzy=="true",cancel_event=cancel_event)
-            _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
+                fuzzy=fuzzy=="true",cancel_event=cancel_event,account=account)
+            with CLOUD.publication(generation, *account, revision=clear_revision):
+                _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
             return result
 
-        return self._read_pixiv_response(query, "排序元数据", read, priority=1)
+        return self._read_pixiv_response(query, "排序元数据", read, priority=1, cache_owned=True)
 
     def _get_account(self, request):
         kind = request.path.removeprefix("/api/account/")

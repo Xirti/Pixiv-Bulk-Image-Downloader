@@ -168,7 +168,7 @@ class PopularityService:
         job["collected"] = job["webOffset"] >= len(job["webIds"])
 
     def read(self, *, generation, kind, uid="", batch="", mode="safe", work_type="all", include_ai=True,
-             start="", end="", index="", page=1, refresh=False, query="", fuzzy=False, cancel_event=None):
+             start="", end="", index="", page=1, refresh=False, query="", fuzzy=False, cancel_event=None, account=None):
         if kind not in {"author", "ranking", "recommended", "search"} or mode not in CONTENT_MODES:
             raise SearchInputError("排序来源无效")
         if work_type not in {"all", "illustration", "manga", "ugoira"} or type(include_ai) is not bool:
@@ -185,7 +185,7 @@ class PopularityService:
         if index and not re.fullmatch(r"[a-f0-9]{32}", index):
             raise SearchInputError("排序快照无效")
         parse_search_date_range(start, end)
-        owner, method = self.context(generation)
+        owner, method = self.context(generation) if account is None else account
         descriptor = [kind, uid, batch, mode, work_type, include_ai, start, end]
         if kind == "search":
             descriptor.extend([query, fuzzy])

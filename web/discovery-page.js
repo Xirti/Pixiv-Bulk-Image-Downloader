@@ -160,6 +160,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       }});
     }catch(problem){
       if(version!==revision || signal.aborted)return;
+      if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
       error=problem.message || '发现读取失败，请右键刷新重试';
       state.waiting=true;
     }finally{if(version===revision && !signal.aborted){pending=false;render();prepareNext();}}
@@ -232,7 +233,11 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       savePage(normal,seed);positions.set(key,{state:normal,data:seed,scroll:root.scrollTop});
       state={...normal,order:'popular',choice:'popular',edition:seed.edition};pending=false;
       await loadPopularity(1);
-    }catch(problem){if(version===revision && !signal.aborted){error=problem.message || '元数据准备失败，请重试';state.waiting=true;}}
+    }catch(problem){
+      if(version!==revision || signal.aborted)return;
+      if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
+      error=problem.message || '元数据准备失败，请重试';state.waiting=true;
+    }
     finally{if(version===revision && !signal.aborted){pending=false;render();}}
   }
   function stopBackground(){
@@ -363,8 +368,9 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
         offset:state.offset,nextOffset:page<result.pages?page*36:null};
       savePage(state,data);restoreTop=root.scrollTop;remember();
     }catch(problem){if(version===revision && !signal.aborted){
+      if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
       error=`${problem.message} · 可重新开启排序重试`;
-      const expired=['cache_miss','cache_cleared','source_changed','ranking_changed'].includes(problem.errorKind);
+      const expired=['cache_miss','source_changed','ranking_changed'].includes(problem.errorKind);
       if(expired){popularViews.delete(sourceKey(state));state.popularityIndex='';}
       if(data && data.popularityIndex!==state.popularityIndex){
         const key=sourceKey(state),normal=positions.get(key);
@@ -419,9 +425,15 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(active)render();
     if(loaded)void prepare({network:true});
   }
-  function clear(){
+  function retireClearedView(destination,message){
+    clear(false);
+    state={...destination,offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:'',waiting:true};
+    error=message;
+    render();
+  }
+  function clear(redraw=true){
     controller?.abort();revision++;void stopBackground();reads.clear();interaction.clear();previews.clear();cache.clear();positions.clear();staged.clear();latest.clear();attempts.clear();sourceVersions.clear();followingDirty.clear();
-    popularViews.clear();startedSources.clear();pausedSources.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active)render();
+    popularViews.clear();startedSources.clear();pausedSources.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active && redraw)render();
   }
   root.querySelectorAll('[data-discovery-tab]').forEach(button=>button.onclick=()=>void open({kind:button.dataset.discoveryTab}));
   root.querySelector('[data-discovery-scope]').onchange=e=>void open({scope:e.target.value});
