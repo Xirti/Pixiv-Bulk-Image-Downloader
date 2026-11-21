@@ -250,14 +250,22 @@ class CloudState:
         with self.lock, closing(self._connect()) as db:
             return [row[0] for row in db.execute("SELECT token FROM page_repairs WHERE owner=? AND method=?", (owner, method))]
 
-    def finish_page_repairs(self, owner, method, tokens, *, abandon_scan=False):
+    def finish_page_repairs(self, owner, method, tokens):
         with self._write() as db:
             db.executemany("DELETE FROM page_repairs WHERE owner=? AND method=? AND token=?",
                 [(owner, method, token) for token in tokens])
-            if abandon_scan:
-                db.execute("UPDATE scans SET payload=json_set(payload,'$.running',json('false'))"
-                           " WHERE owner=? AND method=? AND json_extract(payload,'$.running')",
-                           (owner, method))
+
+    def recover_page_repairs(self, owner, method, tokens, kinds, *, legacy=False):
+        with self._write() as db:
+            for kind in kinds:
+                row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?",
+                                 (owner, method, kind)).fetchone()
+                if row:
+                    old = json.loads(row[0])
+                    self._begin_scan(db, owner, method, kind, 0 if legacy else old["completed"],
+                                     old.get("displayRevision"))
+            db.executemany("DELETE FROM page_repairs WHERE owner=? AND method=? AND token=?",
+                           ((owner, method, token) for token in tokens))
 
     def remember_active(self, owner, method, kind, targets, privacy):
         with self._write() as db:
@@ -317,19 +325,32 @@ class CloudState:
         with self._write() as db:
             row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", (owner, method, kind)).fetchone()
             old = json.loads(row[0]) if row else {}
-            # Persist page coverage with the cursor so another window can resume the sweep.
-            state = {"id": uuid.uuid4().hex, "scope": "public", "cursor": "", "offset":0, "positions":{}, "finished":[], "running": True, "completed": old.get("completed", 0),
-                     "pageOffsets": {}, "visitedPaths": {}, "displayRevision": display_revision, "started": time.time(),
-                     "version": db.execute("SELECT COALESCE(MAX(version),0) FROM relations").fetchone()[0]}
-            db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
-            db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(state)))
-            return state
+            return self._begin_scan(db, owner, method, kind, old.get("completed", 0), display_revision)
+
+    @staticmethod
+    def _begin_scan(db, owner, method, kind, completed, display_revision):
+        state = {"id": uuid.uuid4().hex, "scope": "public", "cursor": "", "offset":0, "positions":{}, "finished":[],
+                 "running": True, "completed": completed, "pageOffsets": {}, "visitedPaths": {},
+                 "displayRevision": display_revision, "started": time.time(),
+                 "version": db.execute("SELECT COALESCE(MAX(version),0) FROM relations").fetchone()[0]}
+        db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
+        db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(state)))
+        return state
+
+    @staticmethod
+    def _complete_scan(db, owner, method, kind, scan):
+        scan.update(running=False, completed=time.time(), cursor="")
+        db.execute("UPDATE relations SET active=0,privacy=NULL,tags='[]',bookmark_id=NULL,touched=? "
+                   "WHERE owner=? AND method=? AND kind=? AND version<=? AND target NOT IN "
+                   "(SELECT target FROM scan_seen WHERE owner=? AND method=? AND kind=?)",
+                   (scan["completed"], owner, method, kind, scan["version"], owner, method, kind))
+        db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
 
     def scan_page(self, owner, method, kind, scan, items, next_cursor, *, repair_id=None):
         with self._write() as db:
             row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", (owner, method, kind)).fetchone()
             current = json.loads(row[0]) if row else None
-            if (current is None or not current["running"] or current.get("id") != scan["id"]
+            if (current is None or not current["running"] or current.get("id") != scan["id"] or current.get("pendingPage")
                     or any(current[key] != scan[key] for key in ("scope", "cursor", "offset"))):
                 raise ScanConflictError("同步批次已更新，请重新同步")
             for target, state in items:
@@ -359,14 +380,23 @@ class CloudState:
                 other="private" if scan["scope"]=="public" else "public"
                 next_scope=other if other not in finished else scan["scope"]
                 updated.update(scope=next_scope,**positions.get(next_scope,{"cursor":"","offset":0}))
-            else:
-                updated.update(running=False, completed=time.time(), cursor="")
-                db.execute("UPDATE relations SET active=0,privacy=NULL,tags='[]',bookmark_id=NULL,touched=? "
-                           "WHERE owner=? AND method=? AND kind=? AND version<=? AND target NOT IN "
-                           "(SELECT target FROM scan_seen WHERE owner=? AND method=? AND kind=?)",
-                           (updated["completed"], owner, method, kind, scan["version"], owner, method, kind))
-                db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
-            db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(updated)))
+            elif repair_id is None:
+                self._complete_scan(db, owner, method, kind, updated)
             if repair_id is not None:
+                updated["pendingPage"] = repair_id
                 db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, method, repair_id))
+            db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(updated)))
             return updated
+
+    def publish_scan_page(self, owner, method, kind, repair_id):
+        with self._write() as db:
+            key = owner, method, kind
+            row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", key).fetchone()
+            state = json.loads(row[0]) if row else {}
+            if state.pop("pendingPage", None) != repair_id:
+                raise ScanConflictError("同步页已更新，请重新同步")
+            if len(state["finished"]) == 2:
+                self._complete_scan(db, *key, state)
+            db.execute("UPDATE scans SET payload=? WHERE owner=? AND method=? AND kind=?", (json.dumps(state), *key))
+            db.execute("DELETE FROM page_repairs WHERE owner=? AND method=? AND token=?", (owner, method, repair_id))
+            return state

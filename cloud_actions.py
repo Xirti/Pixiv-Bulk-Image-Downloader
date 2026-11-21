@@ -234,7 +234,7 @@ class CloudActions:
 
     def _record(self, owner, method, kind, target, previous, state, *, before_pages=None):
         """Use one publication path for verified state and display-cache repairs."""
-        repair_id = uuid.uuid4().hex
+        repair_id = f"{kind}:{uuid.uuid4().hex}"
         current = self.store.put(owner, method, kind, target, state, repair_id=repair_id)
         repair = not previous["known"] or relationship_stamp(previous)==current["stamp"]
         self.pages.note_relation(owner, method, kind, target, current if not previous["known"] else previous, current,
@@ -251,8 +251,13 @@ class CloudActions:
                 self.store.clear_account(owner)
             pending = self.store.pending_page_repairs(owner, method)
             if pending:
-                self.pages.discard_relation_pages(owner, method, generation)
-                self.store.finish_page_repairs(owner, method, pending, abandon_scan=True)
+                kinds = {token.partition(":")[0] for token in pending}
+                known = {"follow", "bookmark"}
+                legacy = not kinds <= known
+                if legacy:
+                    kinds = known
+                self.pages.discard_relation_pages(owner, method, generation, kinds)
+                self.store.recover_page_repairs(owner, method, pending, kinds, legacy=legacy)
             current_revision = self.pages.saved_cache.clear_revision(owner)
             if revision is not None and revision != current_revision:
                 raise AccountError("cache_cleared", "账号缓存已清理，请重新打开页面")
@@ -434,14 +439,14 @@ class CloudActions:
             with self.publication(generation, owner, method, revision=revision):
                 if display_revision != self.pages.saved_cache.display_revision(owner, method):
                     raise AccountError("cache_cleared", "浏览设置已更新，请重新同步")
-                repair_id = uuid.uuid4().hex
+                repair_id = f"{kind}:{uuid.uuid4().hex}"
                 result = self.store.scan_page(owner, method, kind, scan, entries, cursor, repair_id=repair_id)
                 self.pages.cache_scan_page(owner, method, kind, scope, offset, rows, cursor, total, generation,
                     revision=display_revision)
-                if not result["running"]:
+                if len(result["finished"]) == 2:
                     self.pages.finish_scan(owner, method, kind, result["pageOffsets"], generation)
                 # A local write made during this sweep wins over older list responses.
                 for target, state in self.store.newer_relations(owner, method, kind, scan["version"]):
                     self.pages.note_relation(owner, method, kind, target, state, state, repair=True)
-                self.store.finish_page_repairs(owner, method, [repair_id])
+                result = self.store.publish_scan_page(owner, method, kind, repair_id)
             return {**result, "page":{"kind":kind, "scope":scope, "offset":offset}}

@@ -857,12 +857,17 @@ class AccountCache:
                 ((owner, method, encoded) for encoded, _ in removed))
             self._advance_page_epochs(db, owner, method, (view,))
 
-    def discard_relations(self, owner, method, views):
+    def discard_relations(self, owner, method, views, paths):
         with self.lock, closing(self._connect()) as db, db:
-            db.execute("DELETE FROM cursor_visits WHERE owner=? AND method=?",(owner,method))
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany("DELETE FROM cursor_visits WHERE owner=? AND method=? AND substr(path,1,?)=?",
+                           ((owner, method, len(path) + 1, path + "?") for path in paths))
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND (key LIKE ? OR "
-                "key LIKE ? OR (key LIKE ? AND json_extract(key,'$[1]') IN (" + ','.join('?' for _ in views) + ')))',
-                (owner, method, '["cursor",%', '["cursor-state",%', '["data",%', *views))
+                "key LIKE ?) AND json_extract(key,'$[1]') IN (" + ",".join("?" for _ in views) + ")",
+                (owner, method, '["data",%', '["web-relation-rebase",%', *views))
+            db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND (key LIKE ? OR key LIKE ?) AND "
+                           "json_extract(key,'$[1]')=?",
+                           ((owner, method, '["cursor",%', '["cursor-state",%', path) for path in paths))
             self._advance_page_epochs(db, owner, method, sorted(views))
 
 
@@ -871,6 +876,7 @@ class AccountPages:
         "bookmark": ("bookmarks", "profile", "profile-web", "tags", "works"),
         "follow": ("following", "followers", "profile", "profile-web"),
     }
+    _RELATION_PATHS = {"bookmark": "/v1/user/bookmarks/illust", "follow": "/v1/user/following"}
     def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web",
                  commit_guard=None, stopped=lambda:False, credential_publication=nullcontext,
                  login_publication=nullcontext, confirm_web_owner=None):
@@ -1081,7 +1087,7 @@ class AccountPages:
             pages.append((key, page))
         stored = [(["data", *key[1:]], page) for key, page in pages]
         if method == "app" and next_cursor is not None:
-            path = "/v1/user/bookmarks/illust" if kind == "bookmark" else "/v1/user/following"
+            path = self._RELATION_PATHS[kind]
             params = {"user_id":owner, "restrict":scope, "filter":"for_android"}
             stored.append((["cursor",path,sorted(params.items()),next_offset],next_cursor))
             cursor_scan = uuid.uuid4().hex
@@ -1089,12 +1095,12 @@ class AccountPages:
         with self.publication(generation), self._lock:
             self.saved_cache.save_many(owner, method, stored, revision=revision)
 
-    def discard_relation_pages(self, owner, method, generation):
+    def discard_relation_pages(self, owner, method, generation, kinds):
         """Recover derived pages after an interrupted cross-database publication."""
-        views = {"bookmarks", "following", "followers", "profile", "profile-web", "tags", "works"}
+        views = sorted({view for kind in kinds for view in self._RELATION_VIEWS[kind]})
+        paths = sorted(self._RELATION_PATHS[kind] for kind in kinds) if method == "app" else ()
         with self.publication(generation), self._lock:
-            self.saved_cache.discard_relations(owner, method, views)
-            self._cache_revision += 1
+            self.saved_cache.discard_relations(owner, method, views, paths)
 
     @staticmethod
     def relation_page(method, kind, rows, *, offset, next_offset, total=None, mode="safe"):
@@ -1122,7 +1128,7 @@ class AccountPages:
 
     def finish_scan(self, owner, method, kind, offsets, generation):
         view="bookmarks" if kind=="bookmark" else "following"
-        path="/v1/user/bookmarks/illust" if kind=="bookmark" else "/v1/user/following"
+        path = self._RELATION_PATHS[kind]
         retained = {scope: set(values) for scope, values in offsets.items()}
         with self.publication(generation), self._lock:
             self.saved_cache.finish_relation_scan(owner, method, view, path, retained)
