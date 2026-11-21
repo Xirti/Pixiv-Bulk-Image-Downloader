@@ -326,6 +326,27 @@ class WorkspaceStore:
             connection.execute("INSERT OR REPLACE INTO basket VALUES (1,?,?)", (revision + 1, json.dumps(normalized, ensure_ascii=False)))
         return revision + 1
 
+    @contextmanager
+    def pending_download_ids(self):
+        """Hold a stable view of unconfirmed batch IDs across all accounts."""
+        with self._lock:
+            if not self.path.exists():
+                yield []
+                return
+            with self._connection() as connection:
+                # Queue edits wait until receipt pruning has committed.
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute("""
+                    SELECT json_extract(chunk.payload, '$.requestId')
+                    FROM tasks AS task JOIN task_chunks AS chunk ON chunk.task_id = task.id
+                    WHERE chunk.ordinal >= json_extract(task.payload, '$._cursor')
+                    UNION
+                    SELECT json_extract(chunk.value, '$.requestId')
+                    FROM tasks AS task, json_each(task.payload, '$.remainingChunks') AS chunk
+                    WHERE json_type(task.payload, '$._cursor') IS NULL
+                """)
+                yield [row[0] for row in rows]
+
     def save_task(self, value: dict, scope: str, *, expected: dict | None = None,
                   require_existing: bool = False) -> dict:
         task = normalize_task(value)

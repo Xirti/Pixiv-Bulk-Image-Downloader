@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -16,9 +17,11 @@ from local_catalog import artifact_file_state
 from download_execution import (
     cancel_download_execution, download_execution, download_execution_active, download_migration_guard,
 )
+from workspace_store import WorkspaceStore
 
 
 Response = tuple[dict, int]
+RECEIPT_LIMIT = 2000
 
 
 def _fingerprint(route: str, scope: str, body: dict) -> str:
@@ -66,6 +69,7 @@ class DownloadRequests:
         self, *, max_entries: int = 64, ttl_seconds: float = 1800,
         clock: Callable[[], float] = time.monotonic,
         path: Path | None = None,
+        workspace: WorkspaceStore | None = None,
     ) -> None:
         if max_entries < 1 or ttl_seconds <= 0:
             raise ValueError("invalid download recovery limits")
@@ -75,6 +79,7 @@ class DownloadRequests:
         self._entries: OrderedDict[str, _Request] = OrderedDict()
         self._lock = threading.Lock()
         self._path = Path(path) if path is not None else None
+        self._workspace = workspace
 
     def _journal_connection(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,9 +160,27 @@ class DownloadRequests:
             with connection:
                 connection.execute("INSERT OR REPLACE INTO completed VALUES (?,?,?,?)",
                                    (request_id, fingerprint, json.dumps(result[0], ensure_ascii=False), json.dumps(files, ensure_ascii=False)))
-                connection.execute("DELETE FROM completed WHERE rowid NOT IN (SELECT rowid FROM completed ORDER BY rowid DESC LIMIT 2000)")
+            self._prune_receipts(connection)
         finally:
             connection.close()
+
+    def _prune_receipts(self, connection: sqlite3.Connection) -> None:
+        try:
+            if connection.execute("SELECT 1 FROM completed LIMIT 1 OFFSET ?", (RECEIPT_LIMIT,)).fetchone() is None:
+                return
+            pending = self._workspace.pending_download_ids() if self._workspace is not None else nullcontext([])
+            with pending as request_ids, connection:
+                connection.execute("""
+                    DELETE FROM completed WHERE rowid IN (
+                        SELECT rowid FROM completed
+                        WHERE id NOT IN (SELECT value FROM json_each(?))
+                        ORDER BY rowid DESC LIMIT -1 OFFSET ?
+                    )
+                """, (json.dumps(request_ids), RECEIPT_LIMIT))
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            # The new receipt is already committed. Retry maintenance on a
+            # later success, after the queue can be read safely.
+            logging.getLogger("moku.http").warning("Download receipt pruning deferred: %s", exc)
 
     def probe(
         self, request_id: object, route: str, body: dict, *, scope: str,

@@ -131,10 +131,10 @@ FOLDER_PICKER_LOCK = threading.Lock()
 # Single-artwork and batch requests share this process-wide limiter. The HTTP
 # server may create many request threads, but only a small bounded number may
 # consume Pixiv bandwidth and local staging/publish resources at once.
-DOWNLOAD_REQUESTS = DownloadRequests(path=history_path().with_name("requests.sqlite3"))
+WORKSPACE_STORE = WorkspaceStore(history_path().with_name("workspace.sqlite3"))
+DOWNLOAD_REQUESTS = DownloadRequests(path=history_path().with_name("requests.sqlite3"), workspace=WORKSPACE_STORE)
 DOWNLOAD_HISTORY = DownloadHistory(history_path())
 LOCAL_CATALOG = LocalCatalog(history_path().with_name("catalog.sqlite3"))
-WORKSPACE_STORE = WorkspaceStore(history_path().with_name("workspace.sqlite3"))
 GUIDE_SEEN_MARKER = history_path().with_name("guide-v1.seen")
 REQUEST_COORDINATOR = RequestCoordinator(history_path().with_name("request-settings.json"), shared=SharedRequestBudget())
 SOURCE_SEARCH = SourceSearch(history_path().with_name("source-search"), proxy=lambda: PIXIV_PROXY)
