@@ -55,6 +55,7 @@ let activeDownload = null;
 let lastKnownLoggedIn = null;
 let lastKnownAuthorizationGeneration = null;
 let lastKnownBrowsingGeneration = null;
+let lastKnownBrowsingPolicyStatus = "ready";
 let downloadAuthorizationRevision = 0;
 let authStatusGeneration = 0;
 let appConnection = null;
@@ -4018,13 +4019,16 @@ async function syncAuthStatus() {
     lastKnownLoggedIn = logged;
     lastKnownAuthorizationGeneration = accountGeneration;
     lastKnownBrowsingGeneration = browsingGeneration;
+    lastKnownBrowsingPolicyStatus = data.browsingPolicyStatus || "ready";
     $("#mode").textContent = data.authMethod==="app"?(logged?"PIXIV · APP":"PIXIV · 待授权"):(logged?"PIXIV · WEB":"PIXIV PUBLIC");
     loginMethod=data.authMethod || "app";
     if(authorizationLost || accountChanged)settingsView.reset();
     pixivDisplayView.setSession();
     cloudControls.setSession();
     syncAppConnection(appConnection);
-    $("#safety").querySelectorAll('option[value="r18"],option[value="r18g"],option[value="all"]').forEach((option) => { option.disabled = !logged; });
+    $("#safety").querySelectorAll('option[value="r18"],option[value="r18g"],option[value="all"]').forEach((option) => {
+      option.disabled = !logged || data.r18Available === false;
+    });
     if (authorizationLost) handleAuthorizationLoss();
     else if (accountChanged) handleAuthorizationLoss("Pixiv 账户状态已变更");
     else if (browsingChanged) invalidateBrowsingViews();
@@ -4217,6 +4221,13 @@ function syncAppConnection(value) {
   $("#rememberLoginRow").hidden=app;
   $("#authStateTitle").textContent=waiting?"等待 Pixiv 授权":lastKnownLoggedIn?"已登录 · "+(app?"App 授权":"网页登录"):"尚未登录";
   $("#authStateText").textContent=app && value?.authorization?.error || (waiting?"请在系统浏览器完成本次授权。":lastKnownLoggedIn?"当前方式已连接，可以继续浏览。":app?"在系统浏览器完成一次 App 授权即可使用。":"在应用内的 Pixiv 官方窗口完成登录。");
+  if (!app && lastKnownLoggedIn) {
+    if (lastKnownBrowsingPolicyStatus === "unavailable") {
+      $("#authStateText").textContent = "浏览设置暂时无法读取，刷新后可重试。";
+    } else if (lastKnownBrowsingPolicyStatus === "pending") {
+      $("#authStateText").textContent = "浏览设置正在核对，请稍后刷新。";
+    }
+  }
   $("#authAction").textContent=appConnectionBusy?"正在打开授权网页…":authActionBusy?"正在处理…":waiting?"重新打开授权网页":lastKnownLoggedIn?(app?"重新授权":"重新登录"):"登录 Pixiv";
   $("#authAction").disabled=authActionBusy || appConnectionBusy;
   $("#authDisconnect").hidden=!lastKnownLoggedIn;

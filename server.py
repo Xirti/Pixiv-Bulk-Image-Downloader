@@ -736,22 +736,30 @@ def mark_authorized_session() -> None:
         AUTHORIZATION_ACTIVE = True
 
 
+def _local_session() -> tuple[bool, str]:
+    """Observe credentials while the caller holds SEARCH_SESSION_LOCKS_GUARD."""
+    if BACKEND_STOP.is_set():
+        return False, AUTH_METHOD.get()
+    _observe_shared_authorization()
+    method = AUTH_METHOD.get()
+    if method == "app":
+        app = ACCOUNTS.account().snapshot()
+        present = app["connected"] and not app["needsAuthorization"]
+    else:
+        present = bool(web_session_cookie_header())
+    if not present:
+        clear_authorized_state(force=False)
+    return present, method
+
+
 def validated_authorization(force: bool = False) -> tuple[bool, int | None]:
     """Atomically validate the local session and capture its revocation epoch."""
     global AUTHORIZATION_ACTIVE
-    # Credential observation and epoch capture must be indivisible. Logout
-    # removes the credential before taking this guard, then revokes the epoch
-    # under it, so it cannot be inserted between these two values.
     with SEARCH_SESSION_LOCKS_GUARD:
-        if BACKEND_STOP.is_set():
-            return False, None
-        _observe_shared_authorization()
-        app = ACCOUNTS.account().snapshot() if AUTH_METHOD.get()=="app" else None
-        present = app["connected"] and not app["needsAuthorization"] if app is not None else bool(session_cookie_header())
+        present, method = _local_session()
         if not present:
-            clear_authorized_state(force=False)
             return False, None
-        if app is None:
+        if method == "web":
             _observe_web_policy()
         AUTHORIZATION_ACTIVE = True
         return True, AUTHORIZATION_GENERATION
@@ -771,15 +779,28 @@ READ_SCOPES = ReadScopes(
 
 
 def auth_status_snapshot() -> dict:
+    global AUTHORIZATION_ACTIVE
     with SEARCH_SESSION_LOCKS_GUARD:
-        session_present, _epoch = validated_authorization()
+        session_present, method = _local_session()
+        policy_status = "ready"
+        if session_present and method == "web":
+            try:
+                if _observe_web_policy():
+                    policy_status = "pending"
+            except AccountError as error:
+                if error.kind != "settings_unavailable":
+                    raise
+                policy_status = "unavailable"
+        if session_present and policy_status != "unavailable":
+            AUTHORIZATION_ACTIVE = True
         return {
             "loggedIn": session_present,
             "sessionPresent": session_present,
             "authState": "authorized" if session_present else "unauthenticated",
             "authorizationGeneration": AUTHORIZATION_GENERATION,
-            "authMethod": AUTH_METHOD.get(),
+            "authMethod": method,
             "browsingGeneration": BROWSING_GENERATION,
+            "browsingPolicyStatus": policy_status,
         }
 
 
@@ -3400,7 +3421,7 @@ class Handler(SimpleHTTPRequestHandler):
                 **auth,
                 "mode": "pixiv-authorized" if logged_in else "pixiv-public",
                 "authAvailable": True,
-                "r18Available": logged_in,
+                "r18Available": logged_in and auth["browsingPolicyStatus"] == "ready",
                 "message": "Pixiv 本机授权会话" if logged_in else "Pixiv 公开全年龄模式",
                 "network": public_network_state(windows_proxy_state()),
                 "requestPolicy": {**policy, "browserProfile": getattr(PIXIV_OPENER, "profile", "compatibility")},
