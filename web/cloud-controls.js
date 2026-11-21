@@ -4,7 +4,7 @@
 globalThis.createCloudControls = function ({request,session,login,report,changed,preferencesChanged,official,cachedTags=()=>null,captureAccountCounts=()=>null,cleared=()=>{},prepareAccount=()=>Promise.resolve(),clearStarted=()=>Promise.resolve(),checkUpdates=()=>Promise.resolve({})}) {
   const defaults={bookmarkDefault:"ask",followDefault:"ask",bookmarkLast:"private",followLast:"private",autoSync:true,syncMinutes:"10",autoRanking:true,autoFollowing:true,autoRecommended:true,saveRoot:"",createFolder:true,mediaMemory:"normal",previewLayout:"adaptive",previewAction:"expand",previewSize:"large",sensitiveMask:"both",autoLoadPages:false,orderTags:"default",orderAuthor:"default",orderUid:"default",orderPid:"default",orderRecommended:"default",orderRanking:"default",showLoadButton:true,updateDots:true};
   let prefs={...defaults},states={bookmark:new Map(),follow:new Map()},syncState={},owner=null;
-  let epoch=0,sessionKey="",settingsPromise=null,prefsLoaded=false,hydration=null,hydrationAgain=null,hydratedKey="",timer=null,syncError="";
+  let epoch=0,sessionKey="",settingsPromise=null,prefsLoaded=false,hydration=null,hydrationAgain=null,hydratingKey="",timer=null,syncError="";
   let popup=null,anchor=null,popupVersion=0,syncBusy=false,lastSyncAttempt=0,syncTurn=0;
   let autoNotBefore=0,syncRequest=null,syncJob=null,syncVersion=0;
   let clearing=false,clearJob=null,accountPrepared=false,auxiliaryBusy=false,auxiliaryCompleted=0,auxiliaryError="";
@@ -80,16 +80,17 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     if(data.settingsRevision<settingsRevision)return;
     prefs=data.settings;settingsRevision=data.settingsRevision;prefsLoaded=true;
   }
-  async function loadPreferences(){
+  async function loadPreferences(requireFresh=false){
     const revision=sessionEpoch,generation=session().generation;
     let data;
     try{data=await request("/api/settings",{},20000);}
     catch(error){
-      if(!sameSession(revision,generation) || prefsLoaded)return;
+      if(!sameSession(revision,generation) || !requireFresh && prefsLoaded)return false;
       throw error;
     }
-    if(!sameSession(revision,generation) || data.authorizationGeneration!==generation)return;
+    if(!sameSession(revision,generation) || data.authorizationGeneration!==generation)return false;
     adoptPreferences(data);notifySettings();
+    return true;
   }
   function ready(){
     if(prefsLoaded)return Promise.resolve();
@@ -125,23 +126,26 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   }
   async function hydrate(force=false){
     if(clearing || !session().logged)return;
-    if(hydration){hydrationAgain={force:force || hydrationAgain?.force || false};return hydration;}
     const {works,authors}=visibleTargets();
     const queryKey=JSON.stringify([works,authors]);
-    if(!force && queryKey===hydratedKey)return;
+    if(hydration){
+      if(force || queryKey!==hydratingKey)hydrationAgain={force:force || hydrationAgain?.force || false};
+      return hydration;
+    }
+    hydratingKey=queryKey;
     const revision=epoch,generation=session().generation,syncAtStart=syncVersion;
     const task=(async()=>{
       try{
         const data=await request(`/api/cloud/state?${new URLSearchParams({works:works.join(","),authors:authors.join(",")})}`,{},30000);
         if(!sameEpoch(revision,generation) || data.authorizationGeneration!==generation)return;
-        hydratedKey=queryKey;owner=data.owner;if(syncAtStart===syncVersion)syncState=data.sync;
+        owner=data.owner;if(syncAtStart===syncVersion)syncState=data.sync;
         for(const kind of ["bookmark","follow"])for(const [id,state] of Object.entries(data.states[kind])){
           rememberState(kind,id,state);
         }
         paint();notifySettings();
         return true;
       }catch(error){
-        if(revision===epoch){hydratedKey="";syncError=error.message;lastSyncAttempt=Date.now();notifySettings();}
+        if(revision===epoch){syncError=error.message;lastSyncAttempt=Date.now();notifySettings();}
         return false;
       }
     })().finally(()=>{
@@ -269,15 +273,30 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
         position();
     }
   }
-  function open(button,force){
+  async function open(button,force){
     const {cloudKind:kind,cloudId:id}=button.dataset,targetKey=key(kind,id);
     if(busy.has(targetKey))return;
     if(!session().logged){login();report("请先登录 Pixiv，再进行云端操作");return;}
     close();
-    const state=get(kind,id);
-    if(!force && !state.active && prefsLoaded && prefs[kind+"Default"]!=="ask"){
-      void mutate(kind,id,state,true,prefs[kind+"Default"],[],popupVersion);
-    }else editor(button,kind,id,state);
+    if(force || !prefsLoaded || get(kind,id).active){editor(button,kind,id,get(kind,id));return;}
+    const version=popupVersion,revision=epoch,generation=session().generation;
+    const current=()=>sameEpoch(revision,generation) && popupVersion===version;
+    const unresolved=[...pendingWrites.values()].find(intent=>intent.kind===kind && intent.id===id &&
+      intent.active && intent.tags?.length===0);
+    if(unresolved){
+      void mutate(kind,id,get(kind,id),true,unresolved.privacy,unresolved.tags,version);
+      return;
+    }
+    try{
+      if(!await loadPreferences(true))return;
+    }catch(error){
+      if(current())report(`默认范围读取失败：${error.message}`);
+      return;
+    }
+    if(!current())return;
+    const state=get(kind,id),privacy=prefs[kind+"Default"];
+    if(!state.active && prefsLoaded && privacy!=="ask")void mutate(kind,id,state,true,privacy,[],version);
+    else editor(button,kind,id,state);
   }
 
   async function tick(){
@@ -338,7 +357,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       if(generation!==session().generation)throw new Error("账号已改变，请重新操作");
       await post("/api/cloud/clear-cache",{},30000);
       if(generation!==session().generation)throw new Error("账号已改变，请重新操作");
-      states={bookmark:new Map(),follow:new Map()};syncState={};hydratedKey="";syncError="";auxiliaryError="";scanFailures.clear();
+      states={bookmark:new Map(),follow:new Map()};syncState={};syncError="";auxiliaryError="";scanFailures.clear();
       lastUpdateCheck=0;updatesRemaining=false;
       auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;
       autoNotBefore=Date.now()+Number(prefs.syncMinutes)*60000;
@@ -353,7 +372,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     if(clearing || manual.size || syncBusy)return;
     if(!session().logged){login();report("请先登录 Pixiv，再同步云端状态");return;}
     for(const kind of ["bookmark","follow"]){manual.add(kind);if(!scanFailures.has(kind))restart.add(kind);}
-    hydratedKey="";lastSyncAttempt=0;syncError="";notifySettings();
+    lastSyncAttempt=0;syncError="";notifySettings();
     if(initialSyncReady)void hydrate(true);
     void tick();
     void prepareAccountData({network:true,refresh:true});
@@ -367,7 +386,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     updatesBusy=false;lastUpdateCheck=0;updatesRemaining=false;
     void clearStarted();
     auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;auxiliaryError="";
-    states={bookmark:new Map(),follow:new Map()};syncState={};owner=null;hydratedKey="";lastSyncAttempt=0;autoNotBefore=0;
+    states={bookmark:new Map(),follow:new Map()};syncState={};owner=null;lastSyncAttempt=0;autoNotBefore=0;
     prefs={...defaults};prefsLoaded=false;syncError="";scanFailures.clear();syncTurn=0;
     settingsPromise=null;initialSync=null;initialSyncReady=false;settingsRetryAt=0;
     notifySettings();paint();
@@ -408,6 +427,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   },true);
   document.addEventListener("keydown",event=>{if(event.key==="Escape" && popup){event.preventDefault();event.stopPropagation();close();}});
   document.addEventListener("scroll",schedule,true);window.addEventListener("resize",schedule);
+  window.addEventListener("focus",()=>{void hydrate();});
   new MutationObserver(records=>{
     const selector="[data-cloud-kind][data-cloud-id]";
     if(records.some(record=>[...record.addedNodes,...record.removedNodes].some(node=>
