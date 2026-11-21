@@ -46,7 +46,7 @@
 <div class="account-body account-content">
 <section class="account-profile" data-account-profile aria-label="账号资料"></section>
 <section class="account-management" data-account-management aria-labelledby="loginTitle"><div class="account-management-heading"><h3 id="loginTitle">Pixiv 登录管理</h3><div class="account-sync-action"><button id="accountSync" type="button" disabled>同步账号状态</button><small id="accountSyncStatus" role="status">登录后可同步账号状态</small></div></div>
-<label class="auth-method-choice">登录方式<select id="authMethod"><option value="app">App 授权（推荐）</option><option value="web">网页登录（兼容）</option></select></label>
+<label class="auth-method-choice">登录方式<select id="authMethod"><option value="" disabled hidden>请选择登录方式</option><option value="app">App 授权（推荐）</option><option value="web">网页登录（兼容）</option></select></label>
 <div class="login-content"><div class="auth-state"><div class="auth-state-copy"><b id="authStateTitle">尚未登录</b><span id="authStateText">选择一种方式登录即可。</span></div><button id="authDisconnect" type="button" hidden>退出登录</button></div><label id="rememberLoginRow" class="remember-choice" hidden><input id="rememberLogin" type="checkbox" checked><span>在这台电脑保持登录</span></label><div class="account-login-actions"><button id="authAction" type="button">登录 Pixiv</button></div></div>
 <p class="guide-tip">两种方式任选其一。密码和验证码在 Pixiv 官方页面输入，保存的登录凭据由 Windows 加密保护。</p></section>
 <section id="downloadStatistics" class="download-statistics" hidden aria-label="本机下载统计"><header class="download-statistics-heading"><h3>下载统计</h3><small data-statistics-status role="status"></small></header><div data-statistics-body></div></section>

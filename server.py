@@ -860,6 +860,7 @@ def auth_status_snapshot() -> dict:
             "authState": "authorized" if session_present else "unauthenticated",
             "authorizationGeneration": AUTHORIZATION_GENERATION,
             "authMethod": method,
+            "authMethodNeedsRepair": AUTH_METHOD.needs_repair,
             "browsingGeneration": BROWSING_GENERATION,
             "browsingPolicyStatus": policy_status,
         }
@@ -3949,20 +3950,30 @@ class Handler(SimpleHTTPRequestHandler):
         ACCOUNT_AUTH.cancel(url)
         return self.send_json({"ok": True})
 
-    def _post_auth_method(self,data):
-        value=data.get("method")
-        if not isinstance(value,str) or value not in {"app","web"}:return self.send_json({"error":"登录方式无效"},400)
-        with self.server._download_idle:
-            if self.server._download_jobs:return self.send_json({"error":"请等待下载结束后切换登录方式"},409)
+    def _post_auth_method(self, data):
+        value = data.get("method")
+        expected = data.get("authorizationGeneration")
+        if not isinstance(value, str) or value not in {"app", "web"} or type(expected) is not int:
+            return self.send_json({"error": "登录方式请求无效"}, 400)
         try:
-            with credential_publication():
-                if value!=AUTH_METHOD.get():
-                    ACCOUNT_AUTH.close()
+            with credential_publication(), self.server._download_idle:
+                if expected != AUTHORIZATION_GENERATION:
+                    return self.send_json({"error": "登录状态已改变，请核对后重新选择"}, 409)
+                if self.server._download_jobs:
+                    return self.send_json({"error": "请等待下载结束后切换登录方式"}, 409)
+                changed = value != AUTH_METHOD.get()
+                if changed or AUTH_METHOD.needs_repair:
                     AUTH_METHOD.set(value)
+                if changed:
                     clear_authorized_state(force=True)
-            return self.send_json({"ok":True,**auth_status_snapshot()})
-        except PIXIV_OPERATION_ERRORS:
-            return self.send_json({"error":"登录方式未能保存，请重试"},500)
+                    try:
+                        ACCOUNT_AUTH.close()
+                    except (AccountError, OSError):
+                        HTTP_LOG.warning("Saved login method; App callback cleanup needs retry", exc_info=True)
+                result = {"ok": True, "authMethod": value, "authorizationGeneration": AUTHORIZATION_GENERATION}
+        except OSError:
+            return self.send_json({"error": "登录方式未能保存，请重试"}, 500)
+        return self.send_json(result)
 
     def _get_pixiv_search(self, request):
         query = urllib.parse.parse_qs(request.query)

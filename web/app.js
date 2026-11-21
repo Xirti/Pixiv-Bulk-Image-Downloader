@@ -62,6 +62,8 @@ let appConnection = null;
 let loginMethod = "app";
 let authActionBusy = false;
 let webLoginConfirmationPending = false;
+let authMethodConfirmation = null;
+let authMethodNeedsRepair = false;
 let appConnectionTimer = null;
 let appConnectionRevision = 0;
 let appConnectionBusy = false;
@@ -4024,6 +4026,8 @@ async function syncAuthStatus() {
     $("#mode").textContent = data.authMethod==="app"?(logged?"PIXIV · APP":"PIXIV · 待授权"):(logged?"PIXIV · WEB":"PIXIV PUBLIC");
     loginMethod=data.authMethod || "app";
     webLoginConfirmationPending=false;
+    authMethodConfirmation=null;
+    authMethodNeedsRepair=data.authMethodNeedsRepair===true;
     if(authorizationLost || accountChanged)settingsView.reset();
     pixivDisplayView.setSession();
     cloudControls.setSession();
@@ -4219,12 +4223,18 @@ function syncAppConnection(value) {
   appConnection=value;
   const app=loginMethod==="app",waiting=app && Boolean(value?.authorization?.pending);
   const confirmingWebLogin=!app && webLoginConfirmationPending;
-  $("#authMethod").value=loginMethod;
-  $("#authMethod").disabled=authActionBusy || appConnectionBusy;
+  const confirming=confirmingWebLogin || authMethodConfirmation!==null;
+  $("#authMethod").value=authMethodConfirmation?.saved ? authMethodConfirmation.method : authMethodNeedsRepair ? "" : loginMethod;
+  $("#authMethod").disabled=authActionBusy || appConnectionBusy || authMethodConfirmation!==null;
   $("#rememberLoginRow").hidden=app || confirmingWebLogin;
   $("#authStateTitle").textContent=waiting?"等待 Pixiv 授权":lastKnownLoggedIn?"已登录 · "+(app?"App 授权":"网页登录"):"尚未登录";
   $("#authStateText").textContent=app && value?.authorization?.error || (waiting?"请在系统浏览器完成本次授权。":lastKnownLoggedIn?"当前方式已连接，可以继续浏览。":app?"在系统浏览器完成一次 App 授权即可使用。":"在应用内的 Pixiv 官方窗口完成登录。");
-  if (confirmingWebLogin) {
+  if (authMethodConfirmation) {
+    $("#authStateTitle").textContent="登录方式待核对";
+    $("#authStateText").textContent=authMethodConfirmation.saved
+      ? "登录方式已保存，暂时无法读取账号状态。"
+      : "暂时无法确认登录方式是否保存，请重新核对。";
+  } else if (confirmingWebLogin) {
     $("#authStateTitle").textContent="登录状态待核对";
     $("#authStateText").textContent="暂时无法确认当前会话，请重新核对登录状态。";
   } else if (!app && lastKnownLoggedIn) {
@@ -4234,9 +4244,10 @@ function syncAppConnection(value) {
       $("#authStateText").textContent = "浏览设置正在核对，请稍后刷新。";
     }
   }
-  $("#authAction").textContent=appConnectionBusy?"正在打开授权网页…":authActionBusy?"正在处理…":confirmingWebLogin?"重新核对登录状态":waiting?"重新打开授权网页":lastKnownLoggedIn?(app?"重新授权":"重新登录"):"登录 Pixiv";
+  if (authMethodNeedsRepair && !confirming) $("#authStateText").textContent="登录方式设置无法读取，请重新选择并保存。";
+  $("#authAction").textContent=appConnectionBusy?"正在打开授权网页…":authActionBusy?"正在处理…":confirming?"重新核对登录状态":waiting?"重新打开授权网页":lastKnownLoggedIn?(app?"重新授权":"重新登录"):"登录 Pixiv";
   $("#authAction").disabled=authActionBusy || appConnectionBusy;
-  $("#authDisconnect").hidden=!lastKnownLoggedIn || confirmingWebLogin;
+  $("#authDisconnect").hidden=!lastKnownLoggedIn || confirming;
   $("#authDisconnect").disabled=authActionBusy || appConnectionBusy;
 }
 async function beginAppLogin(){
@@ -4276,12 +4287,12 @@ async function beginAppLogin(){
 }
 $("#authAction").onclick = async () => {
   if(authActionBusy || appConnectionBusy)return;
-  if(loginMethod==="app"){await beginAppLogin();return;}
+  if(!authMethodConfirmation && loginMethod==="app"){await beginAppLogin();return;}
   const generation=lastKnownAuthorizationGeneration, logged=lastKnownLoggedIn;
   authActionBusy=true;syncAppConnection(appConnection);
   let actionError="", bridgeStarted=false;
   try {
-    if (!webLoginConfirmationPending) {
+    if (!webLoginConfirmationPending && !authMethodConfirmation) {
       if (!window.pywebview?.api?.pixiv_login)throw Error("请在 MOKU 桌面版中登录。");
       bridgeStarted=true;
       const result=await window.pywebview.api.pixiv_login(Boolean($("#rememberLogin").checked));
@@ -4331,17 +4342,31 @@ $("#authDisconnect").onclick=async()=>{
   }
 };
 $("#authMethod").onchange=async event=>{
-  if(contextNavigationLocked() || selection.locked || singleDownloadPending || activeDownload){event.target.value=loginMethod;showTaskDock("暂不能切换登录方式","请等待当前下载完成。",4000);return;}
   const method=event.target.value;
+  if(authActionBusy || appConnectionBusy || authMethodConfirmation){syncAppConnection(appConnection);return;}
+  if(contextNavigationLocked() || selection.locked || singleDownloadPending || activeDownload){syncAppConnection(appConnection);showTaskDock("暂不能切换登录方式","请等待当前下载完成。",4000);return;}
+  const generation=lastKnownAuthorizationGeneration;
   authActionBusy=true;syncAppConnection(appConnection);
   let failure="";
   try{
-    // syncAppConnection keeps the control at the current method while saving.
-    await fetchJson("/api/auth/method",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({method})});
-    await syncAuthStatus();
-    if(activeWorkspace==="account")await accountView.refresh();
-  }catch(error){failure=error.message || "登录方式未能切换";}
-  finally{authActionBusy=false;syncAppConnection(appConnection);if(failure)$("#authStateText").textContent=failure;}
+    if(generation===null) {
+      authMethodConfirmation={method,saved:false};
+    } else {
+      try {
+        const reply=await fetchJson("/api/auth/method",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({method,authorizationGeneration:generation})});
+        authMethodConfirmation={method,saved:reply.ok===true && reply.authMethod===method};
+      } catch(error) {
+        if(error.status) failure=error.message || "登录方式未能切换";
+        else authMethodConfirmation={method,saved:false};
+      }
+    }
+    if(await syncAuthStatus() && activeWorkspace==="account")await accountView.refresh();
+  } finally {
+    authActionBusy=false;
+    syncAppConnection(appConnection);
+    if(failure && loginMethod!==method)$("#authStateText").textContent=failure;
+  }
 };
 document.querySelectorAll(".dialog-close").forEach((button) => {
   button.onclick = () => button.closest("dialog")?.close();
