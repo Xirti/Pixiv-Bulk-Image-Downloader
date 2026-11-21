@@ -4339,7 +4339,6 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             with SEARCH_SESSION_LOCKS_GUARD:
                 found = DOWNLOAD_REQUESTS.cancel(request_id, workspace_scope())
-            DOWNLOAD_AHEAD.clear()
         except OSError:
             return self.send_json({"error": "无法暂停下载，请重试"}, 500)
         return self.send_json({"ok": True, "cancelled": found})
@@ -4497,7 +4496,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "无法移除任务"}, 500)
         payload = {"ok": True, "deleted": deleted}
         if deleted and task:
-            DOWNLOAD_AHEAD.clear()
+            DOWNLOAD_AHEAD.clear(queue=task["id"])
             try:
                 DOWNLOAD_REQUESTS.cancel(task["remainingChunks"][0]["requestId"], scope)
             except OSError:
@@ -4738,10 +4737,10 @@ class Handler(SimpleHTTPRequestHandler):
             headroom = shutil.disk_usage(save_root).free - reserve
             source_limit = min(MAX_UGOIRA_BYTES, MAX_AHEAD_BYTES // 2, max(0, headroom) // max(1, len(upcoming)))
             if source_limit <= 0:
-                DOWNLOAD_AHEAD.clear(wait=True)
+                DOWNLOAD_AHEAD.clear(wait=True, queue=queued[0])
                 return
             keys = {_animation_source_key(chunk["groups"][0]["id"], quality) for chunk in upcoming}
-            DOWNLOAD_AHEAD.retain(keys)
+            DOWNLOAD_AHEAD.retain(keys, queue=queued[0])
 
             @contextmanager
             def prepare(chunk, stop):
@@ -4784,7 +4783,8 @@ class Handler(SimpleHTTPRequestHandler):
 
             for chunk in upcoming:
                 key = _animation_source_key(chunk["groups"][0]["id"], quality)
-                DOWNLOAD_AHEAD.start(key, lambda stop, chunk=chunk: prepare(chunk, stop), cancel_event, hold=True)
+                DOWNLOAD_AHEAD.start(key, lambda stop, chunk=chunk: prepare(chunk, stop), cancel_event,
+                                     hold=True, queue=queued[0])
         except (OSError, sqlite3.Error, PixivPolicyError, RequestInputError) as exc:
             HTTP_LOG.info("download lookahead skipped category=%s", type(exc).__name__)
 

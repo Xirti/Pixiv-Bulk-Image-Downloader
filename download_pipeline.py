@@ -191,11 +191,11 @@ class DownloadAhead:
         self._ttl = ttl
         self._capacity = capacity
 
-    def start(self, key, prepare, cancel_event, *, hold=False):
+    def start(self, key, prepare, cancel_event, *, hold=False, queue=None):
         with self._condition:
             if key in self._entries or len(self._entries) >= self._capacity:
                 return False
-            entry = {"key": key, "stop": _Cancellation(cancel_event),
+            entry = {"key": key, "queue": queue, "stop": _Cancellation(cancel_event),
                      "ready": False, "claimed": False, "released": False,
                      "value": None, "idle": not hold, "expires": None}
             self._entries[key] = entry
@@ -211,6 +211,10 @@ class DownloadAhead:
                 raise
             return True
 
+    @staticmethod
+    def _expired(entry):
+        return entry["expires"] is not None and time.monotonic() >= entry["expires"]
+
     def _prepare(self, entry, prepare):
         try:
             with prepare(entry["stop"]) as value:
@@ -223,8 +227,7 @@ class DownloadAhead:
                         entry["expires"] = time.monotonic() + self._ttl
                     self._condition.notify_all()
                     while not entry["released"]:
-                        if not entry["claimed"] and (entry["stop"].is_set()
-                                or (entry["expires"] is not None and time.monotonic() >= entry["expires"])):
+                        if not entry["claimed"] and (entry["stop"].is_set() or self._expired(entry)):
                             entry["released"] = True
                             break
                         self._condition.wait(None if entry["claimed"] else .05)
@@ -248,6 +251,11 @@ class DownloadAhead:
         value = None
         with self._condition:
             candidate = self._entries.pop(key, None)
+            if candidate is not None and (self._expired(candidate) or candidate["stop"].is_set()):
+                candidate["stop"].set()
+                candidate["released"] = True
+                self._condition.notify_all()
+                candidate = None
             if candidate is not None:
                 entry = candidate
                 entry["claimed"] = True
@@ -266,18 +274,21 @@ class DownloadAhead:
                     entry["released"] = True
                     self._condition.notify_all()
 
-    def clear(self, *, wait=False):
+    def clear(self, *, wait=False, queue=None):
         with self._condition:
-            for entry in self._entries.values():
+            entries = [entry for entry in self._entries.values() if queue is None or entry["queue"] == queue]
+            for entry in entries:
                 entry["stop"].set()
             self._condition.notify_all()
             if wait:
-                self._condition.wait_for(lambda: not self._entries, timeout=2)
+                self._condition.wait_for(
+                    lambda: all(self._entries.get(entry["key"]) is not entry for entry in entries), timeout=2,
+                )
 
-    def retain(self, keys):
+    def retain(self, keys, *, queue):
         with self._condition:
             for key, entry in self._entries.items():
-                if key not in keys:
+                if entry["queue"] == queue and key not in keys:
                     entry["stop"].set()
             self._condition.notify_all()
 
@@ -286,19 +297,15 @@ class DownloadAhead:
         with self._condition:
             self._condition.wait_for(lambda: not self._workers, timeout=2)
 
-    def begin(self):
+    def finish(self, cancel_event, *, keep):
         with self._condition:
             for entry in self._entries.values():
-                entry["idle"] = False
-                entry["expires"] = None
-            self._condition.notify_all()
-
-    def finish(self, *, keep):
-        with self._condition:
-            for entry in self._entries.values():
+                if entry["stop"].parent is not cancel_event:
+                    continue
                 if keep:
                     entry["idle"] = True
-                    entry["expires"] = time.monotonic() + self._ttl
+                    if entry["expires"] is None:
+                        entry["expires"] = time.monotonic() + self._ttl
                 else:
                     entry["stop"].set()
             self._condition.notify_all()

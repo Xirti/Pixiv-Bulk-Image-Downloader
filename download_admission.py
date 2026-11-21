@@ -28,13 +28,12 @@ class DownloadAdmission:
             priority = REQUEST_PRIORITY.set(1)
             completed = False
             try:
-                self._ahead.begin()
                 result = operation()
                 completed = result[1] == 200
                 return result
             finally:
                 try:
-                    self._ahead.finish(keep=completed and not cancel.is_set())
+                    self._ahead.finish(cancel, keep=completed and not cancel.is_set())
                 finally:
                     REQUEST_PRIORITY.reset(priority)
         finally:
