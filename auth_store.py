@@ -22,11 +22,11 @@ _PERSISTENT_SESSION_CACHE: str | object = _SESSION_CACHE_UNSET
 _SESSION_LOCK = threading.RLock()
 
 
-class LogoutRevision:
-    """One non-secret revocation marker shared by the local Pixiv backends."""
-    def __init__(self, path: Path):
+class SessionRevision:
+    """A non-secret marker published under the shared credential mutex."""
+    def __init__(self, path: Path, *, guard_path: Path | None = None):
         self.path = path
-        scope = os.path.normcase(str(path.resolve()))
+        scope = os.path.normcase(str((guard_path or path).resolve()))
         self._mutex = "Local\\MOKU.PixivSession." + hashlib.sha256(scope.encode()).hexdigest()[:32]
         self._observed = (None, "")
 
@@ -51,15 +51,18 @@ class LogoutRevision:
             return None
         return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size
 
-    def advance(self) -> str:
+    def advance(self, *, prefix: str = "") -> str:
         # Caller holds guard(), including the accompanying credential update.
-        revision = uuid.uuid4().hex
+        revision = prefix + uuid.uuid4().hex
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(revision, encoding="ascii")
         temporary.replace(self.path)
         self._observed = (self._signature(), revision)
         return revision
+
+
+LogoutRevision = SessionRevision
 
 
 class CREDENTIALW(ctypes.Structure):
@@ -153,11 +156,20 @@ def clear_memory_session() -> None:
 
 
 def forget_local_session() -> None:
-    """Discard memory after a peer logout. The peer owns vault deletion."""
+    """Discard cached Web credentials without touching the vault."""
     global _MEMORY_SESSION, _PERSISTENT_SESSION_CACHE
     with _SESSION_LOCK:
         _MEMORY_SESSION = ""
         _PERSISTENT_SESSION_CACHE = ""
+
+
+def adopt_persistent_session() -> None:
+    """Reload the published Web credential while the caller holds the shared mutex."""
+    global _MEMORY_SESSION, _PERSISTENT_SESSION_CACHE
+    with _SESSION_LOCK:
+        _MEMORY_SESSION = ""
+        _PERSISTENT_SESSION_CACHE = ""
+        _PERSISTENT_SESSION_CACHE = read_persistent_session()
 
 
 def store_session(value: str, remember: bool = False) -> None:

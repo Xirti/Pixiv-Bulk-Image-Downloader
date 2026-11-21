@@ -40,7 +40,8 @@ from typing import BinaryIO
 from zipfile import BadZipFile, ZipFile
 
 from auth_store import (
-    LogoutRevision,
+    SessionRevision,
+    adopt_persistent_session,
     delete_session,
     forget_local_session,
     session_cookie_header as web_session_cookie_header,
@@ -308,7 +309,10 @@ SEARCH_REQUESTS: OrderedDict[str, dict] = OrderedDict()
 SEARCH_REQUESTS_LOCK = threading.Lock()
 PENDING_READ_PROMOTIONS: OrderedDict[str, float] = OrderedDict()
 AUTHORIZATION_GENERATION = 0
-SHARED_LOGOUT = LogoutRevision(history_path().with_name("pixiv-logout-revision"))
+SHARED_LOGOUT = SessionRevision(history_path().with_name("pixiv-logout-revision"))
+SHARED_WEB_SESSION = SessionRevision(SHARED_LOGOUT.path.with_name("pixiv-web-session-revision"),
+                                    guard_path=SHARED_LOGOUT.path)
+LOCAL_WEB_SESSION_REVISION = ""
 with SHARED_LOGOUT.guard():
     LOCAL_LOGOUT_REVISION = SHARED_LOGOUT.read()
     AUTH_METHOD = AuthMethod(history_path().with_name("auth-method.json"))
@@ -479,19 +483,30 @@ def authorization_generation() -> int:
         return AUTHORIZATION_GENERATION
 
 
-def _adopt_shared_logout(revision: str) -> None:
+def _adopt_shared_logout(revision: str) -> bool:
     global LOCAL_LOGOUT_REVISION
     if revision == LOCAL_LOGOUT_REVISION:
-        return
+        return False
     LOCAL_LOGOUT_REVISION = revision
     clear_authorized_state(force=True)
     ACCOUNTS.forget_credentials()
     forget_local_session()
     ACCOUNT_AUTH.close()
+    return True
 
 
 def _adopt_shared_authorization() -> None:
-    _adopt_shared_logout(SHARED_LOGOUT.read())
+    global LOCAL_WEB_SESSION_REVISION
+    logged_out = _adopt_shared_logout(SHARED_LOGOUT.read())
+    web_revision = SHARED_WEB_SESSION.read()
+    if web_revision != LOCAL_WEB_SESSION_REVISION:
+        if not logged_out:
+            clear_authorized_state(force=True)
+        if web_revision.startswith("remembered:"):
+            adopt_persistent_session()
+        else:
+            forget_local_session()
+        LOCAL_WEB_SESSION_REVISION = web_revision
     if AUTH_METHOD.reload():
         # Mode changes fence existing requests while preserving both credentials.
         clear_authorized_state(force=True)
@@ -499,7 +514,8 @@ def _adopt_shared_authorization() -> None:
 
 
 def _observe_shared_authorization() -> None:
-    if SHARED_LOGOUT.read() != LOCAL_LOGOUT_REVISION or AUTH_METHOD.changed():
+    if (SHARED_LOGOUT.read() != LOCAL_LOGOUT_REVISION
+            or SHARED_WEB_SESSION.read() != LOCAL_WEB_SESSION_REVISION or AUTH_METHOD.changed()):
         with SHARED_LOGOUT.guard():
             _adopt_shared_authorization()
 
@@ -695,6 +711,13 @@ def stop_pending_work() -> None:
         clear_authorized_state(force=True)
 
 
+def _clear_shared_web_session() -> None:
+    global LOCAL_WEB_SESSION_REVISION
+    # Revocation survives a failure or interruption during the vault update.
+    LOCAL_WEB_SESSION_REVISION = SHARED_WEB_SESSION.advance(prefix="empty:")
+    forget_local_session()
+
+
 def disconnect_authorized_session() -> None:
     # Login, logout, and authorization snapshots share one linearization lock.
     # Otherwise a concurrent login can land between credential deletion and
@@ -703,6 +726,7 @@ def disconnect_authorized_session() -> None:
     global LOCAL_LOGOUT_REVISION
     with credential_publication():
         try:
+            _clear_shared_web_session()
             LOCAL_LOGOUT_REVISION = SHARED_LOGOUT.advance()
             ACCOUNT_AUTH.close()
             try:
@@ -720,12 +744,21 @@ def connect_authorized_session(value: str, *, remember: bool) -> None:
     # switch indivisible with respect to authorization snapshots. The previous
     # credential is removed first so a failed replacement cannot resurrect it.
     clean_value = validate_session_value(value)
+    global LOCAL_WEB_SESSION_REVISION
     with credential_publication():
         if BACKEND_STOP.is_set():
             raise AuthorizationRevokedError("应用正在退出，请重新打开")
+        _clear_shared_web_session()
         clear_authorized_state(force=True)
-        delete_session()
+        if remember:
+            delete_session()
         store_session(clean_value, remember=remember)
+        if remember:
+            try:
+                LOCAL_WEB_SESSION_REVISION = SHARED_WEB_SESSION.advance(prefix="remembered:")
+            except OSError:
+                forget_local_session()
+                raise
         mark_authorized_session()
         REQUEST_COORDINATOR.session_connected()
 
@@ -4336,12 +4369,12 @@ class Handler(SimpleHTTPRequestHandler):
         if not isinstance(value, str) or not isinstance(remember, bool):
             return self.send_json({"error": "桌面认证请求格式无效"}, 400)
         generation = data.get("authorizationGeneration")
-        if generation is not None and type(generation) is not int:
+        if type(generation) is not int:
             return self.send_json({"error": "桌面认证状态无效"}, 400)
         try:
             context = parse_login_context(data["browserContext"]) if data.get("browserContext") is not None else None
             with credential_publication():
-                if generation is not None and generation != AUTHORIZATION_GENERATION:
+                if generation != AUTHORIZATION_GENERATION:
                     return self.send_json({"error": "账户状态已变化，请重新打开登录窗口"}, 409)
                 connect_authorized_session(value, remember=remember)
                 if context is not None:
