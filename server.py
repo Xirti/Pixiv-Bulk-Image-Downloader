@@ -3556,6 +3556,17 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(error)}, 400)
         return self.send_json({"error": "无法读取或保存云端状态，请检查资料目录及网络"}, 502)
 
+    def _send_display_settings(self, result):
+        def check_snapshot():
+            assert_authorization_generation(result["authorizationGeneration"])
+            if _observe_web_policy():
+                raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
+            if result["browsingGeneration"] != BROWSING_GENERATION:
+                raise AccountError("content_changed", "浏览设置已更新，请重新读取。")
+
+        with SEARCH_SESSION_LOCKS_GUARD:
+            return self.send_json(result, before_send=check_snapshot)
+
     def _get_display_settings(self, request):
         try:
             connected, generation = validated_authorization()
@@ -3565,12 +3576,7 @@ class Handler(SimpleHTTPRequestHandler):
                 raise AccountError("web_required", "此项需网页登录，请在登录管理中选择网页登录。")
             ensure_network_opener_current()
             refresh = urllib.parse.parse_qs(request.query).get("refresh", [""])[0] == "1"
-            result = WEB_DISPLAY_SETTINGS.read(generation, refresh=refresh)
-            with SEARCH_SESSION_LOCKS_GUARD:
-                assert_authorization_generation(result["authorizationGeneration"])
-                if result["browsingGeneration"] != BROWSING_GENERATION:
-                    raise AccountError("content_changed", "浏览设置已更新，请重新读取。")
-                return self.send_json(result)
+            return self._send_display_settings(WEB_DISPLAY_SETTINGS.read(generation, refresh=refresh))
         except (ValueError, sqlite3.Error, OSError, PixivPolicyError) as error:
             return self._cloud_error(error)
 
@@ -3580,12 +3586,7 @@ class Handler(SimpleHTTPRequestHandler):
             if AUTH_METHOD.get() != "web":
                 raise AccountError("web_required", "此项需网页登录，请在登录管理中选择网页登录。")
             ensure_network_opener_current()
-            result = WEB_DISPLAY_SETTINGS.change(generation, data.get("key"), data.get("value"))
-            with SEARCH_SESSION_LOCKS_GUARD:
-                assert_authorization_generation(result["authorizationGeneration"])
-                if result["browsingGeneration"] != BROWSING_GENERATION:
-                    raise AccountError("content_changed", "浏览设置已更新，请重新读取。")
-                return self.send_json(result)
+            return self._send_display_settings(WEB_DISPLAY_SETTINGS.change(generation, data.get("key"), data.get("value")))
         except (ValueError, sqlite3.Error, OSError, PixivPolicyError) as error:
             return self._cloud_error(error)
 
