@@ -153,7 +153,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
       const data = await send("/api/workspace");
       if (token !== epoch || generation !== readGeneration) return false;
       const authorizationGeneration = getAuthorizationGeneration();
-      if ((previousScope !== null && data.scope !== previousScope)
+      if ((previousScope !== null && data.scope !== previousScope && data.priorScope !== previousScope)
         || (authorizationGeneration !== null && Number.isInteger(data.authorizationGeneration)
           && data.authorizationGeneration !== authorizationGeneration)) {
         reset();

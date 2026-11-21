@@ -1,6 +1,7 @@
 """Small durable basket and paused download queue, with no image URLs."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -16,6 +17,10 @@ class TaskConflictError(ValueError):
 
 class WorkspaceCapacityError(ValueError):
     pass
+
+
+def account_scope(identity: str) -> str:
+    return "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 class TaskCapacityError(ValueError):
@@ -218,10 +223,69 @@ class WorkspaceStore:
                 # cannot turn a removed task into a new create operation.
                 connection.execute("CREATE TABLE IF NOT EXISTS task_removals (id TEXT PRIMARY KEY) WITHOUT ROWID")
                 connection.execute("CREATE TABLE IF NOT EXISTS task_chunks (task_id TEXT NOT NULL, ordinal INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(task_id,ordinal)) WITHOUT ROWID")
+                connection.execute("CREATE TABLE IF NOT EXISTS web_workspace_owners (legacy_scope TEXT PRIMARY KEY, account_scope TEXT NOT NULL)")
                 if version != 2:connection.execute("PRAGMA user_version=2")
                 yield connection
         finally:
             connection.close()
+
+    def confirmed_web_scope(self, legacy_scope: str) -> str | None:
+        with self._lock, self._connection() as db:
+            row = db.execute("SELECT account_scope FROM web_workspace_owners WHERE legacy_scope=?",
+                             (legacy_scope,)).fetchone()
+            return row[0] if row else None
+
+    def prior_web_scopes(self, scope: str) -> tuple[str, ...]:
+        if scope == "public" or not self.path.is_file():
+            return ()
+        with self._lock, self._connection() as db:
+            return tuple(row[0] for row in db.execute(
+                "SELECT legacy_scope FROM web_workspace_owners WHERE account_scope=?", (scope,)))
+
+    def confirm_web_scope(self, legacy_scope: str, scope: str) -> None:
+        with self._lock, self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT account_scope FROM web_workspace_owners WHERE legacy_scope=?",
+                                  (legacy_scope,)).fetchone()
+            if existing:
+                if existing[0] != scope:
+                    raise TaskConflictError("网页会话确认了不同账号，请重新登录")
+                return
+
+            basket = db.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
+            revision, entries = (basket[0], json.loads(basket[1])) if basket else (0, [])
+            owned = {row["id"]: row for owner, row in entries if owner == scope}
+            updated = [(owner, row) for owner, row in entries if owner != legacy_scope]
+            for owner, row in entries:
+                if owner != legacy_scope:
+                    continue
+                current = owned.get(row["id"])
+                if current is None:
+                    updated.append((scope, row))
+                else:
+                    pages = set(current["pages"]) | set(row["pages"])
+                    current["pages"] = sorted(page for page in pages if page < current["item"]["pages"])
+                    current["archived"] = current.get("archived", True) or row.get("archived", True)
+            db.execute("INSERT OR REPLACE INTO basket VALUES(1,?,?)",
+                       (revision + 1, json.dumps(updated, ensure_ascii=False)))
+            recent = db.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
+            if recent:
+                merged = []
+                for owner, row in json.loads(recent[0]):
+                    entry = [scope if owner == legacy_scope else owner, row]
+                    if entry not in merged:
+                        merged.append(entry)
+                db.execute("UPDATE recent SET payload=? WHERE singleton=1", (json.dumps(merged, ensure_ascii=False),))
+            db.execute("UPDATE tasks SET scope=? WHERE scope=?", (scope, legacy_scope))
+            db.execute("INSERT INTO web_workspace_owners VALUES(?,?)", (legacy_scope, scope))
+
+    @contextmanager
+    def _write(self, scope: str):
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM web_workspace_owners WHERE legacy_scope=?", (scope,)).fetchone():
+                raise TaskConflictError("账号工作区已更新，请重新读取")
+            yield connection
 
     def load(self, scope: str) -> dict:
         result = {"basket": [], "revision": 0, "tasks": [], "recent": [], "scope": scope}
@@ -249,8 +313,7 @@ class WorkspaceStore:
         self._update_recent_search(value, scope, remove=True)
 
     def clear_recent_searches(self, scope: str) -> None:
-        with self._lock, self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._write(scope) as connection:
             row=connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
             recent=json.loads(row[0]) if row else []
             retained=[(owner,value) for owner,value in recent if owner not in {scope,"public"}]
@@ -271,8 +334,7 @@ class WorkspaceStore:
         owner = "public" if filters["mode"] == "safe" else scope
         if owner == "public" and filters["mode"] != "safe":
             raise ValueError("restricted search needs account")
-        with self._lock, self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._write(scope) as connection:
             row = connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
             recent = json.loads(row[0]) if row else []
             recent = [(old_owner, old) for old_owner, old in recent if old != value or old_owner != owner]
@@ -314,8 +376,7 @@ class WorkspaceStore:
             total += len(pages)
         if total > 1000:
             raise WorkspaceCapacityError("采集篮容量为 1000 张，请取消部分选择后重试")
-        with self._lock, self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._write(scope) as connection:
             old = connection.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
             if (old[0] if old else 0) != revision:
                 raise ValueError("stale basket revision")
@@ -351,8 +412,7 @@ class WorkspaceStore:
                   require_existing: bool = False) -> dict:
         task = normalize_task(value)
         previous = normalize_task(expected) if expected is not None else None
-        with self._lock, self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._write(scope) as connection:
             old = connection.execute("SELECT scope,payload FROM tasks WHERE id=?", (task["id"],)).fetchone()
             if connection.execute("SELECT 1 FROM task_removals WHERE id=?", (task["id"],)).fetchone():
                 raise TaskConflictError("任务已移除，请重新发起下载")
@@ -407,8 +467,7 @@ class WorkspaceStore:
         if not isinstance(progress,dict) or set(progress)!={"savedCount","fileCount","skippedCount","firstSaved"}:raise ValueError("invalid checkpoint progress")
         for key,maximum in (("savedCount",1000),("fileCount",2000),("skippedCount",1000)):_integer(progress[key],0,maximum)
         if not isinstance(progress["firstSaved"],str) or len(progress["firstSaved"])>32768:raise ValueError("invalid checkpoint path")
-        with self._lock,self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._write(scope) as connection:
             row=connection.execute("SELECT payload FROM tasks WHERE id=? AND scope=?",(task_id,scope)).fetchone()
             if not row:raise TaskConflictError("任务已移除，请重新读取")
             task=json.loads(row[0])
@@ -426,8 +485,7 @@ class WorkspaceStore:
         _request_id(task_id)
         if revision is not None:
             _integer(revision, 0, 2147483647)
-        with self._lock, self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._write(scope) as connection:
             row = connection.execute("SELECT payload FROM tasks WHERE id=? AND scope=?", (task_id, scope)).fetchone()
             if row and revision is not None and json.loads(row[0]).get("revision", 0) != revision:
                 raise TaskConflictError("任务已在另一个窗口更新，请重新读取后移除")

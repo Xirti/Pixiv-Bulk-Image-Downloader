@@ -1745,7 +1745,9 @@ settingsView=createAccountSettings({root:$("[data-account-settings]"),save:patch
 pixivDisplayView=createPixivDisplaySettings({root:$("[data-pixiv-display]"),request:requestAccount,
   session:()=>({logged:lastKnownLoggedIn===true,method:loginMethod,generation:lastKnownAuthorizationGeneration,browsingGeneration:lastKnownBrowsingGeneration}),
   reconcile:async result=>{
-    if(result===null || result.authorizationGeneration!==lastKnownAuthorizationGeneration || result.browsingGeneration!==lastKnownBrowsingGeneration)await syncAuthStatus();
+    if(result===null || result.authorizationGeneration!==lastKnownAuthorizationGeneration
+      || result.browsingGeneration!==lastKnownBrowsingGeneration
+      || (typeof result.workspaceScope==="string" && workspaceSync.scope!==result.workspaceScope))await syncAuthStatus();
   },
   login:async()=>{await openAccount("home");$("#authMethod").scrollIntoView({block:"center",behavior:"smooth"});$("#authMethod").focus({preventScroll:true});}});
 $("#accountSync").onclick=()=>cloudControls.refresh();
@@ -1997,7 +1999,12 @@ async function requestAccount(url,options={}) {
       // The original request can still finish with its original priority.
     });
   });
-  try{return await fetchJson(`${url}${url.includes("?")?"&":"?"}requestId=${encodeURIComponent(id)}`,fetchOptions,url.startsWith("/api/popularity?")?90000:60000);}
+  try{
+    const result=await fetchJson(`${url}${url.includes("?")?"&":"?"}requestId=${encodeURIComponent(id)}`,fetchOptions,url.startsWith("/api/popularity?")?90000:60000);
+    if(typeof result.workspaceScope==="string" && typeof workspaceSync.scope==="string"
+      && workspaceSync.scope!==result.workspaceScope)void syncAuthStatus();
+    return result;
+  }
   catch(error){
     if(error.timedOut && !signal?.aborted)void cancel();
     throw error;
@@ -4011,10 +4018,14 @@ async function syncAuthStatus() {
     const browsingGeneration=Number.isInteger(data.browsingGeneration)?data.browsingGeneration:null;
     const browsingChanged=lastKnownBrowsingGeneration!==null && browsingGeneration!==null
       && browsingGeneration!==lastKnownBrowsingGeneration;
+    const scopeChanged=typeof workspaceSync.scope==="string" && typeof data.workspaceScope==="string"
+      && workspaceSync.scope!==data.workspaceScope;
+    const scopeAdopted=scopeChanged && !accountChanged && logged===lastKnownLoggedIn
+      && data.workspacePriorScope===workspaceSync.scope;
     const reloadWorkspace = workspaceSync.active
-      && (accountChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged));
-    if (reloadWorkspace) workspaceSync.reset();
-    if (accountChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged)) {
+      && (accountChanged || scopeChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged));
+    if (reloadWorkspace && !scopeAdopted) workspaceSync.reset();
+    if (accountChanged || scopeChanged || (lastKnownLoggedIn !== null && lastKnownLoggedIn !== logged)) {
       downloadAuthorizationRevision += 1;
       resumableSingleTask = null;
       resumableBatchTask = null;
@@ -4040,7 +4051,8 @@ async function syncAuthStatus() {
     else if (browsingChanged) invalidateBrowsingViews();
     if (reloadWorkspace) {
       syncSearchScopedControls();
-      await restoreWorkspaceWhenUnlocked();
+      if (scopeAdopted) await workspaceSync.restore();
+      else await restoreWorkspaceWhenUnlocked();
     }
     return true;
   } catch (error) {

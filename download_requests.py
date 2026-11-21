@@ -111,7 +111,15 @@ class DownloadRequests:
             raise
         return connection
 
-    def _read_success(self, request_id: str, fingerprint: str) -> Response | None:
+    def _legacy_fingerprints(self, route: str, body: dict, scope: str) -> tuple[str, ...]:
+        if self._workspace is None:
+            return ()
+        aliases = self._workspace.prior_web_scopes(scope)
+        normalized = {key: value for key, value in body.items() if key != "requestId"}
+        return tuple(_fingerprint(route, alias, {**normalized, "scope": alias}
+                                  if normalized.get("scope") == scope else normalized) for alias in aliases)
+
+    def _read_success(self, request_id: str, fingerprints: tuple[str, ...]) -> Response | None:
         lookup = "SELECT fingerprint, result, files FROM completed WHERE id=?"
         recovery_error = None
         if self._history is not None:
@@ -123,14 +131,14 @@ class DownloadRequests:
             else:
                 if row is not None:
                     # A pending publication record belongs to the last attempt.
-                    return self._verify_receipt(row, fingerprint)
+                    return self._verify_receipt(row, fingerprints)
         if self._path is not None and self._path.exists():
             connection = self._journal_connection()
             try:
                 row = connection.execute(lookup, (request_id,)).fetchone()
             finally:
                 connection.close()
-            result = self._verify_receipt(row, fingerprint)
+            result = self._verify_receipt(row, fingerprints)
             if result is not None:
                 return result
         if recovery_error is not None:
@@ -140,10 +148,10 @@ class DownloadRequests:
         return None
 
     @staticmethod
-    def _verify_receipt(row, fingerprint: str) -> Response | None:
+    def _verify_receipt(row, fingerprints: tuple[str, ...]) -> Response | None:
         if not row:
             return None
-        if row[0] != fingerprint:
+        if row[0] not in fingerprints:
             raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
         # A receipt is an optional cache. A damaged row must fall back to the
         # normal download/file-deduplication path, preserving the identity
@@ -183,9 +191,9 @@ class DownloadRequests:
                 return None
         return payload, 200
 
-    def _confirm_receipt(self, request_id: str, fingerprint: str) -> Response | None:
+    def _confirm_receipt(self, request_id: str, fingerprints: tuple[str, ...]) -> Response | None:
         try:
-            return self._read_success(request_id, fingerprint)
+            return self._read_success(request_id, fingerprints)
         except (OSError, sqlite3.Error) as exc:
             raise DownloadRequestError("暂时无法核对下载回执，请继续原任务重试", 503) from exc
 
@@ -245,12 +253,14 @@ class DownloadRequests:
         if request_id is None and "requestId" not in body:
             return {}, 204
         request_id, fingerprint, durable_fingerprint = _request_identity(request_id, route, body, scope, durable_scope)
+        aliases = self._legacy_fingerprints(route, body, durable_scope)
+        fingerprints = (durable_fingerprint, *aliases)
         with self._lock:
             entry = self._entries.get(request_id)
             if entry is not None and (entry.active or self._clock() - entry.touched < self._ttl):
                 expected = entry.fingerprint if entry.active else entry.durable_fingerprint
                 observed = fingerprint if entry.active else durable_fingerprint
-                if expected != observed:
+                if expected != observed and entry.durable_fingerprint not in aliases:
                     raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
                 if entry.active:
                     return {"pending": True, "retryAfterMs": 1000}, 202
@@ -259,20 +269,22 @@ class DownloadRequests:
         if self._path is not None and download_execution_active(self._path, request_id, durable_scope):
             return {"pending": True, "retryAfterMs": 1000}, 202
         try:
-            receipt = self._read_success(request_id, durable_fingerprint)
+            receipt = self._read_success(request_id, fingerprints)
         except (OSError, sqlite3.Error):
-            receipt = self._confirm_receipt(request_id, durable_fingerprint)
+            receipt = self._confirm_receipt(request_id, fingerprints)
         return receipt if receipt is not None else ({}, 204)
 
     def migration_guard(self, request_id: str):
         return nullcontext(True) if self._path is None else download_migration_guard(self._path, request_id)
 
     def cancel(self, request_id: str, scope: str) -> bool:
+        aliases = self._workspace.prior_web_scopes(scope) if self._workspace is not None else ()
+        scopes = (scope, *aliases)
         if self._path is not None:
-            return cancel_download_execution(self._path, request_id, scope)
+            return any(cancel_download_execution(self._path, request_id, owner) for owner in scopes)
         with self._lock:
             entry = self._entries.get(request_id)
-            if entry is None or not entry.active or entry.scope != scope or entry.cancel is None:
+            if entry is None or not entry.active or entry.scope not in scopes or entry.cancel is None:
                 return False
             entry.cancel.set()
             return True
@@ -288,17 +300,19 @@ class DownloadRequests:
             return operation()
         receipt_scope = scope if durable_scope is None else durable_scope
         request_id, fingerprint, durable_fingerprint = _request_identity(request_id, route, body, scope, receipt_scope)
+        aliases = self._legacy_fingerprints(route, body, receipt_scope)
+        fingerprints = (durable_fingerprint, *aliases)
         now = self._clock()
         # Active polls need only registry state. Disk verification belongs
         # outside this lock; a slow output directory must not stall other IDs.
         with self._lock:
             entry = self._entries.get(request_id)
             if entry is not None and entry.active:
-                if entry.fingerprint != fingerprint:
+                if entry.fingerprint != fingerprint and entry.durable_fingerprint not in aliases:
                     raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
                 return {"pending": True, "retryAfterMs": 1000}, 202
         try:
-            restored = self._read_success(request_id, durable_fingerprint)
+            restored = self._read_success(request_id, fingerprints)
         except (OSError, sqlite3.Error):
             restored = None
         with self._lock:
@@ -310,10 +324,13 @@ class DownloadRequests:
                 if entry.fingerprint != fingerprint:
                     # Reauthorization may change only the volatile epoch. Keep
                     # both account and request content bound to their identity.
-                    if not entry.active and durable_scope is not None and entry.durable_fingerprint == durable_fingerprint:
+                    if entry.active and entry.durable_fingerprint in aliases:
+                        return {"pending": True, "retryAfterMs": 1000}, 202
+                    if not entry.active and durable_scope is not None and entry.durable_fingerprint in fingerprints:
                         if entry.result is not None and self._path is None:
                             return entry.result
                         entry.fingerprint = fingerprint
+                        entry.durable_fingerprint = durable_fingerprint
                         entry.result = None
                     else:
                         raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
@@ -348,7 +365,7 @@ class DownloadRequests:
                         return {"pending": True, "retryAfterMs": 1000}, 202
                     # A peer may have committed its receipt after our first
                     # lookup but before mutex acquisition. Recheck as owner.
-                    result = self._confirm_receipt(request_id, durable_fingerprint)
+                    result = self._confirm_receipt(request_id, fingerprints)
                     if result is None:
                         token = _PUBLICATION_ID.set((request_id, durable_fingerprint) if self._history is not None else None)
                         try:

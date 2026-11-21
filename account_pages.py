@@ -830,7 +830,7 @@ class AccountCache:
 class AccountPages:
     def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web",
                  commit_guard=None, stopped=lambda:False, credential_publication=nullcontext,
-                 login_publication=nullcontext):
+                 login_publication=nullcontext, confirm_web_owner=None):
         self.directory = Path(directory)
         self.request_json, self.request_homepage = request_json, request_homepage
         self.generation, self.coordinator, self.proxy = generation, coordinator, proxy
@@ -840,6 +840,7 @@ class AccountPages:
         self.commit_guard = commit_guard if commit_guard is not None else threading.RLock()
         self.credential_publication = credential_publication
         self.login_publication = login_publication
+        self.confirm_web_owner = confirm_web_owner
         self._app_credentials_revoked = False
         self._account = None
         self._lock = threading.RLock()
@@ -1140,7 +1141,10 @@ class AccountPages:
             parser = HomepageIdentity()
             parser.feed(self.request_homepage())
             return parser.user_id()
-        return self._cached((generation, "owner"), load)
+        owner = self._cached((generation, "owner"), load)
+        if self.confirm_web_owner is not None:
+            self.confirm_web_owner(generation, owner)
+        return owner
 
     def cached_web_owner(self, generation):
         with self._lock:

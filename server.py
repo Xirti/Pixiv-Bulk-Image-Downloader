@@ -62,7 +62,7 @@ from file_publish import (
 from download_pipeline import DownloadAhead, DownloadSource, consume_downloads, stream_downloads
 from download_history import DownloadHistory, history_path
 from local_catalog import LocalCatalog
-from workspace_store import TaskConflictError, TaskCapacityError, WorkspaceCapacityError, WorkspaceStore
+from workspace_store import TaskConflictError, TaskCapacityError, WorkspaceCapacityError, WorkspaceStore, account_scope
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from read_scope import ReadScopes
 from ugoira_export import MAX_ARCHIVE_BYTES as MAX_UGOIRA_BYTES, MAX_EXPANDED_BYTES as MAX_UGOIRA_TEMP_BYTES, UgoiraCancelledError, UgoiraExportError, export_formats, export_ugoira, require_mp4_encoder
@@ -151,15 +151,22 @@ MAX_AHEAD_BYTES = 1024 * 1024 * 1024
 
 
 def workspace_scope() -> str:
-    if AUTH_METHOD.get()=="app":
-        uid=ACCOUNTS.account().snapshot()["uid"]
-        return "account:"+hashlib.sha256(uid.encode("utf-8")).hexdigest() if uid else "public"
+    return workspace_ownership()[0]
+
+
+def workspace_ownership() -> tuple[str, str | None]:
+    if AUTH_METHOD.get() == "app":
+        uid = ACCOUNTS.account().snapshot()["uid"]
+        return (account_scope(uid) if uid else "public"), None
     cookie = session_cookie_header().get("Cookie", "")
     if not cookie:
-        return "public"
+        return "public", None
     user = re.match(r"PHPSESSID=(\d+)_", cookie)
-    identity = user[1] if user else cookie
-    return "account:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    if user:
+        return account_scope(user[1]), None
+    provisional = account_scope(cookie)
+    confirmed = WORKSPACE_STORE.confirmed_web_scope(provisional)
+    return (confirmed, provisional) if confirmed else (provisional, None)
 
 
 def session_cookie_header():
@@ -537,6 +544,22 @@ def credential_publication():
         yield
 
 
+def confirm_web_workspace(generation: int, owner: str) -> None:
+    with credential_publication():
+        if generation != AUTHORIZATION_GENERATION or AUTH_METHOD.get() != "web":
+            raise AccountError("revoked", "账号已改变，请重新打开我的账号")
+        cookie = web_session_cookie_header().get("Cookie", "")
+        if not cookie:
+            raise AccountError("reauth", "网页登录已失效，请重新登录")
+        if not re.match(r"PHPSESSID=(\d+)_", cookie):
+            try:
+                WORKSPACE_STORE.confirm_web_scope(account_scope(cookie), account_scope(owner))
+            except TaskConflictError as error:
+                raise AccountError("revoked", str(error)) from error
+            except sqlite3.Error as error:
+                raise AccountError("workspace_unavailable", "暂时无法合并账号本机记录，请重试") from error
+
+
 @contextmanager
 def app_login_publication():
     # The caller holds the shared credential mutex. An existing saved session
@@ -854,6 +877,7 @@ def auth_status_snapshot() -> dict:
                 policy_status = "unavailable"
         if session_present and policy_status != "unavailable":
             AUTHORIZATION_ACTIVE = True
+        scope, prior_scope = workspace_ownership() if not BACKEND_STOP.is_set() else ("public", None)
         return {
             "loggedIn": session_present,
             "sessionPresent": session_present,
@@ -861,6 +885,8 @@ def auth_status_snapshot() -> dict:
             "authorizationGeneration": AUTHORIZATION_GENERATION,
             "authMethod": method,
             "authMethodNeedsRepair": AUTH_METHOD.needs_repair,
+            "workspaceScope": scope,
+            "workspacePriorScope": prior_scope,
             "browsingGeneration": BROWSING_GENERATION,
             "browsingPolicyStatus": policy_status,
         }
@@ -1708,7 +1734,8 @@ ACCOUNTS = AccountPages(directory=history_path().parent, request_json=pixiv_json
     request_homepage=lambda: pixiv_request("https://www.pixiv.net/", max_bytes=8*1024*1024)[0].decode("utf-8"),
     generation=authorization_generation, coordinator=REQUEST_COORDINATOR, proxy=lambda: PIXIV_PROXY,method=AUTH_METHOD.get,
     commit_guard=SEARCH_SESSION_LOCKS_GUARD, stopped=lambda:BACKEND_STOP.is_set(),
-    credential_publication=credential_publication, login_publication=app_login_publication)
+    credential_publication=credential_publication, login_publication=app_login_publication,
+    confirm_web_owner=confirm_web_workspace)
 ACCOUNT_AUTH = AccountAuthorization(ACCOUNTS)
 CLOUD_STATE = CloudState(history_path().with_name("cloud-state.sqlite3"))
 
@@ -3488,7 +3515,7 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 policy = REQUEST_COORDINATOR.snapshot()
                 auth = auth_status_snapshot()
-            except (PixivPolicyError, OSError) as exc:
+            except (PixivPolicyError, OSError, sqlite3.Error) as exc:
                 return self.send_json({"error": str(exc)}, 503)
             logged_in = bool(auth["loggedIn"])
             return self.send_json({
@@ -3535,10 +3562,10 @@ class Handler(SimpleHTTPRequestHandler):
             except (OSError, ValueError, sqlite3.Error):
                 return self.send_json({"error": "无法检查已下载的文件"}, 500)
         if request.path == "/api/workspace":
-            with SEARCH_SESSION_LOCKS_GUARD:
-                generation = authorization_generation()
-                scope = workspace_scope()
             try:
+                with SEARCH_SESSION_LOCKS_GUARD:
+                    generation = authorization_generation()
+                    scope, prior_scope = workspace_ownership()
                 result = WORKSPACE_STORE.load(scope)
             except (OSError, ValueError, sqlite3.Error):
                 return self.send_json({"error": "无法读取采集篮和未完成任务"}, 500)
@@ -3546,6 +3573,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if generation != authorization_generation() or scope != workspace_scope():
                     return self.send_json({"error": "Pixiv 账户状态已变更，请重新读取采集篮"}, 409)
                 result["authorizationGeneration"] = generation
+                result["priorScope"] = prior_scope
                 return self.send_json(result)
         if request.path == "/api/network/policy":
             try:
@@ -3688,6 +3716,7 @@ class Handler(SimpleHTTPRequestHandler):
                 raise AccountError("content_changed", "浏览设置已更新，请重新读取。")
 
         with SEARCH_SESSION_LOCKS_GUARD:
+            result["workspaceScope"] = workspace_scope()
             return self.send_json(result, before_send=check_snapshot)
 
     def _get_display_settings(self, request):
@@ -3896,6 +3925,8 @@ class Handler(SimpleHTTPRequestHandler):
                                       restriction="account", authorization_epoch=generation)
             if "items" in result:
                 _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
+            if kind == "profile" and method == "web":
+                result["workspaceScope"] = workspace_scope()
             return result
 
         return self._read_pixiv_response(query, "账号资料", read, account_cache=True)
@@ -4331,11 +4362,14 @@ class Handler(SimpleHTTPRequestHandler):
                 payload, status = {"error": "无法读取下载任务"}, 500
             return self.send_json(payload, status)
         if path.startswith("/api/workspace/"):
-            with SEARCH_SESSION_LOCKS_GUARD:
-                _observe_shared_authorization()
-                if data.get("scope") != workspace_scope():
-                    return self.send_json({"error": "Pixiv 账户状态已变更，请重开窗口或刷新任务"}, 409)
-                return route[1](data)
+            try:
+                with SEARCH_SESSION_LOCKS_GUARD:
+                    _observe_shared_authorization()
+                    if data.get("scope") != workspace_scope():
+                        return self.send_json({"error": "Pixiv 账户状态已变更，请重开窗口或刷新任务"}, 409)
+                    return route[1](data)
+            except sqlite3.Error:
+                return self.send_json({"error": "本机记录暂时无法读取，请重试"}, 503)
         return route[1](data)
 
     def _post_updates(self, data: dict):
@@ -4488,10 +4522,12 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_save_basket(self, data: dict):
         try:
-            revision = WORKSPACE_STORE.save_basket(data.get("basket"), workspace_scope(), revision=data.get("revision"))
+            revision = WORKSPACE_STORE.save_basket(data.get("basket"), data["scope"], revision=data.get("revision"))
             return self.send_json({"ok": True, "revision": revision})
         except WorkspaceCapacityError as exc:
             return self.send_json({"error": str(exc), "basketCapacity": True}, 409)
+        except TaskConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
         except ValueError as exc:
             return self.send_json({"error": "采集篮已在另一个窗口更新，请重试保存" if "stale" in str(exc) else "采集篮数据无效"}, 409 if "stale" in str(exc) else 400)
         except (OSError, sqlite3.Error):
@@ -4503,9 +4539,9 @@ class Handler(SimpleHTTPRequestHandler):
             if type(update_only) is not bool:
                 raise ValueError("invalid task update mode")
             if "checkpoint" in data:
-                task=WORKSPACE_STORE.advance_task(data["checkpoint"],workspace_scope())
+                task=WORKSPACE_STORE.advance_task(data["checkpoint"],data["scope"])
                 return self.send_json({"ok":True,"task":task})
-            task = WORKSPACE_STORE.save_task(data.get("task"), workspace_scope(),
+            task = WORKSPACE_STORE.save_task(data.get("task"), data["scope"],
                                              require_existing=update_only,
                                              **({"expected": data["expectedTask"]} if "expectedTask" in data else {}))
             return self.send_json({"ok": True, "task": task})
@@ -4522,9 +4558,11 @@ class Handler(SimpleHTTPRequestHandler):
     def _post_migrate_task(self, data: dict):
         try:
             generation = AUTHORIZATION_GENERATION
-            scope = workspace_scope()
+            scope = data["scope"]
             task = WORKSPACE_STORE.get_task(data.get("id"), scope)
             if task is None:
+                if scope != workspace_scope():
+                    raise TaskConflictError("账号工作区已更新，请重新读取")
                 return self.send_json({"removed": True})
             if task.get("chunkPolicy"):
                 return self.send_json({"task": task})
@@ -4604,14 +4642,15 @@ class Handler(SimpleHTTPRequestHandler):
             action = data.get("action", "remember")
             if action not in ("remember", "remove", "clear"):
                 raise ValueError("invalid recent action")
-            with SEARCH_SESSION_LOCKS_GUARD:
-                scope=workspace_scope()
-                if data.get("scope")!=scope:return self.send_json({"error":"账号状态已改变，请重试"},409)
-                if action=="clear":WORKSPACE_STORE.clear_recent_searches(scope)
-                else:
-                    operation = WORKSPACE_STORE.delete_recent_search if action == "remove" else WORKSPACE_STORE.remember_search
-                    operation(data.get("search"), scope)
+            scope = data["scope"]
+            if action == "clear":
+                WORKSPACE_STORE.clear_recent_searches(scope)
+            else:
+                operation = WORKSPACE_STORE.delete_recent_search if action == "remove" else WORKSPACE_STORE.remember_search
+                operation(data.get("search"), scope)
             return self.send_json({"ok": True})
+        except TaskConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
         except ValueError:
             return self.send_json({"error": "搜索条件无效"}, 400)
         except (OSError, sqlite3.Error):
@@ -4619,7 +4658,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_delete_task(self, data: dict):
         try:
-            scope = workspace_scope()
+            scope = data["scope"]
             task = WORKSPACE_STORE.get_task(data.get("id"), scope)
             deleted = WORKSPACE_STORE.delete_task(data.get("id"), scope, revision=data.get("revision"))
         except TaskConflictError as exc:
