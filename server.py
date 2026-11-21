@@ -37,6 +37,7 @@ from itertools import islice
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import BinaryIO
+from zipfile import BadZipFile, ZipFile
 
 from auth_store import (
     LogoutRevision,
@@ -2761,15 +2762,17 @@ def pixiv_ugoira_meta(
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
     network_timeout: float | None = None,
+    refresh: bool = False,
 ) -> dict:
     """Fetch the ugoira animation manifest (frame zip URLs and delays)."""
     if authorization_epoch is not None:
         assert_authorization_generation(authorization_epoch)
     try:
+        kind = "meta-download" if network_timeout is not None else "meta"
         meta = UGOIRA_RESOURCES.get(
-            ("meta-download" if network_timeout is not None else "meta", artwork_id, authorization_epoch),
+            (kind + "-refresh" if refresh else kind, artwork_id, authorization_epoch),
             lambda event: _fetch_ugoira_meta(artwork_id, authorization_epoch, event, timeout=network_timeout or 25),
-            ttl=60, cancel_event=cancel_event,
+            ttl=0 if refresh else 60, cancel_event=cancel_event,
         )
     except (PreviewCancelledError, SearchCancelledError) as exc:
         if authorization_epoch is not None:
@@ -2913,20 +2916,42 @@ def _fetch_ugoira_source(
     artwork_id = str(item.get("id") or "")
     HTTP_LOG.info("download artwork=%s stage=animation-metadata", artwork_id)
     meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch, cancel_event=cancel_event, network_timeout=90)
-    zip_url = str(meta["originalSrc"] if quality == "original" else meta["src"])
+    url_field = "originalSrc" if quality == "original" else "src"
     # Temporary files keep large ZIPs and encoded outputs off the Python heap.
-    # Publication still copies through the existing exclusively owned handles.
-    with tempfile.TemporaryFile(dir=staging_root) as source:
-        HTTP_LOG.info("download artwork=%s stage=archive", artwork_id)
-        pixiv_request(zip_url, image_only=True, cancel_event=cancel_event,
-                      max_bytes=maximum_bytes, output=source, timeout=90, max_duration=600, download=True, archive=True)
-        source.seek(0)
-        if not source.read(4).startswith(UGOIRA_ZIP_MAGIC):
-            raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
-        source.seek(0)
-        if item.get("restriction") in RESTRICTED_CONTENT and authorization_epoch is not None:
-            assert_authorization_generation(authorization_epoch)
-        yield source, meta, zip_url
+    for attempt in range(2):
+        raise_if_search_cancelled(cancel_event)
+        zip_url = meta[url_field]
+        with tempfile.TemporaryFile(dir=staging_root) as source:
+            HTTP_LOG.info("download artwork=%s stage=archive", artwork_id)
+            pixiv_request(zip_url, image_only=True, cancel_event=cancel_event,
+                          max_bytes=maximum_bytes, output=source, timeout=90, max_duration=600, download=True, archive=True)
+            source.seek(0)
+            if source.read(4) != UGOIRA_ZIP_MAGIC:
+                raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
+            try:
+                with ZipFile(source) as archive:
+                    names = [entry.filename for entry in archive.infolist() if not entry.is_dir()]
+            except BadZipFile as exc:
+                raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP") from exc
+            entries = set(names)
+            if len(names) != len(entries):
+                raise PixivPolicyError("Pixiv 动图 ZIP 包含重名文件")
+            if entries != {frame["file"] for frame in meta["frames"]}:
+                if attempt:
+                    break
+                meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=authorization_epoch,
+                                        cancel_event=cancel_event, network_timeout=90, refresh=True)
+                # The bytes already fetched may match the newer manifest when
+                # Pixiv updates the content at the same URL.
+                if meta[url_field] != zip_url or entries != {frame["file"] for frame in meta["frames"]}:
+                    continue
+            source.seek(0)
+            raise_if_search_cancelled(cancel_event)
+            if item.get("restriction") in RESTRICTED_CONTENT and authorization_epoch is not None:
+                assert_authorization_generation(authorization_epoch)
+            yield source, meta, zip_url
+            return
+    raise PixivPolicyError("Pixiv 动图帧表与 ZIP 内容不一致，请稍后重试")
 
 
 def _animation_source_key(artwork_id: str, quality: str):
