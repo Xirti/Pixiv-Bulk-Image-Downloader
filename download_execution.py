@@ -76,12 +76,24 @@ def _mutex(name: str, timeout_ms: int):
 
 @contextmanager
 def download_execution(path: Path, request_id: str, scope: str, cancel: threading.Event | None):
-    """Own one request until its receipt is stored; observers get False.
+    """Own one request until its receipt is stored; competing writers get False.
 
     Mutex ownership lives on the HTTP thread and is reclaimed by Windows on
     process/thread exit. The cancellation event is scoped to the account.
     """
-    with _mutex(_name(path, request_id), 0) as owner, ExitStack() as cleanup:
+    name = _name(path, request_id)
+    with ExitStack() as cleanup:
+        # A probe must see the owner as soon as a subsequent writer can see
+        # the occupied mutex. The registration lock covers only native handles.
+        with _mutex(name + ".registration", 1000) as registered:
+            if not registered:
+                raise TimeoutError("下载状态通道繁忙，请重试")
+            owner = cleanup.enter_context(_mutex(name, 0))
+            if owner:
+                running = _KERNEL.CreateEventW(None, True, False, name + ".running")
+                if not running:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                cleanup.callback(_KERNEL.CloseHandle, running)
         if not owner:
             yield False
             return
@@ -107,6 +119,23 @@ def download_execution(path: Path, request_id: str, scope: str, cancel: threadin
             watcher.start()
             cleanup.callback(_stop_watcher, stopped, watcher)
         yield True
+
+
+def download_execution_active(path: Path, request_id: str, scope: str) -> bool:
+    name = _name(path, request_id)
+    with _mutex(name + ".registration", 1000) as registered:
+        if not registered:
+            raise TimeoutError("下载状态通道繁忙，请重试")
+        # An older running desktop only exposes its account-bound cancel event.
+        for event_name in (name + ".running", _name(path, request_id, scope)):
+            handle = _KERNEL.OpenEventW(0x00100000, False, event_name)
+            if handle:
+                _KERNEL.CloseHandle(handle)
+                return True
+            error = ctypes.get_last_error()
+            if error != 2:
+                raise ctypes.WinError(error)
+    return False
 
 
 def cancel_download_execution(path: Path, request_id: str, scope: str) -> bool:

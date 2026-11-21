@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from local_catalog import artifact_file_state
-from download_execution import cancel_download_execution, download_execution
+from download_execution import cancel_download_execution, download_execution, download_execution_active
 
 
 Response = tuple[dict, int]
@@ -29,6 +29,15 @@ class DownloadRequestError(ValueError):
     def __init__(self, message: str, status: int = 400) -> None:
         super().__init__(message)
         self.status = status
+
+
+def _request_identity(request_id: object, route: str, body: dict, scope: str, receipt_scope: str) -> tuple[str, str, str]:
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,96}", request_id):
+        raise DownloadRequestError("下载任务编号无效")
+    normalized = {key: value for key, value in body.items() if key != "requestId"}
+    fingerprint = _fingerprint(route, scope, normalized)
+    durable_fingerprint = fingerprint if receipt_scope == scope else _fingerprint(route, receipt_scope, normalized)
+    return request_id, fingerprint, durable_fingerprint
 
 
 @dataclass
@@ -124,6 +133,12 @@ class DownloadRequests:
                 return None
         return payload, 200
 
+    def _confirm_receipt(self, request_id: str, fingerprint: str) -> Response | None:
+        try:
+            return self._read_success(request_id, fingerprint)
+        except (OSError, sqlite3.Error) as exc:
+            raise DownloadRequestError("暂时无法核对下载回执，请继续原任务重试", 503) from exc
+
     def _write_success(self, request_id: str, fingerprint: str, result: Response, root: Path) -> None:
         if self._path is None:
             return
@@ -142,16 +157,36 @@ class DownloadRequests:
             connection.close()
 
     def probe(
-        self, request_id: str, route: str, body: dict, *, scope: str,
+        self, request_id: object, route: str, body: dict, *, scope: str,
         durable_scope: str, output_root: Path,
     ) -> Response:
         """Inspect a queued legacy request without starting or publishing work.
 
         Inactive attempts can be inspected after reauthorization to the same
-        account. Valid receipts replay; expired receipts return to planning.
+        account. The output_root keyword is retained for existing callers;
+        a probe verifies the paths already stored in the receipt.
         """
-        return self.run(request_id, route, body, lambda: ({}, 204),
-                        scope=scope, durable_scope=durable_scope, output_root=output_root)
+        if request_id is None and "requestId" not in body:
+            return {}, 204
+        request_id, fingerprint, durable_fingerprint = _request_identity(request_id, route, body, scope, durable_scope)
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is not None and (entry.active or self._clock() - entry.touched < self._ttl):
+                expected = entry.fingerprint if entry.active else entry.durable_fingerprint
+                observed = fingerprint if entry.active else durable_fingerprint
+                if expected != observed:
+                    raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
+                if entry.active:
+                    return {"pending": True, "retryAfterMs": 1000}, 202
+                if self._path is None and entry.result is not None:
+                    return entry.result
+        if self._path is not None and download_execution_active(self._path, request_id, durable_scope):
+            return {"pending": True, "retryAfterMs": 1000}, 202
+        try:
+            receipt = self._read_success(request_id, durable_fingerprint)
+        except (OSError, sqlite3.Error):
+            receipt = self._confirm_receipt(request_id, durable_fingerprint)
+        return receipt if receipt is not None else ({}, 204)
 
     def cancel(self, request_id: str, scope: str) -> bool:
         if self._path is not None:
@@ -172,12 +207,8 @@ class DownloadRequests:
         # Old clients without an ID retain the existing synchronous behaviour.
         if request_id is None and "requestId" not in body:
             return operation()
-        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,96}", request_id):
-            raise DownloadRequestError("下载任务编号无效")
-        normalized = {key: value for key, value in body.items() if key != "requestId"}
-        fingerprint = _fingerprint(route, scope, normalized)
         receipt_scope = scope if durable_scope is None else durable_scope
-        durable_fingerprint = fingerprint if receipt_scope == scope else _fingerprint(route, receipt_scope, normalized)
+        request_id, fingerprint, durable_fingerprint = _request_identity(request_id, route, body, scope, receipt_scope)
         now = self._clock()
         # Active polls need only registry state. Disk verification belongs
         # outside this lock; a slow output directory must not stall other IDs.
@@ -238,10 +269,7 @@ class DownloadRequests:
                         return {"pending": True, "retryAfterMs": 1000}, 202
                     # A peer may have committed its receipt after our first
                     # lookup but before mutex acquisition. Recheck as owner.
-                    try:
-                        result = self._read_success(request_id, durable_fingerprint)
-                    except (OSError, sqlite3.Error) as exc:
-                        raise DownloadRequestError("暂时无法核对下载回执，请继续原任务重试", 503) from exc
+                    result = self._confirm_receipt(request_id, durable_fingerprint)
                     if result is None:
                         result = operation()
                         if result[1] == 200:
