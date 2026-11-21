@@ -1,12 +1,14 @@
 """Read-only Pixiv account pages and per-account observed-work markers."""
 from collections import OrderedDict
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from contextvars import ContextVar
 import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 from html.parser import HTMLParser
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -22,10 +24,18 @@ from pixiv_adapter import (PixivPolicyError, normalize_search_item, is_allowed_p
 from pixiv_app_gallery import normalize_work, artist_profile, continuation
 from artist_service import normalize_artist
 from request_coordinator import checked_lock
+from runtime_identity import named_mutex, process_presence
 
 ACCOUNT_CACHE_ONLY = ContextVar("account_cache_only", default=False)
 RELATION_VIEWS = frozenset({"bookmarks", "following"})
 _DISPLAY_PENDING_KEY = json.dumps(["web-display-pending"])
+_DISPLAY_REVISION_KEY = json.dumps(["display-cache-revision"])
+_DISPLAY_ORDER_KEY = json.dumps(["display-publication-order"])
+_DISPLAY_SETTINGS_KEY = json.dumps(["web-display-settings"])
+_WEB_POLICY_KEY = json.dumps(["web-policy-revision"])
+_ACCOUNT_CLEAR_KEY = json.dumps(["account-clear-revision"])
+# Existing snapshots use their creation time until a refresh obtains an order.
+_PUBLICATION_ORDER_SQL = "COALESCE(json_extract(payload,'$.publicationOrder'),json_extract(payload,'$.created')*1000)"
 
 
 class HomepageIdentity(HTMLParser):
@@ -120,9 +130,9 @@ class VisitStore:
 
     def acknowledge(self, owner, authors):
         with self.lock, closing(self._connect()) as connection, connection:
-            connection.executemany("INSERT INTO author_seen VALUES(?,?,?,?,?) ON CONFLICT(owner,author) DO UPDATE SET "
-                "seen=MAX(author_seen.seen,excluded.seen),observed=MAX(author_seen.observed,excluded.observed),touched=excluded.touched",
-                [(owner,author,stamp,stamp,time.time()) for author,stamp in authors.items()])
+            connection.executemany("UPDATE author_seen SET seen=MAX(seen,?),touched=?"
+                " WHERE owner=? AND author=? AND observed>=?",
+                [(stamp,time.time(),owner,author,stamp) for author,stamp in authors.items()])
 
     def clear(self, owner):
         with self.lock, closing(self._connect()) as connection, connection:
@@ -134,6 +144,13 @@ class VisitStore:
 class DiscoveryPage:
     feed: dict
     items: list
+
+
+@dataclass(frozen=True)
+class DisplayPublication:
+    order: int | float
+    batch: str
+    legacy_batch: str | None
 
 
 @dataclass(frozen=True)
@@ -157,10 +174,54 @@ class AccountCache:
     def __init__(self, path):
         self.path = Path(path)
         self.lock = threading.RLock()
+        self._policy_lock = threading.Lock()
+        self._policy_connection = None
+        self._policy_observed = None
+        self._policy_stamp = (None, None, None)
+        path_key = os.path.normcase(str(self.path.resolve()))
+        self._mutex_prefix = "Local\\MOKU.Account." + hashlib.sha256(path_key.encode()).hexdigest()[:32]
 
-    def _connect(self):
+    def owner_mutex(self, owner):
+        return named_mutex(f"{self._mutex_prefix}.{owner}", timeout_seconds=5)
+
+    def relation_mutex(self, owner, kind, target):
+        # App and Web can change the same Pixiv relationship.
+        return named_mutex(f"{self._mutex_prefix}.{owner}.{kind}.{target}", timeout_seconds=0)
+
+    @contextmanager
+    def web_settings_mutex(self, owner):
+        with ExitStack() as locks:
+            try:
+                locks.enter_context(named_mutex(f"{self._mutex_prefix}.{owner}.web-settings", timeout_seconds=0))
+            except TimeoutError as error:
+                raise AccountError("settings_pending", "另一个窗口正在核对浏览设置，请稍后重试。") from error
+            yield
+
+    def _snapshot_key(self, owner, method, kind, identity):
+        return f"{self._mutex_prefix}.{owner}.{kind}.{method}.{identity}"
+
+    @contextmanager
+    def pin_snapshot(self, owner, method, kind, identity):
+        key = self._snapshot_key(owner, method, kind, identity)
+        with ExitStack() as presence:
+            with named_mutex(key + ".gate", timeout_seconds=5):
+                presence.enter_context(process_presence(key))
+            yield
+
+    def _snapshot_can_be_retired(self, held, owner, method, kind, identity):
+        name = self._snapshot_key(owner, method, kind, identity)
+        try:
+            # Keep the gate until deletion commits. A reader cannot pin it after this check.
+            held.enter_context(named_mutex(name + ".gate", timeout_seconds=0))
+        except TimeoutError:
+            return False
+        with process_presence(name) as active:
+            return not active
+
+    def _connect(self, *, shared_reader=False):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path, timeout=5)
+        connection = sqlite3.connect(self.path, timeout=.25 if shared_reader else 5,
+            check_same_thread=not shared_reader)
         try:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version == 1:
@@ -178,7 +239,30 @@ class AccountCache:
             raise
         return connection
 
-    def read(self, owner, method, key):
+    def web_policy_stamp(self, owner):
+        """Use the connection's committed data version to skip unchanged policy rows."""
+        with self._policy_lock:
+            if self._policy_connection is None:
+                self._policy_connection = self._connect(shared_reader=True)
+            db = self._policy_connection
+            current = owner, db.execute("PRAGMA data_version").fetchone()[0]
+            if current != self._policy_observed:
+                rows = dict(db.execute("SELECT key,payload FROM cached WHERE owner=? AND method='web' AND key IN (?,?,?)",
+                    (owner, _WEB_POLICY_KEY, _DISPLAY_PENDING_KEY, _DISPLAY_SETTINGS_KEY)))
+                settings = json.loads(rows[_DISPLAY_SETTINGS_KEY]) if _DISPLAY_SETTINGS_KEY in rows else None
+                flags = tuple(settings.get(name) for name in ("ageRestriction", "sensitive", "showAI")) if settings else None
+                self._policy_stamp = (rows.get(_WEB_POLICY_KEY), rows.get(_DISPLAY_PENDING_KEY), flags)
+                self._policy_observed = current
+            return self._policy_stamp
+
+    def close_policy_reader(self):
+        with self._policy_lock:
+            if self._policy_connection is not None:
+                self._policy_connection.close()
+                self._policy_connection = None
+                self._policy_observed = None
+
+    def read(self, owner, method, key, *, clear_revision=None):
         with self.lock, closing(self._connect()) as db:
             if self._is_display_key(key):
                 self._begin_display_cache(db, owner, method)
@@ -186,43 +270,86 @@ class AccountCache:
                 db.execute("BEGIN")
                 if self._display_update_pending(db, owner, method):
                     return None
+            elif clear_revision is not None:
+                db.execute("BEGIN")
+            self._check_clear_revision(db, owner, clear_revision)
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
                              (owner, method, json.dumps(key))).fetchone()
             return json.loads(row[0]) if row else None
 
     def discovery_batch(self, owner, method, descriptor):
         """A separate pointer keeps the old cache readable after a rollback."""
-        current = ["discovery-current", *descriptor]
-        current_key, paged_key = json.dumps(current), json.dumps([*current, "pages"])
         with self.lock, closing(self._connect()) as db:
             self._begin_display_cache(db, owner, method)
-            pointers = dict(db.execute("SELECT key,payload FROM cached WHERE owner=? AND method=? AND key IN (?,?)",
-                (owner, method, current_key, paged_key)))
-            if len(pointers) < 2:
-                return json.loads(next(iter(pointers.values()))) if pointers else ""
-            # A legacy version may have fetched a newer batch after rollback.
-            candidates = []
-            for paged, pointer in enumerate((current_key, paged_key)):
-                batch = json.loads(pointers[pointer])
-                key = ["discovery-feed", batch]
-                if paged:
-                    key.append("pages")
-                row = db.execute("SELECT json_extract(payload,'$.created') FROM cached WHERE owner=? AND method=? AND key=?",
-                    (owner, method, json.dumps(key))).fetchone()
-                if row is not None:
-                    candidates.append((row[0], paged, batch))
-            return max(candidates)[2] if candidates else ""
+            current, _ = self._discovery_current(db, owner, method, ["discovery-current", *descriptor])
+            return current.batch if current else ""
+
+    @staticmethod
+    def _snapshot_pointer(db, owner, method, pointer, kind, *suffix):
+        row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
+            (owner, method, json.dumps(pointer))).fetchone()
+        if row is None:
+            return None
+        identity = json.loads(row[0])
+        snapshot = db.execute(f"SELECT {_PUBLICATION_ORDER_SQL},json_extract(payload,'$.legacyBatch') "
+            "FROM cached WHERE owner=? AND method=? AND key=?",
+            (owner, method, json.dumps([kind, identity, *suffix]))).fetchone()
+        return DisplayPublication(snapshot[0], identity, snapshot[1]) if snapshot is not None else None
 
     @classmethod
-    def _begin_display_cache(cls, db, owner, method, *, write=False):
-        db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-        if cls._display_update_pending(db, owner, method):
-            raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
+    def _discovery_current(cls, db, owner, method, pointer):
+        legacy = cls._snapshot_pointer(db, owner, method, pointer, "discovery-feed")
+        paged = cls._snapshot_pointer(db, owner, method, [*pointer, "pages"], "discovery-feed", "pages")
+        if legacy is None:
+            return paged, ""
+        if paged is None:
+            return legacy, legacy.batch
+        if paged.legacy_batch is not None:
+            # A different legacy batch was published since the paged request began.
+            return (paged if paged.legacy_batch == legacy.batch else legacy), legacy.batch
+        return (paged if paged.order >= legacy.order else legacy), legacy.batch
 
-    def read_discovery(self, owner, method, batch, *, page=None):
+    @classmethod
+    def _begin_display_cache(cls, db, owner, method, *, write=False, revision=None):
+        db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        cls._require_display_ready(db, owner, method)
+        if revision is not None and cls._display_revision(db, owner, method) != revision:
+            raise AccountError("cache_cleared", "浏览缓存已更新，请重新打开页面")
+
+    @classmethod
+    def _display_revision(cls, db, owner, method):
+        # Pre-revision releases also replace the settings row on confirmation.
+        values = dict(db.execute("SELECT key,CASE WHEN key=? THEN rowid ELSE payload END"
+            " FROM cached WHERE owner=? AND method=? AND key IN (?,?)",
+            (_DISPLAY_SETTINGS_KEY, owner, method, _DISPLAY_REVISION_KEY, _DISPLAY_SETTINGS_KEY)))
+        return json.dumps([cls._read_clear_revision(db, owner), values.get(_DISPLAY_REVISION_KEY),
+            values.get(_DISPLAY_SETTINGS_KEY)])
+
+    def display_revision(self, owner, method):
+        with self.lock, closing(self._connect()) as db, db:
+            self._begin_account_read(db, owner)
+            self._require_display_ready(db, owner, method)
+            return self._display_revision(db, owner, method)
+
+    def reserve_display_publication(self, owner, method, pointer, *, revision):
+        """Assign fresh reads their order before any upstream work starts."""
+        with self.lock, closing(self._connect()) as db, db:
+            self._begin_display_cache(db, owner, method, write=True, revision=revision)
+            last = db.execute("SELECT CAST(payload AS INTEGER) FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, _DISPLAY_ORDER_KEY)).fetchone()
+            legacy_batch = None
+            if pointer[0] == "discovery-current":
+                current, legacy_batch = self._discovery_current(db, owner, method, pointer)
+            else:
+                current = self._snapshot_pointer(db, owner, method, pointer, "popularity-index")
+            order = int(max(time.time() * 1000, last[0] if last else 0, current.order if current else 0)) + 1
+            db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", (owner, method, _DISPLAY_ORDER_KEY, str(order)))
+            return order, legacy_batch
+
+    def read_discovery(self, owner, method, batch, *, page=None, warm=None, revision=None):
         key = ["discovery-feed", batch]
         with self.lock, closing(self._connect()) as db:
-            self._begin_display_cache(db, owner, method)
+            self._begin_display_cache(db, owner, method, revision=revision)
             header = json.dumps([*key, "pages"])
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, header)).fetchone()
@@ -236,6 +363,9 @@ class AccountCache:
                 feed["_legacy_rowid"] = rowid
                 return feed
             feed = json.loads(row[0])
+            if warm is not None and (warm.get("_checkpoint"), warm.get("_offsetCheckpoint")) == (
+                    feed["_checkpoint"], feed.get("_offsetCheckpoint")):
+                return warm
             if page is not None and feed.get("_offsetCheckpoint") == feed["_checkpoint"]:
                 offset, limit, cached = page
                 target = offset + limit
@@ -263,10 +393,10 @@ class AccountCache:
                     feed["visitedPaths"].setdefault(stream, []).extend(paths)
             return feed
 
-    def save_discovery(self, owner, method, feed, previous, *, current=None):
+    def save_discovery(self, owner, method, feed, previous, *, revision, current=None):
         key = ["discovery-feed", feed["batch"]]
         if previous is not None and "_legacy_rowid" in previous:
-            return self._save_legacy_discovery(owner, method, key, feed, previous["_legacy_rowid"])
+            return self._save_legacy_discovery(owner, method, key, feed, previous["_legacy_rowid"], revision)
         header = json.dumps([*key, "pages"])
         checkpoint = previous["_checkpoint"] if previous else 0
         prefix = previous
@@ -281,10 +411,12 @@ class AccountCache:
         metadata["_offsetCheckpoint"] = checkpoint + 1
         metadata["_itemCount"] = len(feed["items"])
         rows = [(owner, method, header, json.dumps(metadata, ensure_ascii=False))]
-        if current is not None:
-            rows.append((owner, method, json.dumps([*current, "pages"]), json.dumps(feed["batch"])))
         with self.lock, closing(self._connect()) as db, db:
-            self._begin_display_cache(db, owner, method, write=True)
+            self._begin_display_cache(db, owner, method, write=True, revision=revision)
+            if current is not None:
+                latest, legacy_batch = self._discovery_current(db, owner, method, current)
+                if feed["legacyBatch"] == legacy_batch and (latest is None or feed["publicationOrder"] > latest.order):
+                    rows.append((owner, method, json.dumps([*current, "pages"]), json.dumps(feed["batch"])))
             db.execute("""CREATE TABLE IF NOT EXISTS discovery_pages (
                 owner TEXT, method TEXT, header TEXT, checkpoint INTEGER, payload TEXT NOT NULL,
                 PRIMARY KEY(owner,method,header,checkpoint))""")
@@ -322,13 +454,13 @@ class AccountCache:
         return {"_checkpoint": checkpoint + 1, "_offsetCheckpoint": checkpoint + 1,
                 "_itemCount": metadata["_itemCount"]}
 
-    def _save_legacy_discovery(self, owner, method, key, feed, previous_rowid):
+    def _save_legacy_discovery(self, owner, method, key, feed, previous_rowid, revision):
         # Continue an existing old-format batch in place so a downgraded
         # application can resume it too. Refreshes create new paged batches.
         snapshot = dict(feed, seen=sorted(feed["seen"]))
         snapshot.pop("_legacy_rowid")
         with self.lock, closing(self._connect()) as db, db:
-            self._begin_display_cache(db, owner, method, write=True)
+            self._begin_display_cache(db, owner, method, write=True, revision=revision)
             stored = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, json.dumps(key))).fetchone()
             if stored != (previous_rowid,):
@@ -337,20 +469,49 @@ class AccountCache:
                 (owner, method, json.dumps(key), json.dumps(snapshot, ensure_ascii=False)))
             return {"_legacy_rowid": inserted.lastrowid}
 
-    def save(self, owner, method, key, value):
-        self.save_many(owner,method,[(key,value)])
+    def save(self, owner, method, key, value, *, revision=None):
+        self.save_many(owner,method,[(key,value)], revision=revision)
 
     @staticmethod
     def _save_rows(db, owner, method, pages):
         db.executemany("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
             [(owner,method,json.dumps(key),json.dumps(value,ensure_ascii=False)) for key,value in pages])
 
-    def save_many(self, owner, method, pages):
+    def save_many(self, owner, method, pages, *, revision=None):
         pages = list(pages)
         with self.lock, closing(self._connect()) as db, db:
             if any(self._is_display_key(key) for key, _ in pages):
-                self._begin_display_cache(db, owner, method, write=True)
+                self._begin_display_cache(db, owner, method, write=True, revision=revision)
             self._save_rows(db,owner,method,pages)
+
+    def read_popularity(self, owner, method, key, *, revision, warm=None):
+        with self.lock, closing(self._connect()) as db:
+            self._begin_display_cache(db, owner, method, revision=revision)
+            params = owner, method, json.dumps(key)
+            row = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?", params).fetchone()
+            if row is None:
+                return None, None
+            if warm is not None and warm[0] == row[0]:
+                return warm
+            payload = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?", params).fetchone()[0]
+            return row[0], json.loads(payload)
+
+    def save_popularity(self, owner, method, snapshot, previous_rowid, *, revision, current=None):
+        index = snapshot["index"]
+        key = json.dumps(["popularity-index", index])
+        payload = json.dumps(snapshot, ensure_ascii=False)
+        with self.lock, closing(self._connect()) as db, db:
+            self._begin_display_cache(db, owner, method, write=True, revision=revision)
+            row = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, key)).fetchone()
+            if (row[0] if row else None) != previous_rowid:
+                raise AccountError("cache_changed", "排序快照已更新，请重试")
+            if current is not None:
+                latest = self._snapshot_pointer(db, owner, method, current, "popularity-index")
+                if latest is None or snapshot["publicationOrder"] > latest.order:
+                    self._save_rows(db, owner, method, [(current, index)])
+            row = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", (owner, method, key, payload))
+            return row.lastrowid
 
     def read_cursor(self, owner, method, key):
         with self.lock, closing(self._connect()) as db:
@@ -377,12 +538,14 @@ class AccountCache:
             raise AccountError("cursor","账号分页检查点格式异常，请刷新")
         return path,state["scan"] if state is not None and state["path"]==path else None
 
-    def relation_version(self, owner, method, key):
+    def page_version(self, owner, method, key, *, clear_revision=None):
         with self.lock, closing(self._connect()) as db:
-            return self._relation_version(db, owner, method, key)
+            db.execute("BEGIN")
+            self._check_clear_revision(db, owner, clear_revision)
+            return self._page_version(db, owner, method, key)
 
     @staticmethod
-    def _relation_version(db, owner, method, key):
+    def _page_version(db, owner, method, key):
         epoch_key = json.dumps(["relation-cache-epoch", key[1]])
         page_key = json.dumps(key)
         rows = {encoded: (rowid, epoch) for encoded, rowid, epoch in db.execute(
@@ -391,17 +554,18 @@ class AccountCache:
         return rows.get(epoch_key, (None, None))[1], rows.get(page_key, (None, None))[0]
 
     @staticmethod
-    def _advance_relation_epochs(db, owner, method, views):
+    def _advance_page_epochs(db, owner, method, views):
         AccountCache._save_rows(db, owner, method, [
             (["relation-cache-epoch", view], uuid.uuid4().hex) for view in views])
 
-    def save_relation_page(self, owner, method, key, result, expected, cursor):
+    def save_account_page(self, owner, method, key, result, expected, cursor, *, clear_revision, display_revision):
         with self.lock, closing(self._connect()) as db, db:
             if self._is_display_key(key):
-                self._begin_display_cache(db, owner, method, write=True)
+                self._begin_display_cache(db, owner, method, write=True, revision=display_revision)
             else:
                 db.execute("BEGIN IMMEDIATE")
-            if self._relation_version(db, owner, method, key) != expected:
+            self._check_clear_revision(db, owner, clear_revision)
+            if self._page_version(db, owner, method, key) != expected:
                 raise AccountError("cache_changed", "账号列表已更新，请重新打开页面")
             self._save_rows(db, owner, method, [(key, result)])
             if cursor is not None:
@@ -432,32 +596,86 @@ class AccountCache:
                 [(owner,method,identity) for (identity,) in obsolete])
 
     def retain_discovery(self, owner, method, limit=32):
-        with self.lock, closing(self._connect()) as db, db:
+        with ExitStack() as held, self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            current={row[0] for row in db.execute("SELECT json_extract(payload,'$') FROM cached WHERE owner=? AND method=? AND key LIKE ?",
-                (owner,method,'["discovery-current",%'))}
-            feeds=db.execute("SELECT key,json_extract(payload,'$.batch') FROM cached WHERE owner=? AND method=? AND key LIKE ? "
-                "ORDER BY json_extract(payload,'$.created') DESC LIMIT -1 OFFSET ?",(owner,method,'["discovery-feed",%',limit)).fetchall()
-            removable=[(owner,method,key) for key,batch in feeds if batch not in current]
-            db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?",removable)
+            feeds = db.execute("SELECT key,json_extract(key,'$[1]') FROM cached WHERE owner=? AND method=? AND key LIKE ? "
+                "ORDER BY rowid DESC LIMIT -1 OFFSET ?", (owner, method, '["discovery-feed",%', limit)).fetchall()
+            if not feeds:
+                return
+            protected = {batch for (batch,) in db.execute(
+                "SELECT json_extract(payload,'$') FROM cached WHERE owner=? AND method=? AND key LIKE ?",
+                (owner, method, '["discovery-current",%'))}
+            if all(batch in protected for _, batch in feeds):
+                return
+            # Ranking sources written by old releases carry the same dependency fields.
+            protected.update(batch for (batch,) in db.execute(
+                "SELECT DISTINCT json_extract(payload,'$.batch') FROM cached WHERE owner=? AND method=? AND key LIKE ?"
+                " AND json_extract(payload,'$.kind')='ranking' AND json_extract(payload,'$.collected')=0",
+                (owner, method, '["popularity-index",%')))
+            removed = [(owner, method, key) for key, batch in feeds if batch not in protected
+                and self._snapshot_can_be_retired(held, owner, method, "discovery", batch)]
+            db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?", removed)
 
     def retain_popularity(self, owner, method, limit=24):
-        with self.lock, closing(self._connect()) as db, db:
+        with ExitStack() as held, self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            rows=db.execute("SELECT key FROM cached WHERE owner=? AND method=? AND key LIKE ? "
-                "ORDER BY json_extract(payload,'$.created') DESC LIMIT -1 OFFSET ?",(owner,method,'["popularity-index",%',limit)).fetchall()
+            rows = db.execute("SELECT key FROM cached WHERE owner=? AND method=? AND key LIKE ? "
+                "ORDER BY rowid DESC LIMIT -1 OFFSET ?", (owner, method, '["popularity-index",%', limit)).fetchall()
+            paused = 0
+            removed = []
+            for (key,) in rows:
+                _, index = json.loads(key)
+                if paused < 8 and db.execute(
+                        "SELECT json_extract(payload,'$.ready') FROM cached WHERE owner=? AND method=? AND key=?",
+                        (owner, method, key)).fetchone()[0] == 0:
+                    paused += 1
+                    continue
+                if self._snapshot_can_be_retired(held, owner, method, "popularity", index):
+                    removed.append((owner, method, key))
             db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
-                           [(owner,method,key) for (key,) in rows])
+                removed)
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key LIKE ? AND json_extract(payload,'$') NOT IN "
                 "(SELECT json_extract(key,'$[1]') FROM cached WHERE owner=? AND method=? AND key LIKE ?)",
                 (owner,method,'["popularity-current",%',owner,method,'["popularity-index",%'))
 
     def clear(self, owner):
         with self.lock, closing(self._connect()) as db, db:
-            db.execute("DELETE FROM cached WHERE owner=? AND key<>?", (owner, _DISPLAY_PENDING_KEY))
+            db.execute("DELETE FROM cached WHERE owner=? AND key NOT IN (?,?,?)",
+                (owner, _DISPLAY_PENDING_KEY, _DISPLAY_ORDER_KEY, _WEB_POLICY_KEY))
             db.execute("DELETE FROM cursor_visits WHERE owner=?",(owner,))
+            db.execute("INSERT INTO cached VALUES(?,?,?,?)", (owner, "account", _ACCOUNT_CLEAR_KEY, json.dumps(uuid.uuid4().hex)))
             for method in ("app", "web"):
-                self._advance_relation_epochs(db, owner, method, sorted(RELATION_VIEWS))
+                self._advance_page_epochs(db, owner, method, sorted(RELATION_VIEWS))
+                self._advance_display_revision(db, owner, method)
+
+    def clear_revision(self, owner):
+        with self.lock, closing(self._connect()) as db, db:
+            return self._begin_account_read(db, owner)
+
+    @classmethod
+    def _begin_account_read(cls, db, owner):
+        db.execute("BEGIN")
+        current = cls._read_clear_revision(db, owner)
+        if current:
+            return current
+        # Anchor the request before upstream work. Old versions delete this row
+        # when clearing, even if this account did not have any cached pages yet.
+        db.rollback()
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT OR IGNORE INTO cached VALUES(?,?,?,?)",
+            (owner, "account", _ACCOUNT_CLEAR_KEY, json.dumps(uuid.uuid4().hex)))
+        return cls._read_clear_revision(db, owner)
+
+    @staticmethod
+    def _read_clear_revision(db, owner):
+        row = db.execute("SELECT payload FROM cached WHERE owner=? AND method='account' AND key=?",
+            (owner, _ACCOUNT_CLEAR_KEY)).fetchone()
+        return row[0] if row else ""
+
+    @classmethod
+    def _check_clear_revision(cls, db, owner, expected):
+        if expected is not None and cls._read_clear_revision(db, owner) != expected:
+            raise AccountError("cache_cleared", "账号缓存已清理，请重新打开页面")
 
     @staticmethod
     def _is_display_key(key):
@@ -470,15 +688,27 @@ class AccountCache:
             "((json_extract(key,'$[0]')='data' AND json_extract(key,'$[1]') IN ('bookmarks','works')) "
             "OR json_extract(key,'$[0]') IN ('discovery-current','discovery-feed','popularity-current','popularity-index'))",
             (owner, method))
-        AccountCache._advance_relation_epochs(db, owner, method, ("bookmarks",))
+        AccountCache._advance_page_epochs(db, owner, method, ("bookmarks", "works"))
+        AccountCache._advance_display_revision(db, owner, method)
+
+    @staticmethod
+    def _advance_display_revision(db, owner, method):
+        db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
+            (owner, method, _DISPLAY_REVISION_KEY, json.dumps(uuid.uuid4().hex)))
+
+    @staticmethod
+    def _advance_web_policy(db, owner, method):
+        db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
+            (owner, method, _WEB_POLICY_KEY, json.dumps(uuid.uuid4().hex)))
 
     def begin_display_update(self, owner, method):
         with self.lock, closing(self._connect()) as db, db:
             db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
                 (owner, method, _DISPLAY_PENDING_KEY, json.dumps({"started": time.time()})))
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, json.dumps(["web-display-settings"])))
+                (owner, method, _DISPLAY_SETTINGS_KEY))
             self._delete_display_pages(db, owner, method)
+            self._advance_web_policy(db, owner, method)
 
     def display_update_pending(self, owner, method):
         with self.lock, closing(self._connect()) as db:
@@ -489,13 +719,19 @@ class AccountCache:
         return db.execute("SELECT 1 FROM cached WHERE owner=? AND method=? AND key=?",
             (owner, method, _DISPLAY_PENDING_KEY)).fetchone() is not None
 
+    @classmethod
+    def _require_display_ready(cls, db, owner, method):
+        if cls._display_update_pending(db, owner, method):
+            raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
+
     def finish_display_update(self, owner, method, state):
         with self.lock, closing(self._connect()) as db, db:
             db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
-                (owner, method, json.dumps(["web-display-settings"]), json.dumps(state)))
+                (owner, method, _DISPLAY_SETTINGS_KEY, json.dumps(state)))
             self._delete_display_pages(db, owner, method)
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, _DISPLAY_PENDING_KEY))
+            self._advance_web_policy(db, owner, method)
 
     def entries(self, owner, method, views=None):
         with self.lock, closing(self._connect()) as db:
@@ -508,14 +744,13 @@ class AccountCache:
             (" AND json_extract(key,'$[1]') IN ("+','.join('?' for _ in views)+')' if views is not None else ""),
             (owner,method,'["data",%',*views) if views is not None else (owner,method,'["data",%'))]
 
-    def update_entries(self, owner, method, views, update, *, relation_view):
+    def update_entries(self, owner, method, views, update):
         with self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             patches = update(self._read_entries(db,owner,method,views))
             self._save_rows(db,owner,method,patches)
             # An overlapping read can still have rows that no cached page contains yet.
-            self._advance_relation_epochs(db, owner, method, (relation_view,))
-        return patches
+            self._advance_page_epochs(db, owner, method, views)
 
     def finish_relation_scan(self, owner, method, view, app_path, retained):
         """Retire obsolete list pages and their continuation keys together."""
@@ -540,8 +775,7 @@ class AccountCache:
                     removed.append((encoded, key))
             db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
                 ((owner, method, encoded) for encoded, _ in removed))
-            self._advance_relation_epochs(db, owner, method, (view,))
-        return [key for _, key in removed if key[0] == "data"]
+            self._advance_page_epochs(db, owner, method, (view,))
 
     def discard_relations(self, owner, method, views):
         with self.lock, closing(self._connect()) as db, db:
@@ -549,11 +783,12 @@ class AccountCache:
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND (key LIKE ? OR "
                 "key LIKE ? OR (key LIKE ? AND json_extract(key,'$[1]') IN (" + ','.join('?' for _ in views) + ')))',
                 (owner, method, '["cursor",%', '["cursor-state",%', '["data",%', *views))
-            self._advance_relation_epochs(db, owner, method, sorted(RELATION_VIEWS & views))
+            self._advance_page_epochs(db, owner, method, sorted(views))
 
 
 class AccountPages:
-    def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web", commit_guard=None, stopped=lambda:False):
+    def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web",
+                 commit_guard=None, stopped=lambda:False, credential_publication=nullcontext):
         self.directory = Path(directory)
         self.request_json, self.request_homepage = request_json, request_homepage
         self.generation, self.coordinator, self.proxy = generation, coordinator, proxy
@@ -561,12 +796,12 @@ class AccountPages:
         self.stopped = stopped
         self._closed = False
         self.commit_guard = commit_guard if commit_guard is not None else threading.RLock()
+        self.credential_publication = credential_publication
         self._account = None
         self._lock = threading.RLock()
         self._cache = OrderedDict()
         self._cache_revision = 0
         self._loads = {}
-        self._versions = {}
         self.visits = VisitStore(self.directory / "account-browse.sqlite3")
         self.saved_cache = AccountCache(self.directory / "account-cache.sqlite3")
         self.auth_status = {"pending": False, "error": ""}
@@ -576,7 +811,9 @@ class AccountPages:
             if self._closed or self.stopped():
                 raise AccountError("closed", "账号连接已关闭，请重新打开程序")
             if self._account is None:
-                self._account = AppAccount(CredentialVault(), AppTransport(self.directory / "request-settings.json", self.proxy(), coordinator=self.coordinator), CLIENT_CONFIG)
+                transport = AppTransport(self.directory / "request-settings.json", self.proxy(), coordinator=self.coordinator)
+                self._account = AppAccount(CredentialVault(), transport, CLIENT_CONFIG,
+                    credential_publication=self.credential_publication)
             self._account.transport.proxy = self.proxy()
             return self._account
 
@@ -593,11 +830,18 @@ class AccountPages:
         with checked_lock(self.commit_guard, lambda: self.check(generation)):
             yield
 
+    @contextmanager
+    def cache_publication(self, generation, owner, *, clear_revision=None):
+        with self.publication(generation), self.saved_cache.owner_mutex(owner):
+            self.check(generation)
+            if clear_revision is not None and self.saved_cache.clear_revision(owner) != clear_revision:
+                raise AccountError("cache_cleared", "账号缓存已清理，请重新打开页面")
+            yield
+
     def invalidate(self):
         with self._lock:
             self._cache_revision += 1
             self._cache.clear()
-            self._versions.clear()
             account = self._account
         if account:
             account.fence()
@@ -605,8 +849,6 @@ class AccountPages:
     def invalidate_display_views(self):
         with self._lock:
             self._cache_revision += 1
-            self._cache = OrderedDict((key, value) for key, value in self._cache.items()
-                if key[1] not in {"bookmarks", "works"})
 
     def disconnect(self):
         self.invalidate()
@@ -617,6 +859,11 @@ class AccountPages:
         else:
             CredentialVault().delete()
 
+    def forget_credentials(self):
+        with self._lock:
+            if self._account is not None:
+                self._account.forget_credentials()
+
     def close(self):
         with self.commit_guard:
             with self._lock:
@@ -625,16 +872,19 @@ class AccountPages:
                 self._closed = True
                 account = self._account
             self.invalidate()
+        self.saved_cache.close_policy_reader()
         if account is not None:
             account.transport.close()
 
-    def _cached(self, key, load, refresh=False):
+    def _cached(self, key, load, refresh=False, *, clear_revision=None):
+        if len(key) > 2 and clear_revision is None:
+            clear_revision = self.saved_cache.clear_revision(key[2])
         if ACCOUNT_CACHE_ONLY.get():
-            return self._load_cached(key, load, refresh)
+            return self._load_cached(key, load, refresh, clear_revision=clear_revision)
         if not refresh:
             token=ACCOUNT_CACHE_ONLY.set(True)
             try:
-                return self._load_cached(key,load)
+                return self._load_cached(key, load, clear_revision=clear_revision)
             except AccountError as error:
                 if error.kind not in {"cache_miss","cache_changed"}:raise
             finally:
@@ -644,114 +894,74 @@ class AccountPages:
         try:
             with checked_lock(pending[0],lambda:self.check(key[0])):
                 try:
-                    return self._load_cached(key, load, refresh)
+                    return self._load_cached(key, load, refresh, clear_revision=clear_revision)
                 except AccountError as error:
                     if error.kind!="cache_changed":raise
                     # A write overlapped this first read, so no repaired page
                     # exists yet. Replace that obsolete response once.
-                    return self._load_cached(key, load)
+                    return self._load_cached(key, load, clear_revision=clear_revision)
         finally:
             with self._lock:
                 pending[1]-=1
                 if not pending[1] and self._loads.get(key) is pending:del self._loads[key]
 
-    def _load_cached(self, key, load, refresh=False):
+    def _load_cached(self, key, load, refresh=False, *, clear_revision):
         persistent = len(key) > 2
         method = self.method()
         durable_key = ["data", *key[1:]] if persistent else None
         with self._lock:
             cache_revision = self._cache_revision
-            version = self._versions.get(key,0)
-            cached = self._cache.get(key)
-            if cached and not refresh:
-                self._cache.move_to_end(key)
+            cached = self._cache.get(key) if not persistent else None
 
-        def check_version(*, use_newer=False):
-            # Caller holds _lock, including while finding a replacement page.
-            if cache_revision != self._cache_revision:
-                raise AccountError("cache_cleared", "账号缓存已清除，请重新打开页面")
-            if version == self._versions.get(key, 0):
-                return None
-            if use_newer:
-                current = self._updated_cached(key, method)
-                if current is not None:
-                    return current
-            raise AccountError("cache_changed", "账号列表已更新，请重新打开页面")
+        previous_check = ACCOUNT_REQUEST_CHECK.get()
+
+        def check_read():
+            previous_check()
+            with self._lock:
+                if cache_revision != self._cache_revision:
+                    raise AccountError("cache_cleared", "账号缓存已清除，请重新打开页面")
 
         if cached and not refresh:
             result = copy.deepcopy(cached[1])
             self.check(key[0])
-            with self._lock:
-                check_version()
+            check_read()
             return result
         if persistent and not refresh:
-            cached = self.saved_cache.read(str(key[2]), method, durable_key)
+            cached = self.saved_cache.read(key[2], method, durable_key, clear_revision=clear_revision)
             if cached is not None:
-                with self.publication(key[0]), self._lock:
-                    current = check_version(use_newer=True)
-                    if current is not None:
-                        return current
-                    self._remember_cache(key,cached)
+                self.check(key[0])
+                check_read()
                 return cached
         if ACCOUNT_CACHE_ONLY.get():
             raise AccountError("cache_miss", "账号数据尚未在本地准备好")
-        relation = persistent and key[1] in RELATION_VIEWS
-        if relation:
-            stamp = self.saved_cache.relation_version(str(key[2]), method, durable_key)
-        previous_check = ACCOUNT_REQUEST_CHECK.get()
-        def check_read():
-            previous_check()
-            with self._lock:
-                check_version()
+        revision = self.saved_cache.display_revision(key[2], method) if persistent and key[1] in {"bookmarks", "works"} else None
+        if persistent:
+            stamp = self.saved_cache.page_version(key[2], method, durable_key, clear_revision=clear_revision)
         token = ACCOUNT_REQUEST_CHECK.set(check_read)
         try:
             result = load()
         finally:
             ACCOUNT_REQUEST_CHECK.reset(token)
         with self.publication(key[0]), self._lock:
-            current = check_version(use_newer=True)
-            if current is not None:
-                return current
-            if relation:
+            check_read()
+            if persistent:
                 cursor = None
                 if isinstance(result, AppRelationPage):
                     cursor, result = result.cursor, result.data
-                self.saved_cache.save_relation_page(str(key[2]), method, durable_key, result, stamp, cursor)
-            elif persistent:
-                self.saved_cache.save(str(key[2]), method, durable_key, result)
-            self._remember_cache(key,result)
+                self.saved_cache.save_account_page(key[2], method, durable_key, result, stamp, cursor,
+                    clear_revision=clear_revision, display_revision=revision)
+            else:
+                # Only the verified session owner is process-local.
+                self._cache[key] = (time.monotonic(), copy.deepcopy(result))
         return result
-
-    def _updated_cached(self,key,method):
-        # Caller has checked the cache epoch and holds _lock.
-        current=self._cache.get(key)
-        if current is not None:
-            self._cache.move_to_end(key);return copy.deepcopy(current[1])
-        if len(key)<=2:return None
-        value=self.saved_cache.read(str(key[2]),method,["data",*key[1:]])
-        if value is not None:self._remember_cache(key,value)
-        return value
-
-    def _remember_cache(self,key,value):
-        # Caller holds _lock. Eviction releases RAM; the durable page remains.
-        # Relation pages are changed by independent synchronizers on the same database.
-        if key[1] in RELATION_VIEWS:
-            return
-        self._cache[key]=(time.monotonic(),copy.deepcopy(value));self._cache.move_to_end(key)
-        while len(self._cache)>128:
-            old=next((identity for identity in self._cache if identity[1] not in {"owner","profile","profile-web","updates","tags"}),None)
-            if old is None:break
-            del self._cache[old]
 
     def clear_cache(self, owner):
         with self._lock:
             self._cache_revision += 1
-            self._cache = OrderedDict((key, value) for key, value in self._cache.items() if key[1] == "owner")
-            self._versions.clear()
             self.saved_cache.clear(owner)
             self.visits.clear(owner)
 
-    def cache_scan_page(self, owner, method, kind, scope, offset, rows, next_cursor, total, generation):
+    def cache_scan_page(self, owner, method, kind, scope, offset, rows, next_cursor, total, generation, *, revision=None):
         """The same scan response supplies relationship state and display pages."""
         view = "bookmarks" if kind == "bookmark" else "following"
         next_offset = offset + len(rows) if next_cursor is not None else None
@@ -769,10 +979,7 @@ class AccountPages:
             cursor_scan = uuid.uuid4().hex
             stored.append((["cursor-state",path,sorted(params.items()),next_offset],{"path":next_cursor,"scan":cursor_scan}))
         with self.publication(generation), self._lock:
-            self.saved_cache.save_many(owner, method, stored)
-            for key, page in pages:
-                self._versions[key]=self._versions.get(key,0)+1
-                self._remember_cache(key,page)
+            self.saved_cache.save_many(owner, method, stored, revision=revision)
 
     def discard_relation_pages(self, owner, method, generation):
         """Recover derived pages after an interrupted cross-database publication."""
@@ -780,9 +987,6 @@ class AccountPages:
         with self.publication(generation), self._lock:
             self.saved_cache.discard_relations(owner, method, views)
             self._cache_revision += 1
-            self._cache = OrderedDict((key, value) for key, value in self._cache.items()
-                if len(key) < 3 or key[2] != owner or key[1] not in views)
-            self._versions.clear()
 
     @staticmethod
     def relation_page(method, kind, rows, *, offset, next_offset, total=None, mode="safe"):
@@ -813,16 +1017,7 @@ class AccountPages:
         path="/v1/user/bookmarks/illust" if kind=="bookmark" else "/v1/user/following"
         retained = {scope: set(values) for scope, values in offsets.items()}
         with self.publication(generation), self._lock:
-            removed = self.saved_cache.finish_relation_scan(owner, method, view, path, retained)
-            obsolete = {(generation, *key[1:]) for key in removed}
-            for key in self._cache.keys() | self._loads.keys():
-                if len(key) < 5 or key[:3] != (generation, view, owner):
-                    continue
-                if key[4] not in retained.get(key[3], ()) or kind == "bookmark" and key[5]:
-                    obsolete.add(key)
-            for key in obsolete:
-                self._cache.pop(key, None)
-                self._versions[key] = self._versions.get(key, 0) + 1
+            self.saved_cache.finish_relation_scan(owner, method, view, path, retained)
 
     def note_relation(self, owner, method, kind, target, before, after, *, repair=False):
         """Patch cached pages after a confirmed write; do not invalidate unrelated pages."""
@@ -888,15 +1083,7 @@ class AccountPages:
                     patches.append((key,page))
             return patches
         with self.publication(generation), self._lock:
-            patches = self.saved_cache.update_entries(owner,method,views,patch_entries,relation_view=view)
-            for key,page in patches:
-                memory_key=(generation,*key[1:])
-                self._versions[memory_key]=self._versions.get(memory_key,0)+1
-                if memory_key in self._cache:self._cache[memory_key]=(time.monotonic(),copy.deepcopy(page))
-            patched={(generation,*key[1:]) for key,_ in patches}
-            for key in self._loads:
-                if key not in patched and len(key)>2 and key[0]==generation and key[1] in views and key[2]==owner:
-                    self._versions[key]=self._versions.get(key,0)+1
+            self.saved_cache.update_entries(owner, method, views, patch_entries)
 
     def web_owner(self, generation):
         def load():
@@ -905,7 +1092,12 @@ class AccountPages:
             return parser.user_id()
         return self._cached((generation, "owner"), load)
 
-    def profile(self, generation, refresh=False):
+    def cached_web_owner(self, generation):
+        with self._lock:
+            cached = self._cache.get((generation, "owner"))
+            return cached[1] if cached is not None else None
+
+    def profile(self, generation, refresh=False, *, clear_revision=None):
         if self.method() == "web":
             owner = self.web_owner(generation)
             def load_web():
@@ -919,7 +1111,8 @@ class AccountPages:
                 counts["workCount"]=sum(own) if all(type(n) is int and n>=0 for n in own) else None
                 return {"connected":True,"uid":owner,"name":profile["name"],"account":"","bio":profile["description"],
                     "avatar":profile["avatar"],"background":profile["background"],"region":profile["region"],"website":profile["webpage"],**counts,"method":"web"}
-            return {**self._cached((generation,"profile-web",owner),load_web,refresh),"authorization":{"pending":False,"error":""}}
+            return {**self._cached((generation,"profile-web",owner),load_web,refresh,clear_revision=clear_revision),
+                "authorization":{"pending":False,"error":""}}
         account = self.account()
         snapshot = account.snapshot()
         if not snapshot["connected"]:
@@ -944,21 +1137,23 @@ class AccountPages:
             self.check(generation)
             account.promote_verified()
             return result
-        result = self._cached((generation, "profile", owner), load, refresh)
+        result = self._cached((generation, "profile", owner), load, refresh, clear_revision=clear_revision)
         return {**result, "authorization": dict(self.auth_status)}
 
-    def latest_dates(self, generation, owner, scope, refresh=False):
+    def latest_dates(self, generation, owner, scope, refresh=False, *, clear_revision=None):
         method=self.method();feed_scope=scope if method=="app" else "all"
+        if clear_revision is None:
+            clear_revision = self.saved_cache.clear_revision(owner)
         def load():
             scan_key=["follow-update-scan",feed_scope]
-            scan=self.saved_cache.read(owner,method,scan_key) or {}
+            expected = self.saved_cache.read(owner, method, scan_key, clear_revision=clear_revision)
+            scan = expected or {}
             initial=not scan
             checkpoint=scan.get("checkpoint","")
             path=scan.get("cursor") or ("/v2/illust/follow?"+urlencode({"restrict":scope}) if method=="app" else 1)
             cutoff=scan.get("cutoff","") if scan.get("cursor") else checkpoint
             head=scan.get("head","") if scan.get("cursor") else ""
             visited=list(scan.get("visitedPaths",[])) if scan.get("cursor") else []
-            revision=self._cache_revision
             dates = {}
             for _ in range(3):
                 self.check(generation)
@@ -998,47 +1193,51 @@ class AccountPages:
                     page_dates[author]=max(page_dates.get(author,""),canonical)
                 cursor=next_path if not initial and not reached and works else None
                 visited.append(path)
-                with self.publication(generation), self._lock:
-                    if revision!=self._cache_revision:raise AccountError("cache_cleared","账号缓存已清理")
+                with self.cache_publication(generation, owner, clear_revision=clear_revision):
+                    if self.saved_cache.read(owner, method, scan_key) != expected:
+                        break
                     self.visits.observe(owner,page_dates,scope=feed_scope,initial=initial)
-                    self.saved_cache.save(owner,method,scan_key,{"checkpoint":checkpoint if cursor else max(head,checkpoint),
-                        "cursor":cursor,"cutoff":cutoff,"head":head if cursor else "","visitedPaths":visited if cursor else []})
+                    expected = {"checkpoint":checkpoint if cursor else max(head,checkpoint), "cursor":cursor,
+                        "cutoff":cutoff, "head":head if cursor else "", "visitedPaths":visited.copy() if cursor else []}
+                    self.saved_cache.save(owner, method, scan_key, expected)
                 for author,stamp in page_dates.items():dates[author]=max(dates.get(author,""),stamp)
                 if not cursor:break
                 path=cursor
             return dates
-        return self._cached((generation, "updates", owner, feed_scope), load, refresh)
+        return self._cached((generation, "updates", owner, feed_scope), load, refresh, clear_revision=clear_revision)
 
-    def read(self, kind, *, scope="public", offset=0, tag="", generation, allow_r18=False, refresh=False, mode=None,check_updates=True):
+    def read(self, kind, *, scope="public", offset=0, tag="", generation, allow_r18=False, refresh=False,
+             mode=None, check_updates=True, clear_revision=None):
         mode = mode or ("all" if allow_r18 else "safe")
         if mode not in CONTENT_MODES:raise AccountError("invalid_request", "内容范围无效")
         allow_r18 = mode != "safe"
-        profile = self.profile(generation, refresh=refresh and kind == "profile")
+        profile = self.profile(generation, refresh=refresh and kind == "profile", clear_revision=clear_revision)
         if not profile["connected"] or kind == "profile":
             return profile
         owner = profile["uid"]
+        if clear_revision is None:
+            clear_revision = self.saved_cache.clear_revision(owner)
         if kind == "following":
-            result = self._cached((generation, kind, owner, scope, offset), lambda: self._app_people(owner,scope,offset,generation) if self.method()=="app" else self._people(owner, scope, offset), refresh)
+            result = self._cached((generation, kind, owner, scope, offset), lambda: self._app_people(owner,scope,offset,generation) if self.method()=="app" else self._people(owner, scope, offset), refresh, clear_revision=clear_revision)
             markers=self.visits.status(owner,scope if self.method()=="app" else None) if check_updates else {}
             for person in result["people"]:
                 person.update(markers.get(person["id"],{"isNew":False,"latestObserved":""}))
         elif kind == "followers":
             if self.method()=="web":
                 raise AccountError("capability","网页登录暂不提供粉丝列表，可在资料中选择 App 授权。")
-            result = self._cached((generation, kind, owner, offset), lambda: self._followers(owner, offset), refresh)
+            result = self._cached((generation, kind, owner, offset), lambda: self._followers(owner, offset), refresh, clear_revision=clear_revision)
         elif kind == "bookmarks":
-            result = self._cached((generation, kind, owner, scope, offset, tag, mode), lambda: self._app_bookmarks(owner,scope,offset,tag,mode,generation) if self.method()=="app" else self._bookmarks(owner, scope, offset, tag, mode), refresh)
+            result = self._cached((generation, kind, owner, scope, offset, tag, mode), lambda: self._app_bookmarks(owner,scope,offset,tag,mode,generation) if self.method()=="app" else self._bookmarks(owner, scope, offset, tag, mode), refresh, clear_revision=clear_revision)
         elif kind == "tags":
-            result = self._cached((generation, kind, owner), lambda: self._app_tags() if self.method()=="app" else self._tags(owner), refresh)
+            result = self._cached((generation, kind, owner), lambda: self._app_tags() if self.method()=="app" else self._tags(owner), refresh, clear_revision=clear_revision)
         elif kind == "updates":
             feed_scope=scope if self.method()=="app" else "all"
-            dates=self.latest_dates(generation,owner,scope,refresh) if check_updates else {}
-            if dates:self.visits.observe(owner,dates,scope=feed_scope)
-            scan=self.saved_cache.read(owner,self.method(),["follow-update-scan",feed_scope]) or {}
+            dates=self.latest_dates(generation,owner,scope,refresh,clear_revision=clear_revision) if check_updates else {}
+            scan=self.saved_cache.read(owner,self.method(),["follow-update-scan",feed_scope],clear_revision=clear_revision) or {}
             result={"dates":dates,"authors":self.visits.status(owner,scope if self.method()=="app" else None) if check_updates else {},
                 "hasMore":bool(scan.get("cursor")) if check_updates else False,"combined":self.method()=="web"}
         elif kind == "works":
-            result=self._cached((generation,kind,owner,mode),lambda:self._own_works(owner,profile["workCount"],allow_r18,mode),refresh)
+            result=self._cached((generation,kind,owner,mode),lambda:self._own_works(owner,profile["workCount"],allow_r18,mode),refresh,clear_revision=clear_revision)
         else:
             raise AccountError("invalid_request", "账户页面不存在")
         if "items" in result:
@@ -1191,16 +1390,3 @@ class AccountPages:
             result[kind] = [{"name": row["tag"], "count": source_total(row["cnt"])} for row in rows[:300]
                             if isinstance(row, dict) and isinstance(row.get("tag"), str) and type(row.get("cnt")) is int and row["cnt"] >= 0]
         return result
-
-    def seen(self, generation, author):
-        profile = self.profile(generation)
-        if not profile["connected"]:
-            raise AccountError("reauth", "请先连接账号功能")
-        with self.publication(generation):
-            self.visits.mark_seen(profile["uid"], author)
-
-    def acknowledge_updates(self,generation,authors):
-        profile=self.profile(generation)
-        if not profile["connected"]:raise AccountError("reauth","请先连接账号功能")
-        with self.publication(generation):
-            self.visits.acknowledge(profile["uid"],authors)

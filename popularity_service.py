@@ -1,5 +1,6 @@
 """Resumable metadata-only popularity snapshots for authors and discovery feeds."""
 from collections import OrderedDict
+from contextlib import ExitStack
 import copy
 import re
 import threading
@@ -42,21 +43,21 @@ class PopularityService:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
 
-    def _save(self, owner, method, job, epoch, generation, *, current_key=None):
+    def _save(self, owner, method, job, epoch, generation, rowid, revision, *, current_key=None):
         snapshot = copy.deepcopy(job)
         with self.pages.publication(generation), self.guard:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
-            records = [(["popularity-index", job["index"]], snapshot)]
-            if current_key is not None:records.append((current_key, job["index"]))
-            self.pages.saved_cache.save_many(owner, method, records)
-            self.jobs[owner, method, job["index"]] = snapshot
+            rowid = self.pages.saved_cache.save_popularity(owner, method, snapshot, rowid,
+                revision=revision, current=current_key)
+            self.jobs[owner, method, job["index"]] = (rowid, snapshot)
             self.jobs.move_to_end((owner, method, job["index"]))
             while len(self.jobs) > 12:
                 self.jobs.popitem(last=False)
+            return rowid
 
-    def _new(self, kind, uid, batch, mode, work_type, include_ai, start, end, method, generation):
-        job = {"index": uuid.uuid4().hex, "kind": kind, "uid": uid, "batch": batch, "mode": mode,
+    def _new(self, index, kind, uid, batch, mode, work_type, include_ai, start, end, method, generation):
+        job = {"index": index, "kind": kind, "uid": uid, "batch": batch, "mode": mode,
                "workType": work_type, "includeAi": include_ai, "startDate": start, "endDate": end,
                "created": time.time(), "items": [], "seen": [], "paths": [], "visitedPaths": [], "webIds": None,
                "webOffset": 0, "sourceOffset": 0, "enrichOffset": 0, "collected": False, "ready": False}
@@ -191,30 +192,41 @@ class PopularityService:
         with self.guard:
             epoch = self.epoch
             lock = self.locks.setdefault((owner, method, *descriptor), threading.RLock())
-        with checked_lock(lock,lambda:self._check(generation,epoch)):
-            self._check(generation, epoch)
+        with checked_lock(lock, lambda: self._check(generation, epoch)), ExitStack() as held:
+            cache = self.pages.saved_cache
+            revision = cache.display_revision(owner, method)
             current_key = ["popularity-current", *descriptor]
             requested_index = index
             if not index and not refresh:
-                index = self.pages.saved_cache.read(owner, method, current_key) or ""
+                index = cache.read(owner, method, current_key) or ""
+            if index:
+                held.enter_context(cache.pin_snapshot(owner, method, "popularity", index))
             with self.guard:
-                job = self.jobs.get((owner, method, index))
-            if job is None and index:
-                job = self.pages.saved_cache.read(owner, method, ["popularity-index", index])
+                warm = self.jobs.get((owner, method, index))
+            rowid, job = cache.read_popularity(owner, method, ["popularity-index", index],
+                revision=revision, warm=warm) if index else (None, None)
             if requested_index and job is None:
                 raise AccountError("cache_miss", "排序快照已清理，请重新准备")
             if job and job["descriptor"] != descriptor:
                 raise AccountError("source_changed", "排序快照与当前条件不符")
+            needs_source = kind in {"ranking", "recommended"} and (
+                job is None or kind == "ranking" and not job["collected"])
+            if needs_source:
+                held.enter_context(cache.pin_snapshot(owner, method, "discovery", batch))
             if job is not None and not job["ready"]:
                 job = copy.deepcopy(job)
             if job is None:
-                job = self._new(kind, uid, batch, mode, work_type, include_ai, start, end, method, generation)
+                index = uuid.uuid4().hex
+                held.enter_context(cache.pin_snapshot(owner, method, "popularity", index))
+                order, _ = cache.reserve_display_publication(owner, method, current_key, revision=revision)
+                job = self._new(index, kind, uid, batch, mode, work_type, include_ai, start, end, method, generation)
+                job["publicationOrder"] = order
                 job["descriptor"] = descriptor
                 if kind == "search":
                     job.update(query=query, fuzzy=fuzzy)
-                self._save(owner, method, job, epoch, generation, current_key=current_key)
+                rowid = self._save(owner, method, job, epoch, generation, rowid, revision, current_key=current_key)
                 with self.pages.publication(generation), self.guard:
-                    self.pages.saved_cache.retain_popularity(owner, method)
+                    cache.retain_popularity(owner, method)
             deadline = time.monotonic() + 18
             reads = 0
             while not job["ready"] and reads < 3 and time.monotonic() < deadline:
@@ -252,7 +264,7 @@ class PopularityService:
                         job["items"].sort(key=lambda item: (item["bookmarks"], item.get("sortDate", ""), int(item["id"])), reverse=True)
                         job["ready"] = True
                 self._check(generation, epoch)
-                self._save(owner, method, job, epoch, generation)
+                rowid = self._save(owner, method, job, epoch, generation, rowid, revision)
             offset = (page - 1) * 36
             total = len(job["items"])
             if job["ready"] and offset >= total and page != 1:

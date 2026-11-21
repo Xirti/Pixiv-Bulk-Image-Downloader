@@ -27,6 +27,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   const ownsIdleView=(visit=revision)=>active && visit===revision && !pending && !sorting;
   const manual=()=>state.kind!=='following' && !browse.automatic();
   const japanDay=milliseconds=>Math.floor((milliseconds+9*3600000)/86400000);
+  const rankingWindow=milliseconds=>Math.floor((milliseconds-3*3600000)/86400000);
+  const publicationOrder=result=>result.publicationOrder ?? result.created*1000;
   const interaction=createGalleryInteraction({grid,scrollSurface:root,allowed:()=>active && !pending && allowed(),report,
     openArtwork:index=>{const item=data?.items[index];if(item)openArtwork(item,{context:{kind:'pid',value:item.id},resultPage:state.page});},openArtist:item=>openArtist(item.userId)});
   const query=(s,extra={})=>'/api/discovery?'+new URLSearchParams({kind:s.kind,scope:s.scope,mode:s.mode,rank:s.rank,offset:s.offset,batch:s.batch,...extra});
@@ -52,7 +54,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   }
 
   function remember(){
-    if(!active || !data)return;
+    if(!active || !data && !(state.order==='popular' && state.popularityIndex))return;
     const record={state:structuredClone(state),data,scroll:root.scrollTop};
     const views=state.order==='popular'?popularViews:positions;
     views.set(sourceKey(state),record);
@@ -73,7 +75,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     const key=pageKey(target);
     cache.delete(key);cache.set(key,result);
     const source=sourceKey(target),known=latest.get(source);
-    if(target.order!=="popular" && target.offset===0 && (!known || result.created>=known.created))latest.set(source,result);
+    if(target.order!=="popular" && target.offset===0 && (!known || publicationOrder(result)>=publicationOrder(known)))latest.set(source,result);
     if(cache.size>80){
       for(const old of cache.keys()){
         if(old!==pageKey(state))cache.delete(old);
@@ -91,9 +93,10 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   function due(target,result) {
     if(!result)return true;
     const created=result.created*1000;
-    if(target.kind==='following')return Date.now()-created>=Number(preferences.syncMinutes)*60000;
-    if(target.kind==='ranking')return Math.floor((created-3*3600000)/86400000)!==Math.floor((Date.now()-3*3600000)/86400000);
-    return japanDay(created)!==japanDay(Date.now());
+    const now=Date.now();
+    if(target.kind==='following')return now<created || now-created>=Number(preferences.syncMinutes)*60000;
+    if(target.kind==='ranking')return (result.rankingWindow ?? rankingWindow(created))!==rankingWindow(now);
+    return japanDay(created)!==japanDay(now);
   }
   function render(){
     preserveViewport(root,()=>{
@@ -202,7 +205,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   function cancelLoad(){
     controller?.abort();revision++;pending=false;sorting=false;state.waiting=true;
     const key=sourceKey(state);startedSources.delete(key);pausedSources.add(key);sourceVersions.set(key,sourceVersion(key)+1);
-    error='加载已中断，可再次开始';render();
+    remember();error='加载已中断，可再次开始';render();
   }
   async function startLoad({refresh=false,restoring=false}={}){
     if(pending || sorting){cancelLoad();return;}
@@ -236,15 +239,19 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   }
   function applyPrepared(target,result) {
     const key=sourceKey(target),nextState={...target,batch:result.batch,offset:result.offset};
-    if(latest.get(key)?.created>result.created)return;
+    const known=latest.get(key);
+    if(known && publicationOrder(known)>publicationOrder(result))return;
     savePage(nextState,result);
     const existing=positions.get(key);
     const record={state:nextState,data:result,scroll:0};
     if(!existing){positions.set(key,record);staged.delete(key);return;}
     if(existing.state.batch===result.batch)return;
     const first=cache.get(pageKey({...existing.state,offset:0}));
-    const same=first && first.edition===result.edition && first.items.map(item=>item.id).join(',')===result.items.map(item=>item.id).join(',');
-    if(!same)staged.set(key,record);
+    // An App ranking may keep the same first page while its old cursor expires.
+    const windowChanged=result.rankingWindow!=null && existing.data.rankingWindow!==result.rankingWindow;
+    const same=!windowChanged && first && first.edition===result.edition && first.items.map(item=>item.id).join(',')===result.items.map(item=>item.id).join(',');
+    if(same)staged.delete(key);
+    else staged.set(key,record);
   }
   async function reconcileFollowing(){
     const signal=background.signal,auth=generation(),viewRevision=revision;let reload=false;
@@ -298,8 +305,9 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
             else applyPrepared(target,result);
           }
           if(!network || !preferences || !automatic(target) || !due(target,result) && !followingDirty.has(key))continue;
-          if(Date.now()-(attempts.get(key) || 0)<60000)continue;
-          attempts.set(key,Date.now());
+          const now=performance.now();
+          if(now-(attempts.get(key) ?? -Infinity)<60000)continue;
+          attempts.set(key,now);
           result=await readPage(target,{background:'1',refresh:'1',batch:'',offset:'0'},{signal});
           if(signal.aborted || auth!==generation() || version!==sourceVersion(key))continue;
           followingDirty.delete(key);applyPrepared(target,result);
@@ -354,10 +362,15 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       savePage(state,data);restoreTop=root.scrollTop;remember();
     }catch(problem){if(version===revision && !signal.aborted){
       error=`${problem.message} · 可重新开启排序重试`;
+      const expired=['cache_miss','cache_cleared','source_changed','ranking_changed'].includes(problem.errorKind);
+      if(expired){popularViews.delete(sourceKey(state));state.popularityIndex='';}
       if(data && data.popularityIndex!==state.popularityIndex){
         const key=sourceKey(state),normal=positions.get(key);
-        popularViews.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});
-        if(normal){state=structuredClone(normal.state);data=normal.data;}
+        if(!expired)popularViews.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});
+        if(normal){
+          if(!state.popularityIndex)state={...structuredClone(normal.state),choice:destination.choice};
+          data=normal.data;
+        }
       }
     }}
     finally{if(version===revision && !signal.aborted){sorting=false;if(error)state.waiting=true;render();}}
@@ -392,7 +405,11 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     await startLoad({refresh:true});
   }
   sortControl.querySelectorAll('[data-discovery-sort]').forEach(button=>button.onclick=()=>void changeSort((state.choice || state.order)==='popular'?'default':'popular'));
-  sortControl.querySelector('[data-popularity-start]').onclick=()=>void startLoad({refresh:state.kind==='ranking' || Boolean(data) && !state.waiting && state.choice===state.order});
+  sortControl.querySelector('[data-popularity-start]').onclick=()=>{
+    const resuming=state.waiting && state.choice==='popular' && state.order==='popular' && state.popularityIndex;
+    const refresh=!resuming && (state.kind==='ranking' || Boolean(data) && !state.waiting && state.choice===state.order);
+    void startLoad({refresh});
+  };
   function configure(value,loaded){
     const nextPreferences=loaded?{autoLoadPages:value.autoLoadPages,showLoadButton:value.showLoadButton,autoRanking:value.autoRanking,autoFollowing:value.autoFollowing,autoRecommended:value.autoRecommended,syncMinutes:value.syncMinutes}:null;
     if(JSON.stringify(preferences)===JSON.stringify(nextPreferences))return;

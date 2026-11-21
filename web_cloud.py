@@ -7,7 +7,6 @@ from account_pages import HomepageIdentity, source_body
 from curl_cffi.requests import Session
 from curl_cffi.requests.exceptions import RequestException
 from pixiv_account import AccountError
-from request_coordinator import checked_lock
 
 
 class WebCloudTransport:
@@ -78,7 +77,6 @@ class WebDisplaySettings:
         self.post = post
         self.changed = changed
         self.revision = revision
-        self.lock = threading.Lock()
 
     def _owner(self, generation):
         owner, method = self.context(generation)
@@ -104,7 +102,8 @@ class WebDisplaySettings:
                 "canChangeAge": age >= 18, "updatedAt": time.time()}
 
     def _publish(self, owner, generation, state):
-        with self.pages.publication(generation):
+        with self.pages.publication(generation), self.pages.credential_publication():
+            self.pages.check(generation)
             self.pages.saved_cache.finish_display_update(owner, "web", state)
             self.changed(owner, generation)
 
@@ -115,7 +114,8 @@ class WebDisplaySettings:
 
     def read(self, generation, refresh=False):
         owner = self._owner(generation)
-        with checked_lock(self.lock, lambda: self.pages.check(generation)):
+        with self.pages.saved_cache.web_settings_mutex(owner):
+            self.pages.check(generation)
             cached = self.pages.saved_cache.read(owner, "web", ["web-display-settings"])
             if cached is not None and not refresh:
                 self.pages.check(generation)
@@ -139,7 +139,8 @@ class WebDisplaySettings:
         if not valid:
             raise ValueError("Pixiv 浏览设置选项无效")
         owner = self._owner(generation)
-        with checked_lock(self.lock, lambda: self.pages.check(generation)):
+        with self.pages.saved_cache.web_settings_mutex(owner):
+            self.pages.check(generation)
             cached = self.pages.saved_cache.read(owner, "web", ["web-display-settings"])
             before = self._read_remote(owner, generation)
             if before[key] == value:
@@ -170,27 +171,21 @@ class WebDisplaySettings:
                 "sensitive": ("/ajax/settings/sensitive_view_setting", {"sensitiveViewSetting": int(value)}),
                 "showAI": ("/ajax/settings/hide_ai_works", {"hideAiWorks": int(not value)}),
             }[key]
-            with self.pages.publication(generation):
+            with self.pages.publication(generation), self.pages.credential_publication():
+                self.pages.check(generation)
                 self.pages.saved_cache.begin_display_update(owner, "web")
                 self.changed(owner, generation)
-            settled = False
+            failure = None
             try:
-                failure = None
-                try:
-                    self.post(path, payload, csrf, False, generation)
-                except AccountError as error:
-                    self.pages.check(generation)
-                    failure = error
-                # A lost POST response is settled by reading, never by resubmission.
-                after = self._read_remote(owner, generation)
-                self._publish(owner, generation, after)
-                settled = True
-                if after[key] != value:
-                    if failure is not None:
-                        raise failure
-                    raise AccountError("unconfirmed", "Pixiv 尚未应用该设置，请在官网确认后刷新。")
-            finally:
-                # Even an unreadable response can follow a successful cloud write.
-                if not settled:
-                    self.changed(owner, generation)
+                self.post(path, payload, csrf, False, generation)
+            except AccountError as error:
+                self.pages.check(generation)
+                failure = error
+            # Keep pending state durable until readback confirms the outcome.
+            after = self._read_remote(owner, generation)
+            self._publish(owner, generation, after)
+            if after[key] != value:
+                if failure is not None:
+                    raise failure
+                raise AccountError("unconfirmed", "Pixiv 尚未应用该设置，请在官网确认后刷新。")
             return self._snapshot(generation, after)

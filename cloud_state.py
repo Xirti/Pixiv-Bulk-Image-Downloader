@@ -72,6 +72,7 @@ class CloudState:
     def __init__(self, path):
         self.path = Path(path)
         self.lock = threading.RLock()
+        self._clear_table_ready = False
 
     def _connect(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +81,9 @@ class CloudState:
         try:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version == 1:
+                if not self._clear_table_ready:
+                    db.execute("CREATE TABLE IF NOT EXISTS cache_clear_pending(owner TEXT PRIMARY KEY)")
+                    self._clear_table_ready = True
                 return db
             if version != 0:
                 raise ValueError("Unsupported cloud state schema")
@@ -104,6 +108,7 @@ class CloudState:
           CREATE INDEX IF NOT EXISTS relations_version ON relations(version);
           CREATE TABLE IF NOT EXISTS page_repairs(owner TEXT, method TEXT, token TEXT,
             PRIMARY KEY(owner,method,token));
+          CREATE TABLE IF NOT EXISTS cache_clear_pending(owner TEXT PRIMARY KEY);
             """)
             # Triggers also version writes made by an older running backend.
             for table, revision_table, prefix in (
@@ -119,6 +124,7 @@ class CloudState:
                         END""")
             db.execute("PRAGMA user_version=1")
             db.commit()
+            self._clear_table_ready = True
         except BaseException:
             db.close()
             raise
@@ -240,18 +246,18 @@ class CloudState:
                 (owner, method, kind, target)).fetchone(), self._relation_revision(db))
         return current
 
-    def queue_page_repair(self, owner, method, token):
-        with self._write() as db:
-            db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, method, token))
-
     def pending_page_repairs(self, owner, method):
         with self.lock, closing(self._connect()) as db:
             return [row[0] for row in db.execute("SELECT token FROM page_repairs WHERE owner=? AND method=?", (owner, method))]
 
-    def finish_page_repairs(self, owner, method, tokens):
+    def finish_page_repairs(self, owner, method, tokens, *, abandon_scan=False):
         with self._write() as db:
             db.executemany("DELETE FROM page_repairs WHERE owner=? AND method=? AND token=?",
                 [(owner, method, token) for token in tokens])
+            if abandon_scan:
+                db.execute("UPDATE scans SET payload=json_set(payload,'$.running',json('false'))"
+                           " WHERE owner=? AND method=? AND json_extract(payload,'$.running')",
+                           (owner, method))
 
     def remember_active(self, owner, method, kind, targets, privacy):
         with self._write() as db:
@@ -288,23 +294,33 @@ class CloudState:
             return {row["kind"]: json.loads(row["payload"]) for row in db.execute(
                 "SELECT kind,payload FROM scans WHERE owner=? AND method=?", (owner, method))}
 
+    def begin_cache_clear(self, owner):
+        with self._write() as db:
+            db.execute("INSERT OR IGNORE INTO cache_clear_pending VALUES(?)", (owner,))
+
+    def cache_clear_pending(self, owner):
+        with self.lock, closing(self._connect()) as db:
+            return db.execute("SELECT 1 FROM cache_clear_pending WHERE owner=?", (owner,)).fetchone() is not None
+
     def clear_account(self, owner):
         with self._write() as db:
             for table in ("relations", "scans", "scan_seen", "page_repairs"):
                 db.execute(f"DELETE FROM {table} WHERE owner=?", (owner,))
+            db.execute("DELETE FROM cache_clear_pending WHERE owner=?", (owner,))
 
-    def begin_scan(self, owner, method, kind):
+    def begin_scan(self, owner, method, kind, *, display_revision=None):
         with self._write() as db:
             row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", (owner, method, kind)).fetchone()
             old = json.loads(row[0]) if row else {}
-            # A new process/read session starts a fresh bounded sweep. Never delete from a partial sweep.
+            # Persist page coverage with the cursor so another window can resume the sweep.
             state = {"id": uuid.uuid4().hex, "scope": "public", "cursor": "", "offset":0, "positions":{}, "finished":[], "running": True, "completed": old.get("completed", 0),
-                     "started": time.time(), "version": db.execute("SELECT COALESCE(MAX(version),0) FROM relations").fetchone()[0]}
+                     "pageOffsets": {}, "visitedPaths": {}, "displayRevision": display_revision, "started": time.time(),
+                     "version": db.execute("SELECT COALESCE(MAX(version),0) FROM relations").fetchone()[0]}
             db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
             db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(state)))
             return state
 
-    def scan_page(self, owner, method, kind, scan, items, next_cursor):
+    def scan_page(self, owner, method, kind, scan, items, next_cursor, *, repair_id=None):
         with self._write() as db:
             row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", (owner, method, kind)).fetchone()
             current = json.loads(row[0]) if row else None
@@ -321,6 +337,11 @@ class CloudState:
                     state = {**state, "tags": json.loads(old[1])}
                 self._put(db, owner, method, kind, target, state, scan["version"])
             updated = dict(scan)
+            offsets = {scope: list(values) for scope, values in scan.get("pageOffsets", {}).items()}
+            offsets.setdefault(scan["scope"], []).append(scan["offset"])
+            paths = {scope: list(values) for scope, values in scan.get("visitedPaths", {}).items()}
+            paths.setdefault(scan["scope"], []).append(scan["cursor"])
+            updated.update(pageOffsets=offsets, visitedPaths=paths)
             positions=dict(scan.get("positions",{}));finished=list(scan.get("finished",[]))
             if next_cursor is not None:
                 if next_cursor == scan["cursor"]:
@@ -341,4 +362,6 @@ class CloudState:
                            (updated["completed"], owner, method, kind, scan["version"], owner, method, kind))
                 db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
             db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(updated)))
+            if repair_id is not None:
+                db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, method, repair_id))
             return updated

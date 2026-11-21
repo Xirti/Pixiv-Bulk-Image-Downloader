@@ -17,9 +17,9 @@ import tempfile
 import threading
 import time
 import urllib.request
-from ctypes import wintypes
 from pathlib import Path
 
+from runtime_identity import named_mutex
 
 if __name__ == "__main__" and getattr(sys, "frozen", False):
     from installed_app import hold_installation_guard
@@ -112,8 +112,6 @@ import server
 from edition_profile import DATA_FOLDER, MUTEX_NAME
 
 
-WAIT_OBJECT_0 = 0
-WAIT_ABANDONED = 0x80
 LOG = logging.getLogger("moku.app")
 
 
@@ -132,34 +130,6 @@ def configure_server_paths(resource_root: Path, data_root: Path) -> None:
     server.WEB = Path(resource_root) / "web"
     server.DOWNLOADS = Path(data_root) / "downloads"
     server.DOWNLOADS.mkdir(parents=True, exist_ok=True)
-
-
-@contextlib.contextmanager
-def named_mutex(name: str, timeout_seconds: float = 30.0):
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel32.CreateMutexW.restype = wintypes.HANDLE
-    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    kernel32.WaitForSingleObject.restype = wintypes.DWORD
-    kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
-    kernel32.ReleaseMutex.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-
-    handle = kernel32.CreateMutexW(None, False, name)
-    if not handle:
-        raise ctypes.WinError(ctypes.get_last_error())
-    acquired = False
-    try:
-        result = kernel32.WaitForSingleObject(handle, max(0, int(timeout_seconds * 1000)))
-        if result not in {WAIT_OBJECT_0, WAIT_ABANDONED}:
-            raise TimeoutError("MOKU backend launch lock timeout")
-        acquired = True
-        yield
-    finally:
-        if acquired:
-            kernel32.ReleaseMutex(handle)
-        kernel32.CloseHandle(handle)
 
 
 def _local_opener():

@@ -197,24 +197,55 @@ class SourceSearch:
                 if time.monotonic() - job["created"] > 600:
                     self._fail(job, "查询已超时，请关闭官网窗口后重试")
                 elif job["browser"] and identity == self.active and self.process is not None and self.process.poll() is not None:
-                    self._fail(job, "官网窗口未能完成查询，请重试")
+                    backend = job.get("browserHandoff")
+                    if backend is None:
+                        self._fail(job, "官网窗口未能完成查询，请重试")
+                    else:
+                        try:
+                            self._open_browser(job, backend)
+                        except SourceSearchError:
+                            # The launch failure already belongs to this polled job.
+                            pass
             return {key: job[key] for key in ("id", "mode", "state", "message", "candidates", "quota", "cached", "browserFallback")}
 
-    def start(self, raw, mode, backend):
+    def _job_for_receipt(self, request_id):
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", request_id):
+            raise SourceSearchError("搜图请求编号无效")
+        return next((job for job in self.jobs.values() if request_id in job.get("requestIds", ())), None)
+
+    def receipt(self, request_id):
+        with self.lock:
+            self._check_open()
+            job = self._job_for_receipt(request_id)
+            if job is None:
+                raise SourceSearchError("没有找到这次搜图的回执", 404)
+            return self.snapshot(job["id"])
+
+    def start(self, raw, mode, backend, *, request_id=None):
         if mode not in {"guest", "key"}:
             raise SourceSearchError("搜图方式无效")
         image, (width, height) = prepare_image(raw)
         digest = hashlib.sha256(image).hexdigest()
         with self.lock:
             self._check_open()
+            if request_id is not None:
+                received = self._job_for_receipt(request_id)
+                if received is not None:
+                    if received["hash"] != digest or received["mode"] != mode:
+                        raise SourceSearchError("搜图请求编号已用于其他图片或方式", 409)
+                    return self.snapshot(received["id"])
             old = self.jobs.get(self.active)
-            if old:
-                if old["state"] in {"queued", "searching", "verification"}:
-                    if old["hash"] == digest and old["mode"] == mode:
-                        return self.snapshot(old["id"])
+            if old and old["state"] in {"queued", "searching", "verification"}:
+                if old["hash"] != digest or old["mode"] != mode:
                     raise SourceSearchError("已有搜图进行中，请先取消或等待", 409)
+                if request_id is not None:
+                    if len(old["requestIds"]) >= 8:
+                        raise SourceSearchError("已有搜图进行中，请先完成当前查询", 409)
+                    old["requestIds"].append(request_id)
+                return self.snapshot(old["id"])
             identity = secrets.token_urlsafe(18)
             job = {"id": identity, "hash": digest, "mode": mode, "state": "queued", "message": "正在准备查询…",
+                   "requestIds": [request_id] if request_id is not None else [],
                    "candidates": [], "quota": {}, "cached": False, "browserFallback": False, "secret": secrets.token_urlsafe(32),
                    "image": image, "width": width, "height": height, "epoch": self.epoch, "browser": mode == "guest", "awaitingResponse": False, "created": time.monotonic()}
             cached = self.cache.get((mode, digest))
@@ -248,28 +279,30 @@ class SourceSearch:
                 except (RuntimeError, OSError) as error:
                     self._fail(job, "无法启动搜图任务，请重试")
                     raise SourceSearchError(job["message"], 503) from error
-                self.requests.append(now)
             else:
                 self._open_browser(job, backend)
                 self.active = identity
-                self.requests.append(now)
                 job.update(state="searching", message="官网窗口已打开，请按需手动完成验证")
             return self.snapshot(identity)
 
     def _open_browser(self, job, backend):
+        if self.process is not None and self.process.poll() is None:
+            # The existing window only owns this job once it requests its payload.
+            job["browserHandoff"] = backend
+            return
+        job.pop("browserHandoff", None)
         identity = job["id"]
-        if self.process is None or self.process.poll() is not None:
-            environment = os.environ.copy()
-            environment.pop("MOKU_DESKTOP_AUTH_TOKEN", None)
-            environment.update(MOKU_SOURCE_JOB=identity, MOKU_SOURCE_SECRET=job["secret"], MOKU_SOURCE_BACKEND=backend,
-                               MOKU_SOURCE_PROFILE=str(self.directory / "guest-profile"), MOKU_SOURCE_PROXY=self.proxy())
-            command = [sys.executable, "--source-guest"] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).with_name("moku_app.py")), "--source-guest"]
-            try:
-                self.process = subprocess.Popen(command, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
-                self.browser_identity = identity
-            except OSError as error:
-                job.update(state="error", message="无法打开官网窗口，请重试", image=b"")
-                raise SourceSearchError(job["message"], 503) from error
+        environment = os.environ.copy()
+        environment.pop("MOKU_DESKTOP_AUTH_TOKEN", None)
+        environment.update(MOKU_SOURCE_JOB=identity, MOKU_SOURCE_SECRET=job["secret"], MOKU_SOURCE_BACKEND=backend,
+                           MOKU_SOURCE_PROFILE=str(self.directory / "guest-profile"), MOKU_SOURCE_PROXY=self.proxy())
+        command = [sys.executable, "--source-guest"] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).with_name("moku_app.py")), "--source-guest"]
+        try:
+            self.process = subprocess.Popen(command, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.browser_identity = identity
+        except OSError as error:
+            job.update(state="error", message="无法打开官网窗口，请重试", image=b"")
+            raise SourceSearchError(job["message"], 503) from error
 
     def continue_api(self, identity, backend):
         with self.lock:
@@ -322,7 +355,7 @@ class SourceSearch:
         with self.lock:
             job = self.jobs.get(identity)
             if job and job["state"] not in {"done", "error", "cancelled"}:
-                job.update(state="cancelled", image=b"", message="已取消查询；已发出的请求可能仍计入额度")
+                job.update(state="cancelled", awaitingResponse=False, image=b"", message="已取消查询；已发出的请求可能仍计入额度")
             return {"ok": True, "job": self.snapshot(identity) if job else None}
 
     def _opener(self):
@@ -347,14 +380,16 @@ class SourceSearch:
     def _query(self, job, key):
         try:
             request = self._api_request(job, key)
+            opener = self._opener()
             with self.lock:
                 if self.jobs.get(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
                     return
                 if job["epoch"] != self.epoch:
                     self._fail(job, "搜图设置已修改，请重新查询")
                     return
+                self._reserve_send()
                 job.update(state="searching", message="正在向 SauceNAO 查询…")
-            with self._opener().open(request, timeout=35) as response:
+            with opener.open(request, timeout=35) as response:
                 raw = response.read(1024 * 1024 + 1)
                 content_type = response.headers.get_content_type()
             if len(raw) > 1024 * 1024:
@@ -364,7 +399,7 @@ class SourceSearch:
             candidates, quota = parse_api(json.loads(raw))
             self._complete(job, candidates, quota)
         except urllib.error.HTTPError as error:
-            message = "API 请求需要网页验证，请点击「验证并继续 API」" if error.code == 403 else "API Key 无效，请检查配置" if error.code == 401 else "查询过于频繁或额度不足，请稍后再试" if error.code == 429 else f"搜图服务返回 HTTP {error.code}"
+            message = "API 返回 403，可打开官网查看提示并继续" if error.code == 403 else "API Key 无效，请检查配置" if error.code == 401 else "查询过于频繁或额度不足，请稍后再试" if error.code == 429 else f"搜图服务返回 HTTP {error.code}"
             self._fail(job, message, browser_fallback=error.code == 403)
         except SourceSearchError as error:
             self._fail(job, str(error), browser_fallback=error.status == 403)
@@ -378,7 +413,7 @@ class SourceSearch:
     def _fail(self, job, message, *, browser_fallback=False):
         with self.lock:
             if job["state"] != "cancelled":
-                job.update(state="error", message=message, image=job["image"] if browser_fallback else b"", browserFallback=browser_fallback)
+                job.update(state="error", awaitingResponse=False, message=message, image=job["image"] if browser_fallback else b"", browserFallback=browser_fallback)
 
     def _complete(self, job, candidates, quota):
         with self.lock:
@@ -400,12 +435,19 @@ class SourceSearch:
             while len(self.thumbnails) > 1536:
                 _,old=self.thumbnails.popitem(last=False)
                 self.thumbnail_bytes-=len(old["bytes"] or b"")
-            job.update(state="done", message="已找到匹配来源" if candidates else "没有找到匹配来源", candidates=candidates, quota=quota, image=b"")
+            job.update(state="done", awaitingResponse=False, message="已找到匹配来源" if candidates else "没有找到匹配来源", candidates=candidates, quota=quota, image=b"")
             if quota.get("short_limit", 0) > 0:
                 self.short_limit = quota["short_limit"]
             self.cache[(job["mode"], job["hash"])] = (time.monotonic(), candidates, quota)
             while len(self.cache) > 16:
                 self.cache.popitem(last=False)
+
+    def _reserve_send(self):
+        now = time.monotonic()
+        self.requests = [stamp for stamp in self.requests if now - stamp < 30]
+        if len(self.requests) >= self.short_limit:
+            raise SourceSearchError("请等待 30 秒后再提交查询", 429)
+        self.requests.append(now)
 
     def browser(self, identity, secret, data):
         with self.lock:
@@ -415,7 +457,10 @@ class SourceSearch:
                 raise SourceSearchError("官网窗口授权无效", 403)
             action = data.get("action")
             if action == "payload":
+                if job["state"] in {"cancelled", "done", "error"}:
+                    return {"image": "", "state": job["state"], "mode": job["mode"]}
                 self.browser_identity = identity
+                job.pop("browserHandoff", None)
                 return {"image": base64.b64encode(job["image"]).decode(), "state": job["state"], "mode": job["mode"]}
             if action == "session":
                 state = data.get("login")
@@ -433,18 +478,11 @@ class SourceSearch:
                     raise SourceSearchError("API 设置已修改", 409)
                 if job["awaitingResponse"]:
                     raise SourceSearchError("API 请求正在等待响应，请勿重复提交", 409)
-                now = time.monotonic()
-                self.requests = [stamp for stamp in self.requests if now - stamp < 30]
-                if len(self.requests) >= self.short_limit:
-                    job["message"] = "请等待 30 秒后点击验证窗口中的「提交查询」"
-                    raise SourceSearchError("请等待 30 秒后再继续 API 查询", 429)
                 key = self.vault.read()
                 if not key:
                     self._fail(job, "请重新配置 API Key")
                     raise SourceSearchError("请重新配置 API Key", 401)
                 request = self._api_request(job, key)
-                self.requests.append(now)
-                job["awaitingResponse"] = True
                 return {"url": request.full_url, "body": base64.b64encode(request.data).decode(), "contentType": request.get_header("Content-type")}
             if action == "poll":
                 active = self.jobs.get(self.active)
@@ -454,7 +492,11 @@ class SourceSearch:
             if job["state"] in {"cancelled", "done", "error"}:
                 return {"state": job["state"]}
             previous = job["state"]
+            if action in {"verification", "result", "not-sent", "access-denied", "rate-limited"} and data.get("attempt") != job.get("attempt"):
+                raise SourceSearchError("请求已交接，请使用当前官网页面", 409)
             if action == "result":
+                if not job["awaitingResponse"]:
+                    raise SourceSearchError("没有等待中的查询", 409)
                 try:
                     if job["mode"] == "key" and "json" not in data:
                         raise SourceSearchError("API 返回了网页内容，请继续 API 验证后重试")
@@ -464,8 +506,25 @@ class SourceSearch:
                     self._fail(job, str(error))
             elif action == "verification":
                 job.update(state="verification", awaitingResponse=False, message="请在官网窗口手动通过验证，再点击窗口上方「提交查询」")
+            elif action == "access-denied":
+                job.update(state="verification", awaitingResponse=False, message="官网返回 403，请查看官网提示。如有验证，请手动完成")
+            elif action == "rate-limited":
+                self._fail(job, "官网限制了查询频率或额度，请稍后再试")
             elif action == "submitted":
-                job.update(state="searching", message="官网正在查询，请等待结果；无需重复提交")
+                if self.browser_identity != identity or job["mode"] == "login" or not job["image"]:
+                    raise SourceSearchError("官网窗口没有领到可提交的任务", 409)
+                if job["epoch"] != self.epoch:
+                    self._fail(job, "搜图设置已修改，请重新查询")
+                    return {"state": "error"}
+                if job["awaitingResponse"]:
+                    raise SourceSearchError("查询正在等待响应，请勿重复提交", 409)
+                self._reserve_send()
+                attempt = job.get("attempt", 0) + 1
+                job.update(attempt=attempt, awaitingResponse=True, state="searching",
+                           message="官网正在查询，请等待结果；无需重复提交")
+                return {"state":"searching","attempt":attempt}
+            elif action == "not-sent":
+                job.update(awaitingResponse=False, message="官网尚未准备好，可在窗口重试")
             elif action == "closed":
                 self._fail(job, "官网窗口已关闭，可重新查询")
             elif action == "error":

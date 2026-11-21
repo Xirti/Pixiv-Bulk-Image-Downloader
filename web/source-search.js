@@ -3,6 +3,7 @@
 globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,changed,openArtwork,preview,openExternal,allowed,installImages=()=>{}}) {
   const find=selector=>root.querySelector(selector), setting=selector=>settingsRoot.querySelector(selector);
   let file=null, imageUrl="", job=null, busy=false, sequence=0, timer=null, clickTimer=null, polling=null;
+  let lastReceipt=null, viewReceipt=null;
   let configuration={mode:"guest",keyConfigured:false}, settingsLoaded=false;
   let settingsVersion=0;
   let settingsRead=null,settingsWrite=null;
@@ -41,9 +42,11 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   }
   const urls=[];
   const post=(path,data)=>request(`/api/source-search/${path}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
+  const receiptPath=id=>`/api/source-search/receipt?requestId=${encodeURIComponent(id)}`;
   function message(text,error=false){find("[data-source-message]").textContent=text;find("[data-source-message]").classList.toggle("is-error",error);}
   function controls(){
-    find("[data-source-query]").disabled=!file || busy;
+    find("[data-source-query]").disabled=!file || busy || Boolean(lastReceipt?.pending);
+    find("[data-source-read]").disabled=Boolean(viewReceipt?.pending);
     find("[data-source-cancel]").hidden=!busy;
     find("[data-source-cancel]").disabled=!job?.id;
     find("[data-source-file]").disabled=busy;
@@ -62,7 +65,7 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     while(urls.length>8)URL.revokeObjectURL(urls.shift());
     const image=find("[data-source-input-image]");image.src=imageUrl;image.hidden=false;
     find("[data-source-file-name]").textContent=selected.name;
-    clearTimeout(timer);clearTimeout(clickTimer);sequence++;job=null;render();
+    clearTimeout(timer);clearTimeout(clickTimer);sequence++;viewReceipt=null;job=null;render();
     message("图片已就绪，点击「上传并查找」开始。");changed();
   }
   function render(){
@@ -85,15 +88,22 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     controls();
   }
   function apply(data){
+    if(viewReceipt){
+      viewReceipt.result=data;
+      viewReceipt.unconfirmed=false;
+      viewReceipt.error="";
+    }
     job=data;busy=["queued","searching","verification"].includes(job.state);
     message(job.message,job.state==="error");render();changed();
   }
   function poll(revision){
-    if(revision!==sequence || !job?.id)return Promise.resolve();
+    const path=job?.id?`/api/source-search/job?id=${encodeURIComponent(job.id)}`
+      : viewReceipt?.unconfirmed?receiptPath(viewReceipt.id):null;
+    if(revision!==sequence || !path || viewReceipt?.pending)return Promise.resolve();
     if(polling?.revision===revision)return polling.promise;
     clearTimeout(timer);timer=null;
     const owner={revision,promise:null};polling=owner;
-    owner.promise=request(`/api/source-search/job?id=${encodeURIComponent(job.id)}`).then(data=>{
+    owner.promise=request(path).then(data=>{
       if(revision!==sequence)return;
       apply(data);
       if(busy)timer=setTimeout(()=>void poll(revision),1500);
@@ -104,13 +114,39 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     return owner.promise;
   }
   async function search(){
-    if(!allowed() || !file || busy)return;
-    const revision=++sequence;clearTimeout(timer);clearTimeout(clickTimer);job=null;busy=true;render();message("正在准备搜图副本…");
+    if(!allowed() || !file || busy || lastReceipt?.pending)return;
+    const mode=find("[data-source-mode]").value;
+    const id=viewReceipt?.unconfirmed && viewReceipt.mode===mode?viewReceipt.id:crypto.randomUUID();
+    const receipt={id,mode,pending:true,result:null,error:"",unconfirmed:false};
+    lastReceipt=viewReceipt=receipt;
+    sequence++;clearTimeout(timer);clearTimeout(clickTimer);job=null;busy=true;render();message("正在准备搜图副本…");
     try{
-      const data=await request(`/api/source-search/query?mode=${find("[data-source-mode]").value}`,{method:"POST",headers:{"Content-Type":file.type || "application/octet-stream"},body:file},30000);
-      if(revision!==sequence)return;
-      apply(data);if(busy)timer=setTimeout(()=>void poll(revision),1500);
-    }catch(error){if(revision===sequence){busy=false;message(error.message,true);controls();}}
+      receipt.result=await request(`/api/source-search/query?mode=${encodeURIComponent(mode)}&requestId=${id}`,{
+        method:"POST",headers:{"Content-Type":file.type || "application/octet-stream"},body:file
+      },30000);
+    }catch(error){
+      receipt.error=error.message;
+      receipt.unconfirmed=!error.status || error.status>=500;
+      if(receipt.unconfirmed){
+        try{receipt.result=await request(receiptPath(id));}
+        catch(lookupError){if(lookupError.status!==404)receipt.error=lookupError.message;}
+        if(!receipt.result)receipt.error+="。可点击「读取状态」确认这次查询。";
+      }
+    }finally{
+      receipt.pending=false;
+      if(viewReceipt!==receipt){
+        controls();
+      }else if(receipt.result){
+        const revision=sequence;
+        apply(receipt.result);
+        if(busy)timer=setTimeout(()=>void poll(revision),1500);
+      }else{
+        busy=false;
+        message(receipt.error,true);
+        controls();
+        changed();
+      }
+    }
   }
   function showSettings({applyMode=false}={}){
     if(!settingsModeChosen)setting("[data-source-setting-mode]").value=configuration.mode;
@@ -169,7 +205,7 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
       showSettings({applyMode:true});
       render();
       if(action==="clear"){
-        clearTimeout(timer);clearTimeout(clickTimer);sequence++;cacheEpoch++;job=null;busy=false;render();changed();
+        clearTimeout(timer);clearTimeout(clickTimer);sequence++;cacheEpoch++;lastReceipt=viewReceipt=null;job=null;busy=false;render();changed();
         images.clear();
       }
       status.textContent=action==="clear"?"搜图结果缓存已清除":action==="reset-guest"?"游客会话已重置":action==="remove-key"?"API Key 已移除":"搜图设置已保存";
@@ -230,7 +266,10 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     if(!/^[1-9][0-9]{0,29}$/.test(id)){message("请输入 Pixiv 作品链接或数字 PID",true);return;}
     void openArtwork(id);
   };
-  find("[data-source-read]").onclick=()=>{if(job?.id){clearTimeout(timer);void poll(sequence);}else message("还没有发起查询，请先选择图片。");};
+  find("[data-source-read]").onclick=()=>{
+    if(job?.id || viewReceipt?.unconfirmed){clearTimeout(timer);void poll(sequence);}
+    else if(!viewReceipt?.pending)message("还没有发起查询，请先选择图片。");
+  };
   find("[data-source-cancel]").onclick=async()=>{
     if(!job?.id)return;
     const revision=sequence,id=job.id;
@@ -281,21 +320,24 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   return {
     setMaskSensitive(enabled){if(maskSensitive===enabled)return;maskSensitive=enabled;revealed.clear();clearTimeout(clickTimer);render();},
     async open(){if(!settingsLoaded)await loadSettings();controls();},loadSettings,
-    snapshot:()=>({job,imageUrl,name:find("[data-source-file-name]").textContent,epoch:cacheEpoch}),
+    snapshot:()=>({job,imageUrl,name:find("[data-source-file-name]").textContent,epoch:cacheEpoch,submission:viewReceipt?.id ?? null}),
     restore(state){
       clearTimeout(timer);clearTimeout(clickTimer);sequence++;
       const savedImage=state?.imageUrl || "",expired=Boolean(savedImage) && !urls.includes(savedImage);
       if(imageUrl!==savedImage || expired){file=null;find("[data-source-file]").value="";}
-      job=state?.epoch===cacheEpoch?state.job:null;imageUrl=expired?"":savedImage;
+      viewReceipt=lastReceipt && state?.epoch===cacheEpoch && state.submission===lastReceipt.id?lastReceipt:null;
+      job=viewReceipt?.result || (state?.epoch===cacheEpoch?state.job:null);imageUrl=expired?"":savedImage;
       const image=find("[data-source-input-image]");image.hidden=!imageUrl;if(imageUrl)image.src=imageUrl;else image.removeAttribute("src");
       find("[data-source-file-name]").textContent=state?.name || "选择、拖入或粘贴图片";
-      busy=Boolean(job && ["queued","searching","verification"].includes(job.state));render();
-      message(expired?[job?.message,"图片预览已释放，重新查询请选择图片。"].filter(Boolean).join(" · "):job?.message || "选择图片后，点击上传查询。");
-      if(busy)void poll(sequence);
+      busy=Boolean(viewReceipt?.pending || job && ["queued","searching","verification"].includes(job.state));render();
+      const status=job?.message || (viewReceipt?.pending?"正在准备搜图副本…":viewReceipt?.error);
+      message(expired?[status,"图片预览已释放，重新查询请选择图片。"].filter(Boolean).join(" · ")
+        : status || "选择图片后，点击上传查询。",Boolean(viewReceipt?.error || job?.state==="error"));
+      if(busy && job?.id)void poll(sequence);
     },
     refresh(){
       renderedResults="";
-      if(job?.id){clearTimeout(timer);return poll(sequence);}return loadSettings();
+      if(job?.id || viewReceipt?.unconfirmed){clearTimeout(timer);return poll(sequence);}return loadSettings();
     },
     suspend(){clearTimeout(clickTimer);},
   };

@@ -131,6 +131,8 @@ class PreviewResources:
             self._check_cancel(job.stop)
             job.value = load(job.stop)
             self._check_cancel(job.stop)
+            if ttl <= 0:
+                return
             size = (len(job.value) if isinstance(job.value, bytes) else
                     len(json.dumps(job.value, ensure_ascii=False).encode("utf-8")) * 6)
             with self._lock:

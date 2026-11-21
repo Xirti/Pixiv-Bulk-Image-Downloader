@@ -22,7 +22,7 @@ globalThis.createDetailImageCache=function({fetchBytes,maxBytes=96*1024*1024,max
   }
   function peek(item,page){
     const entry=entries.get(key(item,page));
-    if(entry?.url && Date.now()<entry.expires)return entry.url;
+    if(entry?.url && performance.now()<entry.expires)return entry.url;
     return null;
   }
   function pin(item,page){
@@ -32,11 +32,11 @@ globalThis.createDetailImageCache=function({fetchBytes,maxBytes=96*1024*1024,max
   }
   function unpin(){
     const previous=entries.get(pinned);pinned=null;
-    if(previous && (!previous.url || Date.now()>=previous.expires))drop(previous);
+    if(previous && (!previous.url || performance.now()>=previous.expires))drop(previous);
   }
   function get(item,page){
     const id=key(item,page);let entry=entries.get(id);
-    if(entry?.url && Date.now()>=entry.expires){drop(entry);entry=null;}
+    if(entry?.url && performance.now()>=entry.expires){drop(entry);entry=null;}
     if(entry){entries.delete(id);entries.set(id,entry);return entry.promise;}
     const source=item.pageImages[page].original;
     if(!source)return Promise.reject(new Error("这张图片暂未提供原图"));
@@ -47,7 +47,7 @@ globalThis.createDetailImageCache=function({fetchBytes,maxBytes=96*1024*1024,max
         const data=await fetchBytes(source,{signal:entry.controller.signal});
         entry.controller.signal.throwIfAborted();trim(data.byteLength);
         entry.url=URL.createObjectURL(new Blob([data]));entry.size=data.byteLength;bytes+=entry.size;
-        entry.expires=Date.now()+ttl;
+        entry.expires=performance.now()+ttl;
         entry.timer=setTimeout(()=>{if(pinned!==id)drop(entry);},ttl);
         return entry.url;
       }catch(error){drop(entry);throw error;}

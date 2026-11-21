@@ -1,4 +1,5 @@
 """Pixiv App account credentials, native vault and guarded token refresh."""
+from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import ctypes
@@ -218,7 +219,7 @@ class AppTransport:
 
 
 class AppAccount:
-    def __init__(self, vault, transport, client_config, clock=time.time):
+    def __init__(self, vault, transport, client_config, clock=time.time, *, credential_publication=nullcontext):
         self.vault, self.transport, self.client_config, self.clock = vault, transport, client_config, clock
         self._lock = threading.RLock()
         self._refresh_lock = threading.Lock()
@@ -227,6 +228,7 @@ class AppAccount:
         self._tokens = vault.read()
         self._refresh_error = ""
         self._reauth_required = False
+        self._credential_publication = credential_publication
 
     def snapshot(self):
         with self._lock:
@@ -242,7 +244,7 @@ class AppAccount:
                 raise AccountError("revoked", "账号状态已改变，请重新操作")
 
     def _commit(self, tokens, epoch):
-        with self._lock:
+        with self._credential_publication(), self._lock:
             self._check(epoch)
             self.vault.save(tokens)
             self._tokens = tokens
@@ -353,13 +355,20 @@ class AppAccount:
         return {**self.snapshot(), "identityVerified": True, "refreshRequested": force_refresh}
 
     def promote_verified(self):
-        with self._lock:
+        with self._credential_publication(), self._lock:
             if self._tokens:
                 self.vault.promote(self._tokens)
 
     def fence(self):
         with self._lock:
             self._epoch += 1
+
+    def forget_credentials(self):
+        with self._lock:
+            self._epoch += 1
+            self._tokens = None
+            self._refresh_error = ""
+            self._reauth_required = False
 
     def logout(self):
         with self._lock:

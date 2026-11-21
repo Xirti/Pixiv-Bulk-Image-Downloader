@@ -86,6 +86,7 @@ def clear_installed_user_data(program_root: Path) -> None:
             "downloads.sqlite3", "requests.sqlite3", "catalog.sqlite3", "workspace.sqlite3",
             "account-browse.sqlite3", "account-cache.sqlite3", "cloud-state.sqlite3",
             "guide-v1.seen", "login-context.json", "request-settings.json", "auth-method.json",
+            "pixiv-logout-revision", "pixiv-logout-revision.tmp",
             "browser-profile.json", "app-updates.json", "app-updates.last-check",
             "app-updates.trust-state.json", "account-callback.json", "source-search/settings.json",
         )

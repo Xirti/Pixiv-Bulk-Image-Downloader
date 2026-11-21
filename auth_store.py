@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
+from pathlib import Path
 import re
 import threading
+import uuid
 from ctypes import wintypes
 
 from edition_profile import CREDENTIAL_TARGET
+from runtime_identity import named_mutex
 
 TARGET = CREDENTIAL_TARGET
 CRED_TYPE_GENERIC = 1
@@ -16,6 +20,46 @@ _MEMORY_SESSION = ""
 _SESSION_CACHE_UNSET = object()
 _PERSISTENT_SESSION_CACHE: str | object = _SESSION_CACHE_UNSET
 _SESSION_LOCK = threading.RLock()
+
+
+class LogoutRevision:
+    """One non-secret revocation marker shared by the local Pixiv backends."""
+    def __init__(self, path: Path):
+        self.path = path
+        scope = os.path.normcase(str(path.resolve()))
+        self._mutex = "Local\\MOKU.PixivSession." + hashlib.sha256(scope.encode()).hexdigest()[:32]
+        self._observed = (None, "")
+
+    def guard(self):
+        return named_mutex(self._mutex, timeout_seconds=5)
+
+    def read(self) -> str:
+        observed, revision = self._observed
+        if self._signature() == observed:
+            return revision
+        # Protect the open file from a simultaneous Windows replacement.
+        with self.guard():
+            observed = self._signature()
+            revision = self.path.read_text(encoding="ascii") if observed is not None else ""
+            self._observed = (observed, revision)
+            return revision
+
+    def _signature(self):
+        try:
+            info = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size
+
+    def advance(self) -> str:
+        # Caller holds guard(), including the accompanying credential update.
+        revision = uuid.uuid4().hex
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(revision, encoding="ascii")
+        temporary.replace(self.path)
+        self._observed = (self._signature(), revision)
+        return revision
 
 
 class CREDENTIALW(ctypes.Structure):
@@ -106,6 +150,14 @@ def clear_memory_session() -> None:
     global _MEMORY_SESSION
     with _SESSION_LOCK:
         _MEMORY_SESSION = ""
+
+
+def forget_local_session() -> None:
+    """Discard memory after a peer logout. The peer owns vault deletion."""
+    global _MEMORY_SESSION, _PERSISTENT_SESSION_CACHE
+    with _SESSION_LOCK:
+        _MEMORY_SESSION = ""
+        _PERSISTENT_SESSION_CACHE = ""
 
 
 def store_session(value: str, remember: bool = False) -> None:

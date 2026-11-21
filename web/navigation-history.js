@@ -18,9 +18,10 @@ globalThis.waitForNavigationFrame = function (signal) {
 };
 
 // Page navigation owns a bounded timeline, not selection or download state.
-globalThis.createNavigationHistory = function ({capture,restore,changed,allowed,validate=()=>{},prune=()=>{},maxEntries=30}) {
+globalThis.createNavigationHistory = function ({capture,restore,changed,allowed,canCapture=()=>true,beforeNavigate=()=>{},validate=()=>{},prune=()=>{},maxEntries=30}) {
   let entries=[],cursor=-1,restoring=false,revision=0,activeRestore=null;
   function status(){return {back:cursor>0,forward:cursor>=0 && cursor<entries.length-1,restoring};}
+  const canRecord=()=>!restoring && activeRestore===null && canCapture();
   const cancelled=()=>Object.assign(new Error("页面读取已取消"),{name:"AbortError"});
   async function restoreEntry(state,generation){
     const controller=new AbortController(),entry={controller};
@@ -51,7 +52,7 @@ globalThis.createNavigationHistory = function ({capture,restore,changed,allowed,
     }
   }
   function record(state){
-    if(restoring)return;
+    if(!canRecord())return;
     if(cursor>=0 && entries[cursor].key===state.key)entries[cursor]=state;
     else{
       entries.splice(cursor+1);entries.push(state);
@@ -63,9 +64,11 @@ globalThis.createNavigationHistory = function ({capture,restore,changed,allowed,
   async function go(direction){
     const target=cursor+direction;
     if(restoring || !allowed() || target<0 || target>=entries.length)return false;
+    const captureOutgoing=canRecord();
     cancelRestore();
+    beforeNavigate();
     const generation=revision;
-    const previous=capture();entries[cursor]=previous;
+    const previous=captureOutgoing?capture():entries[cursor];entries[cursor]=previous;
     prune(entries,cursor);
     const state=entries[target];restoring=true;changed(status());
     try{
@@ -92,5 +95,5 @@ globalThis.createNavigationHistory = function ({capture,restore,changed,allowed,
   function restoreSnapshot(state){cancelRestore();return restoreEntry(state,revision);}
   function find(predicate){for(let index=cursor;index>=0;index--)if(predicate(entries[index]))return entries[index];return null;}
   function goTo(key){for(let index=cursor-1;index>=0;index--)if(entries[index].key===key)return go(index-cursor);return Promise.resolve(false);}
-  return {record,go,goTo,find,clear,cancelRestore,restore:restoreSnapshot,status,previous:()=>cursor>0?entries[cursor-1]:null};
+  return {record,canRecord,go,goTo,find,clear,cancelRestore,restore:restoreSnapshot,status,current:()=>entries[cursor] || null,previous:()=>cursor>0?entries[cursor-1]:null};
 };

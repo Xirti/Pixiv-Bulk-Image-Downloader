@@ -1,7 +1,8 @@
-"""Build/runtime identity, independent of server startup and local storage."""
+"""Process coordination and code identity, independent of server startup."""
 from __future__ import annotations
 
 import ctypes
+from contextlib import contextmanager
 from ctypes import wintypes
 from functools import cache
 import hashlib
@@ -20,6 +21,10 @@ def _process_kernel():
     kernel.WaitForSingleObject.restype = wintypes.DWORD
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
+    kernel.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel.ReleaseMutex.restype = wintypes.BOOL
     return kernel
 
 
@@ -41,6 +46,42 @@ def process_identity(pid: int) -> int | None:
         if not api.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
             raise ctypes.WinError(ctypes.get_last_error())
         return (created.dwHighDateTime << 32) | created.dwLowDateTime
+    finally:
+        api.CloseHandle(handle)
+
+
+@contextmanager
+def named_mutex(name: str, timeout_seconds: float = 30.0):
+    """Acquire a Windows mutex, including one abandoned by a terminated process."""
+    api = _process_kernel()
+    handle = api.CreateMutexW(None, False, name)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        result = api.WaitForSingleObject(handle, max(0, int(timeout_seconds * 1000)))
+        if result == 0x102:  # WAIT_TIMEOUT
+            raise TimeoutError("MOKU process lock timeout")
+        if result not in {0, 0x80}:  # WAIT_OBJECT_0, WAIT_ABANDONED
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            yield
+        finally:
+            api.ReleaseMutex(handle)
+    finally:
+        api.CloseHandle(handle)
+
+
+@contextmanager
+def process_presence(name: str):
+    """Hold a shared presence marker, released automatically on process exit."""
+    api = _process_kernel()
+    ctypes.set_last_error(0)
+    handle = api.CreateMutexW(None, False, name)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    existed = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
+    try:
+        yield existed
     finally:
         api.CloseHandle(handle)
 

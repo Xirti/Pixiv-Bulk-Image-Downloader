@@ -78,10 +78,11 @@ def run():
     os.environ["PYTHONNET_RUNTIME"] = "netfx"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def send(action, **data):
-        raw = json.dumps({"id": identity, "action": action, **data}).encode()
+    def send(action, *, credentials=None, **data):
+        owner, capability = (identity, secret) if credentials is None else credentials
+        raw = json.dumps({"id": owner, "action": action, **data}).encode()
         request = urllib.request.Request(backend.rstrip("/") + "/api/source-search/browser", data=raw,
-                                        headers={"Content-Type": "application/json", "X-MOKU-Source-Capability": secret})
+                                        headers={"Content-Type": "application/json", "X-MOKU-Source-Capability": capability})
         with opener.open(request, timeout=8) as response:
             return json.loads(response.read(3 * 1024 * 1024))
 
@@ -98,33 +99,66 @@ def run():
     submitted = False
     completed = False
     last_kind = ""
+    attempt = None
     automatic_submit = True
     login_status = "unknown"
     start_url = "https://saucenao.com/user.php" if mode == "login" else "https://saucenao.com/"
+    navigation = None
+    ready_navigation = None
 
-    def schedule(action):
+    def schedule(action, *, document=None):
+        owner = identity if document is None else document[1]
         try:
-            commands.put_nowait(action)
+            commands.put_nowait((owner, document, action))
         except queue.Full:
             pass  # Repeated menu/loaded notifications share a bounded queue.
 
+    def current_document():
+        document = ready_navigation
+        if document is not None and document is navigation and document[1] == identity:
+            return document
+        return None
+
+    def load_page(url):
+        nonlocal navigation
+        navigation = None
+        window.load_url(url)
+
+    def claim_submission(document):
+        nonlocal attempt, last_kind
+        try:
+            permit = send("submitted")
+        except urllib.error.HTTPError:
+            window.set_title("MOKU — 当前不能提交，请查看主界面")
+            return False
+        if "attempt" not in permit:
+            return False
+        attempt, last_kind = permit["attempt"], ""
+        if current_document() is not document:
+            send("not-sent", attempt=attempt)
+            return False
+        return True
+
     def submit():
-        nonlocal submitted, post_stream, automatic_submit
-        if completed or window.events.closed.is_set():
+        nonlocal submitted, post_stream, automatic_submit, navigation
+        document = current_document()
+        if document is None or completed or window.events.closed.is_set():
             return
         if mode == "login":
             window.set_title("MOKU — 请在官网完成登录，再回主界面查询")
             return
         result = window.evaluate_js(READ_RESULT)
+        if current_document() is not document:
+            return
         if result.get("kind") == "verification":
-            send("verification")
+            send("verification", attempt=attempt)
             window.set_title("MOKU — 请手动通过验证，然后点「提交查询」")
             return
         if mode == "key":
             if result.get("kind") == "other":
                 submitted = False
                 automatic_submit = True
-                window.load_url("https://saucenao.com/")
+                load_page("https://saucenao.com/")
                 return
             try:
                 request = send("api-request")
@@ -145,8 +179,10 @@ def run():
                     request["url"], "POST", post_stream,
                     "Content-Type: " + request["contentType"] + "\r\nAccept: application/json\r\n")
                 core.NavigateWithWebResourceRequest(native_request)
+            if not claim_submission(document):
+                return
             submitted = True
-            send("submitted")
+            navigation = None
             window.native.Invoke(Action(navigate_api))
             window.set_title("MOKU — API Key 查询中，请等待 JSON 结果")
             return
@@ -162,20 +198,27 @@ def run():
               const transfer=new DataTransfer();transfer.items.add(new File([bytes],'query.jpg',{type:'image/jpeg'}));input.files=transfer.files;
               form.hidden=true;document.body.append(form);form.submit();return true;
             })()""".replace("ENCODED", json.dumps(encoded))
+        if not claim_submission(document):
+            return
         if not window.evaluate_js(script):
+            send("not-sent", attempt=attempt)
             window.set_title("MOKU — 官网尚未准备好，可刷新后点「提交查询」")
             return
+        if navigation is document:
+            navigation = None
         submitted = True
-        send("submitted")
         window.set_title("MOKU — 正在搜图，请勿重复提交")
 
     def observe():
         nonlocal completed, last_kind, encoded, automatic_submit, login_status
         auto_submit = False
         try:
-            if completed:
+            document = current_document()
+            if completed or document is None:
                 return
             session = window.evaluate_js(READ_LOGIN)
+            if current_document() is not document:
+                return
             if session in ("signed-in", "signed-out") and session != login_status:
                 send("session", login=session)
                 login_status = session
@@ -185,14 +228,16 @@ def run():
                     window.set_title("MOKU — SauceNAO 官网已登录，可回主界面查询")
                 return
             result = window.evaluate_js(READ_RESULT)
+            if current_document() is not document:
+                return
             kind = result.get("kind")
             if kind == "verification":
                 if last_kind != kind:
-                    send("verification")
+                    send("verification", attempt=attempt)
                     window.set_title("MOKU — 验证请手动完成，再点「提交查询」")
             elif kind == "result" and submitted:
                 args = {"json": result["json"]} if "json" in result else {"rows": result["rows"]}
-                response = send("result", **args)
+                response = send("result", attempt=attempt, **args)
                 completed = response.get("state") in {"done", "error", "cancelled"}
                 if completed:
                     encoded = ""
@@ -214,7 +259,7 @@ def run():
             submit()
 
     def startup():
-        nonlocal identity, secret, encoded, submitted, completed, last_kind, mode, automatic_submit, login_status
+        nonlocal identity, secret, encoded, submitted, completed, last_kind, mode, automatic_submit, login_status, attempt
         if not window.events.loaded.wait(25):
             send("error")
             return
@@ -223,10 +268,26 @@ def run():
         def navigate():
             core = window.native.webview.CoreWebView2
 
-            def navigation_completed(sender, args):
-                if not args.IsSuccess and str(args.WebErrorStatus) != "OperationCanceled":
-                    schedule("connection-error")
+            def navigation_starting(sender, args):
+                nonlocal navigation
+                if not args.IsRedirected:
+                    navigation = (args.NavigationId, identity)
 
+            def navigation_completed(sender, args):
+                nonlocal ready_navigation
+                document = navigation
+                if document is None or args.NavigationId != document[0]:
+                    return
+                if args.IsSuccess:
+                    ready_navigation = document
+                elif getattr(args, "HttpStatusCode", 0) == 403:
+                    schedule("access-denied", document=document)
+                elif getattr(args, "HttpStatusCode", 0) == 429:
+                    schedule("rate-limited", document=document)
+                elif str(args.WebErrorStatus) != "OperationCanceled":
+                    schedule("connection-error", document=document)
+
+            core.NavigationStarting += navigation_starting
             core.NavigationCompleted += navigation_completed
             core.Navigate(start_url)
 
@@ -235,7 +296,8 @@ def run():
         next_poll = 0
         while not window.events.closed.wait(.25):
             try:
-                action = commands.get_nowait()
+                owner, document, queued_action = commands.get_nowait()
+                action = queued_action if owner == identity and (document is None or document is navigation) else None
             except queue.Empty:
                 action = None
             try:
@@ -243,35 +305,48 @@ def run():
                     send(action)
                     completed = True
                     window.set_title("MOKU — 官网连接失败，可从主界面重新查询")
+                elif action == "access-denied":
+                    send(action, attempt=attempt)
+                    automatic_submit = False
+                    window.set_title("MOKU — 官网返回 403，请查看官网提示")
+                elif action == "rate-limited":
+                    send(action, attempt=attempt)
+                    completed = True
+                    encoded = ""
+                    window.set_title("MOKU — 官网限制了查询频率，请稍后重试")
                 elif action == "submit":
                     submit()
                 elif action == "observe":
                     observe()
                 elif action == "home":
-                    window.load_url("https://saucenao.com/")
+                    load_page("https://saucenao.com/")
                 elif action == "login":
                     automatic_submit = False
                     completed = False
                     login_status = "unknown"
-                    window.load_url("https://saucenao.com/user.php")
+                    load_page("https://saucenao.com/user.php")
                 if time.monotonic() < next_poll:
                     continue
                 next_poll = time.monotonic() + 2
                 response = send("poll")
                 pending = response.get("next")
                 if pending:
-                    identity, secret = pending["id"], pending["secret"]
-                    payload = send("payload")
+                    offered = pending["id"], pending["secret"]
+                    payload = send("payload", credentials=offered)
+                    if payload["state"] in {"cancelled", "error", "done"}:
+                        continue
+                    identity, secret = offered
                     encoded = payload["image"]
                     mode = payload.get("mode", "guest")
                     login_status = "unknown"
                     submitted = completed = False
                     automatic_submit = True
                     last_kind = ""
+                    attempt = None
                     deadline = time.monotonic() + 600
                     window.set_title("MOKU — SauceNAO · " + {"key":"API 验证","login":"官网登录","guest":"官网查询"}[mode])
                     window.show()
-                    window.load_url("https://saucenao.com/user.php" if mode == "login" else "https://saucenao.com/")
+                    load_page("https://saucenao.com/user.php" if mode == "login" else "https://saucenao.com/")
                     continue
                 state = response["state"]
             except (OSError, ValueError):

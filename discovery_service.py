@@ -1,5 +1,6 @@
 """Ordered discovery snapshots. Metadata and full continuation context, never credentials/capabilities."""
 from collections import OrderedDict
+from contextlib import ExitStack
 import copy
 from datetime import datetime, timezone
 import re
@@ -77,9 +78,9 @@ class DiscoveryService:
         with self._guard:
             stored = self._feeds.get((owner, method, batch))
             epoch = self._epoch
-        result = copy.deepcopy(stored) if stored else None
-        if result is None:
-            result = self.pages.saved_cache.read_discovery(owner, method, batch)
+        result = self.pages.saved_cache.read_discovery(owner, method, batch, warm=stored)
+        if result is not None and result is stored:
+            result = copy.deepcopy(result)
         self._check(generation, epoch)
         if result is None:
             raise AccountError("cache_miss", "原发现批次已清理，请刷新当前页面")
@@ -108,9 +109,14 @@ class DiscoveryService:
             items = [item for item in items if not states.get(item["userId"], {}).get("known") or
                      states[item["userId"]]["active"] and (feed["scope"] == "all" or
                      states[item["userId"]].get("privacy") in {None, feed["scope"]})]
-        return {"items":copy.deepcopy(items),"uid":owner,"method":method,"batch":feed["batch"],"offset":offset,
+        result = {"items":copy.deepcopy(items),"uid":owner,"method":method,"batch":feed["batch"],"offset":offset,
                 "nextOffset":next_offset,"edition":feed["edition"],"unavailable":feed["unavailable"],
                 "created":feed["created"],"kind":feed["kind"],"scope":feed["scope"],"rankMode":feed["rankMode"],"authorizationGeneration":generation}
+        if "publicationOrder" in feed:
+            result["publicationOrder"] = feed["publicationOrder"]
+        if feed["kind"] == "ranking" and method == "app":
+            result["rankingWindow"] = feed["window"]
+        return result
 
     @staticmethod
     def _window():
@@ -142,12 +148,16 @@ class DiscoveryService:
             raise AccountError("cursor", "发现续页上下文无效")
         if feed["kind"] == "following" and query.get("restrict") != [stream]:
             raise AccountError("cursor", "关注新作范围不符")
-        if feed["kind"] == "ranking":
+        ranking = feed["kind"] == "ranking"
+        if ranking:
             if query.get("mode") != [feed["rankMode"]]:
                 raise AccountError("cursor", "榜种不符")
-            if feed["sourceCount"] and feed["window"] != self._window():
+            if feed["window"] != self._window():
                 raise AccountError("ranking_changed", "榜单已进入新的更新窗口，请刷新后继续")
         raw = self.pages.account().request("GET", path, check=lambda:self.pages.check(generation))
+        if ranking and feed["window"] != self._window():
+            # The App response has no edition date to establish which window answered.
+            raise AccountError("ranking_changed", "榜单已进入新的更新窗口，请刷新后继续")
         if not isinstance(raw, dict) or not isinstance(raw.get("illusts"), list):
             raise AccountError("invalid_data", "发现作品列表格式异常")
         visited = feed.setdefault("visitedPaths", {}).setdefault(stream, [])
@@ -234,7 +244,7 @@ class DiscoveryService:
         else:feed["stagnant"]=0
         feed["pending"][stream].extend(result)
 
-    def read(self, *, generation, kind="recommended", scope="all", mode="safe", rank="day", offset=0, batch="", refresh=False, cached=False):
+    def read(self, *, generation, kind="recommended", scope="all", mode="safe", rank="day", offset=0, batch="", refresh=False, cached=False, account=None):
         if kind not in {"recommended","following","ranking"} or scope not in {"all","public","private"} or mode not in CONTENT_MODES or rank not in RANKS:
             raise DiscoveryInputError("发现参数无效")
         if kind=="ranking" and mode!="safe":
@@ -243,20 +253,24 @@ class DiscoveryService:
         if kind!="ranking":rank="day"
         if type(offset) is not int or not 0<=offset<=100000 or batch and not re.fullmatch(r"[a-f0-9]{32}",batch):
             raise DiscoveryInputError("发现分页无效")
-        owner, method = self.context(generation)
+        owner, method = self.context(generation) if account is None else account
         requested_batch = bool(batch)
         descriptor = [kind,scope,mode,rank]
         with self._guard:
             epoch = self._epoch
             lock = self._locks.setdefault((owner,method,*descriptor),threading.RLock())
-        with checked_lock(lock,lambda:self._check(generation,epoch)):
+        with checked_lock(lock, lambda: self._check(generation, epoch)), ExitStack() as held:
+            cache = self.pages.saved_cache
+            revision = cache.display_revision(owner, method)
             current_key = ["discovery-current",*descriptor]
-            if not batch and not refresh:batch = self.pages.saved_cache.discovery_batch(owner, method, descriptor)
+            if not batch and not refresh:batch = cache.discovery_batch(owner, method, descriptor)
+            if batch and not refresh:
+                held.enter_context(cache.pin_snapshot(owner, method, "discovery", batch))
             key = (owner,method,batch)
             with self._guard:stored = self._feeds.get(key)
             display_page = None
-            if stored is None and batch and not refresh:
-                stored = self.pages.saved_cache.read_discovery(owner, method, batch, page=(offset, 36, cached))
+            if batch and not refresh:
+                stored = cache.read_discovery(owner, method, batch, page=(offset, 36, cached), warm=stored, revision=revision)
                 if isinstance(stored, DiscoveryPage):
                     display_page, stored = stored, stored.feed
             if stored and [stored["kind"],stored["scope"],stored["mode"],stored["rankMode"]]!=descriptor:
@@ -281,7 +295,10 @@ class DiscoveryService:
                 raise AccountError("cache_miss", "原发现批次已清除，请刷新当前页面")
             previous = stored if not refresh else None
             if previous is None:
+                order, legacy_batch = cache.reserve_display_publication(owner, method, current_key, revision=revision)
                 feed = self._new(kind,scope,mode,rank,method)
+                held.enter_context(cache.pin_snapshot(owner, method, "discovery", feed["batch"]))
+                feed.update(publicationOrder=order, legacyBatch=legacy_batch)
             else:
                 # Existing cards are immutable within a discovery batch. Only the
                 # working lists, cursor map and deduplication state are mutated.
@@ -310,13 +327,13 @@ class DiscoveryService:
                 if epoch != self._epoch:
                     raise AccountError("cache_cleared", "发现缓存已清除，请重新打开")
                 try:
-                    feed.update(self.pages.saved_cache.save_discovery(owner, method, feed, previous,
-                        current=current_key if not batch or refresh else None))
+                    feed.update(cache.save_discovery(owner, method, feed, previous,
+                        revision=revision, current=current_key if not batch or refresh else None))
                 except AccountError as error:
                     if error.kind == "cache_changed":
                         self._feeds.pop(key, None)
                     raise
-                if not stored or refresh:self.pages.saved_cache.retain_discovery(owner,method)
+                if not stored or refresh:cache.retain_discovery(owner,method)
                 self._retain(owner,method,feed,epoch)
             if not items and has_more:raise AccountError("filtered", "当前范围暂未取得可展示作品，再次进入可继续读取，或调整范围")
             return self._response(feed, owner, method, generation, offset, items, has_more)

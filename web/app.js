@@ -1946,11 +1946,10 @@ async function startGalleryLoad({restoring=false,refresh=false}={}){
   syncSearchSortControl();queueNavigationRecord();
 }
 function openArtistPage(userId,options={}){
-  preparePageNavigation();checkpointNavigation();
-  const source=capturePageState();
-  if(source.artist?.kind==="candidates" && !options.order)options={...options,order:galleryDraftOrder};
-  const parent=source.view==="discovery" || source.view==="gallery" && source.artist?.kind!=="profile"?source
-    : source.view==="detail" && contextReturns.detail?pageHistory?.find(page=>page.key===contextReturns.detail.key && (page.view==="discovery" || page.view==="gallery" && page.artist?.kind!=="profile")):null;
+  const source=preparePageNavigation();
+  if(source?.artist?.kind==="candidates" && !options.order)options={...options,order:galleryDraftOrder};
+  const parent=source?.view==="discovery" || source?.view==="gallery" && source.artist?.kind!=="profile"?source
+    : source?.view==="detail" && source.contextReturns.detail?pageHistory?.find(page=>page.key===source.contextReturns.detail.key && (page.view==="discovery" || page.view==="gallery" && page.artist?.kind!=="profile")):null;
   const tag=userId?`uid:${userId}`:`author:${options.name}`;
   void openLinkedSearch(tag,parent?{key:parent.key,label:parent.view==="discovery"?"发现":"搜索结果"}:null,options);
 }
@@ -1961,7 +1960,7 @@ document.addEventListener("click",event=>{
   event.preventDefault();
   if(contextNavigationLocked() || mokuHasSelectedText(link))return;
   if(link.dataset.artistId)openArtistPage(link.dataset.artistId);
-  else{preparePageNavigation();checkpointNavigation();const parent=capturePageState();void openLinkedSearch(link.dataset.tagName,{key:parent.key});}
+  else{const parent=preparePageNavigation();void openLinkedSearch(link.dataset.tagName,parent?{key:parent.key}:null);}
 });
 
 const galleryInteraction = createGalleryInteraction({
@@ -2029,8 +2028,8 @@ discoveryView=createDiscoveryPage({root:$("#discoveryPage"),request:requestAccou
   backgroundAllowed:()=>cloudControls.canPrepareBackground()});
 
 async function openDiscovery(options={},linked=false){
-  preparePageNavigation();checkpointNavigation();
-  const parent=linked?capturePageState():null,revision=navigationRevision;
+  const source=preparePageNavigation();
+  const parent=linked?source:null,revision=navigationRevision;
   closeAllViewer();closeBasketPage();accountOrigin=false;contextReturns=parent?{discovery:{key:parent.key}}:{};
   setWorkspace("discovery");
   if(lastKnownLoggedIn===null){
@@ -2045,7 +2044,7 @@ async function openDiscovery(options={},linked=false){
 async function openAccount(view) {
   preparePageNavigation();
   const revision=navigationRevision;
-  checkpointNavigation();closeAllViewer();closeBasketPage();accountOrigin=true;
+  closeAllViewer();closeBasketPage();accountOrigin=true;
   contextReturns={};
   setWorkspace("account");
   if(lastKnownLoggedIn===null){
@@ -2062,7 +2061,7 @@ const sourceSearchView=createSourceSearch({root:$("#reversePage"),settingsRoot:$
   request:fetchJson,escape:esc,changed:queueNavigationRecord,allowed:()=>!contextNavigationLocked(),report:announceToast,
   openArtwork:async id=>{
     if(contextNavigationLocked())return;
-    preparePageNavigation();checkpointNavigation();const parent=capturePageState();accountOrigin=false;closeAllViewer();
+    const parent=preparePageNavigation();accountOrigin=false;closeAllViewer();
     await openLinkedSearch(`pid:${id}`,parent,{start:true});
   },
   openExternal:(url,event)=>{
@@ -2075,9 +2074,8 @@ const sourceSearchView=createSourceSearch({root:$("#reversePage"),settingsRoot:$
 });
 $("#sourceSearchEntry").onclick=async()=>{
   if(contextNavigationLocked())return;
-  preparePageNavigation();checkpointNavigation();
-  const parent=capturePageState();
-  closeAllViewer();closeBasketPage();accountOrigin=false;contextReturns={reverse:{key:parent.key}};
+  const parent=preparePageNavigation();
+  closeAllViewer();closeBasketPage();accountOrigin=false;contextReturns=parent?{reverse:{key:parent.key}}:{};
   workspaceReturn=null;setWorkspace("reverse");await sourceSearchView.open();queueNavigationRecord();
 };
 
@@ -2174,7 +2172,9 @@ function updatePaginationDock() {
   const sections = ['home', 'gallery'];
   const marker = window.innerHeight * .4;
   const active = libraryWorkspaceOpen() ? activeWorkspace
-    : basketPageOpen() ? "basket" : accountOrigin ? "account" : activeWorkspace === "download" ? "detail"
+    : basketPageOpen() ? "basket"
+    : activeWorkspace === "download" ? (accountOrigin ? "account" : "detail")
+    : searchSurface === "gallery" && activeSearchContext.kind === "uid" ? "gallery"
     : sections.reduce((current, id) => $(`#${id}`).getBoundingClientRect().top <= marker ? id : current, 'home');
   rail.querySelectorAll('a, button').forEach(link => {
     if (link.hash === `#${active}` || link.dataset.view === active) {
@@ -2332,7 +2332,8 @@ function pruneNavigationCache(entries,cursor) {
   galleryPreviewCache.prune(new Set([...retained,...searchPageCache.warmKeys()]));
 }
 
-function preparePageNavigation() {
+function preparePageNavigation({record=true}={}) {
+  const recordOutgoing=record && pageHistory?.canRecord();
   cancelGalleryPopularity();
   navigationRevision++;
   pageHistory?.cancelRestore();
@@ -2348,9 +2349,10 @@ function preparePageNavigation() {
     grid.setAttribute("aria-busy","false");
     searchButton.textContent="开始寻找";cancelSearchButton.hidden=true;
   }
-  checkpointNavigation();
+  if(recordOutgoing)checkpointNavigation();
   invalidateDetailView();
   syncSearchScopedControls();
+  return pageHistory?.current() || null;
 }
 
 function captureSearchState() {
@@ -2391,15 +2393,16 @@ function capturePageState() {
 }
 
 function checkpointNavigation() {
-  if(pageHistory && !pageRefreshPending && !pageHistory.status().restoring)pageHistory.record(capturePageState());
+  if(pageHistory?.canRecord())pageHistory.record(capturePageState());
 }
 function queueNavigationRecord(deferred=false) {
   clearTimeout(navigationRecordTimer);navigationRecordTimer=null;
+  if(!pageHistory?.canRecord())return;
   if(deferred){navigationRecordTimer=setTimeout(()=>{navigationRecordTimer=null;queueNavigationRecord();},160);return;}
-  if(!pageHistory || pageRefreshPending || pageHistory.status().restoring || navigationRecordFrame!==null)return;
+  if(navigationRecordFrame!==null)return;
   navigationRecordFrame=requestAnimationFrame(()=>{
     navigationRecordFrame=null;
-    if(!searchPending && !pageRefreshPending)pageHistory.record(capturePageState());
+    if(!searchPending)checkpointNavigation();
   });
 }
 function syncPageHistoryControls() {
@@ -2459,6 +2462,8 @@ function restoreResultPage(source){
 }
 async function restorePageState(state,scope) {
   scope.check();
+  clearTimeout(navigationRecordTimer);navigationRecordTimer=null;
+  cancelAnimationFrame(navigationRecordFrame);navigationRecordFrame=null;
   closeAllViewer();closeBasketPage();invalidateDetailView();clearDetail();
   setWorkspace(["account","discovery","history","reverse"].includes(state.baseView)?state.baseView:null);
   searchSurface=state.searchSurface;accountOrigin=Boolean(state.accountOrigin);
@@ -2616,7 +2621,6 @@ function openDownloadPage() {
 
 function navigatePrimary(hash) {
   preparePageNavigation();
-  checkpointNavigation();
   contextReturns={};
   accountOrigin=false;
   if (hash === "#home" || hash === "#gallery") searchSurface = hash.slice(1);
@@ -2638,7 +2642,6 @@ function navigatePrimary(hash) {
 function openLibrary(view,{restoring=false}={}) {
   if(view==="favorites"){void openAccount("bookmarks");return;}
   if(!restoring)preparePageNavigation();
-  checkpointNavigation();
   accountOrigin=false;
   contextReturns={};
   if (!libraryWorkspaceOpen()) workspaceReturn = activeWorkspace;
@@ -2647,9 +2650,9 @@ function openLibrary(view,{restoring=false}={}) {
   if (view === "history") historyView.open();
 }
 
-function closeLibrary() {
+function closeLibrary({record=true}={}) {
   if(pageRefreshPending)return;
-  checkpointNavigation();
+  if(record)checkpointNavigation();
   const target = workspaceReturn;
   workspaceReturn = null;
   setWorkspace(target);
@@ -2663,9 +2666,6 @@ $("#navBasket").onclick = () => {
     showTaskDock("采集篮为空", "先在预览页勾选作品，再来选择图片。", 3000);
     return;
   }
-  preparePageNavigation();
-  if (libraryWorkspaceOpen()) closeLibrary();
-  closeAllViewer();
   openSelectionBasket({fromSidebar:true});
 };
 $("#historyBack").onclick = closeLibrary;
@@ -2674,9 +2674,8 @@ $("#downloadBack").onclick = () => navigatePrimary("#gallery");
 async function select(index,suppliedItem=null,suppliedContext=null,{restoring=false}={}) {
   let item = suppliedItem || items[index];
   if (!item) return;
-  if(!restoring)preparePageNavigation();
-  checkpointNavigation();
-  contextReturns.detail={key:capturePageIdentity().key};
+  const parent=restoring?null:preparePageNavigation();
+  contextReturns.detail={key:parent?.key ?? capturePageIdentity().key};
   clearDetail("正在加载作品详情…");
   closeAllViewer();
   invalidateDetailView();
@@ -2890,9 +2889,8 @@ function renderViewerWindow(item) {
 }
 
 function openAllViewer({restoring=false}={}) {
-  if(!restoring)preparePageNavigation();
-  checkpointNavigation();
-  contextReturns.viewer={key:capturePageIdentity().key};
+  const parent=restoring?null:preparePageNavigation();
+  contextReturns.viewer={key:parent?.key ?? capturePageIdentity().key};
   const detail = activeDetail();
   const current = detail.item && String(detail.item.id) === String(detail.artworkId) ? detail.item : null;
   const item = current || selection.get(detail.artworkId)?.item || items.find(row => row.id === detail.artworkId);
@@ -2970,9 +2968,8 @@ function updateBatchDetailSummary() {
 }
 
 function showBatchDetail({fromSidebar=false}={}) {
-  preparePageNavigation();
-  checkpointNavigation();
-  contextReturns.detail=fromSidebar?null:{key:capturePageIdentity().key};
+  const parent=preparePageNavigation();
+  contextReturns.detail=fromSidebar?null:{key:parent?.key ?? capturePageIdentity().key};
   const quality = $("#quality").value;
   const format = $("#format").value;
   clearDetail();
@@ -3094,14 +3091,17 @@ function syncBasketHeader() {
 }
 
 function openSelectionBasket({fromSidebar=false,restoring=false}={}) {
-  if(!restoring)preparePageNavigation();
+  const parent=restoring?null:preparePageNavigation();
+  if(fromSidebar){
+    if(libraryWorkspaceOpen()) closeLibrary({record:false});
+    closeAllViewer();
+  }
   const rows = selection.snapshot();
   if (!rows.length) {
     $("#pageSelectionStatus").textContent = "请先勾选至少一个作品";
     return;
   }
-  checkpointNavigation();
-  contextReturns.basket=fromSidebar?null:{key:capturePageIdentity().key};
+  contextReturns.basket=fromSidebar?null:{key:parent?.key ?? capturePageIdentity().key};
   invalidateDetailView();
   batchCandidateItems = rows.map(row => row.item);
   batchCandidateContextByArtwork.clear();
@@ -3721,11 +3721,10 @@ function renderBasketArtworkDetail(item) {
 }
 
 async function openBatchCollection(id,{restoring=false}={}) {
-  if(!restoring)preparePageNavigation();
+  const parent=restoring?null:preparePageNavigation();
   let item = selection.get(id)?.item || batchCandidateItems.find((candidate) => candidate.id === id);
   if (!item) return;
-  checkpointNavigation();
-  contextReturns.basket={key:capturePageIdentity().key};
+  contextReturns.basket={key:parent?.key ?? capturePageIdentity().key};
   invalidateDetailView();
   detailController = new AbortController();
   const controller = detailController;
@@ -3888,7 +3887,7 @@ function updateFormatHint() {
 $("#quality").onchange = updateFormatHint;
 $("#format").onchange = updateFormatHint;
 $("#searchForm").onsubmit = async (event) => {
-  event.preventDefault();preparePageNavigation();checkpointNavigation();accountOrigin=false;
+  event.preventDefault();preparePageNavigation();accountOrigin=false;
   const revision=navigationRevision,tag=$("#tag").value,filters=readSearchFilters(),kind=searchKind.value;
   scrollToResults();
   try{
@@ -4306,18 +4305,17 @@ document.querySelectorAll("dialog").forEach((modal) => {
   };
 });
 
-pageHistory=createNavigationHistory({capture:capturePageState,restore:restorePageState,validate:assertNavigationAccount,allowed:()=>true,changed:syncPageHistoryControls,prune:pruneNavigationCache});
+pageHistory=createNavigationHistory({capture:capturePageState,restore:restorePageState,validate:assertNavigationAccount,allowed:()=>true,
+  canCapture:()=>!pageRefreshPending,beforeNavigate:()=>preparePageNavigation({record:false}),changed:syncPageHistoryControls,prune:pruneNavigationCache});
 document.querySelectorAll("[data-context-back]").forEach(button=>{
   button.onclick=()=>{
     if(contextNavigationLocked())return;
     const target=contextReturns[button.dataset.returnSurface];
-    preparePageNavigation();
     if(target)void pageHistory.goTo(target.key).catch(error=>showTaskDock("返回失败",error.message,5000));
   };
 });
 function navigateHistory(direction) {
   if (contextNavigationLocked()) return;
-  preparePageNavigation();
   void pageHistory.go(direction).catch(error=>showTaskDock("页面跳转失败",error.message,4000));
 }
 $("#pageBack").onclick=()=>navigateHistory(-1);
