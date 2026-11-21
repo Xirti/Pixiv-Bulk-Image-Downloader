@@ -562,9 +562,14 @@ async function saveDownloadTask(task, expectedTask = null, completedRequestId = 
 }
 
 async function deleteSavedTask(id) {
-  if (!workspaceSync.ready) return;
-  const revision = pendingTasks.get(id)?.revision ?? 0;
-  const result = await writeTaskState("/api/workspace/task/delete", {id, scope: workspaceSync.scope, revision});
+  if (!workspaceSync.ready) throw new Error("本机任务尚未同步，请稍后重试");
+  const task = pendingTasks.get(id);
+  const revision = task?.revision ?? 0;
+  const scope = workspaceSync.scope;
+  const authorization = downloadAuthorizationRevision;
+  const result = await writeTaskState("/api/workspace/task/delete", {id, scope, revision});
+  if (authorization !== downloadAuthorizationRevision || scope !== workspaceSync.scope
+      || pendingTasks.get(id) !== task || (task?.revision ?? 0) !== revision) return;
   pendingTasks.delete(id);
   forgetTaskRetry(id);
   renderPendingTasks();
@@ -3521,7 +3526,14 @@ async function executeDownloadTask(task, requestForChunk, reportProgress) {
         if (task.remainingChunks.length) await saveDownloadTask(task,null,chunk.requestId);
         else {
           try { await saveDownloadTask(task); }
-          catch { task.stateWarning = true; }
+          catch {
+            task.stateWarning = true;
+            // A lost reply can hide a completed removal. The workspace defers
+            // the read until the download releases the selection controls.
+            if (task.authorizationRevision === downloadAuthorizationRevision && !workspaceSync.needsRestore) {
+              await workspaceSync.restore();
+            }
+          }
         }
       }
     }
