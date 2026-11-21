@@ -10,8 +10,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   let clearing=false,clearJob=null,accountPrepared=false,auxiliaryBusy=false,auxiliaryCompleted=0,auxiliaryError="";
   let preferenceWrites=Promise.resolve();
   let sessionEpoch=0,settingsRevision=-1;
+  let initialSync=null,initialSyncReady=false,settingsRetryAt=0;
   let updatesBusy=false,lastUpdateCheck=0,updatesRemaining=false;
   const busy=new Set(),manual=new Set(),restart=new Set();
+  const scanFailures=new Map();
   const pendingWrites=new Map();
   const painted=new WeakMap();
   const post=(path,data,timeout=90000)=>request(path,{method:"POST",headers:{"Content-Type":"application/json"},
@@ -60,7 +62,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     popup.style.left=`${Math.max(8,Math.min(innerWidth-box.width-8,rect.right-box.width))}px`;
     popup.style.top=`${Math.max(8,Math.min(innerHeight-box.height-8,rect.bottom+8))}px`;
   }
-  function notifySettings(){preferencesChanged({...prefs},{...structuredClone(syncState),error:syncError || auxiliaryError,manual:manual.size>0,preparing:auxiliaryBusy,prepared:auxiliaryCompleted,clearing,requesting:syncBusy},prefsLoaded);}
+  function notifySettings(){preferencesChanged({...prefs},{...structuredClone(syncState),error:syncError || [...scanFailures.values()][0]?.message || auxiliaryError,manual:manual.size>0,preparing:auxiliaryBusy,prepared:auxiliaryCompleted,clearing,requesting:syncBusy},prefsLoaded);}
   async function prepareAccountData(options){
     const revision=epoch,generation=session().generation;
     if(auxiliaryBusy || clearing || !session().logged)return;
@@ -135,8 +137,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
           rememberState(kind,id,state);
         }
         paint();notifySettings();
+        return true;
       }catch(error){
         if(revision===epoch){hydratedKey="";syncError=error.message;lastSyncAttempt=Date.now();notifySettings();}
+        return false;
       }
     })().finally(()=>{
       if(hydration!==task)return;
@@ -275,7 +279,13 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   }
 
   async function tick(){
-    if(clearing || !session().logged || !prefsLoaded || settingsPromise)return;
+    if(clearing || !session().logged)return;
+    if(!initialSyncReady){
+      if(Date.now()<settingsRetryAt)return;
+      const revision=epoch,generation=session().generation;
+      await initializeSync();
+      if(!sameEpoch(revision,generation) || !initialSyncReady || clearing || !session().logged)return;
+    }
     if(prefs.autoFollowing && Date.now()>=autoNotBefore && !updatesBusy && Date.now()-lastUpdateCheck>=(updatesRemaining?30000:Number(prefs.syncMinutes)*60000)){
       updatesBusy=true;lastUpdateCheck=Date.now();const revision=epoch,generation=session().generation;
       void checkUpdates({continuing:updatesRemaining}).then(result=>{if(sameEpoch(revision,generation))updatesRemaining=Boolean(result.hasMore);})
@@ -288,21 +298,26 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     }
     const candidates=["bookmark","follow"],now=Date.now();
     const due=candidates.map((_,offset)=>candidates[(syncTurn+offset)%2]).find(candidate=>manual.has(candidate) || prefs.autoSync && now>=autoNotBefore &&
+      now>=(scanFailures.get(candidate)?.retryAt || 0) &&
       (syncState[candidate]?.running || !syncState[candidate]?.completed || (now-syncState[candidate].completed*1000)/60000>=Number(prefs.syncMinutes)));
     if(!due)return;
-    syncBusy=true;lastSyncAttempt=now;const revision=epoch,generation=session().generation,job={};syncJob=job;
+    syncBusy=true;lastSyncAttempt=now;syncTurn=due==="bookmark"?1:0;
+    const revision=epoch,generation=session().generation,job={};syncJob=job;
     try{
       syncRequest=post("/api/cloud/sync",{kind:due,force:restart.has(due)});
       const data=await syncRequest;
       if(!sameEpoch(revision,generation))return;
-      restart.delete(due);syncState[due]=data.sync;syncVersion++;syncError="";syncTurn=due==="bookmark"?1:0;
+      restart.delete(due);scanFailures.delete(due);syncState[due]=data.sync;syncVersion++;syncError="";
       const preparePage=prefs.autoSync || manual.has(due);
       if(!data.sync.running)manual.delete(due);
       if(preparePage && data.sync.page)await prepareAccount({page:data.sync.page,completed:data.sync.running?null:data.sync.pageOffsets});
       if(!sameEpoch(revision,generation))return;
       await hydrate(true);notifySettings();
     }catch(error){
-      if(revision===epoch){syncError=error.message;lastSyncAttempt=Date.now()+55000;manual.clear();restart.clear();notifySettings();}
+      if(sameEpoch(revision,generation)){
+        scanFailures.set(due,{message:`${due==="bookmark"?"收藏":"关注"}：${error.message}`,retryAt:Date.now()+55000});
+        manual.delete(due);restart.delete(due);notifySettings();
+      }
     }finally{if(syncJob===job){syncBusy=false;syncRequest=null;syncJob=null;}if(sameEpoch(revision,generation)){notifySettings();setTimeout(()=>{void tick();},1100);}}
   }
   async function clearCache(){
@@ -319,7 +334,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       if(generation!==session().generation)throw new Error("账号已改变，请重新操作");
       await post("/api/cloud/clear-cache",{},30000);
       if(generation!==session().generation)throw new Error("账号已改变，请重新操作");
-      states={bookmark:new Map(),follow:new Map()};syncState={};hydratedKey="";syncError="";auxiliaryError="";
+      states={bookmark:new Map(),follow:new Map()};syncState={};hydratedKey="";syncError="";auxiliaryError="";scanFailures.clear();
       lastUpdateCheck=0;updatesRemaining=false;
       auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;
       autoNotBefore=Date.now()+Number(prefs.syncMinutes)*60000;
@@ -333,8 +348,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   function refresh(){
     if(clearing || manual.size || syncBusy)return;
     if(!session().logged){login();report("请先登录 Pixiv，再同步云端状态");return;}
-    for(const kind of ["bookmark","follow"]){manual.add(kind);restart.add(kind);}
-    hydratedKey="";lastSyncAttempt=0;syncError="";notifySettings();void hydrate(true);void tick();
+    for(const kind of ["bookmark","follow"]){manual.add(kind);if(!scanFailures.has(kind))restart.add(kind);}
+    hydratedKey="";lastSyncAttempt=0;syncError="";notifySettings();
+    if(initialSyncReady)void hydrate(true);
+    void tick();
     void prepareAccountData({network:true,refresh:true});
   }
   function setSession(){
@@ -347,17 +364,33 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     void clearStarted();
     auxiliaryBusy=false;accountPrepared=false;auxiliaryCompleted=0;auxiliaryError="";
     states={bookmark:new Map(),follow:new Map()};syncState={};owner=null;hydratedKey="";lastSyncAttempt=0;autoNotBefore=0;
-    prefs={...defaults};prefsLoaded=false;syncError="";notifySettings();settingsPromise=null;
-    const revision=epoch;
-    void ready().then(async()=>{
-      if(revision!==epoch)return;
-      await hydrate(true);
-      if(revision!==epoch || !session().logged)return;
+    prefs={...defaults};prefsLoaded=false;syncError="";scanFailures.clear();syncTurn=0;
+    settingsPromise=null;initialSync=null;initialSyncReady=false;settingsRetryAt=0;
+    notifySettings();paint();
+    void initializeSync().then(()=>tick());
+  }
+  function initializeSync(){
+    if(initialSync)return initialSync;
+    const revision=epoch,generation=session().generation;
+    const task=ready().then(async()=>{
+      if(!sameEpoch(revision,generation) || !prefsLoaded)return;
+      if(!session().logged){initialSyncReady=true;return;}
+      if(settingsRetryAt){settingsRetryAt=0;syncError="";}
+      const hydrated=await hydrate(true);
+      if(!sameEpoch(revision,generation))return;
+      if(!hydrated){settingsRetryAt=Date.now()+5000;return;}
       await prepareAccountData({network:false});
-      if(revision!==epoch)return;
+      if(!sameEpoch(revision,generation))return;
+      initialSyncReady=true;
       if(prefs.autoSync)void prepareAccountData({network:true,refresh:true});
-      void tick();
-    }).catch(error=>report(error.message));paint();
+    }).catch(error=>{
+      if(!sameEpoch(revision,generation))return;
+      settingsRetryAt=Date.now()+5000;
+      if(syncError!==error.message)report(error.message);
+      syncError=error.message;notifySettings();
+    }).finally(()=>{if(initialSync===task)initialSync=null;});
+    initialSync=task;
+    return task;
   }
   document.addEventListener("click",event=>{
     const button=event.target.closest("[data-cloud-kind][data-cloud-id]");

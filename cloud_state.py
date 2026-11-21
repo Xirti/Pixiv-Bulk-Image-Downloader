@@ -339,6 +339,25 @@ class CloudState:
         with self.lock, closing(self._connect()) as db:
             return self._unseen_targets(db, owner, method, kind, scan, 4)
 
+    def note_unusable_cursor(self, owner, method, kind, scan):
+        with self._write() as db:
+            key = owner, method, kind
+            row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", key).fetchone()
+            if not row:
+                return
+            current = json.loads(row[0])
+            if (not current["running"] or current.get("pendingPage")
+                    or any(current[field] != scan[field] for field in ("id", "scope", "cursor", "offset"))):
+                return
+            # One invalid response can be temporary. Restart only when the
+            # same persisted continuation fails again.
+            if current.get("cursorFailed"):
+                self._begin_scan(db, *key, current["completed"], current.get("displayRevision"))
+            else:
+                current["cursorFailed"] = True
+                db.execute("UPDATE scans SET payload=? WHERE owner=? AND method=? AND kind=?",
+                           (json.dumps(current), *key))
+
     def _complete_scan(self, db, owner, method, kind, scan):
         if self._unseen_targets(db, owner, method, kind, scan, 1):
             return
@@ -363,6 +382,7 @@ class CloudState:
                     state = {**state, "tags": json.loads(old[1])}
                 self._put(db, owner, method, kind, target, state, scan["version"])
             updated = dict(scan)
+            updated.pop("cursorFailed", None)
             offsets = {scope: list(values) for scope, values in scan.get("pageOffsets", {}).items()}
             offsets.setdefault(scan["scope"], []).append(scan["offset"])
             paths = {scope: list(values) for scope, values in scan.get("visitedPaths", {}).items()}

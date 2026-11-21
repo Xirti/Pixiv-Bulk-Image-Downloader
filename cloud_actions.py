@@ -453,6 +453,12 @@ class CloudActions:
                 else:
                     entries, cursor, rows, total = self._scan_page(owner, method, kind, scope, scan["cursor"], generation,
                         visited=scan["visitedPaths"].get(scope, []))
+            except AccountError as error:
+                if not checking and scan["cursor"] and error.kind == "cursor":
+                    with self.publication(generation, owner, method, revision=revision):
+                        if display_revision == self.pages.saved_cache.display_revision(owner, method):
+                            self.store.note_unusable_cursor(owner, method, kind, scan)
+                raise
             finally:
                 REQUEST_PRIORITY.reset(priority)
             with self.publication(generation, owner, method, revision=revision):
