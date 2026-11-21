@@ -4284,31 +4284,29 @@ class Handler(SimpleHTTPRequestHandler):
                     validate=validate_queued_download,
                 )
 
+            probe = self.headers.get("X-MOKU-Download-Probe") == "1"
             try:
-                with SEARCH_SESSION_LOCKS_GUARD:
-                    authorized, epoch = validated_authorization()
-                    owner_scope = workspace_scope()
-                    if data.get("queueId") is not None:
-                        if data.get("scope") != owner_scope or not WORKSPACE_STORE.has_task(data["queueId"], owner_scope):
-                            return self.send_json({"error": "这项任务不属于当前账户，请重新确认下载"}, 403)
-                        self._queued_authorization = (owner_scope, authorized, epoch)
-                        self._queued_task = (data["queueId"], data.get("requestId"))
-                if self.headers.get("X-MOKU-Download-Probe") == "1":
-                    payload, status = DOWNLOAD_REQUESTS.probe(
-                        data.get("requestId"), path, data,
-                        scope=str(epoch) if authorized else "public",
-                        durable_scope=owner_scope, output_root=DOWNLOADS,
-                    )
-                    if status == 204:
-                        payload, status = {"inactive": True}, 200
-                else:
-                    with self.server.download_job() as cancel:
-                        self._download_cancel = cancel
+                with ExitStack() as active_download:
+                    if not probe:
+                        self._download_cancel = active_download.enter_context(self.server.download_job())
+                    with SEARCH_SESSION_LOCKS_GUARD:
+                        authorized, epoch = validated_authorization()
+                        owner_scope = workspace_scope()
+                        self._download_authorization = (owner_scope, AUTHORIZATION_GENERATION, authorized, epoch)
+                        if data.get("queueId") is not None:
+                            if data.get("scope") != owner_scope or not WORKSPACE_STORE.has_task(data["queueId"], owner_scope):
+                                return self.send_json({"error": "这项任务不属于当前账户，请重新确认下载"}, 403)
+                            self._queued_task = (data["queueId"], data.get("requestId"))
+                    registration = {"scope": str(epoch) if authorized else "public",
+                                    "durable_scope": owner_scope, "output_root": DOWNLOADS}
+                    if probe:
+                        payload, status = DOWNLOAD_REQUESTS.probe(data.get("requestId"), path, data, **registration)
+                        if status == 204:
+                            payload, status = {"inactive": True}, 200
+                    else:
                         payload, status = DOWNLOAD_REQUESTS.run(
                             data.get("requestId"), path, data, download_result,
-                            scope=str(epoch) if authorized else "public",
-                            durable_scope=owner_scope, output_root=DOWNLOADS,
-                            cancel_event=cancel,
+                            cancel_event=self._download_cancel, **registration,
                         )
             except SearchCancelledError:
                 payload, status = {"error": "下载已暂停，重新打开后可继续", "retryable": True}, 503
@@ -4812,8 +4810,8 @@ class Handler(SimpleHTTPRequestHandler):
     def _download_authorization_snapshot(self) -> tuple[bool, int | None]:
         with SEARCH_SESSION_LOCKS_GUARD:
             snapshot = validated_authorization()
-            expected = getattr(self, "_queued_authorization", None)
-            if expected is not None and expected != (workspace_scope(), *snapshot):
+            expected = getattr(self, "_download_authorization", None)
+            if expected is not None and expected != (workspace_scope(), AUTHORIZATION_GENERATION, *snapshot):
                 raise AuthorizationRevokedError("Pixiv 账户状态已变更，请重新确认下载")
             queued_task = getattr(self, "_queued_task", None)
             if queued_task is not None:
@@ -4824,7 +4822,7 @@ class Handler(SimpleHTTPRequestHandler):
             return snapshot
 
     def _check_download_publication(self, details: Iterable[ArtworkDetail]) -> None:
-        if hasattr(self, "_queued_authorization"):
+        if hasattr(self, "_download_authorization"):
             self._download_authorization_snapshot()
         for detail in details:
             detail.check_download()
