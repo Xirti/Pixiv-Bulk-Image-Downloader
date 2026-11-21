@@ -219,7 +219,8 @@ class AccountAuthorization:
 
     def cancel(self, url):
         with self.lock:
-            if self.flow and self.flow["authorizeUrl"] == url:
+            flow = self.flow or self._retired_flow
+            if flow and flow["authorizeUrl"] == url:
                 self.close()
 
     def receive(self, value):
