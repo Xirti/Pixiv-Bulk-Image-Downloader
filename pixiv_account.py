@@ -20,6 +20,7 @@ from pixiv_adapter import PixivPolicyError
 
 
 ACCOUNT_REQUEST_CHECK=ContextVar("account_request_check",default=lambda:None)
+ACCOUNT_WRITE_PREFLIGHT = ContextVar("account_write_preflight", default=lambda: None)
 
 class AccountError(PixivPolicyError):
     def __init__(self, kind, message):
@@ -177,6 +178,14 @@ class AppTransport:
                 callback_error = error
                 return 0
 
+        preflight = ACCOUNT_WRITE_PREFLIGHT.get() if method == "POST" and not token_request else None
+
+        def send(session):
+            if preflight is not None:
+                preflight()
+            return session.request(method, url, headers=headers, data=form, proxy=self.proxy or None,
+                                   timeout=20, allow_redirects=False, discard_cookies=True, content_callback=consume)
+
         check()
         priority=0 if token_request else REQUEST_PRIORITY.get()
         with self.coordinator.slot(False, check, priority=priority):
@@ -186,9 +195,7 @@ class AppTransport:
                 received = 0
                 callback_error = None
                 try:
-                    response = self._pool.perform(lambda session: session.request(method, url, headers=headers,
-                        data=form, proxy=self.proxy or None, timeout=20, allow_redirects=False,
-                        discard_cookies=True, content_callback=consume), check=check, deadline=time.monotonic()+20)
+                    response = self._pool.perform(send, check=check, deadline=time.monotonic()+20)
                     break
                 except TransportClosedError as error:
                     raise AccountError("closed", "账号连接已关闭，请重新打开程序") from error

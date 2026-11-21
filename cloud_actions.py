@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from cloud_state import relationship_stamp
 from account_pages import HomepageIdentity, source_body
-from pixiv_account import AccountError
+from pixiv_account import ACCOUNT_WRITE_PREFLIGHT, AccountError
 from pixiv_app_gallery import continuation
 from pixiv_adapter import PixivPolicyError, valid_pixiv_id
 from request_coordinator import REQUEST_PRIORITY, checked_lock
@@ -279,6 +279,7 @@ class CloudActions:
                 if kind == "bookmark" and intent["tags"] is not None:
                     form["tags[]"] = " ".join(intent["tags"])
             path = ("/v2/illust/bookmark/add" if active else "/v1/illust/bookmark/delete") if kind == "bookmark" else "/v1/user/follow/" + ("add" if active else "delete")
+            ACCOUNT_WRITE_PREFLIGHT.get()()
             self._app(generation, "POST", path, form)
             return
         parser = HomepageIdentity()
@@ -299,13 +300,21 @@ class CloudActions:
             path, payload, form = "/ajax/following/user/restrict_change", {"user_id": target, "restrict": int(privacy == "private")}, True
         else:
             path, payload, form = "/bookmark_add.php", {"mode": "add", "type": "user", "user_id": target, "tag": "", "restrict": int(privacy == "private"), "format": "json"}, True
+        preflight = ACCOUNT_WRITE_PREFLIGHT.get()
+        preflight()
         self.web_post(path, payload, token, form, generation)
         if kind == "bookmark" and active and before["active"] and intent["tags"] is not None:
             removed = sorted(set(before["tags"]) - set(intent["tags"]))
             if removed:
                 # Web add merges tags; an empty tags list does not clear existing tags.
-                self.web_post("/ajax/illusts/bookmarks/remove_tags", {"removeTags": removed,
-                    "bookmarkIds": [before["bookmarkId"]]}, token, False, generation)
+                try:
+                    preflight()
+                    self.web_post("/ajax/illusts/bookmarks/remove_tags", {"removeTags": removed,
+                        "bookmarkIds": [before["bookmarkId"]]}, token, False, generation)
+                except CloudActionError as error:
+                    if error.kind != "conflict":
+                        raise
+                    raise CloudActionError("unconfirmed", "收藏已部分提交，请核对当前标签", state=error.state) from error
 
     def mutate(self, generation, scope, intent):
         owner, method = self.context(generation)
@@ -354,10 +363,23 @@ class CloudActions:
             effective = {**intent, "tags": before["tags"]} if kind=="bookmark" and intent["tags"] is None else intent
             error = None
             needs_write = not self._matches(effective, before)
+
+            def preflight():
+                with self.publication(generation, owner, method, revision=revision):
+                    current = self._cached_relation(owner, method, kind, target)
+                    if (current.get("stamp"), current.get("bookmarkId")) != (cached.get("stamp"), cached.get("bookmarkId")):
+                        raise CloudActionError("conflict", "此对象已更新，请核对后重新提交", state=current)
+
             try:
                 if needs_write:
-                    self._write(generation, owner, method, effective, before)
+                    check = ACCOUNT_WRITE_PREFLIGHT.set(preflight)
+                    try:
+                        self._write(generation, owner, method, effective, before)
+                    finally:
+                        ACCOUNT_WRITE_PREFLIGHT.reset(check)
             except (PixivPolicyError, OSError, TimeoutError) as failure:
+                if isinstance(failure, CloudActionError) and failure.kind == "conflict":
+                    raise
                 self.pages.check(generation)
                 error = failure
             observed = cached

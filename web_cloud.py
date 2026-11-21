@@ -6,7 +6,7 @@ import time
 from account_pages import HomepageIdentity, source_body
 from curl_cffi.requests import Session
 from curl_cffi.requests.exceptions import RequestException
-from pixiv_account import AccountError
+from pixiv_account import ACCOUNT_WRITE_PREFLIGHT, AccountError
 
 
 class WebCloudTransport:
@@ -42,6 +42,7 @@ class WebCloudTransport:
 
             with self.coordinator.slot(False, check, priority=0):
                 self.coordinator.before_send(False, check, priority=0, activity="detail")
+                ACCOUNT_WRITE_PREFLIGHT.get()()
                 try:
                     response = self.session.post("https://www.pixiv.net" + path, headers=headers,
                         **({"data": payload} if form else {"json": payload}), proxy=proxy or None,
