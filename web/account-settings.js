@@ -18,6 +18,7 @@ globalThis.createPixivDisplaySettings = function ({root,request,session,reconcil
   const loginButton=root.querySelector('[data-pixiv-display-login]');
   const ageHint=root.querySelector('[data-pixiv-age-hint]');
   let sessionKey='',state=null,operation=null,error='',notice='';
+  let browsingGeneration=null,needsReadback=false;
   const readable=()=>session().logged && session().method==='web';
   function paint(){
     const connected=readable(),busy=Boolean(operation);
@@ -35,36 +36,59 @@ globalThis.createPixivDisplaySettings = function ({root,request,session,reconcil
   }
   function run(change=null,refreshState=false){
     if(!readable()){paint();return Promise.resolve();}
-    if(operation)return operation;
-    const startKey=sessionKey;
+    if(operation)return operation.promise;
     const auth=session().generation;
+    const active={};
+    operation=active;
     error='';notice=change?'正在保存…':'正在读取…';
-    let refreshAgain=false;
-    const task=(async()=>{
-      try{
-        const result=await request('/api/settings/pixiv'+(refreshState?'?refresh=1':''),change?{
-          method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({...change,authorizationGeneration:auth})
-        }:{});
-        if(sessionKey!==startKey)return;
+    paint();
+    active.promise=(async()=>{
+      let writeError='';
+      // A lost write reply or an obsolete snapshot gets one readback. Only
+      // the first request may write, even when the user reopens the form.
+      for(let attempt=0;attempt<2;attempt++){
+        const writing=change && attempt===0;
+        const refresh=refreshState || needsReadback || attempt>0;
+        let result;
+        try{
+          result=await request('/api/settings/pixiv'+(!writing && refresh?'?refresh=1':''),writing?{
+            method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({...change,authorizationGeneration:auth})
+          }:{});
+        }catch(problem){
+          if(operation!==active)return;
+          error=problem.message;notice='';
+          if(writing){
+            writeError=error;state=null;needsReadback=true;
+            notice='正在核对官网设置…';paint();
+          }
+          await reconcile(null);
+          if(!writing || operation!==active)return;
+          continue;
+        }
+        if(operation!==active)return;
         await reconcile(result);
-        if(sessionKey!==startKey || !readable())return;
-        if(session().generation!==result.authorizationGeneration || session().browsingGeneration!==result.browsingGeneration){
-          refreshAgain=true;return;
+        if(operation!==active)return;
+        const current=session();
+        if(current.generation!==result.authorizationGeneration || current.browsingGeneration!==result.browsingGeneration){
+          state=null;needsReadback=true;
+          error='浏览设置已变化，请重新读取。';notice='正在核对官网设置…';paint();
+          continue;
         }
-        state=result.settings;notice=change?'已保存到 Pixiv。':'';
-      }catch(problem){
-        if(sessionKey!==startKey)return;
-        await reconcile(null);
-        if(sessionKey===startKey && readable()){error=problem.message;notice='';}
-      }finally{
-        if(operation===task){
-          operation=null;paint();
-          if(readable() && !error && (refreshAgain || !state && sessionKey!==startKey))void run(null,true);
+        state=result.settings;needsReadback=false;browsingGeneration=current.browsingGeneration;
+        error='';notice='';
+        if(change){
+          if(state[change.key]!==change.value)error=writeError || '官网当前值与所选设置不同。';
+          else notice=writing?'已保存到 Pixiv。':'已核对官网设置。';
         }
+        return;
       }
-    })();
-    operation=task;paint();return task;
+    })().catch(problem=>{
+      if(operation===active){state=null;needsReadback=true;error=problem.message;notice='';}
+    }).finally(()=>{
+      if(operation===active){operation=null;paint();}
+    });
+    return active.promise;
   }
   fields.forEach(field=>field.addEventListener('change',()=>{
     const value=field.type==='checkbox'?field.checked:Number(field.value);
@@ -73,12 +97,16 @@ globalThis.createPixivDisplaySettings = function ({root,request,session,reconcil
   refresh.onclick=()=>run(null,true);
   loginButton.onclick=login;
   return {
-    load:()=>state?Promise.resolve():run(),
+    load:()=>state && !operation?Promise.resolve():run(null,needsReadback),
     setSession(){
       const current=session(),next=`${current.method}:${current.logged}:${current.generation}`;
-      if(next===sessionKey)return;
-      sessionKey=next;state=null;error='';notice='';paint();
-      if(readable() && !operation)void run();
+      if(next===sessionKey && current.browsingGeneration===browsingGeneration)return;
+      if(next!==sessionKey){operation=null;needsReadback=false;sessionKey=next;}
+      browsingGeneration=current.browsingGeneration;
+      state=null;
+      if(!operation){error='';notice='';}
+      paint();
+      if(readable() && !operation)void run(null,needsReadback);
     }
   };
 };
