@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 from email.utils import parsedate_to_datetime
+from http.client import HTTPException
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Callable
@@ -84,21 +85,24 @@ def desktop_auth_request(
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    uncertain = {"confirmationRequired": True} if action == "session" else {}
     try:
-        with opener.open(request, timeout=120.0 if action == "update-restart" else 30.0 if action == "app-connect" else max(1.0, min(float(timeout), 15.0))) as response:
+        try:
+            response = opener.open(request, timeout=120.0 if action == "update-restart" else 30.0 if action == "app-connect" else max(1.0, min(float(timeout), 15.0)))
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
             response_raw = response.read(65537)
-    except urllib.error.HTTPError as exc:
-        response_raw = exc.read(65537)
-    except (OSError, ValueError):
-        return {"ok": False, "error": "无法连接 MOKU 本机后端"}
+    except (OSError, ValueError, HTTPException):
+        return {"ok": False, "error": "无法连接 MOKU 本机后端", **uncertain}
     if len(response_raw) > 65536:
-        return {"ok": False, "error": "MOKU 本机后端响应过大"}
+        return {"ok": False, "error": "MOKU 本机后端响应过大", **uncertain}
     try:
         result = json.loads(response_raw)
     except (UnicodeError, json.JSONDecodeError):
-        return {"ok": False, "error": "MOKU 本机后端响应无效"}
+        return {"ok": False, "error": "MOKU 本机后端响应无效", **uncertain}
     if not isinstance(result, dict):
-        return {"ok": False, "error": "MOKU 本机后端响应无效"}
+        return {"ok": False, "error": "MOKU 本机后端响应无效", **uncertain}
     return result
 
 
@@ -273,15 +277,16 @@ class DesktopApi:
                 if login.events.closed.is_set():
                     raise DesktopLoginCancelled("已取消 Pixiv 桌面登录")
                 result = self._auth_request("session", payload)
-                if not isinstance(result, dict) or not result.get("ok"):
-                    return {
+                if not isinstance(result, dict):
+                    result = {"confirmationRequired": True}
+                if not result.get("ok"):
+                    failure = {
                         "ok": False,
-                        "error": str(
-                            (result or {}).get("error")
-                            if isinstance(result, dict)
-                            else ""
-                        ) or "Pixiv 会话未能提交到 MOKU 后端",
+                        "error": str(result.get("error") or "Pixiv 会话未能提交到 MOKU 后端"),
                     }
+                    if result.get("confirmationRequired") is True:
+                        failure["confirmationRequired"] = True
+                    return failure
                 self._notify("Pixiv 账户已连接。")
                 return {"ok": True, "remembered": bool(remember)}
             return {"ok": False, "error": "Pixiv 桌面登录等待超时，请重试"}

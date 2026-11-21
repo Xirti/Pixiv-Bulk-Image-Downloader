@@ -61,6 +61,7 @@ let authStatusGeneration = 0;
 let appConnection = null;
 let loginMethod = "app";
 let authActionBusy = false;
+let webLoginConfirmationPending = false;
 let appConnectionTimer = null;
 let appConnectionRevision = 0;
 let appConnectionBusy = false;
@@ -4022,6 +4023,7 @@ async function syncAuthStatus() {
     lastKnownBrowsingPolicyStatus = data.browsingPolicyStatus || "ready";
     $("#mode").textContent = data.authMethod==="app"?(logged?"PIXIV · APP":"PIXIV · 待授权"):(logged?"PIXIV · WEB":"PIXIV PUBLIC");
     loginMethod=data.authMethod || "app";
+    webLoginConfirmationPending=false;
     if(authorizationLost || accountChanged)settingsView.reset();
     pixivDisplayView.setSession();
     cloudControls.setSession();
@@ -4216,21 +4218,25 @@ $("#networkCheck").onclick = async () => {
 function syncAppConnection(value) {
   appConnection=value;
   const app=loginMethod==="app",waiting=app && Boolean(value?.authorization?.pending);
+  const confirmingWebLogin=!app && webLoginConfirmationPending;
   $("#authMethod").value=loginMethod;
   $("#authMethod").disabled=authActionBusy || appConnectionBusy;
-  $("#rememberLoginRow").hidden=app;
+  $("#rememberLoginRow").hidden=app || confirmingWebLogin;
   $("#authStateTitle").textContent=waiting?"等待 Pixiv 授权":lastKnownLoggedIn?"已登录 · "+(app?"App 授权":"网页登录"):"尚未登录";
   $("#authStateText").textContent=app && value?.authorization?.error || (waiting?"请在系统浏览器完成本次授权。":lastKnownLoggedIn?"当前方式已连接，可以继续浏览。":app?"在系统浏览器完成一次 App 授权即可使用。":"在应用内的 Pixiv 官方窗口完成登录。");
-  if (!app && lastKnownLoggedIn) {
+  if (confirmingWebLogin) {
+    $("#authStateTitle").textContent="登录状态待核对";
+    $("#authStateText").textContent="暂时无法确认当前会话，请重新核对登录状态。";
+  } else if (!app && lastKnownLoggedIn) {
     if (lastKnownBrowsingPolicyStatus === "unavailable") {
       $("#authStateText").textContent = "浏览设置暂时无法读取，刷新后可重试。";
     } else if (lastKnownBrowsingPolicyStatus === "pending") {
       $("#authStateText").textContent = "浏览设置正在核对，请稍后刷新。";
     }
   }
-  $("#authAction").textContent=appConnectionBusy?"正在打开授权网页…":authActionBusy?"正在处理…":waiting?"重新打开授权网页":lastKnownLoggedIn?(app?"重新授权":"重新登录"):"登录 Pixiv";
+  $("#authAction").textContent=appConnectionBusy?"正在打开授权网页…":authActionBusy?"正在处理…":confirmingWebLogin?"重新核对登录状态":waiting?"重新打开授权网页":lastKnownLoggedIn?(app?"重新授权":"重新登录"):"登录 Pixiv";
   $("#authAction").disabled=authActionBusy || appConnectionBusy;
-  $("#authDisconnect").hidden=!lastKnownLoggedIn;
+  $("#authDisconnect").hidden=!lastKnownLoggedIn || confirmingWebLogin;
   $("#authDisconnect").disabled=authActionBusy || appConnectionBusy;
 }
 async function beginAppLogin(){
@@ -4269,20 +4275,33 @@ async function beginAppLogin(){
   }
 }
 $("#authAction").onclick = async () => {
+  if(authActionBusy || appConnectionBusy)return;
   if(loginMethod==="app"){await beginAppLogin();return;}
+  const generation=lastKnownAuthorizationGeneration, logged=lastKnownLoggedIn;
   authActionBusy=true;syncAppConnection(appConnection);
-  let actionError="";
+  let actionError="", bridgeStarted=false;
   try {
-    if (!window.pywebview?.api?.pixiv_login)throw Error("请在 MOKU 桌面版中登录。");
-    const data=await window.pywebview.api.pixiv_login(Boolean($("#rememberLogin").checked));
-    if(!data.ok)throw Error(data.error || "登录失败");
-  }catch(error){actionError=error.message || "登录失败";}
-  finally{
+    if (!webLoginConfirmationPending) {
+      if (!window.pywebview?.api?.pixiv_login)throw Error("请在 MOKU 桌面版中登录。");
+      bridgeStarted=true;
+      const result=await window.pywebview.api.pixiv_login(Boolean($("#rememberLogin").checked));
+      webLoginConfirmationPending=result.ok===true || result.confirmationRequired===true;
+      if (!result.ok)actionError=webLoginConfirmationPending?"暂未确认这次登录，请重试。":result.error || "登录失败";
+    }
+  } catch(error) {
+    webLoginConfirmationPending=bridgeStarted;
+    actionError=bridgeStarted?"暂未确认这次登录，请重试。":error.message || "登录失败";
+  }
+  try {
+    if(await syncAuthStatus() && activeWorkspace==="account")await accountView.refresh();
+  } finally {
     authActionBusy=false;
-    await syncAuthStatus();
-    if(activeWorkspace==="account")await accountView.refresh();
     syncAppConnection(appConnection);
-    if(actionError)$("#authStateText").textContent=actionError;
+    const sessionChanged=(generation!==null && generation!==lastKnownAuthorizationGeneration)
+      || (logged!==lastKnownLoggedIn && (logged!==null || lastKnownLoggedIn));
+    if(actionError && !webLoginConfirmationPending && loginMethod==="web" && !sessionChanged){
+      $("#authStateText").textContent=actionError;
+    }
   }
 };
 $("#authDisconnect").onclick=async()=>{
