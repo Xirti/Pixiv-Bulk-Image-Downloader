@@ -1799,15 +1799,24 @@ def _observe_web_policy(owner=None):
             return False
         match = re.match(r"PHPSESSID=([0-9]{1,30})_", cookie)
         owner = match[1] if match else ACCOUNTS.cached_web_owner(AUTHORIZATION_GENERATION)
-        if owner is None:
-            return False
     try:
-        revision, pending, flags = ACCOUNTS.saved_cache.web_policy_stamp(owner)
+        current = ACCOUNTS.saved_cache.web_policy_stamps(owner)
     except sqlite3.OperationalError as error:
         raise AccountError("settings_unavailable", "暂时无法读取浏览设置，请重试。") from error
-    identity = AUTHORIZATION_GENERATION, owner
-    if OBSERVED_WEB_POLICY is not None and OBSERVED_WEB_POLICY[0] == identity:
-        _, old_revision, old_pending, old_flags = OBSERVED_WEB_POLICY
+    generation = AUTHORIZATION_GENERATION
+    previous = OBSERVED_WEB_POLICY[1] if OBSERVED_WEB_POLICY and OBSERVED_WEB_POLICY[0] == generation else None
+    if previous is None:
+        OBSERVED_WEB_POLICY = generation, current
+        return any(pending is not None for _, pending, _ in current.values())
+    resolved = {}
+    changed = False
+    # Until the UID is known, a policy update for any possible owner can
+    # invalidate images already issued to this session.
+    owners = {owner} if owner is not None else current.keys() | previous.keys()
+    missing = (None, None, None)
+    for uid in owners:
+        old_revision, old_pending, old_flags = previous.get(uid, missing)
+        revision, pending, flags = current.get(uid, missing)
         # Clearing the account's cache may remove readback values; the account
         # still has the same official settings.
         revision = revision if revision is not None else old_revision
@@ -1816,10 +1825,12 @@ def _observe_web_policy(owner=None):
         # provided no before-image, so keep their conservative revocation.
         legacy_write = (pending != old_pending and any(
             raw is not None and "before" not in json.loads(raw) for raw in (old_pending, pending)))
-        if revision != old_revision or old_flags is not None and flags != old_flags or legacy_write:
-            _invalidate_browsing_state()
-    OBSERVED_WEB_POLICY = identity, revision, pending, flags
-    return pending is not None
+        changed |= (revision != old_revision or old_flags is not None and flags != old_flags or legacy_write)
+        resolved[uid] = revision, pending, flags
+    if changed:
+        _invalidate_browsing_state()
+    OBSERVED_WEB_POLICY = generation, resolved
+    return any(pending is not None for _, pending, _ in resolved.values())
 
 
 def display_settings_changed(owner, generation):

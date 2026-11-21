@@ -182,7 +182,7 @@ class AccountCache:
         self._policy_lock = threading.Lock()
         self._policy_connection = None
         self._policy_observed = None
-        self._policy_stamp = (None, None, None)
+        self._policy_stamp = {}
         path_key = os.path.normcase(str(self.path.resolve()))
         self._mutex_prefix = "Local\\MOKU.Account." + hashlib.sha256(path_key.encode()).hexdigest()[:32]
 
@@ -244,19 +244,27 @@ class AccountCache:
             raise
         return connection
 
-    def web_policy_stamp(self, owner):
-        """Use the connection's committed data version to skip unchanged policy rows."""
+    def web_policy_stamps(self, owner):
+        """Read policy for one UID, or for all known UIDs while a session is unresolved."""
         with self._policy_lock:
             if self._policy_connection is None:
                 self._policy_connection = self._connect(shared_reader=True)
             db = self._policy_connection
             current = owner, db.execute("PRAGMA data_version").fetchone()[0]
             if current != self._policy_observed:
-                rows = dict(db.execute("SELECT key,payload FROM cached WHERE owner=? AND method='web' AND key IN (?,?,?)",
-                    (owner, _WEB_POLICY_KEY, _DISPLAY_PENDING_KEY, _DISPLAY_SETTINGS_KEY)))
-                settings = json.loads(rows[_DISPLAY_SETTINGS_KEY]) if _DISPLAY_SETTINGS_KEY in rows else None
-                flags = _web_display_flags(settings) if settings else None
-                self._policy_stamp = (rows.get(_WEB_POLICY_KEY), rows.get(_DISPLAY_PENDING_KEY), flags)
+                query = "SELECT owner,key,payload FROM cached WHERE method='web' AND key IN (?,?,?)"
+                keys = (_WEB_POLICY_KEY, _DISPLAY_PENDING_KEY, _DISPLAY_SETTINGS_KEY)
+                rows = db.execute(query if owner is None else query + " AND owner=?",
+                                  keys if owner is None else (*keys, owner))
+                by_owner = {}
+                for uid, key, payload in rows:
+                    by_owner.setdefault(uid, {})[key] = payload
+                stamps = {}
+                for uid, values in by_owner.items():
+                    settings = json.loads(values[_DISPLAY_SETTINGS_KEY]) if _DISPLAY_SETTINGS_KEY in values else None
+                    flags = _web_display_flags(settings) if settings else None
+                    stamps[uid] = values.get(_WEB_POLICY_KEY), values.get(_DISPLAY_PENDING_KEY), flags
+                self._policy_stamp = stamps
                 self._policy_observed = current
             return self._policy_stamp
 
