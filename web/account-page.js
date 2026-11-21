@@ -17,6 +17,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   let backgroundRevision=0,backgroundController=new AbortController(),backgroundQueue=Promise.resolve();
   const reads=createPageReads(request),nextReads=new Map();
   let updatePreferences={detect:true,dots:true},updates={public:{},private:{}},checkingUpdates=null;
+  let updateController=new AbortController();
   const acknowledged=new Map();
   const pendingUpdateScopes=new Set();
   const completedScans=new Map();
@@ -53,9 +54,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     throw new Error("账号列表仍在更新，请稍后重试");
   }
   function stopBackground(){
+    const pendingUpdates=checkingUpdates;
+    stopUpdates();
     backgroundRevision++;backgroundController.abort();backgroundController=new AbortController();nextReads.clear();
     // Callers are stopping work; its original caller owns any reported failure.
-    return Promise.allSettled([backgroundQueue]);
+    return Promise.allSettled([backgroundQueue,pendingUpdates]);
   }
   function prepare({network=false,refresh=false,page=null,completed=null}={}){
     const version=backgroundRevision,signal=backgroundController.signal,contentMode=mode();
@@ -173,28 +176,46 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       card.querySelector('[data-person-following]').hidden=state.view!=="followers" || !person.following;
     });
   }
+  function stopUpdates(){
+    updateController.abort();
+    updateController=new AbortController();
+    checkingUpdates=null;
+  }
   function checkUpdates({network=true,continuing=false}={}){
     if(!updatePreferences.detect || !signedIn())return Promise.resolve({hasMore:false});
     if(checkingUpdates)return checkingUpdates;
-    const version=backgroundRevision,signal=backgroundController.signal;
+    const signal=updateController.signal,auth=generation();
+    const valid=()=>!signal.aborted && updatePreferences.detect && signedIn() && generation()===auth;
     let task;task=(async()=>{
-      let hasMore=false,combined=false;
+      let combined=profile?.method==="web";
+      const failures=[];
       for(const scope of ['public','private']){
-        const refresh=network && !combined && (!continuing || pendingUpdateScopes.has(scope));
-        const result=await read('updates',{scope,background:'1',...(refresh?{refresh:'1'}:{cached:'1'})},{signal});
-        if(version!==backgroundRevision || signal.aborted)return {hasMore:false};
+        if(!valid())return {hasMore:false};
+        const usesCursor=scope==='public' || !combined;
+        const refresh=network && usesCursor && (!continuing || pendingUpdateScopes.has(scope));
+        let result;
+        try{
+          result=await read('updates',{scope,background:'1',...(refresh?{refresh:'1'}:{cached:'1'})},{signal});
+        }catch(problem){
+          if(!valid())return {hasMore:false};
+          if(refresh)pendingUpdateScopes.add(scope);
+          failures.push(`${scope==='public'?'公开':'私密'}范围：${problem.message}`);
+          continue;
+        }
+        if(!valid())return {hasMore:false};
         if(result.cached===false)continue;
         if(result.connected===false)return {hasMore:false};
-        combined=Boolean(result.combined);
-        if(refresh){if(result.hasMore)pendingUpdateScopes.add(scope);else pendingUpdateScopes.delete(scope);}
-        hasMore ||= result.hasMore;
+        combined ||= Boolean(result.combined);
+        if(usesCursor){if(result.hasMore)pendingUpdateScopes.add(scope);else pendingUpdateScopes.delete(scope);}
         for(const [id,marker] of Object.entries(result.authors)){
           if(updates[scope][id]?.latestObserved>marker.latestObserved)continue;
           updates[scope][id]={...marker,isNew:marker.isNew && marker.latestObserved>(acknowledged.get(id) || '')};
         }
         for(const id of Object.keys(updates[scope]))if(!result.authors[id])delete updates[scope][id];
+        syncPeopleStatus();
       }
-      syncPeopleStatus();return {hasMore};
+      if(failures.length)report(`新作检查未完成：${failures.join('；')}`);
+      return {hasMore:pendingUpdateScopes.size>0};
     })().finally(()=>{if(checkingUpdates===task)checkingUpdates=null;});
     checkingUpdates=task;return task;
   }
@@ -423,7 +444,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     void stopBackground();
     controller?.abort();controller=null;reads.clear();revision++;profile=null;tags=null;data=null;own=null;ownMode=null;
     state=keepView?{...state,offset:0,page:1,trail:[],scroll:keepScroll?state.scroll:0}:empty();restoreTop=state.scroll;positions.clear();
-    updates={public:{},private:{}};acknowledged.clear();pendingUpdateScopes.clear();completedScans.clear();checkingUpdates=null;
+    updates={public:{},private:{}};acknowledged.clear();pendingUpdateScopes.clear();completedScans.clear();
     interaction.clear();ownInteraction.clear();
     cache.clear();worksCache.clear();ownCache.clear();avatars.clear();
     for(const node of [header,ownGrid,peopleRoot,grid])node.innerHTML="";
@@ -435,7 +456,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   return {open:async snapshot=>{remember();active=true;if(snapshot)state={...empty(),...structuredClone(snapshot)};restoreTop=state.scroll;await load();},
     snapshot:()=>{remember();return structuredClone(state);},refresh:()=>{remember();return Promise.all([load(true),state.view==="home"?statistics?.refresh():null]);},syncSelection,
     cachedTags:()=>tags,prepare,stopBackground,checkUpdates,seenWorks,
-    configure(value,loaded){if(!loaded)return;updatePreferences={detect:value.autoFollowing,dots:value.updateDots};syncPeopleStatus();},
+    configure(value,loaded){
+      if(!loaded)return;
+      if(updatePreferences.detect && !value.autoFollowing)stopUpdates();
+      updatePreferences={detect:value.autoFollowing,dots:value.updateDots};syncPeopleStatus();
+    },
     captureCounts:()=>new Set([profile,tags,data,...cache.values()]),
     cloudChanged:(kind,id,value,previous,beforeCounts)=>{
       relationVersion++;

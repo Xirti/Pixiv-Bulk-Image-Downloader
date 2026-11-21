@@ -103,11 +103,13 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       const data=await post("/api/settings",{settings:patch},20000);
       if(!sameSession(revision,generation))throw new Error("账号已改变，请重新打开设置");
       const wasAutomatic=prefs.autoSync;
+      const detectedUpdates=prefs.autoFollowing;
       adoptPreferences(data);
       notifySettings();lastSyncAttempt=0;
       if(wasAutomatic && !prefs.autoSync)await clearStarted();
       if(!sameSession(revision,generation))throw new Error("账号已改变，请重新打开设置");
       if(!wasAutomatic && prefs.autoSync){accountPrepared=false;auxiliaryCompleted=0;void tick();}
+      if(!detectedUpdates && prefs.autoFollowing){lastUpdateCheck=0;void tick();}
       return {...prefs};
     });
     preferenceWrites=pending;return pending;
@@ -328,6 +330,8 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     clearing=true;clearJob=job;
     notifySettings();
     epoch++;close();manual.clear();restart.clear();busy.clear();hydration=null;hydrationAgain=null;
+    if(updatesBusy)lastUpdateCheck=0;
+    updatesBusy=false;auxiliaryBusy=false;
     try{
       await clearStarted();
       if(syncRequest)await Promise.allSettled([syncRequest]);
