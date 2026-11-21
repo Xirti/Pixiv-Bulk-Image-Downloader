@@ -436,8 +436,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     snapshot:()=>{remember();return structuredClone(state);},refresh:()=>{remember();return Promise.all([load(true),state.view==="home"?statistics?.refresh():null]);},syncSelection,
     cachedTags:()=>tags,prepare,stopBackground,checkUpdates,seenWorks,
     configure(value,loaded){if(!loaded)return;updatePreferences={detect:value.autoFollowing,dots:value.updateDots};syncPeopleStatus();},
-    cloudChanged:(kind,id,value,previous)=>{
+    captureCounts:()=>new Set([profile,tags,data,...cache.values()]),
+    cloudChanged:(kind,id,value,previous,beforeCounts)=>{
       relationVersion++;
+      const canAdjust=value=>beforeCounts===undefined || beforeCounts?.has(value);
+      let rereadPage=false,rereadProfile=false,rereadTags=false;
       if(kind==='follow')for(const scope of ['public','private'])if(!value.active || value.privacy && value.privacy!==scope)delete updates[scope][id];
       const view=kind==="bookmark"?"bookmarks":"following",field=kind==="bookmark"?"items":"people";
       const web=profile?.method==="web";
@@ -451,7 +454,9 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       if(kind==="follow")for(const [key,page] of cache)if(JSON.parse(key)[0]==="followers"){
         for(const person of page.people || [])if(person.id===id)person.following=value.active;
       }
-      for(const [key,page] of cache){
+      const visibleKey=pageKey(),pages=new Map(cache);
+      if(data && !pages.has(visibleKey))pages.set(visibleKey,data);
+      for(const [key,page] of pages){
         const [type,scope,tag,offset,contentMode]=JSON.parse(key);
         if(type!==view || !page[field])continue;
         const rows=page[field],present=rows.some(row=>row.id===id);
@@ -473,14 +478,25 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         if(present && !fits)page[field]=rows.filter(row=>row.id!==id);
         else if(!present && fits && !offset && record)page[field]=[{...record,...(kind==="follow"?{following:true}:{})},...rows];
         const delta=previousMember!==null && nextMember!==null?Number(nextMember)-Number(previousMember):page[field].length-rows.length;
-        if(delta && Number.isInteger(page.total))page.total=Math.max(0,page.total+delta);
+        if(delta && Number.isInteger(page.total)){
+          if(canAdjust(page))page.total=Math.max(0,page.total+delta);
+          else if(kind==="follow" && !offset && page.nextOffset==null && page.total===rows.length && (!fits || present || record)){
+            page.total=page[field].length;
+          }else{
+            page.total=null;cache.delete(key);
+            rereadPage ||= page===data;
+          }
+        }
         if(web && (delta || page[field]!==rows || membership(previous,false)!==membership(value,false)))cache.delete(key);
       }
       if(profile && previous?.known && (kind==="follow" || !value.active || value.privacy)){
         const delta=kind==="follow"?Number(value.active)-Number(previous.active):
           Number(value.active && value.privacy==="public")-Number(previous.active && previous.privacy==="public");
         const count=kind==="follow"?"following":"publicBookmarks";
-        if(Number.isInteger(profile[count]))profile[count]=Math.max(0,profile[count]+delta);
+        if(delta && Number.isInteger(profile[count])){
+          if(canAdjust(profile))profile[count]=Math.max(0,profile[count]+delta);
+          else {profile={...profile,[count]:null};rereadProfile=true;}
+        }
         if(delta)renderedHeader=undefined;
       }
       if(kind==="bookmark" && tags && previous?.known &&
@@ -488,6 +504,9 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         for(const scope of ["public","private"]){
           const oldTags=previous.active && previous.privacy===scope?previous.tags || []:[];
           const newTags=value.active && value.privacy===scope?value.tags || []:[];
+          if(!canAdjust(tags) && (oldTags.some(name=>!newTags.includes(name)) || newTags.some(name=>!oldTags.includes(name)))){
+            tags=null;rereadTags=true;break;
+          }
           for(const name of new Set([...oldTags,...newTags])){
             const delta=Number(newTags.includes(name))-Number(oldTags.includes(name));
             const row=tags[scope]?.find(row=>row.name===name);
@@ -498,6 +517,19 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         }
       }
       if(active)render();
+      if(active && rereadPage && !controller)void load();
+      const session=generation(),background=backgroundRevision;
+      const reread=(view,adopt)=>void read(view).then(result=>{
+        if(generation()!==session || backgroundRevision!==background)return;
+        adopt(result);if(active)render();
+      }).catch(problem=>{
+        if(generation()===session && backgroundRevision===background)report(`账号计数暂未核对：${problem.message}`);
+      });
+      if(rereadProfile){
+        const placeholder=profile;
+        reread("profile",result=>{if(profile===placeholder){profile=result;connectionChanged(result);}});
+      }
+      if(rereadTags)reread("tags",result=>{if(!tags)tags=result;});
     },
     invalidateConnection:()=>{profile=null;},
     suspend:()=>{remember();active=false;statistics?.setVisible(false);controller?.abort();controller=null;revision++;pending=false;interaction.reset({immediate:true});ownInteraction.reset({immediate:true});},

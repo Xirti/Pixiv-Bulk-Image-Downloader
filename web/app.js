@@ -1712,8 +1712,9 @@ const browseOptions=createBrowseOptions({ready:async()=>{if(lastKnownLoggedIn===
 const cloudControls=createCloudControls({
   request:fetchJson,session:()=>({logged:lastKnownLoggedIn===true,generation:lastKnownAuthorizationGeneration,method:loginMethod}),
   login:()=>{void openAccount("home");},report:message=>showTaskDock("Pixiv",message,4500),
-  changed:(kind,id,state,previous)=>{
-    accountView.cloudChanged(kind,id,state,previous);
+  captureAccountCounts:()=>accountView.captureCounts(),
+  changed:(kind,id,state,previous,beforeCounts)=>{
+    accountView.cloudChanged(kind,id,state,previous,beforeCounts);
     if(kind==="follow")discoveryView?.followingChanged(id,state);
   },
   cachedTags:()=>accountView.cachedTags(),cleared:()=>{accountView.clearCache();discoveryView?.clear();},

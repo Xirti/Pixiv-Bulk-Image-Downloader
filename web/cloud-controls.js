@@ -1,7 +1,7 @@
 "use strict";
 
 // One relationship owner for every card/detail. It never touches download selection or images.
-globalThis.createCloudControls = function ({request,session,login,report,changed,preferencesChanged,official,cachedTags=()=>null,cleared=()=>{},prepareAccount=()=>Promise.resolve(),clearStarted=()=>Promise.resolve(),checkUpdates=()=>Promise.resolve({})}) {
+globalThis.createCloudControls = function ({request,session,login,report,changed,preferencesChanged,official,cachedTags=()=>null,captureAccountCounts=()=>null,cleared=()=>{},prepareAccount=()=>Promise.resolve(),clearStarted=()=>Promise.resolve(),checkUpdates=()=>Promise.resolve({})}) {
   const defaults={bookmarkDefault:"ask",followDefault:"ask",bookmarkLast:"private",followLast:"private",autoSync:true,syncMinutes:"10",autoRanking:true,autoFollowing:true,autoRecommended:true,saveRoot:"",createFolder:true,mediaMemory:"normal",previewLayout:"adaptive",previewAction:"expand",previewSize:"large",sensitiveMask:"both",autoLoadPages:false,orderTags:"default",orderAuthor:"default",orderUid:"default",orderPid:"default",orderRecommended:"default",orderRanking:"default",showLoadButton:true,updateDots:true};
   let prefs={...defaults},states={bookmark:new Map(),follow:new Map()},syncState={},owner=null;
   let epoch=0,sessionKey="",settingsPromise=null,prefsLoaded=false,hydration=null,hydrationAgain=null,hydratedKey="",timer=null,syncError="";
@@ -158,6 +158,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     const labelTags=active && kind==="bookmark" && tags!==null?[...new Set(tags)].sort():null;
     const intentKey=JSON.stringify([generation,targetKey,active,active?privacy:null,labelTags]);
     const pending=pendingWrites.get(intentKey);
+    const beforeCounts=pending?null:captureAccountCounts();
     const intent=pending || {kind,id,active,privacy,tags,expected:state.stamp || null,
       requestId:crypto.randomUUID().replaceAll("-","")};
     pendingWrites.set(intentKey,intent);
@@ -169,7 +170,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       adoptPreferences(data.preferences);
       if(!sameEpoch(revision,generation)){notifySettings();void hydrate(true);return;}
       const current=apply(kind,id,data.state);
-      changed(kind,id,current,state);notifySettings();
+      changed(kind,id,current,state,data.confirmed && !data.replayed?beforeCounts:null);notifySettings();
       if(!data.confirmed)throw new Error("结果仍待确认，请刷新核对");
       if(version===popupVersion)close();
       report(active?`${kind==="bookmark"?"收藏":"关注"}已保存`:`已取消${kind==="bookmark"?"收藏":"关注"}`);
@@ -180,7 +181,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       }
       if(!sameEpoch(revision,generation))return;
       if(error.cloudState){
-        const current=apply(kind,id,error.cloudState);changed(kind,id,current,state);
+        const current=apply(kind,id,error.cloudState);changed(kind,id,current,state,null);
         if(error.errorKind==="conflict" && popup && version===popupVersion){
           const button=anchor,privacyChoice=popup.querySelector('input[name="cloudPrivacy"]:checked')?.value;
           const tagsInput=popup.querySelector('[data-cloud-tags]'),editedTags=tagsInput?.dataset.edited==="true"?tagsInput.value:null;

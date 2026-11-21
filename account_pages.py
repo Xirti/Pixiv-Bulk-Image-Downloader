@@ -801,19 +801,30 @@ class AccountCache:
 
     def entries(self, owner, method, views=None):
         with self.lock, closing(self._connect()) as db:
-            return self._read_entries(db,owner,method,views)
+            return [(json.loads(key), json.loads(payload)) for key, _, payload in
+                    self._entry_rows(db, owner, method, views)]
+
+    def entry_versions(self, owner, method, views):
+        with self.lock, closing(self._connect()) as db:
+            return {tuple(json.loads(key)): rowid
+                    for key, rowid in self._entry_rows(db, owner, method, views, include_payload=False)}
 
     @staticmethod
-    def _read_entries(db, owner, method, views):
-        return [(json.loads(key),json.loads(payload)) for key,payload in db.execute(
-            "SELECT key,payload FROM cached WHERE owner=? AND method=? AND key LIKE ?"+
+    def _entry_rows(db, owner, method, views, *, include_payload=True):
+        columns = "key,rowid,payload" if include_payload else "key,rowid"
+        return db.execute(
+            f"SELECT {columns} FROM cached WHERE owner=? AND method=? AND key LIKE ?"+
             (" AND json_extract(key,'$[1]') IN ("+','.join('?' for _ in views)+')' if views is not None else ""),
-            (owner,method,'["data",%',*views) if views is not None else (owner,method,'["data",%'))]
+            (owner,method,'["data",%',*views) if views is not None else (owner,method,'["data",%'))
 
     def update_entries(self, owner, method, views, update):
         with self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            patches = update(self._read_entries(db,owner,method,views))
+            entries = [(json.loads(key), json.loads(payload), rowid)
+                       for key, rowid, payload in self._entry_rows(db, owner, method, views)]
+            patches, evicted = update(entries)
+            db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
+                           ((owner, method, json.dumps(key)) for key in evicted))
             patches = [(key, value) for key, value in patches
                        if key[0] != "web-relation-rebase" or value != "patched"
                        or self._web_relation_rebase(db, owner, key) != "partial"]
@@ -856,6 +867,10 @@ class AccountCache:
 
 
 class AccountPages:
+    _RELATION_VIEWS = {
+        "bookmark": ("bookmarks", "profile", "profile-web", "tags", "works"),
+        "follow": ("following", "followers", "profile", "profile-web"),
+    }
     def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web",
                  commit_guard=None, stopped=lambda:False, credential_publication=nullcontext,
                  login_publication=nullcontext, confirm_web_owner=None):
@@ -1112,19 +1127,24 @@ class AccountPages:
         with self.publication(generation), self._lock:
             self.saved_cache.finish_relation_scan(owner, method, view, path, retained)
 
-    def note_relation(self, owner, method, kind, target, before, after, *, repair=False):
+    def relation_page_versions(self, owner, method, kind):
+        return self.saved_cache.entry_versions(owner, method, self._RELATION_VIEWS[kind])
+
+    def note_relation(self, owner, method, kind, target, before, after, *, repair=False, before_pages=None):
         """Patch cached pages after a confirmed write; do not invalidate unrelated pages."""
         generation=self.generation()
         view, field = ("bookmarks", "items") if kind == "bookmark" else ("following", "people")
-        views=("bookmarks","profile","profile-web","tags","works") if kind=="bookmark" else ("following","followers","profile","profile-web")
+        views = self._RELATION_VIEWS[kind]
         def patch_entries(entries):
-            record = next((row for key,page in entries for row in page.get(field,[]) if row["id"]==target),None)
+            record = next((row for _,page,_ in entries for row in page.get(field,[]) if row["id"]==target),None)
             patches=[]
+            evicted = []
             groups = {}
             changed_groups = set()
-            missing_additions = set()
-            for key,page in entries:
+            refresh_groups = set()
+            for key,page,rowid in entries:
                 changed = False
+                replaced = before_pages is not None and before_pages.get(tuple(key)) != rowid
                 if key[1] == view:
                     scope,offset = key[3:5]
                     rows = page[field]
@@ -1151,16 +1171,27 @@ class AccountPages:
                     # A sweep may return an old row after a newer local write. It
                     # repairs that page; it is not another relationship transition.
                     delta=int(next_member)-int(previous_member) if not repair and previous_member is not None and next_member is not None else len(page[field])-len(rows)
-                    if delta and page.get("total") is not None:
-                        page["total"]=max(0,page["total"]+delta);changed=True
+                    total = page.get("total")
+                    ambiguous_total = replaced and delta and total is not None
+                    if (ambiguous_total and kind == "follow" and not offset and page["nextOffset"] is None
+                            and total == len(rows) and (not fits or present or record is not None)):
+                        # A complete following page proves whether the target was already counted.
+                        delta = len(page[field]) - len(rows)
+                        ambiguous_total = False
+                    if ambiguous_total and method == "app":
+                        evicted.append(key)
+                        continue
+                    if not ambiguous_total and delta and total is not None:
+                        page["total"] = max(0, total + delta)
+                        changed = True
                     if method == "web":
                         group = self.saved_cache.web_relation_group(key)
                         groups.setdefault(group, {})[offset] = page
                         raw_before, raw_after = membership(before, visible=False), membership(after, visible=False)
-                        if changed or raw_before != raw_after:
+                        if changed or ambiguous_total or raw_before != raw_after:
                             changed_groups.add(group)
-                        if raw_before is False and raw_after is True and record is None:
-                            missing_additions.add(group)
+                        if ambiguous_total or raw_before is False and raw_after is True and record is None:
+                            refresh_groups.add(group)
                 elif key[1]=="followers" and kind=="follow":
                     for person in page["people"]:
                         if person["id"]==target and person["following"]!=after["active"]:
@@ -1169,20 +1200,29 @@ class AccountPages:
                     count = "following" if kind=="follow" else "publicBookmarks"
                     delta = int(after["active"])-int(before["active"]) if kind=="follow" else (
                         int(after["active"] and after["privacy"]=="public")-int(before["active"] and before["privacy"]=="public"))
-                    if delta and page.get(count) is not None:page[count]=max(0,page[count]+delta);changed=True
+                    if delta and page.get(count) is not None:
+                        if replaced:
+                            evicted.append(key)
+                            continue
+                        page[count]=max(0,page[count]+delta);changed=True
                 elif (key[1]=="tags" and kind=="bookmark" and
                       all(not state["active"] or state["privacy"] is not None and state["tags"] is not None
                           for state in (before,after))):
                     for scope in ("public","private"):
                         old=set(before["tags"] or []) if before["active"] and before["privacy"]==scope else set()
                         new=set(after["tags"] or []) if after["active"] and after["privacy"]==scope else set()
-                        for name in old|new:
+                        if old == new:
+                            continue
+                        if replaced:
+                            evicted.append(key)
+                            break
+                        for name in old^new:
                             delta=int(name in new)-int(name in old)
                             row=next((row for row in page[scope] if row["name"]==name),None)
                             if row:row["count"]=max(0,row["count"]+delta)
                             elif delta>0:page[scope].append({"name":name,"count":delta})
                         page[scope]=[row for row in page[scope] if row["count"]>0]
-                    changed=True
+                        changed = True
                 if changed:
                     patches.append((key,page))
             for group in changed_groups:
@@ -1205,9 +1245,9 @@ class AccountPages:
                     if successor <= offset:
                         break
                     offset = successor
-                status = "patched" if complete and group not in missing_additions else "partial"
+                status = "patched" if complete and group not in refresh_groups else "partial"
                 patches.append((group, status))
-            return patches
+            return patches, evicted
         with self.publication(generation), self._lock:
             self.saved_cache.update_entries(owner, method, views, patch_entries)
 

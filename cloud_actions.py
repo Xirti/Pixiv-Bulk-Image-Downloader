@@ -222,7 +222,7 @@ class CloudActions:
         works, authors = ([target], []) if kind == "bookmark" else ([], [target])
         return self.store.many(owner, method, works, authors)[kind][target]
 
-    def _adopt_observation(self, owner, method, kind, target, observed, state, *, before=None):
+    def _adopt_observation(self, owner, method, kind, target, observed, state, *, before=None, before_pages=None):
         """Compare the object's state under the same lock used to publish it."""
         current = self._cached_relation(owner, method, kind, target)
         fields = ("stamp", "touched", "bookmarkId")
@@ -230,14 +230,15 @@ class CloudActions:
             return current, (current.get("stamp") == relationship_stamp(state)
                              and current.get("bookmarkId") == state.get("bookmarkId"))
         previous = observed if before is None else {**before, "known": True}
-        return self._record(owner, method, kind, target, previous, state), True
+        return self._record(owner, method, kind, target, previous, state, before_pages=before_pages), True
 
-    def _record(self, owner, method, kind, target, previous, state):
+    def _record(self, owner, method, kind, target, previous, state, *, before_pages=None):
         """Use one publication path for verified state and display-cache repairs."""
         repair_id = uuid.uuid4().hex
         current = self.store.put(owner, method, kind, target, state, repair_id=repair_id)
         repair = not previous["known"] or relationship_stamp(previous)==current["stamp"]
-        self.pages.note_relation(owner, method, kind, target, current if not previous["known"] else previous, current, repair=repair)
+        self.pages.note_relation(owner, method, kind, target, current if not previous["known"] else previous, current,
+                                 repair=repair, before_pages=before_pages if before_pages is not None else {})
         self.store.finish_page_repairs(owner, method, [repair_id])
         return current
 
@@ -331,10 +332,12 @@ class CloudActions:
                 if current.get("stamp") != cached.get("stamp"):
                     raise CloudActionError("conflict", "账号状态已更新，请核对后重新操作", state=current)
                 replay, result = self.store.operation(owner, method, intent["requestId"], signature)
+                page_versions = None if replay else self.pages.relation_page_versions(owner, method, kind)
 
-            def record(state, observed=cached, *, before=None):
+            def record(state, observed=cached, *, before=None, before_pages=None):
                 with self.publication(generation, owner, method, revision=revision):
-                    return self._adopt_observation(owner, method, kind, target, observed, state, before=before)
+                    return self._adopt_observation(owner, method, kind, target, observed, state,
+                                                   before=before, before_pages=before_pages)
 
             def complete(state):
                 preferences = (scope, {kind + "Last": intent["privacy"]} if intent["active"] else {})
@@ -393,7 +396,8 @@ class CloudActions:
             except (PixivPolicyError, OSError, TimeoutError) as failure:
                 self.pages.check(generation)
                 raise CloudActionError("unknown", "操作结果尚未确认，请刷新核对；不会自动重复提交", official=method == "web" and kind == "follow") from failure
-            current, accepted = record(after, observed, before=before)
+            current, accepted = record(after, observed, before=before,
+                                       before_pages=page_versions if needs_write else None)
             if not accepted:
                 raise CloudActionError("unconfirmed", "关系状态已更新，请继续核对原操作", state=current)
             confirmed = self._matches(effective, after)
