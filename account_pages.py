@@ -286,6 +286,11 @@ class AccountCache:
             elif clear_revision is not None:
                 db.execute("BEGIN")
             self._check_clear_revision(db, owner, clear_revision)
+            if method == "web" and key[0] == "data" and key[1] in {"bookmarks", "following"}:
+                if self._web_relation_rebase(db, owner, self.web_relation_group(key)) == "partial":
+                    if key[4]:
+                        raise AccountError("page_rebased", "账号列表发生变化，请从第一页继续")
+                    return None
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
                              (owner, method, json.dumps(key))).fetchone()
             return json.loads(row[0]) if row else None
@@ -555,7 +560,20 @@ class AccountCache:
         with self.lock, closing(self._connect()) as db:
             db.execute("BEGIN")
             self._check_clear_revision(db, owner, clear_revision)
+            if (method == "web" and key[1] in {"bookmarks", "following"} and key[4]
+                    and self._web_relation_rebase(db, owner, self.web_relation_group(key))):
+                raise AccountError("page_rebased", "账号列表发生变化，请从第一页继续")
             return self._page_version(db, owner, method, key)
+
+    @staticmethod
+    def web_relation_group(key):
+        return ("web-relation-rebase", key[1], key[3], *key[5:])
+
+    @staticmethod
+    def _web_relation_rebase(db, owner, group):
+        row = db.execute("SELECT payload FROM cached WHERE owner=? AND method='web' AND key=?",
+                         (owner, json.dumps(group))).fetchone()
+        return json.loads(row[0]) if row else None
 
     @staticmethod
     def _page_version(db, owner, method, key):
@@ -580,6 +598,13 @@ class AccountCache:
             self._check_clear_revision(db, owner, clear_revision)
             if self._page_version(db, owner, method, key) != expected:
                 raise AccountError("cache_changed", "账号列表已更新，请重新打开页面")
+            if method == "web" and key[1] in {"bookmarks", "following"} and not key[4]:
+                group = self.web_relation_group(key)
+                if self._web_relation_rebase(db, owner, group):
+                    db.execute("DELETE FROM cached WHERE owner=? AND method='web' AND "
+                               "(key=? OR json_remove(key,'$[4]')=json(?))",
+                               (owner, json.dumps(group), json.dumps([*key[:4], *key[5:]])))
+                    self._advance_page_epochs(db, owner, method, (key[1],))
             self._save_rows(db, owner, method, [(key, result)])
             if cursor is not None:
                 self._save_cursor(db, owner, method, ["cursor", cursor.path, cursor.params, result["nextOffset"]],
@@ -789,6 +814,9 @@ class AccountCache:
         with self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             patches = update(self._read_entries(db,owner,method,views))
+            patches = [(key, value) for key, value in patches
+                       if key[0] != "web-relation-rebase" or value != "patched"
+                       or self._web_relation_rebase(db, owner, key) != "partial"]
             self._save_rows(db,owner,method,patches)
             # An overlapping read can still have rows that no cached page contains yet.
             self._advance_page_epochs(db, owner, method, views)
@@ -1092,6 +1120,9 @@ class AccountPages:
         def patch_entries(entries):
             record = next((row for key,page in entries for row in page.get(field,[]) if row["id"]==target),None)
             patches=[]
+            groups = {}
+            changed_groups = set()
+            missing_additions = set()
             for key,page in entries:
                 changed = False
                 if key[1] == view:
@@ -1099,13 +1130,13 @@ class AccountPages:
                     rows = page[field]
                     present = any(row["id"] == target for row in rows)
                     tag,mode = key[5:7] if kind=="bookmark" else ("","all")
-                    def membership(state):
+                    def membership(state, *, visible=True):
                         if not state["active"] or state["privacy"] is not None and state["privacy"]!=scope:return False
                         if state["privacy"] is None and not present:return None
                         if tag:
                             if state["tags"] is None:return None
                             if tag not in state["tags"]:return False
-                        if mode!="all":
+                        if visible and mode!="all":
                             if record is None:return None
                             if not matches_content_mode(record["restriction"],mode):return False
                         return True
@@ -1122,6 +1153,14 @@ class AccountPages:
                     delta=int(next_member)-int(previous_member) if not repair and previous_member is not None and next_member is not None else len(page[field])-len(rows)
                     if delta and page.get("total") is not None:
                         page["total"]=max(0,page["total"]+delta);changed=True
+                    if method == "web":
+                        group = self.saved_cache.web_relation_group(key)
+                        groups.setdefault(group, {})[offset] = page
+                        raw_before, raw_after = membership(before, visible=False), membership(after, visible=False)
+                        if changed or raw_before != raw_after:
+                            changed_groups.add(group)
+                        if raw_before is False and raw_after is True and record is None:
+                            missing_additions.add(group)
                 elif key[1]=="followers" and kind=="follow":
                     for person in page["people"]:
                         if person["id"]==target and person["following"]!=after["active"]:
@@ -1146,6 +1185,28 @@ class AccountPages:
                     changed=True
                 if changed:
                     patches.append((key,page))
+            for group in changed_groups:
+                pages = groups[group]
+                offset = 0
+                seen = set()
+                complete = False
+                total = pages[0]["total"] if 0 in pages else None
+                while offset in pages:
+                    page = pages[offset]
+                    ids = {row["id"] for row in page[field]}
+                    if (page["total"] != total or seen & ids or len(ids) != len(page[field])
+                            or offset and total is not None and offset >= total and not ids):
+                        break
+                    seen.update(ids)
+                    successor = page["nextOffset"]
+                    if successor is None:
+                        complete = True
+                        break
+                    if successor <= offset:
+                        break
+                    offset = successor
+                status = "patched" if complete and group not in missing_additions else "partial"
+                patches.append((group, status))
             return patches
         with self.publication(generation), self._lock:
             self.saved_cache.update_entries(owner, method, views, patch_entries)

@@ -158,7 +158,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       cachePage(key,value);
       if(value.items)await worksCache.prepare("account-works",value.items,signal,{warm:"account"});
       if(value.people)await avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"});
-    }).catch(problem=>{if(!signal.aborted && version===backgroundRevision && nextReads.get(key)===reading && problem.errorKind!=="page_retired")report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
+    }).catch(problem=>{if(!signal.aborted && version===backgroundRevision && nextReads.get(key)===reading && !["page_retired","page_rebased"].includes(problem.errorKind))report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
     nextReads.set(key,reading);
   }
   const artworkContext=item=>({context:{kind:"pid",value:item.id},resultPage:state.page});
@@ -339,13 +339,13 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     syncSelection();syncPeopleStatus();changed();
   }
 
-  async function load(refresh=false){
+  async function load(refresh=false,refreshPage=refresh){
     controller?.abort();controller=new AbortController();const signal=controller.signal,version=++revision,key=pageKey();
     const scan=completedScans.get(state.view);
     const pageRetired=()=>retiredByScan(scan,completedScans.get(state.view),state);
     error="";data=cache.get(key) || null;
     if(data)cachePage(key,data);
-    if(!refresh && profile?.connected && (state.view==="home"?own && ownMode===mode():state.view!=="settings" && data && (state.view!=="bookmarks" || tags))){
+    if(!refreshPage && profile?.connected && (state.view==="home"?own && ownMode===mode():state.view!=="settings" && data && (state.view!=="bookmarks" || tags))){
       controller=null;pending=false;render();prepareNext();return;
     }
     pending=!data;
@@ -375,8 +375,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
           }
         }
       }
-      if(state.view!=="home" && (!data || refresh)){
-        const query=new URLSearchParams({scope:state.scope,offset:String(state.offset),tag:state.tag,mode:mode(),...(refresh?{refresh:"1"}:{})});
+      if(state.view!=="home" && (!data || refreshPage)){
+        const query=new URLSearchParams({scope:state.scope,offset:String(state.offset),tag:state.tag,mode:mode(),...(refreshPage?{refresh:"1"}:{})});
         const value=await read(state.view,Object.fromEntries(query),{signal});
         if(version!==revision)return;data=value;cachePage(key,value);
         pending=false;render();
@@ -391,14 +391,21 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       if(profile.authorization?.error)error=profile.authorization.error;
     }catch(problem){
       if(version!==revision || signal.aborted)return;
+      if(state.offset>0 && problem.errorKind==="page_rebased"){
+        for(const pages of [cache,nextReads])for(const key of pages.keys()){
+          const [view,scope,tag,,contentMode]=JSON.parse(key);
+          if(view===state.view && scope===state.scope && tag===state.tag && contentMode===mode())pages.delete(key);
+        }
+        return returnToFirstPage(true);
+      }
       if(state.offset>0 && problem.errorKind==="page_retired")return returnToFirstPage();
       error=problem.message || "账号读取失败，请刷新重试";
     }
     finally{if(version===revision){controller=null;pending=false;render();prepareNext();}}
   }
-  function returnToFirstPage(){
+  function returnToFirstPage(refresh=false){
     state={...state,offset:0,page:1,trail:[],scroll:0};restoreTop=0;
-    return load();
+    return load(false,refresh);
   }
   async function navigate(view,options={}){
     if(!allowed())return;
@@ -433,6 +440,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       relationVersion++;
       if(kind==='follow')for(const scope of ['public','private'])if(!value.active || value.privacy && value.privacy!==scope)delete updates[scope][id];
       const view=kind==="bookmark"?"bookmarks":"following",field=kind==="bookmark"?"items":"people";
+      const web=profile?.method==="web";
+      if(web)for(const key of nextReads.keys())if(JSON.parse(key)[0]===view)nextReads.delete(key);
       let existing;
       for(const page of cache.values()){
         existing=page[field]?.find(row=>row.id===id);
@@ -446,13 +455,13 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         const [type,scope,tag,offset,contentMode]=JSON.parse(key);
         if(type!==view || !page[field])continue;
         const rows=page[field],present=rows.some(row=>row.id===id);
-        const membership=relation=>{
+        const membership=(relation,visible=true)=>{
           if(!relation?.known)return null;
           if(!relation.active || relation.privacy && relation.privacy!==scope)return false;
           if(!relation.privacy && !present)return null;
           if(kind==="bookmark"){
             if(tag){if(relation.tags===null)return null;if(!relation.tags.includes(tag))return false;}
-            if(contentMode!=="all"){
+            if(visible && contentMode!=="all"){
               if(!record)return null;
               if(record.restriction!==contentMode)return false;
             }
@@ -465,6 +474,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         else if(!present && fits && !offset && record)page[field]=[{...record,...(kind==="follow"?{following:true}:{})},...rows];
         const delta=previousMember!==null && nextMember!==null?Number(nextMember)-Number(previousMember):page[field].length-rows.length;
         if(delta && Number.isInteger(page.total))page.total=Math.max(0,page.total+delta);
+        if(web && (delta || page[field]!==rows || membership(previous,false)!==membership(value,false)))cache.delete(key);
       }
       if(profile && previous?.known && (kind==="follow" || !value.active || value.privacy)){
         const delta=kind==="follow"?Number(value.active)-Number(previous.active):
