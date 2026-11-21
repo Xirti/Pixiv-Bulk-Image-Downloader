@@ -376,8 +376,8 @@ class DesktopApi:
                 self._clear_shared_cookies()
                 self._login_lock.release()
 
-    def pixiv_logout(self) -> dict:
-        result = self._auth_request("logout", {})
+    def pixiv_logout(self, authorization_generation: int) -> dict:
+        result = self._auth_request("logout", {"authorizationGeneration": authorization_generation})
         if not isinstance(result, dict):
             return {"ok": False, "error": "MOKU 本机后端响应无效"}
         return result

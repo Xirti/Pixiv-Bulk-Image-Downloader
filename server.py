@@ -718,13 +718,15 @@ def _clear_shared_web_session() -> None:
     forget_local_session()
 
 
-def disconnect_authorized_session() -> None:
+def disconnect_authorized_session(expected_generation: int) -> None:
     # Login, logout, and authorization snapshots share one linearization lock.
     # Otherwise a concurrent login can land between credential deletion and
     # cache revocation, leaving a new credential that silently reactivates after
     # logout has already reported success.
     global LOCAL_LOGOUT_REVISION
     with credential_publication():
+        if expected_generation != AUTHORIZATION_GENERATION:
+            raise AuthorizationRevokedError("账号状态已变更，请核对当前会话")
         try:
             _clear_shared_web_session()
             LOCAL_LOGOUT_REVISION = SHARED_LOGOUT.advance()
@@ -4336,15 +4338,21 @@ class Handler(SimpleHTTPRequestHandler):
             DOWNLOAD_AHEAD.clear()
         return self.send_json(state)
 
-    def _post_logout(self, _data: dict):
+    def _post_logout(self, data: dict):
+        generation = data.get("authorizationGeneration")
+        if type(generation) is not int:
+            return self.send_json({"ok": False, "error": "退出请求缺少有效的授权状态"}, 400)
         try:
-            disconnect_authorized_session()
+            disconnect_authorized_session(generation)
             DOWNLOAD_AHEAD.clear()
             return self.send_json({"ok": True})
+        except AuthorizationRevokedError as error:
+            return self.send_json({"ok": False, "error": str(error)}, 409)
         except OSError:
             return self.send_json({
                 "ok": False,
                 "error": "退出未能完成，请重试",
+                "errorKind": "logout_cleanup_failed",
             }, 500)
 
     def _post_desktop_context(self, _data: dict):
@@ -4395,8 +4403,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "Pixiv 登录状态保存失败，请检查本机存储后重试"}, 500)
         return self.send_json({"ok": True, "remembered": remember})
 
-    def _post_desktop_logout(self, _data: dict):
-        return self._post_logout(_data)
+    def _post_desktop_logout(self, data: dict):
+        return self._post_logout(data)
 
     def _post_cancel_search(self, data: dict):
         try:

@@ -4286,16 +4286,29 @@ $("#authAction").onclick = async () => {
   }
 };
 $("#authDisconnect").onclick=async()=>{
+  if(authActionBusy || appConnectionBusy || !lastKnownLoggedIn)return;
+  const generation=lastKnownAuthorizationGeneration;
   authActionBusy=true;syncAppConnection(appConnection);
-  let error="";
+  let error="",cleanupFailed=false;
   try{
     if(!window.pywebview?.api?.pixiv_logout)throw Error("请在 MOKU 桌面版中退出登录。");
-    const result=await window.pywebview.api.pixiv_logout();if(!result.ok)throw Error(result.error || "退出失败");
+    const result=await window.pywebview.api.pixiv_logout(generation);
+    if(!result.ok){
+      cleanupFailed=result.errorKind==="logout_cleanup_failed";
+      throw Error(result.error || "退出失败");
+    }
   }catch(problem){error=problem.message;}
   finally{
-    authActionBusy=false;await syncAuthStatus();
-    if(activeWorkspace==="account")await accountView.refresh();
-    syncAppConnection(appConnection);if(error)$("#authStateText").textContent=error;
+    try{
+      await syncAuthStatus();
+      if(activeWorkspace==="account")await accountView.refresh();
+    }finally{
+      authActionBusy=false;
+      syncAppConnection(appConnection);
+      if(error && (generation===lastKnownAuthorizationGeneration || (cleanupFailed && !lastKnownLoggedIn))){
+        $("#authStateText").textContent=error;
+      }
+    }
   }
 };
 $("#authMethod").onchange=async event=>{
