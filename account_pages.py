@@ -821,7 +821,8 @@ class AccountCache:
 
 class AccountPages:
     def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web",
-                 commit_guard=None, stopped=lambda:False, credential_publication=nullcontext):
+                 commit_guard=None, stopped=lambda:False, credential_publication=nullcontext,
+                 login_publication=nullcontext):
         self.directory = Path(directory)
         self.request_json, self.request_homepage = request_json, request_homepage
         self.generation, self.coordinator, self.proxy = generation, coordinator, proxy
@@ -830,6 +831,8 @@ class AccountPages:
         self._closed = False
         self.commit_guard = commit_guard if commit_guard is not None else threading.RLock()
         self.credential_publication = credential_publication
+        self.login_publication = login_publication
+        self._app_credentials_revoked = False
         self._account = None
         self._lock = threading.RLock()
         self._cache = OrderedDict()
@@ -846,7 +849,8 @@ class AccountPages:
             if self._account is None:
                 transport = AppTransport(self.directory / "request-settings.json", self.proxy(), coordinator=self.coordinator)
                 self._account = AppAccount(CredentialVault(), transport, CLIENT_CONFIG,
-                    credential_publication=self.credential_publication)
+                    credential_publication=self.credential_publication, login_publication=self.login_publication,
+                    credentials_revoked=self._app_credentials_revoked)
             self._account.transport.proxy = self.proxy()
             return self._account
 
@@ -886,16 +890,21 @@ class AccountPages:
     def disconnect(self):
         self.invalidate()
         with self._lock:
+            self._app_credentials_revoked = True
             account=self._account
         if account is not None:
             account.logout()
         else:
             CredentialVault().delete()
 
-    def forget_credentials(self):
+    def adopt_app_credentials(self, *, revoked):
         with self._lock:
+            self._app_credentials_revoked = revoked
             if self._account is not None:
-                self._account.forget_credentials()
+                if revoked:
+                    self._account.forget_credentials()
+                else:
+                    self._account.adopt_credentials()
 
     def close(self):
         with self.commit_guard:
@@ -1168,7 +1177,7 @@ class AccountPages:
                 "workCount":sum(details[key] for key in ("total_illusts","total_manga")) if all(type(details.get(key)) is int and details[key]>=0 for key in ("total_illusts","total_manga")) else None,
                 "method":"app", "authorization": dict(self.auth_status)}
             self.check(generation)
-            account.promote_verified()
+            account.promote_verified(snapshot["generation"])
             return result
         result = self._cached((generation, "profile", owner), load, refresh, clear_revision=clear_revision)
         return {**result, "authorization": dict(self.auth_status)}

@@ -312,7 +312,10 @@ AUTHORIZATION_GENERATION = 0
 SHARED_LOGOUT = SessionRevision(history_path().with_name("pixiv-logout-revision"))
 SHARED_WEB_SESSION = SessionRevision(SHARED_LOGOUT.path.with_name("pixiv-web-session-revision"),
                                     guard_path=SHARED_LOGOUT.path)
+SHARED_APP_SESSION = SessionRevision(SHARED_LOGOUT.path.with_name("pixiv-app-session-revision"),
+                                    guard_path=SHARED_LOGOUT.path)
 LOCAL_WEB_SESSION_REVISION = ""
+LOCAL_APP_SESSION_REVISION = ""
 with SHARED_LOGOUT.guard():
     LOCAL_LOGOUT_REVISION = SHARED_LOGOUT.read()
     AUTH_METHOD = AuthMethod(history_path().with_name("auth-method.json"))
@@ -489,24 +492,30 @@ def _adopt_shared_logout(revision: str) -> bool:
         return False
     LOCAL_LOGOUT_REVISION = revision
     clear_authorized_state(force=True)
-    ACCOUNTS.forget_credentials()
+    ACCOUNTS.adopt_app_credentials(revoked=True)
     forget_local_session()
     ACCOUNT_AUTH.close()
     return True
 
 
 def _adopt_shared_authorization() -> None:
-    global LOCAL_WEB_SESSION_REVISION
+    global LOCAL_WEB_SESSION_REVISION, LOCAL_APP_SESSION_REVISION
     logged_out = _adopt_shared_logout(SHARED_LOGOUT.read())
     web_revision = SHARED_WEB_SESSION.read()
-    if web_revision != LOCAL_WEB_SESSION_REVISION:
-        if not logged_out:
-            clear_authorized_state(force=True)
+    app_revision = SHARED_APP_SESSION.read()
+    web_changed = web_revision != LOCAL_WEB_SESSION_REVISION
+    app_changed = app_revision != LOCAL_APP_SESSION_REVISION
+    if not logged_out and (web_changed or app_changed):
+        clear_authorized_state(force=True)
+    if web_changed:
         if web_revision.startswith("remembered:"):
             adopt_persistent_session()
         else:
             forget_local_session()
         LOCAL_WEB_SESSION_REVISION = web_revision
+    if app_changed:
+        ACCOUNTS.adopt_app_credentials(revoked=not app_revision.startswith("saved:"))
+        LOCAL_APP_SESSION_REVISION = app_revision
     if AUTH_METHOD.reload():
         # Mode changes fence existing requests while preserving both credentials.
         clear_authorized_state(force=True)
@@ -515,7 +524,8 @@ def _adopt_shared_authorization() -> None:
 
 def _observe_shared_authorization() -> None:
     if (SHARED_LOGOUT.read() != LOCAL_LOGOUT_REVISION
-            or SHARED_WEB_SESSION.read() != LOCAL_WEB_SESSION_REVISION or AUTH_METHOD.changed()):
+            or SHARED_WEB_SESSION.read() != LOCAL_WEB_SESSION_REVISION
+            or SHARED_APP_SESSION.read() != LOCAL_APP_SESSION_REVISION or AUTH_METHOD.changed()):
         with SHARED_LOGOUT.guard():
             _adopt_shared_authorization()
 
@@ -525,6 +535,19 @@ def credential_publication():
     with SEARCH_SESSION_LOCKS_GUARD, SHARED_LOGOUT.guard():
         _adopt_shared_authorization()
         yield
+
+
+@contextmanager
+def app_login_publication():
+    # The caller holds the shared credential mutex. An existing saved session
+    # can be re-read if the replacement fails. A revoked vault stays hidden
+    # until a new credential has actually been saved.
+    revoked = SHARED_APP_SESSION.read().startswith("empty:")
+    if not revoked:
+        SHARED_APP_SESSION.advance(prefix="saved:")
+    yield
+    if revoked:
+        SHARED_APP_SESSION.advance(prefix="saved:")
 
 
 def assert_authorization_generation(expected: int | None) -> None:
@@ -723,12 +746,14 @@ def disconnect_authorized_session(expected_generation: int) -> None:
     # Otherwise a concurrent login can land between credential deletion and
     # cache revocation, leaving a new credential that silently reactivates after
     # logout has already reported success.
-    global LOCAL_LOGOUT_REVISION
+    global LOCAL_LOGOUT_REVISION, LOCAL_APP_SESSION_REVISION
     with credential_publication():
         if expected_generation != AUTHORIZATION_GENERATION:
             raise AuthorizationRevokedError("账号状态已变更，请核对当前会话")
         try:
             _clear_shared_web_session()
+            LOCAL_APP_SESSION_REVISION = SHARED_APP_SESSION.advance(prefix="empty:")
+            ACCOUNTS.adopt_app_credentials(revoked=True)
             LOCAL_LOGOUT_REVISION = SHARED_LOGOUT.advance()
             ACCOUNT_AUTH.close()
             try:
@@ -1681,7 +1706,8 @@ ARTISTS = ArtistService(search_pixiv_json)
 ACCOUNTS = AccountPages(directory=history_path().parent, request_json=pixiv_json,
     request_homepage=lambda: pixiv_request("https://www.pixiv.net/", max_bytes=8*1024*1024)[0].decode("utf-8"),
     generation=authorization_generation, coordinator=REQUEST_COORDINATOR, proxy=lambda: PIXIV_PROXY,method=AUTH_METHOD.get,
-    commit_guard=SEARCH_SESSION_LOCKS_GUARD, stopped=lambda:BACKEND_STOP.is_set(), credential_publication=credential_publication)
+    commit_guard=SEARCH_SESSION_LOCKS_GUARD, stopped=lambda:BACKEND_STOP.is_set(),
+    credential_publication=credential_publication, login_publication=app_login_publication)
 ACCOUNT_AUTH = AccountAuthorization(ACCOUNTS)
 CLOUD_STATE = CloudState(history_path().with_name("cloud-state.sqlite3"))
 
@@ -3907,8 +3933,8 @@ class Handler(SimpleHTTPRequestHandler):
     def _post_desktop_app_connect(self, _data):
         try:
             ensure_network_opener_current()
-            with SEARCH_SESSION_LOCKS_GUARD:
-                generation=authorization_generation()
+            with credential_publication():
+                generation=AUTHORIZATION_GENERATION
                 if AUTH_METHOD.get() != "app":
                     raise AccountError("method", "当前已选择网页登录")
                 url = ACCOUNT_AUTH.begin(self.server.server_port, REQUEST_TOKEN, generation)

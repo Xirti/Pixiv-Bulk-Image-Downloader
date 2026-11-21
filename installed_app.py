@@ -88,6 +88,7 @@ def clear_installed_user_data(program_root: Path) -> None:
             "guide-v1.seen", "login-context.json", "request-settings.json", "auth-method.json",
             "pixiv-logout-revision", "pixiv-logout-revision.tmp",
             "pixiv-web-session-revision", "pixiv-web-session-revision.tmp",
+            "pixiv-app-session-revision", "pixiv-app-session-revision.tmp",
             "browser-profile.json", "app-updates.json", "app-updates.last-check",
             "app-updates.trust-state.json", "account-callback.json", "source-search/settings.json",
         )

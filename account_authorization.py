@@ -167,7 +167,6 @@ class AccountAuthorization:
                         raise AccountError("timeout", "授权等待已结束，可重新连接")
                     self.pages.check(generation)
                     account.connect(code, verifier, expected_uid, epoch)
-                    self.pages.check(generation)
                     with self.lock:
                         if self.flow is flow and not flow["cancel"].is_set():
                             self.pages.invalidate()

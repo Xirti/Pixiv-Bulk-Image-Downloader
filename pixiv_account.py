@@ -58,10 +58,11 @@ class Tokens:
 
 class CredentialVault:
     TARGET = "MOKU.Pixiv.AppOAuth"
+    LEGACY_TARGET = TARGET + ".Development"
 
     def __init__(self, target=None):
         self.target = target or os.environ.get("MOKU_APP_CREDENTIAL_TARGET") or self.TARGET
-        self.legacy = False
+        self._legacy_tokens = None
         self.disabled = persistent_session_disabled() and target is None and not os.environ.get("MOKU_APP_CREDENTIAL_TARGET")
 
     def read(self):
@@ -69,8 +70,8 @@ class CredentialVault:
             return None
         value = self._read_target(self.target)
         if value is None and self.target == self.TARGET:
-            value = self._read_target("MOKU.Pixiv.AppOAuth.Development")
-            self.legacy = value is not None
+            value = self._read_target(self.LEGACY_TARGET)
+            self._legacy_tokens = value
         return value
 
     def _read_target(self, target):
@@ -114,19 +115,26 @@ class CredentialVault:
             raise ctypes.WinError()
 
     def promote(self, tokens):
-        if not self.legacy:
+        if self._legacy_tokens is None:
             return
-        self.save(tokens)
-        if not advapi32.CredDeleteW("MOKU.Pixiv.AppOAuth.Development", CRED_TYPE_GENERIC, 0) and ctypes.get_last_error() != ERROR_NOT_FOUND:
+        current = self._read_target(self.target)
+        if current is not None and current != tokens:
+            raise AccountError("revoked", "账号凭据已更新，请重新打开我的账号")
+        if self._read_target(self.LEGACY_TARGET) != self._legacy_tokens:
+            self._legacy_tokens = None
+            return
+        if current is None:
+            self.save(tokens)
+        if not advapi32.CredDeleteW(self.LEGACY_TARGET, CRED_TYPE_GENERIC, 0) and ctypes.get_last_error() != ERROR_NOT_FOUND:
             raise ctypes.WinError()
-        self.legacy = False
+        self._legacy_tokens = None
 
     def delete(self):
         if self.disabled:
             return
         targets = [self.target]
         if self.target == self.TARGET:
-            targets.append("MOKU.Pixiv.AppOAuth.Development")
+            targets.append(self.LEGACY_TARGET)
         for target in targets:
             if not advapi32.CredDeleteW(target, CRED_TYPE_GENERIC, 0) and ctypes.get_last_error() != ERROR_NOT_FOUND:
                 raise ctypes.WinError()
@@ -219,16 +227,19 @@ class AppTransport:
 
 
 class AppAccount:
-    def __init__(self, vault, transport, client_config, clock=time.time, *, credential_publication=nullcontext):
+    def __init__(self, vault, transport, client_config, clock=time.time, *, credential_publication=nullcontext,
+                 login_publication=nullcontext, credentials_revoked=False):
         self.vault, self.transport, self.client_config, self.clock = vault, transport, client_config, clock
         self._lock = threading.RLock()
         self._refresh_lock = threading.Lock()
         self._operations = threading.Lock()
         self._epoch = 0
-        self._tokens = vault.read()
+        self._credentials_revoked = credentials_revoked
+        self._tokens = None if credentials_revoked else vault.read()
         self._refresh_error = ""
         self._reauth_required = False
         self._credential_publication = credential_publication
+        self._login_publication = login_publication
 
     def snapshot(self):
         with self._lock:
@@ -243,13 +254,33 @@ class AppAccount:
             if epoch != self._epoch:
                 raise AccountError("revoked", "账号状态已改变，请重新操作")
 
-    def _commit(self, tokens, epoch):
+    def _check_persisted(self, epoch):
+        self._check(epoch)
+        if not self._credentials_revoked:
+            saved = self.vault.read()
+            if saved != self._tokens:
+                self._adopt_tokens(saved)
+                raise AccountError("revoked", "账号凭据已更新，请重新打开我的账号")
+
+    def _adopt_tokens(self, tokens):
+        self._epoch += 1
+        self._tokens = tokens
+        self._refresh_error = ""
+        self._reauth_required = False
+
+    def _commit(self, tokens, epoch, *, login=False):
         with self._credential_publication(), self._lock:
-            self._check(epoch)
-            self.vault.save(tokens)
-            self._tokens = tokens
-            self._refresh_error = ""
-            self._reauth_required = False
+            self._check_persisted(epoch)
+            if login:
+                with self._login_publication():
+                    self.vault.save(tokens)
+                self._credentials_revoked = False
+                self._adopt_tokens(tokens)
+            else:
+                self.vault.save(tokens)
+                self._tokens = tokens
+                self._refresh_error = ""
+                self._reauth_required = False
 
     def connect(self, code, verifier, expected_uid=None, epoch=None):
         with self._lock:
@@ -267,7 +298,7 @@ class AppAccount:
         user = detail.get("user")
         if not isinstance(user, dict) or str(user.get("id")) != tokens.uid:
             raise AccountError("identity_mismatch", "App API 未确认相同账号，本次未保存")
-        self._commit(tokens, epoch)
+        self._commit(tokens, epoch, login=True)
         self.transport.coordinator.session_connected()
         return self.snapshot()
 
@@ -307,8 +338,8 @@ class AppAccount:
                 # The caller's check may acquire the outer authorization lock.
                 # Never call it while holding the account's internal lock.
                 current()
-                with self._lock:
-                    self._check(epoch)
+                with self._credential_publication(), self._lock:
+                    self._check_persisted(epoch)
                     self._refresh_error = str(error) if isinstance(error, AccountError) else "刷新暂时失败，请稍后重试"
                     if isinstance(error, AccountError) and error.kind == "reauth":
                         self._reauth_required = True
@@ -337,8 +368,8 @@ class AppAccount:
                     return self.transport.request(method,path,form=form,bearer=tokens.access,check=current)
                 except AccountError as retry:
                     if retry.kind!="reauth":raise
-            with self._lock:
-                self._check(epoch)
+            with self._credential_publication(), self._lock:
+                self._check_persisted(epoch)
                 if self._tokens is not tokens:
                     raise AccountError("unconfirmed", "会话已更新，请核对本次操作结果后再试")
                 self._reauth_required=True
@@ -354,8 +385,9 @@ class AppAccount:
             raise AccountError("identity_mismatch", "账号资料与当前会话不一致")
         return {**self.snapshot(), "identityVerified": True, "refreshRequested": force_refresh}
 
-    def promote_verified(self):
+    def promote_verified(self, epoch):
         with self._credential_publication(), self._lock:
+            self._check_persisted(epoch)
             if self._tokens:
                 self.vault.promote(self._tokens)
 
@@ -363,17 +395,17 @@ class AppAccount:
         with self._lock:
             self._epoch += 1
 
+    def adopt_credentials(self):
+        with self._lock:
+            self._adopt_tokens(self.vault.read())
+            self._credentials_revoked = False
+
     def forget_credentials(self):
         with self._lock:
-            self._epoch += 1
-            self._tokens = None
-            self._refresh_error = ""
-            self._reauth_required = False
+            self._credentials_revoked = True
+            self._adopt_tokens(None)
 
     def logout(self):
         with self._lock:
-            self._epoch += 1
-            self._tokens = None
-            self._refresh_error = ""
-            self._reauth_required = False
+            self.forget_credentials()
             self.vault.delete()
