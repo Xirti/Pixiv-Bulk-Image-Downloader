@@ -204,10 +204,8 @@ class CloudActions:
                 previous = self._cached_relation(owner, method, kind, target)
             state = self._read(owner, method, kind, target, generation)
             with self.publication(generation, owner, method, revision=revision):
-                current = self._cached_relation(owner, method, kind, target)
-                if (current.get("stamp"), current["touched"]) != (previous.get("stamp"), previous["touched"]):
-                    return current
-                return self._record(owner, method, kind, target, previous, state)
+                current, _ = self._adopt_observation(owner, method, kind, target, previous, state)
+                return current
 
     @contextmanager
     def _relationship_operation(self, generation, owner, kind, target):
@@ -223,6 +221,16 @@ class CloudActions:
     def _cached_relation(self, owner, method, kind, target):
         works, authors = ([target], []) if kind == "bookmark" else ([], [target])
         return self.store.many(owner, method, works, authors)[kind][target]
+
+    def _adopt_observation(self, owner, method, kind, target, observed, state, *, before=None):
+        """Compare the object's state under the same lock used to publish it."""
+        current = self._cached_relation(owner, method, kind, target)
+        fields = ("stamp", "touched", "bookmarkId")
+        if any(current.get(field) != observed.get(field) for field in fields):
+            return current, (current.get("stamp") == relationship_stamp(state)
+                             and current.get("bookmarkId") == state.get("bookmarkId"))
+        previous = observed if before is None else {**before, "known": True}
+        return self._record(owner, method, kind, target, previous, state), True
 
     def _record(self, owner, method, kind, target, previous, state):
         """Use one publication path for verified state and display-cache repairs."""
@@ -315,9 +323,9 @@ class CloudActions:
                     raise CloudActionError("conflict", "账号状态已更新，请核对后重新操作", state=current)
                 replay, result = self.store.operation(owner, method, intent["requestId"], signature)
 
-            def record(state, previous=cached):
+            def record(state, observed=cached, *, before=None):
                 with self.publication(generation, owner, method, revision=revision):
-                    return self._record(owner, method, kind, target, previous, state)
+                    return self._adopt_observation(owner, method, kind, target, observed, state, before=before)
 
             def complete(state):
                 preferences = (scope, {kind + "Last": intent["privacy"]} if intent["active"] else {})
@@ -326,8 +334,8 @@ class CloudActions:
 
             if replay:
                 # A lost response never causes a second POST. A fresh read repairs the local view.
-                current = record(before)
-                confirmed = self._matches(intent, before)
+                current, accepted = record(before)
+                confirmed = accepted and self._matches(intent, before)
                 if confirmed and result is None:
                     preferences = complete(current)
                 else:
@@ -338,10 +346,10 @@ class CloudActions:
                 before["active"] and any(cached.get(field) is not None and before.get(field) is not None and
                     (set(cached[field]) != set(before[field]) if field == "tags" else cached[field] != before[field]) for field in ("privacy", "tags")))
             if conflict:
-                current = record(before)
+                current, _ = record(before)
                 raise CloudActionError("conflict", "云端状态已改变，请核对后重新操作", state=current)
             if kind == "bookmark" and intent["active"] and before["active"] and before["tags"] is None and intent["tags"] is not None:
-                current = record(before)
+                current, _ = record(before)
                 raise CloudActionError("tags_unknown", "现有收藏标签尚未完整读取，请先在官网核对，避免覆盖", state=current)
             effective = {**intent, "tags": before["tags"]} if kind=="bookmark" and intent["tags"] is None else intent
             error = None
@@ -352,12 +360,20 @@ class CloudActions:
             except (PixivPolicyError, OSError, TimeoutError) as failure:
                 self.pages.check(generation)
                 error = failure
+            observed = cached
             try:
-                after = self._read(owner, method, kind, target, generation) if needs_write else before
+                if needs_write:
+                    with self.publication(generation, owner, method, revision=revision):
+                        observed = self._cached_relation(owner, method, kind, target)
+                    after = self._read(owner, method, kind, target, generation)
+                else:
+                    after = before
             except (PixivPolicyError, OSError, TimeoutError) as failure:
                 self.pages.check(generation)
                 raise CloudActionError("unknown", "操作结果尚未确认，请刷新核对；不会自动重复提交", official=method == "web" and kind == "follow") from failure
-            current = record(after, {**before, "known": True})
+            current, accepted = record(after, observed, before=before)
+            if not accepted:
+                raise CloudActionError("unconfirmed", "关系状态已更新，请继续核对原操作", state=current)
             confirmed = self._matches(effective, after)
             if not confirmed:
                 official = method == "web" and kind == "follow"
