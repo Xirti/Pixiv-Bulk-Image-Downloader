@@ -69,8 +69,6 @@ class WebCloudTransport:
 class WebDisplaySettings:
     """Account display settings with verified identity and server readback."""
 
-    FIELDS = ("ageRestriction", "sensitive", "showAI")
-
     def __init__(self, pages, context, post, changed, *, revision):
         self.pages = pages
         self.context = context
@@ -104,8 +102,8 @@ class WebDisplaySettings:
     def _publish(self, owner, generation, state):
         with self.pages.publication(generation), self.pages.credential_publication():
             self.pages.check(generation)
-            self.pages.saved_cache.finish_display_update(owner, "web", state)
-            self.changed(owner, generation)
+            if self.pages.saved_cache.finish_display_update(owner, "web", state):
+                self.changed(owner, generation)
 
     def _snapshot(self, generation, state):
         with self.pages.publication(generation):
@@ -121,12 +119,7 @@ class WebDisplaySettings:
                 self.pages.check(generation)
                 return self._snapshot(generation, cached)
             state = self._read_remote(owner, generation)
-            recovering = self.pages.saved_cache.display_update_pending(owner, "web")
-            if recovering or cached is not None and any(cached[key] != state[key] for key in self.FIELDS):
-                self._publish(owner, generation, state)
-            else:
-                with self.pages.publication(generation):
-                    self.pages.saved_cache.save(owner, "web", ["web-display-settings"], state)
+            self._publish(owner, generation, state)
             return self._snapshot(generation, state)
 
     def change(self, generation, key, value):
@@ -141,15 +134,9 @@ class WebDisplaySettings:
         owner = self._owner(generation)
         with self.pages.saved_cache.web_settings_mutex(owner):
             self.pages.check(generation)
-            cached = self.pages.saved_cache.read(owner, "web", ["web-display-settings"])
             before = self._read_remote(owner, generation)
+            self._publish(owner, generation, before)
             if before[key] == value:
-                recovering = self.pages.saved_cache.display_update_pending(owner, "web")
-                if recovering or cached is not None and any(cached[field] != before[field] for field in self.FIELDS):
-                    self._publish(owner, generation, before)
-                else:
-                    with self.pages.publication(generation):
-                        self.pages.saved_cache.save(owner, "web", ["web-display-settings"], before)
                 return self._snapshot(generation, before)
             if key == "ageRestriction" and value and not before["canChangeAge"]:
                 raise AccountError("eligibility", "请先在 Pixiv 官网确认出生日期及年龄限制设置。")
@@ -173,8 +160,7 @@ class WebDisplaySettings:
             }[key]
             with self.pages.publication(generation), self.pages.credential_publication():
                 self.pages.check(generation)
-                self.pages.saved_cache.begin_display_update(owner, "web")
-                self.changed(owner, generation)
+                self.pages.saved_cache.begin_display_update(owner, "web", before)
             failure = None
             try:
                 self.post(path, payload, csrf, False, generation)

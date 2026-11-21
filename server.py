@@ -461,7 +461,8 @@ def assert_read_current(cancel_event: threading.Event | None, generation: int,
                         authorization_epoch: int | None = None) -> None:
     if BROWSING_REQUEST_GENERATION.get() is not None:
         with SEARCH_SESSION_LOCKS_GUARD:
-            _observe_web_policy()
+            if _observe_web_policy():
+                raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
     raise_if_search_cancelled(cancel_event)
     if authorization_epoch is not None:
         assert_authorization_generation(authorization_epoch)
@@ -1724,10 +1725,11 @@ def _observe_web_policy(owner=None):
         # still has the same official settings.
         revision = revision if revision is not None else old_revision
         flags = flags if flags is not None else old_flags
-        # Learning the flags for the first time does not change them. Explicit
-        # policy writes and pending transitions still revoke in-flight work.
-        if ((revision, pending) != (old_revision, old_pending)
-                or old_flags is not None and flags != old_flags):
+        # A pending write blocks publication until readback. Legacy writers
+        # provided no before-image, so keep their conservative revocation.
+        legacy_write = (pending != old_pending and any(
+            raw is not None and "before" not in json.loads(raw) for raw in (old_pending, pending)))
+        if revision != old_revision or old_flags is not None and flags != old_flags or legacy_write:
             _invalidate_browsing_state()
     OBSERVED_WEB_POLICY = identity, revision, pending, flags
     return pending is not None
@@ -4051,8 +4053,10 @@ class Handler(SimpleHTTPRequestHandler):
             finally:
                 REQUEST_PRIORITY.reset(priority_token)
             with SEARCH_SESSION_LOCKS_GUARD:
-                _observe_web_policy()
+                pending = _observe_web_policy()
                 web_session = AUTH_METHOD.get() == "web" and bool(web_session_cookie_header())
+            if pending:
+                return self.send_json({"error": "浏览设置正在核对，请稍后刷新。", "errorKind": "settings_pending"}, 503)
             with PIXIV_STATE_LOCK:
                 still_approved = IMAGE_TOKENS.get(token)
                 if still_approved != approved or approved[0] < time.monotonic():

@@ -32,10 +32,15 @@ _DISPLAY_PENDING_KEY = json.dumps(["web-display-pending"])
 _DISPLAY_REVISION_KEY = json.dumps(["display-cache-revision"])
 _DISPLAY_ORDER_KEY = json.dumps(["display-publication-order"])
 _DISPLAY_SETTINGS_KEY = json.dumps(["web-display-settings"])
+_PREVIOUS_WEB_FLAGS_KEY = json.dumps(["web-display-previous-flags"])
 _WEB_POLICY_KEY = json.dumps(["web-policy-revision"])
 _ACCOUNT_CLEAR_KEY = json.dumps(["account-clear-revision"])
 # Existing snapshots use their creation time until a refresh obtains an order.
 _PUBLICATION_ORDER_SQL = "COALESCE(json_extract(payload,'$.publicationOrder'),json_extract(payload,'$.created')*1000)"
+
+
+def _web_display_flags(settings):
+    return tuple(settings.get(key) for key in ("ageRestriction", "sensitive", "showAI"))
 
 
 class HomepageIdentity(HTMLParser):
@@ -250,7 +255,7 @@ class AccountCache:
                 rows = dict(db.execute("SELECT key,payload FROM cached WHERE owner=? AND method='web' AND key IN (?,?,?)",
                     (owner, _WEB_POLICY_KEY, _DISPLAY_PENDING_KEY, _DISPLAY_SETTINGS_KEY)))
                 settings = json.loads(rows[_DISPLAY_SETTINGS_KEY]) if _DISPLAY_SETTINGS_KEY in rows else None
-                flags = tuple(settings.get(name) for name in ("ageRestriction", "sensitive", "showAI")) if settings else None
+                flags = _web_display_flags(settings) if settings else None
                 self._policy_stamp = (rows.get(_WEB_POLICY_KEY), rows.get(_DISPLAY_PENDING_KEY), flags)
                 self._policy_observed = current
             return self._policy_stamp
@@ -327,7 +332,7 @@ class AccountCache:
 
     def display_revision(self, owner, method):
         with self.lock, closing(self._connect()) as db, db:
-            self._begin_account_read(db, owner)
+            self._begin_account_read(db, owner, anchor_web_settings=method == "web")
             self._require_display_ready(db, owner, method)
             return self._display_revision(db, owner, method)
 
@@ -640,8 +645,17 @@ class AccountCache:
 
     def clear(self, owner):
         with self.lock, closing(self._connect()) as db, db:
-            db.execute("DELETE FROM cached WHERE owner=? AND key NOT IN (?,?,?)",
-                (owner, _DISPLAY_PENDING_KEY, _DISPLAY_ORDER_KEY, _WEB_POLICY_KEY))
+            db.execute("BEGIN IMMEDIATE")
+            # Drop the refreshable form, but keep the policy under which newly
+            # rebuilt pages will be read. Repeated clears must keep that baseline.
+            row = db.execute("SELECT payload FROM cached WHERE owner=? AND method='web' AND key=?",
+                             (owner, _DISPLAY_SETTINGS_KEY)).fetchone()
+            previous = json.loads(row[0]) if row else None
+            if previous is not None:
+                db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
+                           (owner, "web", _PREVIOUS_WEB_FLAGS_KEY, json.dumps(_web_display_flags(previous))))
+            db.execute("DELETE FROM cached WHERE owner=? AND key NOT IN (?,?,?,?)",
+                (owner, _DISPLAY_PENDING_KEY, _DISPLAY_ORDER_KEY, _WEB_POLICY_KEY, _PREVIOUS_WEB_FLAGS_KEY))
             db.execute("DELETE FROM cursor_visits WHERE owner=?",(owner,))
             db.execute("INSERT INTO cached VALUES(?,?,?,?)", (owner, "account", _ACCOUNT_CLEAR_KEY, json.dumps(uuid.uuid4().hex)))
             for method in ("app", "web"):
@@ -653,10 +667,12 @@ class AccountCache:
             return self._begin_account_read(db, owner)
 
     @classmethod
-    def _begin_account_read(cls, db, owner):
+    def _begin_account_read(cls, db, owner, *, anchor_web_settings=False):
         db.execute("BEGIN")
         current = cls._read_clear_revision(db, owner)
-        if current:
+        if current and (not anchor_web_settings or db.execute(
+                "SELECT 1 FROM cached WHERE owner=? AND method='web' AND key=?",
+                (owner, _DISPLAY_SETTINGS_KEY)).fetchone()):
             return current
         # Anchor the request before upstream work. Old versions delete this row
         # when clearing, even if this account did not have any cached pages yet.
@@ -664,6 +680,11 @@ class AccountCache:
         db.execute("BEGIN IMMEDIATE")
         db.execute("INSERT OR IGNORE INTO cached VALUES(?,?,?,?)",
             (owner, "account", _ACCOUNT_CLEAR_KEY, json.dumps(uuid.uuid4().hex)))
+        if anchor_web_settings:
+            # New readers update this row in place. Legacy writers delete or
+            # replace it, so their invalidations remain visible through rowid.
+            db.execute("INSERT OR IGNORE INTO cached VALUES(?,?,?,?)",
+                       (owner, "web", _DISPLAY_SETTINGS_KEY, "null"))
         return cls._read_clear_revision(db, owner)
 
     @staticmethod
@@ -701,14 +722,13 @@ class AccountCache:
         db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
             (owner, method, _WEB_POLICY_KEY, json.dumps(uuid.uuid4().hex)))
 
-    def begin_display_update(self, owner, method):
+    def begin_display_update(self, owner, method, before=None):
+        pending = {"started": time.time()}
+        if before is not None:
+            pending["before"] = _web_display_flags(before)
         with self.lock, closing(self._connect()) as db, db:
             db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
-                (owner, method, _DISPLAY_PENDING_KEY, json.dumps({"started": time.time()})))
-            db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, _DISPLAY_SETTINGS_KEY))
-            self._delete_display_pages(db, owner, method)
-            self._advance_web_policy(db, owner, method)
+                (owner, method, _DISPLAY_PENDING_KEY, json.dumps(pending)))
 
     def display_update_pending(self, owner, method):
         with self.lock, closing(self._connect()) as db:
@@ -726,12 +746,25 @@ class AccountCache:
 
     def finish_display_update(self, owner, method, state):
         with self.lock, closing(self._connect()) as db, db:
-            db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
+            db.execute("BEGIN IMMEDIATE")
+            values = {key: json.loads(payload) for key, payload in db.execute(
+                "SELECT key,payload FROM cached WHERE owner=? AND method=? AND key IN (?,?,?)",
+                (owner, method, _DISPLAY_SETTINGS_KEY, _PREVIOUS_WEB_FLAGS_KEY, _DISPLAY_PENDING_KEY))}
+            settings = values.get(_DISPLAY_SETTINGS_KEY)
+            pending = values.get(_DISPLAY_PENDING_KEY)
+            previous = _web_display_flags(settings) if settings is not None else values.get(_PREVIOUS_WEB_FLAGS_KEY)
+            if previous is None and pending is not None:
+                previous = pending.get("before")
+            changed = tuple(previous) != _web_display_flags(state) if previous is not None else pending is not None
+            db.execute("INSERT INTO cached VALUES(?,?,?,?) ON CONFLICT(owner,method,key) "
+                "DO UPDATE SET payload=excluded.payload",
                 (owner, method, _DISPLAY_SETTINGS_KEY, json.dumps(state)))
-            self._delete_display_pages(db, owner, method)
-            db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, _DISPLAY_PENDING_KEY))
-            self._advance_web_policy(db, owner, method)
+            db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key IN (?,?)",
+                (owner, method, _DISPLAY_PENDING_KEY, _PREVIOUS_WEB_FLAGS_KEY))
+            if changed:
+                self._delete_display_pages(db, owner, method)
+                self._advance_web_policy(db, owner, method)
+            return changed
 
     def entries(self, owner, method, views=None):
         with self.lock, closing(self._connect()) as db:
