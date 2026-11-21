@@ -277,14 +277,19 @@ class CloudState:
                 if row[0] != signature:
                     raise ValueError("操作编号已用于另一项操作")
                 return True, json.loads(row[1]) if row[1] else None
-            db.execute("DELETE FROM operations WHERE touched<?", (time.time() - 7 * 86400,))
-            db.execute("INSERT INTO operations VALUES(?,?,?,?,NULL,?)", (owner, method, request_id, signature, time.time()))
+            now = time.time()
+            # An unresolved receipt is the only record that this intent may
+            # have reached Pixiv. Its age alone cannot authorize another write.
+            db.execute("DELETE FROM operations WHERE result IS NOT NULL AND touched<?", (now - 7 * 86400,))
+            db.execute("INSERT INTO operations VALUES(?,?,?,?,NULL,?)", (owner, method, request_id, signature, now))
             return False, None
 
     def finish_operation(self, owner, method, request_id, state, *, preferences: tuple[str, dict] | None = None):
         with self._write() as db:
-            db.execute("UPDATE operations SET result=? WHERE owner=? AND method=? AND request_id=?",
-                       (json.dumps(state), owner, method, request_id))
+            row = db.execute("UPDATE operations SET result=?,touched=? WHERE owner=? AND method=? AND request_id=?",
+                             (json.dumps(state), time.time(), owner, method, request_id))
+            if row.rowcount != 1:
+                raise ValueError("云端操作回执无法确认，请刷新核对")
             if preferences is not None:
                 self._save_preferences(db, *preferences)
                 return self._preferences_snapshot(db, preferences[0])

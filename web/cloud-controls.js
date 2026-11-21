@@ -179,7 +179,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
         }
       }
       if(error.official && kind==="follow"){
-        if(!popup || version!==popupVersion){
+        if(!popup && version===popupVersion){
           const target=[...document.querySelectorAll('[data-cloud-kind="follow"][data-cloud-id]')].find(button=>button.dataset.cloudId===id && button.getClientRects().length);
           if(target){editor(target,kind,id,get(kind,id));version=popupVersion;}
         }
