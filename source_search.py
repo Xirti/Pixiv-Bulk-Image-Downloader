@@ -150,7 +150,7 @@ class SourceSearch:
             if not isinstance(action, str) or action not in {"save", "clear", "reset-guest", "remove-key"}:
                 raise SourceSearchError("搜图设置操作无效")
             if data.get("action") == "clear":
-                active = self.jobs.get(self.active)
+                active = self._job(self.active)
                 if active and active["state"] in {"queued", "searching", "verification"}:
                     raise SourceSearchError("请先完成或取消当前搜图，再清除缓存", 409)
                 self.cache.clear()
@@ -194,26 +194,32 @@ class SourceSearch:
             self.settings_error = ""
             return self.settings()
 
+    def _job(self, identity):
+        # Call under self.lock before deciding whether an operation still owns a task.
+        job = self.jobs.get(identity)
+        if job is not None and time.monotonic() - job["created"] > 600:
+            if job["state"] in {"queued", "searching", "verification"}:
+                self._fail(job, "查询已超时，请关闭官网窗口后重试")
+            elif job["browserFallback"]:
+                job.update(image=b"", browserFallback=False, message="API 验证任务已过期，请重新查询")
+        return job
+
     def snapshot(self, identity):
         with self.lock:
-            job = self.jobs.get(identity)
+            job = self._job(identity)
             if job is None:
                 raise SourceSearchError("搜图记录已过期，请重新查询", 404)
-            if job["browserFallback"] and time.monotonic() - job["created"] > 600:
-                job.update(image=b"", browserFallback=False, message="API 验证任务已过期，请重新查询")
-            if job["state"] in {"queued", "searching", "verification"}:
-                if time.monotonic() - job["created"] > 600:
-                    self._fail(job, "查询已超时，请关闭官网窗口后重试")
-                elif job["browser"] and identity == self.active and self.process is not None and self.process.poll() is not None:
-                    backend = job.get("browserHandoff")
-                    if backend is None:
-                        self._fail(job, "官网窗口未能完成查询，请重试")
-                    else:
-                        try:
-                            self._open_browser(job, backend)
-                        except SourceSearchError:
-                            # The launch failure already belongs to this polled job.
-                            pass
+            if (job["state"] in {"queued", "searching", "verification"} and job["browser"]
+                    and identity == self.active and self.process is not None and self.process.poll() is not None):
+                backend = job.get("browserHandoff")
+                if backend is None:
+                    self._fail(job, "官网窗口未能完成查询，请重试")
+                else:
+                    try:
+                        self._open_browser(job, backend)
+                    except SourceSearchError:
+                        # The launch failure already belongs to this polled job.
+                        pass
             return {**{key: job[key] for key in
                        ("id", "mode", "state", "message", "candidates", "quota", "cached", "browserFallback")},
                     "resultEpoch": job["epoch"], "cacheEpoch": self.cache_epoch}
@@ -244,7 +250,7 @@ class SourceSearch:
                     if received["hash"] != digest or received["mode"] != mode:
                         raise SourceSearchError("搜图请求编号已用于其他图片或方式", 409)
                     return self.snapshot(received["id"])
-            old = self.jobs.get(self.active)
+            old = self._job(self.active)
             if old and old["state"] in {"queued", "searching", "verification"}:
                 if old["hash"] != digest or old["mode"] != mode:
                     raise SourceSearchError("已有搜图进行中，请先取消或等待", 409)
@@ -317,20 +323,17 @@ class SourceSearch:
     def continue_api(self, identity, backend):
         with self.lock:
             self._check_open()
-            job = self.jobs.get(identity)
+            job = self._job(identity)
             if not job or job["mode"] != "key" or not (job["browserFallback"] or job["browser"]) or not job["image"]:
                 raise SourceSearchError("API 验证任务已过期，请重新选择图片查询", 409)
             if job["epoch"] != self.epoch:
                 self._fail(job, "API 设置已修改，请重新查询")
                 raise SourceSearchError("API 设置已修改，请重新查询", 409)
-            active = self.jobs.get(self.active)
+            active = self._job(self.active)
             if active and active["id"] != identity and active["state"] in {"queued", "searching", "verification"}:
                 raise SourceSearchError("请先完成或取消当前查询", 409)
             if job["browser"] and job["state"] in {"searching", "verification"}:
                 return self.snapshot(identity)
-            if time.monotonic() - job["created"] > 600:
-                job["image"] = b""
-                raise SourceSearchError("API 验证任务已过期，请重新查询", 409)
             job.update(browser=True, state="verification", browserFallback=False, awaitingResponse=False,
                        message="API 网页验证中，请在窗口完成验证后继续 API 查询")
             self.active = identity
@@ -341,7 +344,7 @@ class SourceSearch:
     def open_login(self, backend):
         with self.lock:
             self._check_open()
-            active = self.jobs.get(self.active)
+            active = self._job(self.active)
             if active and active["state"] in {"queued", "searching", "verification"}:
                 if active["mode"] == "login":
                     return self.snapshot(active["id"])
@@ -363,7 +366,7 @@ class SourceSearch:
 
     def cancel(self, identity):
         with self.lock:
-            job = self.jobs.get(identity)
+            job = self._job(identity)
             if job and job["state"] not in {"done", "error", "cancelled"}:
                 job.update(state="cancelled", awaitingResponse=False, image=b"", message="已取消查询；已发出的请求可能仍计入额度")
             return {"ok": True, "job": self.snapshot(identity) if job else None}
@@ -392,7 +395,7 @@ class SourceSearch:
             request = self._api_request(job, key)
             opener = self._opener()
             with self.lock:
-                if self.jobs.get(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
+                if self._job(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
                     return
                 if job["epoch"] != self.epoch:
                     self._fail(job, "搜图设置已修改，请重新查询")
@@ -427,7 +430,7 @@ class SourceSearch:
 
     def _complete(self, job, candidates, quota):
         with self.lock:
-            if self.jobs.get(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
+            if self._job(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
                 return
             if job["epoch"] != self.epoch:
                 self._fail(job, "搜图设置已修改，请重新查询")
@@ -462,7 +465,7 @@ class SourceSearch:
     def browser(self, identity, secret, data):
         with self.lock:
             self._check_open()
-            job = self.jobs.get(identity)
+            job = self._job(identity)
             if job is None or not secret.isascii() or not secrets.compare_digest(job["secret"], secret) or not job["browser"]:
                 raise SourceSearchError("官网窗口授权无效", 403)
             action = data.get("action")
@@ -495,7 +498,7 @@ class SourceSearch:
                 request = self._api_request(job, key)
                 return {"url": request.full_url, "body": base64.b64encode(request.data).decode(), "contentType": request.get_header("Content-type")}
             if action == "poll":
-                active = self.jobs.get(self.active)
+                active = self._job(self.active)
                 if active and active["id"] != identity and active["browser"] and active["state"] in {"queued", "searching", "verification"}:
                     return {"state": job["state"], "next": {"id": active["id"], "secret": active["secret"]}}
                 return {"state": job["state"]}

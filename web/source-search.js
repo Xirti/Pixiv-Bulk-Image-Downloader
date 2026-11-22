@@ -128,7 +128,8 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     message(job.message,job.state==="error");render();changed();
   }
   function poll(revision){
-    const path=job?.id?`/api/source-search/job?id=${encodeURIComponent(job.id)}`
+    const id=job?.id;
+    const path=id?`/api/source-search/job?id=${encodeURIComponent(id)}`
       : viewReceipt?.unconfirmed?receiptPath(viewReceipt.id):null;
     if(revision!==sequence || !path || viewReceipt?.pending)return Promise.resolve();
     if(polling?.revision===revision)return polling.promise;
@@ -140,6 +141,13 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
       if(busy)timer=setTimeout(()=>void poll(revision),1500);
     }).catch(error=>{
       if(revision!==sequence)return;
+      if(error.status===404 && id && job?.id===id){
+        if(lastReceipt?.result?.id===id)lastReceipt=null;
+        if(viewReceipt?.result?.id===id)viewReceipt=null;
+        job=null;busy=false;
+        message(error.message,true);render();changed();
+        return;
+      }
       message(`${error.message}。可点击「读取状态」重试，查询不会重复提交。`,true);controls();
     }).finally(()=>{if(polling===owner)polling=null;});
     return owner.promise;
