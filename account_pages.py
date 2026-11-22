@@ -311,11 +311,23 @@ class AccountCache:
             current, _ = self._discovery_current(db, owner, method, ["discovery-current", *descriptor])
             return current.batch if current else ""
 
+    def bind_default_snapshot(self, owner, method, pointer, held, *, revision):
+        """Select and pin under the same SQLite writer reservation used by retirement."""
+        with self.lock, closing(self._connect()) as db:
+            self._begin_display_cache(db, owner, method, write=True, revision=revision)
+            current, _ = self._current_display_snapshot(db, owner, method, pointer)
+            if current is None:
+                return ""
+            kind = "discovery" if pointer[0] == "discovery-current" else "popularity"
+            held.enter_context(self.pin_snapshot(owner, method, kind, current.batch))
+            return current.batch
+
     @staticmethod
     def _decode_discovery_header(payload, batch):
         try:
             feed = json.loads(payload)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as error:
+            logging.getLogger("moku.http").warning("Invalid discovery snapshot header for %s: %s", batch, error)
             return None
         if not isinstance(feed, dict) or feed.get("batch") != batch:
             return None
@@ -370,6 +382,12 @@ class AccountCache:
         return (paged if (paged.usable, paged.order) >= (legacy.usable, legacy.order) else legacy), legacy.batch
 
     @classmethod
+    def _current_display_snapshot(cls, db, owner, method, pointer):
+        if pointer[0] == "discovery-current":
+            return cls._discovery_current(db, owner, method, pointer)
+        return cls._snapshot_pointer(db, owner, method, pointer, "popularity-index"), None
+
+    @classmethod
     def _begin_display_cache(cls, db, owner, method, *, write=False, revision=None, exclusive=False):
         db.execute("BEGIN EXCLUSIVE" if exclusive else "BEGIN IMMEDIATE" if write else "BEGIN")
         cls._require_display_ready(db, owner, method)
@@ -397,11 +415,7 @@ class AccountCache:
             self._begin_display_cache(db, owner, method, write=True, revision=revision)
             last = db.execute("SELECT CAST(payload AS INTEGER) FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, _DISPLAY_ORDER_KEY)).fetchone()
-            legacy_batch = None
-            if pointer[0] == "discovery-current":
-                current, legacy_batch = self._discovery_current(db, owner, method, pointer)
-            else:
-                current = self._snapshot_pointer(db, owner, method, pointer, "popularity-index")
+            current, legacy_batch = self._current_display_snapshot(db, owner, method, pointer)
             order = int(max(time.time() * 1000, last[0] if last else 0, current.order if current else 0)) + 1
             db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", (owner, method, _DISPLAY_ORDER_KEY, str(order)))
             return order, legacy_batch

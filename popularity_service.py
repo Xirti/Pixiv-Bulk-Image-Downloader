@@ -201,8 +201,8 @@ class PopularityService:
             current_key = ["popularity-current", *descriptor]
             requested_index = index
             if not index and not refresh:
-                index = cache.read(owner, method, current_key) or ""
-            if index:
+                index = cache.bind_default_snapshot(owner, method, current_key, held, revision=revision)
+            elif index:
                 held.enter_context(cache.pin_snapshot(owner, method, "popularity", index))
             with self.guard:
                 warm = self.jobs.get((owner, method, index))

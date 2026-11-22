@@ -281,8 +281,9 @@ class DiscoveryService:
             cache = self.pages.saved_cache
             revision = cache.display_revision(owner, method)
             current_key = ["discovery-current",*descriptor]
-            if not batch and not refresh:batch = cache.discovery_batch(owner, method, descriptor)
-            if batch and not refresh:
+            if not batch and not refresh:
+                batch = cache.bind_default_snapshot(owner, method, current_key, held, revision=revision)
+            elif batch and not refresh:
                 held.enter_context(cache.pin_snapshot(owner, method, "discovery", batch))
             key = (owner,method,batch)
             with self._guard:stored = self._feeds.get(key)
