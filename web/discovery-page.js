@@ -92,13 +92,23 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(target.kind!=='following' && !preferences.autoLoadPages && !startedSources.has(sourceKey(target)))return false;
     return preferences[{ranking:'autoRanking',following:'autoFollowing',recommended:'autoRecommended'}[target.kind]];
   }
-  function due(target,result) {
-    if(!result)return true;
+  function refreshInterval(target,result) {
+    if(!result)return 60000;
     const created=result.created*1000;
     const now=Date.now();
-    if(target.kind==='following')return now<created || now-created>=Number(preferences.syncMinutes)*60000;
-    if(target.kind==='ranking')return (result.rankingWindow ?? rankingWindow(created))!==rankingWindow(now);
-    return japanDay(created)!==japanDay(now);
+    if(target.kind==='following')return now<created || now-created>=Number(preferences.syncMinutes)*60000 ? 60000 : null;
+    if(target.kind==='ranking'){
+      const window=rankingWindow(now);
+      if((result.rankingWindow ?? rankingWindow(created))!==window)return 60000;
+      // A dated Web response can still be from an earlier edition. Allow a
+      // bounded retry period without treating App or undated results as stale.
+      if(result.method!=='web' || !/^\d{8}$/.test(result.edition))return null;
+      const day=window*86400000;
+      const edition=new Date(day).toISOString().slice(0,10).replaceAll('-','');
+      const interval=30*60000;
+      return result.edition<edition && now-(day+3*3600000)<4*3600000 && now-created>=interval ? interval : null;
+    }
+    return japanDay(created)!==japanDay(now) ? 60000 : null;
   }
   function render(){
     preserveViewport(root,()=>{
@@ -347,9 +357,11 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
             if(result.cached===false)result=null;
             else applyPrepared(target,result);
           }
-          if(!network || !preferences || !automatic(target) || !due(target,result) && !followingDirty.has(key))continue;
+          if(!network || !preferences || !automatic(target))continue;
+          const interval=followingDirty.has(key) ? 60000 : refreshInterval(target,result);
+          if(interval===null)continue;
           const now=performance.now();
-          if(now-(attempts.get(key) ?? -Infinity)<60000)continue;
+          if(now-(attempts.get(key) ?? -Infinity)<interval)continue;
           attempts.set(key,now);
           result=await readPage(target,{background:'1',refresh:'1',batch:'',offset:'0'},{signal});
           if(signal.aborted || auth!==generation() || version!==sourceVersion(key))continue;

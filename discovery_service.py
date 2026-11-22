@@ -123,6 +123,10 @@ class DiscoveryService:
         # Official rankings publish at noon in Japan.
         return int((time.time() - 3 * 3600) // 86400)
 
+    def _check_ranking_window(self, feed):
+        if feed["window"] != self._window():
+            raise AccountError("ranking_changed", "榜单已进入新的更新窗口，请刷新后继续")
+
     def _new(self, kind, scope, mode, rank, method):
         paths = {}
         if method == "app":
@@ -152,12 +156,11 @@ class DiscoveryService:
         if ranking:
             if query.get("mode") != [feed["rankMode"]]:
                 raise AccountError("cursor", "榜种不符")
-            if feed["window"] != self._window():
-                raise AccountError("ranking_changed", "榜单已进入新的更新窗口，请刷新后继续")
+            self._check_ranking_window(feed)
         raw = self.pages.account().request("GET", path, check=lambda:self.pages.check(generation))
-        if ranking and feed["window"] != self._window():
+        if ranking:
             # The App response has no edition date to establish which window answered.
-            raise AccountError("ranking_changed", "榜单已进入新的更新窗口，请刷新后继续")
+            self._check_ranking_window(feed)
         if not isinstance(raw, dict) or not isinstance(raw.get("illusts"), list):
             raise AccountError("invalid_data", "发现作品列表格式异常")
         visited = feed.setdefault("visitedPaths", {}).setdefault(stream, [])
@@ -326,9 +329,10 @@ class DiscoveryService:
             with self.pages.publication(generation), self._guard:
                 if epoch != self._epoch:
                     raise AccountError("cache_cleared", "发现缓存已清除，请重新打开")
+                check_window = (lambda: self._check_ranking_window(feed)) if method == "app" and kind == "ranking" else None
                 try:
                     feed.update(cache.save_discovery(owner, method, feed, previous,
-                        revision=revision, current=current_key if not batch or refresh else None))
+                        revision=revision, current=current_key if not batch or refresh else None, check_window=check_window))
                 except AccountError as error:
                     if error.kind == "cache_changed":
                         self._feeds.pop(key, None)

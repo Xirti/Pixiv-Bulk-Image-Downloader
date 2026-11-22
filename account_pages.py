@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 from html.parser import HTMLParser
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -309,12 +310,40 @@ class AccountCache:
             return current.batch if current else ""
 
     @staticmethod
-    def _snapshot_pointer(db, owner, method, pointer, kind, *suffix):
+    def _decode_discovery_header(payload, batch):
+        try:
+            feed = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(feed, dict) or feed.get("batch") != batch:
+            return None
+        fields = {"kind": str, "scope": str, "mode": str, "rankMode": str, "edition": str,
+                  "window": int, "unavailable": int, "sourceCount": int, "stagnant": int,
+                  "paths": dict, "pending": dict, "_checkpoint": int}
+        if any(type(feed.get(name)) is not field_type for name, field_type in fields.items()) or feed["_checkpoint"] < 1:
+            return None
+        for value in (feed.get("created"), feed.get("publicationOrder", feed.get("created"))):
+            if type(value) not in (int, float) or isinstance(value, float) and not math.isfinite(value):
+                return None
+        if "_offsetCheckpoint" in feed and (type(feed["_offsetCheckpoint"]) is not int or
+                type(feed.get("_itemCount")) is not int or feed["_itemCount"] < 0):
+            return None
+        return feed
+
+    @classmethod
+    def _snapshot_pointer(cls, db, owner, method, pointer, kind, *suffix):
         row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
             (owner, method, json.dumps(pointer))).fetchone()
         if row is None:
             return None
         identity = json.loads(row[0])
+        if kind == "discovery-feed" and suffix:
+            row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, json.dumps([kind, identity, *suffix]))).fetchone()
+            feed = cls._decode_discovery_header(row[0], identity) if row else None
+            if feed is None:
+                return None
+            return DisplayPublication(feed.get("publicationOrder", feed["created"] * 1000), identity, feed.get("legacyBatch"))
         snapshot = db.execute(f"SELECT {_PUBLICATION_ORDER_SQL},json_extract(payload,'$.legacyBatch') "
             "FROM cached WHERE owner=? AND method=? AND key=?",
             (owner, method, json.dumps([kind, identity, *suffix]))).fetchone()
@@ -334,8 +363,8 @@ class AccountCache:
         return (paged if paged.order >= legacy.order else legacy), legacy.batch
 
     @classmethod
-    def _begin_display_cache(cls, db, owner, method, *, write=False, revision=None):
-        db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+    def _begin_display_cache(cls, db, owner, method, *, write=False, revision=None, exclusive=False):
+        db.execute("BEGIN EXCLUSIVE" if exclusive else "BEGIN IMMEDIATE" if write else "BEGIN")
         cls._require_display_ready(db, owner, method)
         if revision is not None and cls._display_revision(db, owner, method) != revision:
             raise AccountError("cache_cleared", "浏览缓存已更新，请重新打开页面")
@@ -386,7 +415,9 @@ class AccountCache:
                 feed = json.loads(payload)
                 feed["_legacy_rowid"] = rowid
                 return feed
-            feed = json.loads(row[0])
+            feed = self._decode_discovery_header(row[0], batch)
+            if feed is None:
+                return None
             if warm is not None and (warm.get("_checkpoint"), warm.get("_offsetCheckpoint")) == (
                     feed["_checkpoint"], feed.get("_offsetCheckpoint")):
                 return warm
@@ -417,10 +448,10 @@ class AccountCache:
                     feed["visitedPaths"].setdefault(stream, []).extend(paths)
             return feed
 
-    def save_discovery(self, owner, method, feed, previous, *, revision, current=None):
+    def save_discovery(self, owner, method, feed, previous, *, revision, current=None, check_window=None):
         key = ["discovery-feed", feed["batch"]]
         if previous is not None and "_legacy_rowid" in previous:
-            return self._save_legacy_discovery(owner, method, key, feed, previous["_legacy_rowid"], revision)
+            return self._save_legacy_discovery(owner, method, key, feed, previous["_legacy_rowid"], revision, check_window)
         header = json.dumps([*key, "pages"])
         checkpoint = previous["_checkpoint"] if previous else 0
         prefix = previous
@@ -436,7 +467,8 @@ class AccountCache:
         metadata["_itemCount"] = len(feed["items"])
         rows = [(owner, method, header, json.dumps(metadata, ensure_ascii=False))]
         with self.lock, closing(self._connect()) as db, db:
-            self._begin_display_cache(db, owner, method, write=True, revision=revision)
+            # Acquire the commit lock before checking an App ranking's window.
+            self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=check_window is not None)
             if current is not None:
                 latest, legacy_batch = self._discovery_current(db, owner, method, current)
                 if feed["legacyBatch"] == legacy_batch and (latest is None or feed["publicationOrder"] > latest.order):
@@ -475,22 +507,26 @@ class AccountCache:
             # UPSERT avoids REPLACE's delete trigger when recursive_triggers is enabled.
             db.executemany("INSERT INTO cached VALUES(?,?,?,?) ON CONFLICT(owner,method,key) DO UPDATE SET payload=excluded.payload",
                 rows)
+            if check_window is not None:
+                check_window()
         return {"_checkpoint": checkpoint + 1, "_offsetCheckpoint": checkpoint + 1,
                 "_itemCount": metadata["_itemCount"]}
 
-    def _save_legacy_discovery(self, owner, method, key, feed, previous_rowid, revision):
+    def _save_legacy_discovery(self, owner, method, key, feed, previous_rowid, revision, check_window):
         # Continue an existing old-format batch in place so a downgraded
         # application can resume it too. Refreshes create new paged batches.
         snapshot = dict(feed, seen=sorted(feed["seen"]))
         snapshot.pop("_legacy_rowid")
         with self.lock, closing(self._connect()) as db, db:
-            self._begin_display_cache(db, owner, method, write=True, revision=revision)
+            self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=check_window is not None)
             stored = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, json.dumps(key))).fetchone()
             if stored != (previous_rowid,):
                 raise AccountError("cache_changed", "发现批次已改变，请重试")
             inserted = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
                 (owner, method, json.dumps(key), json.dumps(snapshot, ensure_ascii=False)))
+            if check_window is not None:
+                check_window()
             return {"_legacy_rowid": inserted.lastrowid}
 
     def save(self, owner, method, key, value, *, revision=None):
