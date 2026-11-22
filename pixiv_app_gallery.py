@@ -1,5 +1,6 @@
 """App API boundary: normalized artworks, bounded search snapshots and artist reads."""
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import copy
 import html
@@ -134,6 +135,7 @@ class SearchSnapshot:
     index: SearchResultIndex = field(default_factory=SearchResultIndex)
     lock: threading.Lock = field(default_factory=threading.Lock)
     touched: float = field(default_factory=time.monotonic)
+    readers: int = 0
     invalid: bool = False
 
 
@@ -154,6 +156,23 @@ class AppGallery:
             self.sessions.clear()
             self.candidate_paths.clear()
             self.artist_reads.clear()
+
+    def _prune_search_sessions(self):
+        now = time.monotonic()
+        for key, session in list(self.sessions.items()):
+            if not session.readers and (len(self.sessions) > 8 or now - session.touched > 1800):
+                del self.sessions[key]
+                session.index.close()
+
+    @contextmanager
+    def _release_search_session(self, session):
+        try:
+            yield
+        finally:
+            with self.lock:
+                session.readers -= 1
+                session.touched = time.monotonic()
+                self._prune_search_sessions()
 
     def get(self, path, generation, cancel_event=None):
         self.check(generation, cancel_event)
@@ -272,11 +291,9 @@ class AppGallery:
                         sources.append({'next':'/v1/search/illust?'+urlencode(params),'bound':None})
                 session=SearchSnapshot(sources);self.sessions[key]=session
             self.sessions.move_to_end(key)
-            for old_key,old in list(self.sessions.items()):
-                if old_key!=key and (len(self.sessions)>8 or time.monotonic()-old.touched>1800):
-                    old.invalid=True;del self.sessions[old_key]
-                    if old.lock.acquire(blocking=False):old.index.close();old.lock.release()
-        with checked_lock(session.lock,lambda:self.check(generation,cancel_event)):
+            session.readers += 1
+            self._prune_search_sessions()
+        with self._release_search_session(session), checked_lock(session.lock,lambda:self.check(generation,cancel_event)):
             try:
                 self.check(generation,cancel_event)
                 if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
