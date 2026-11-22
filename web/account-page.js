@@ -333,6 +333,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
 
     peopleRoot.hidden=!p?.connected || !["following","followers"].includes(state.view);
     grid.hidden=!p?.connected || state.view!=="bookmarks";
+    globalThis.mediaBudget?.schedule();
     if(!peopleRoot.hidden && (renderedPeople!==data?.people || peopleKey!==pageKey())){
     renderedPeople=data?.people;peopleKey=pageKey();avatars.park(peopleRoot);
     peopleRoot.innerHTML=(data?.people || []).map((person,index)=>`<article class="account-person" data-person="${index}"><a class="account-person-avatar" href="#artist/${esc(person.id)}" aria-label="${esc(person.name)}"><span class="update-dot" hidden aria-hidden="true"></span>${person.avatar?`<img data-gallery-src="${esc(person.avatar)}" data-preview-artwork="avatar:${esc(person.id)}" alt="" loading="lazy" decoding="async">`:'<span aria-hidden="true">人</span>'}</a><div class="account-person-info"><a class="account-person-name" href="#artist/${esc(person.id)}">${esc(person.name)}</a><span class="account-person-uid">UID ${esc(person.id)}<span data-person-following ${state.view==="followers"&&person.following?"":"hidden"}> · 互相关注</span></span><p class="account-person-bio">${person.bioLoaded?esc(person.bio || "暂未填写简介"):'<button type="button" data-person-bio>查看简介</button>'}</p>${person.latestObserved?`<span class="account-person-update" title="已读取范围内的最新作品">最新观察 · ${esc(person.latestObserved.slice(0,10))}</span>`:""}</div></article>`).join("");

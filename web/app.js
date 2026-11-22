@@ -2288,6 +2288,7 @@ function updateFloatingChrome() {
 
 // Keep page state intact while releasing media owned by inactive views.
 function syncPreviewResources({releaseIdle = null} = {}) {
+  mediaBudget.schedule();
   const surface = activeScrollSurface();
   markAuthorWorksViewed();
   const normalVisible = detailStageVisible(surface, false);
