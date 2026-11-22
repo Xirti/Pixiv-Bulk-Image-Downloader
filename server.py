@@ -3549,6 +3549,8 @@ class Handler(SimpleHTTPRequestHandler):
                 query = urllib.parse.parse_qs(request.query)
                 if request.path == "/api/source-search/settings":
                     return self.send_json(SOURCE_SEARCH.settings())
+                if request.path == "/api/source-search/cache-state":
+                    return self.send_json(SOURCE_SEARCH.cache_state())
                 if request.path == "/api/source-search/job":
                     return self.send_json(SOURCE_SEARCH.snapshot(query.get("id", [""])[0]))
                 if request.path == "/api/source-search/receipt":

@@ -87,7 +87,38 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     find("[data-source-result-count]").textContent=job?.state==="done"?`共 ${results.length} 条来源 · ${results.filter(row=>row.pixivIds.length).length} 条含 Pixiv`:"";
     controls();
   }
+  async function readCacheEpoch(signal){
+    const {cacheEpoch:epoch}=await request("/api/source-search/cache-state",{signal});
+    if(!Number.isSafeInteger(epoch) || epoch<0)throw new Error("搜图缓存状态不可读");
+    return epoch;
+  }
+
+  function observeCacheEpoch(epoch){
+    if(!(epoch>cacheEpoch))return;
+    cacheEpoch=epoch;
+    if(lastReceipt?.result?.resultEpoch<epoch){
+      if(viewReceipt===lastReceipt)viewReceipt=null;
+      lastReceipt=null;
+    }
+    if(job?.resultEpoch<epoch){
+      clearTimeout(timer);clearTimeout(clickTimer);timer=clickTimer=null;job=null;
+      busy=Boolean(viewReceipt?.pending);
+    }
+    images.clear();
+  }
+
   function apply(data){
+    observeCacheEpoch(data.cacheEpoch);
+    if(data.resultEpoch<cacheEpoch){
+      if(viewReceipt?.result===data){
+        if(lastReceipt===viewReceipt)lastReceipt=null;
+        viewReceipt=null;
+      }
+      if(!job)busy=Boolean(viewReceipt?.pending);
+      if(!job)message("搜图缓存已清除，请重新查询");
+      render();changed();
+      return;
+    }
     if(viewReceipt){
       viewReceipt.result=data;
       viewReceipt.unconfirmed=false;
@@ -169,6 +200,7 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
       if(reading.version!==settingsVersion)return false;
       const applyMode=!settingsLoaded && !queryModeChosen;
       configuration=value;
+      observeCacheEpoch(value.cacheEpoch);
       settingsLoaded=true;
       showSettings({applyMode});
       render();
@@ -187,6 +219,20 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     });
     return reading.promise;
   }
+  async function clearCache(data){
+    const before=await readCacheEpoch();
+    try{
+      return await post("settings",data);
+    }catch(error){
+      if(error.status && error.status<500)throw error;
+      let after;
+      try{after=await readCacheEpoch();}
+      catch(recovery){throw new AggregateError([error,recovery],error.message+"；无法核对搜图缓存状态："+recovery.message);}
+      if(after<=before)throw error;
+      return {cacheEpoch:after};
+    }
+  }
+
   async function saveSettings(action){
     if(settingsWrite)return;
     settingsVersion++;
@@ -196,18 +242,18 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     try{
       const data={action,mode:setting("[data-source-setting-mode]").value};
       if(action==="save" && key.value.trim())data.key=key.value.trim();
-      settingsWrite=post("settings",data);
-      configuration=await settingsWrite;
-      settingsLoaded=true;
-      queryModeChosen=false;
-      settingsModeChosen=false;
-      key.value="";
-      showSettings({applyMode:true});
-      render();
-      if(action==="clear"){
-        clearTimeout(timer);clearTimeout(clickTimer);sequence++;cacheEpoch++;lastReceipt=viewReceipt=null;job=null;busy=false;render();changed();
-        images.clear();
+      settingsWrite=action==="clear"?clearCache(data):post("settings",data);
+      const saved=await settingsWrite;
+      observeCacheEpoch(saved.cacheEpoch);
+      if(action!=="clear"){
+        configuration=saved;
+        settingsLoaded=true;
+        queryModeChosen=false;
+        settingsModeChosen=false;
+        key.value="";
+        showSettings({applyMode:true});
       }
+      render();changed();
       status.textContent=action==="clear"?"搜图结果缓存已清除":action==="reset-guest"?"游客会话已重置":action==="remove-key"?"API Key 已移除":"搜图设置已保存";
     }catch(error){status.textContent=error.message;}
     finally{
@@ -321,8 +367,14 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     setMaskSensitive(enabled){if(maskSensitive===enabled)return;maskSensitive=enabled;revealed.clear();clearTimeout(clickTimer);render();},
     async open(){if(!settingsLoaded)await loadSettings();controls();},loadSettings,
     snapshot:()=>({job,imageUrl,name:find("[data-source-file-name]").textContent,epoch:cacheEpoch,submission:viewReceipt?.id ?? null}),
-    restore(state){
-      clearTimeout(timer);clearTimeout(clickTimer);sequence++;
+    async restore(state,{signal}={}){
+      clearTimeout(timer);clearTimeout(clickTimer);const revision=++sequence;
+      if(state?.job || state?.submission){
+        const epoch=await readCacheEpoch(signal);
+        signal?.throwIfAborted();
+        if(revision!==sequence)return;
+        observeCacheEpoch(epoch);
+      }
       const savedImage=state?.imageUrl || "",expired=Boolean(savedImage) && !urls.includes(savedImage);
       if(imageUrl!==savedImage || expired){file=null;find("[data-source-file]").value="";}
       viewReceipt=lastReceipt && state?.epoch===cacheEpoch && state.submission===lastReceipt.id?lastReceipt:null;

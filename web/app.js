@@ -2610,7 +2610,7 @@ async function restorePageState(state,scope) {
   if(state.baseView==="history")openLibrary(state.baseView,{restoring:true});
   if(state.baseView==="account")await scope.read(()=>accountView.open({...state.account,scroll:state.scroll.account}));
   if(state.baseView==="discovery"){setWorkspace("discovery");await scope.read(()=>discoveryView.open({restore:state.discovery}));}
-  if(state.baseView==="reverse")sourceSearchView.restore(state.reverse);
+  if(state.baseView==="reverse")await scope.read(signal=>sourceSearchView.restore(state.reverse,{signal}));
   workspaceReturn=state.workspaceReturn;
   contextReturns={...state.contextReturns};
   if(state.view==="viewer"){

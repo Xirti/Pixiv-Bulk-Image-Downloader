@@ -112,6 +112,7 @@ class SourceSearch:
         self.website_login = "unknown"
         self.active = None
         self.epoch = 0
+        self.cache_epoch = 0
         self.requests = []
         self.short_limit = 4
         self.settings_path = directory / "settings.json"
@@ -135,7 +136,12 @@ class SourceSearch:
 
     def settings(self):
         with self.lock:
-            return {"mode": self.mode, "keyConfigured": bool(self.vault.read()), "websiteLogin": self.website_login, "error": self.settings_error}
+            return {"mode": self.mode, "keyConfigured": bool(self.vault.read()), "websiteLogin": self.website_login,
+                    "error": self.settings_error, "cacheEpoch": self.cache_epoch}
+
+    def cache_state(self):
+        with self.lock:
+            return {"cacheEpoch": self.cache_epoch}
 
     def configure(self, data):
         with self.lock:
@@ -155,7 +161,8 @@ class SourceSearch:
                     if job["state"] == "done":
                         job["message"] = "搜图缓存已清除，请重新查询"
                 self.epoch += 1
-                return self.settings()
+                self.cache_epoch = self.epoch
+                return self.cache_state()
             if data.get("action") == "reset-guest":
                 if self.process is not None and self.process.poll() is None:
                     raise SourceSearchError("请先关闭官网窗口，再重置会话", 409)
@@ -207,7 +214,9 @@ class SourceSearch:
                         except SourceSearchError:
                             # The launch failure already belongs to this polled job.
                             pass
-            return {key: job[key] for key in ("id", "mode", "state", "message", "candidates", "quota", "cached", "browserFallback")}
+            return {**{key: job[key] for key in
+                       ("id", "mode", "state", "message", "candidates", "quota", "cached", "browserFallback")},
+                    "resultEpoch": job["epoch"], "cacheEpoch": self.cache_epoch}
 
     def _job_for_receipt(self, request_id):
         if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", request_id):
