@@ -1547,13 +1547,21 @@ class AccountPages:
                     except ValueError:
                         continue
                     head=max(head,canonical)
-                    if cutoff and canonical<=cutoff:reached=True;continue
+                    if cutoff and canonical<cutoff:reached=True;continue
                     page_dates[author]=max(page_dates.get(author,""),canonical)
                 cursor=next_path if not initial and not reached and works else None
                 visited.append(path)
                 with self.cache_publication(generation, owner, clear_revision=clear_revision):
                     if self.saved_cache.read(owner, method, scan_key) != expected:
                         break
+                    # A timestamp can span authors and pages. Revisit ties, skipping
+                    # authors already observed at that time in this feed's scope.
+                    boundary = [author for author, stamp in page_dates.items() if stamp == cutoff]
+                    if boundary:
+                        known = self.visits.status(owner, feed_scope, authors=boundary)
+                        for author, marker in known.items():
+                            if marker["latestObserved"] >= cutoff:
+                                del page_dates[author]
                     self.visits.observe(owner,page_dates,scope=feed_scope,initial=initial)
                     expected = {"checkpoint":checkpoint if cursor else max(head,checkpoint), "cursor":cursor,
                         "cutoff":cutoff, "head":head if cursor else "", "visitedPaths":visited.copy() if cursor else []}

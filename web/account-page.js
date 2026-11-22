@@ -71,7 +71,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     })();
   }
   function stopBackground(){
-    const pendingUpdates=checkingUpdates;
+    const pendingUpdates=checkingUpdates?.task;
     stopUpdates();
     backgroundRevision++;backgroundController.abort();backgroundController=new AbortController();nextReads.clear();
     // Callers are stopping work; its original caller owns any reported failure.
@@ -202,8 +202,14 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     if(dot)dot.hidden=!enabled || !Object.values(updates[state.scope]).some(row=>row.isNew);
     peopleRoot.querySelectorAll('[data-person]').forEach(card=>{
       const person=data?.people?.[Number(card.dataset.person)];if(!person)return;
-      const marker=updates[state.scope][person.id] || person;
-      card.querySelector('.update-dot').hidden=!enabled || !marker.isNew;
+      const observed=updates[state.scope][person.id];
+      const marker=observed && observed.latestObserved>=(person.latestObserved || '') ? observed : person;
+      const sameObservation=observed && observed.latestObserved===person.latestObserved;
+      const unread=marker.isNew && (!sameObservation || person.isNew) && marker.latestObserved>(acknowledged.get(person.id) || '');
+      card.querySelector('.update-dot').hidden=!enabled || !unread;
+      const date=card.querySelector('.account-person-update');
+      date.hidden=!marker.latestObserved;
+      date.textContent=marker.latestObserved?`最新观察 · ${marker.latestObserved.slice(0,10)}`:'';
       card.querySelector('[data-person-following]').hidden=state.view!=="followers" || !person.following;
     });
   }
@@ -214,9 +220,13 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   }
   function checkUpdates({network=true,continuing=false}={}){
     if(!updatePreferences.detect || !signedIn())return Promise.resolve({hasMore:false});
-    if(checkingUpdates)return checkingUpdates;
     const signal=updateController.signal,auth=generation();
     const valid=()=>!signal.aborted && updatePreferences.detect && signedIn() && generation()===auth;
+    if(checkingUpdates){
+      const pending=checkingUpdates;
+      if(!network || pending.network && (continuing || !pending.continuing))return pending.task;
+      return pending.task.then(()=>valid()?checkUpdates({network,continuing}):{hasMore:false});
+    }
     let task;task=(async()=>{
       let combined=profile?.method==="web";
       const failures=[];
@@ -249,8 +259,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       }
       if(failures.length)report(`新作检查未完成：${failures.join('；')}`);
       return {hasMore:pendingUpdateScopes.size>0};
-    })().finally(()=>{if(checkingUpdates===task)checkingUpdates=null;});
-    checkingUpdates=task;return task;
+    })().finally(()=>{if(checkingUpdates?.task===task)checkingUpdates=null;});
+    checkingUpdates={task,network,continuing};return task;
   }
   async function acknowledge(authors,proofs){
     const version=backgroundRevision,auth=generation();
@@ -270,8 +280,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         const stamp=accepted.get(person.id);
         if(stamp!==undefined && person.latestObserved<=stamp)person.isNew=false;
       }
+      syncPeopleStatus();
     }
-    syncPeopleStatus();
   }
   function seenWorks(items){
     if(!updatePreferences.detect)return Promise.resolve();
@@ -361,7 +371,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     globalThis.mediaBudget?.schedule();
     if(!peopleRoot.hidden && (renderedPeople!==data?.people || peopleKey!==pageKey())){
     renderedPeople=data?.people;peopleKey=pageKey();avatars.park(peopleRoot);
-    peopleRoot.innerHTML=(data?.people || []).map((person,index)=>`<article class="account-person" data-person="${index}"><a class="account-person-avatar" href="#artist/${esc(person.id)}" aria-label="${esc(person.name)}"><span class="update-dot" hidden aria-hidden="true"></span>${person.avatar?`<img data-gallery-src="${esc(person.avatar)}" data-preview-artwork="avatar:${esc(person.id)}" alt="" loading="lazy" decoding="async">`:'<span aria-hidden="true">人</span>'}</a><div class="account-person-info"><a class="account-person-name" href="#artist/${esc(person.id)}">${esc(person.name)}</a><span class="account-person-uid">UID ${esc(person.id)}<span data-person-following ${state.view==="followers"&&person.following?"":"hidden"}> · 互相关注</span></span><p class="account-person-bio">${person.bioLoaded?esc(person.bio || "暂未填写简介"):'<button type="button" data-person-bio>查看简介</button>'}</p>${person.latestObserved?`<span class="account-person-update" title="已读取范围内的最新作品">最新观察 · ${esc(person.latestObserved.slice(0,10))}</span>`:""}</div></article>`).join("");
+    peopleRoot.innerHTML=(data?.people || []).map((person,index)=>`<article class="account-person" data-person="${index}"><a class="account-person-avatar" href="#artist/${esc(person.id)}" aria-label="${esc(person.name)}"><span class="update-dot" hidden aria-hidden="true"></span>${person.avatar?`<img data-gallery-src="${esc(person.avatar)}" data-preview-artwork="avatar:${esc(person.id)}" alt="" loading="lazy" decoding="async">`:'<span aria-hidden="true">人</span>'}</a><div class="account-person-info"><a class="account-person-name" href="#artist/${esc(person.id)}">${esc(person.name)}</a><span class="account-person-uid">UID ${esc(person.id)}<span data-person-following ${state.view==="followers"&&person.following?"":"hidden"}> · 互相关注</span></span><p class="account-person-bio">${person.bioLoaded?esc(person.bio || "暂未填写简介"):'<button type="button" data-person-bio>查看简介</button>'}</p><span class="account-person-update" title="已读取范围内的最新作品" hidden></span></div></article>`).join("");
     if(!peopleRoot.hidden && !pending && !error && !(data?.people?.length))peopleRoot.innerHTML=`<p class="account-empty">${state.view==="followers"?"目前还没有粉丝。":"这个范围内还没有关注的作者。"}</p>`;
     avatars.mount(peopleRoot,"account-people");installImages(peopleRoot);
     peopleRoot.querySelectorAll("[data-person]").forEach(row=>{
