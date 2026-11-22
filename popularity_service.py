@@ -10,6 +10,7 @@ import uuid
 import weakref
 
 from account_pages import source_body
+from discovery_service import recommendation_size
 from pixiv_account import AccountError
 from pixiv_adapter import (PixivPolicyError, valid_pixiv_id, normalize_search_item,
     build_user_profile_all_url, build_user_profile_works_url,CONTENT_MODES,matches_content_mode)
@@ -72,6 +73,7 @@ class PopularityService:
             if source["kind"] != kind or source["mode"] != mode:
                 raise AccountError("source_changed", "推荐来源已改变，请重新选择排序")
             rows = [*source["items"], *[item for values in source["pending"].values() for item in values]]
+            job["sourceSize"] = len(rows)
             self._append(job, rows)
             job["collected"] = True
         else:
@@ -209,6 +211,10 @@ class PopularityService:
                 raise AccountError("cache_miss", "排序快照已清理，请重新准备")
             if job and job["descriptor"] != descriptor:
                 raise AccountError("source_changed", "排序快照与当前条件不符")
+            if job is not None and kind == "recommended" and not requested_index:
+                source = self.discovery.snapshot(batch, generation=generation, metadata_only=True)
+                if source is not None and recommendation_size(source) > job.get("sourceSize", -1):
+                    rowid, job = None, None
             needs_source = kind in {"ranking", "recommended"} and (
                 job is None or kind == "ranking" and not job["collected"])
             if needs_source:
@@ -274,5 +280,7 @@ class PopularityService:
                     "page": page, "pages": max(1, (total + 35) // 36) if job["ready"] else None,
                     "created": job["created"], "kind": kind, "limit": 500 if kind == "search" else None,
                     "authorizationGeneration": generation}
+            if "sourceSize" in job:
+                result["sourceSize"] = job["sourceSize"]
             self._check(generation, epoch)
             return result

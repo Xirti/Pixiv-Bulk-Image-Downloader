@@ -25,6 +25,11 @@ class DiscoveryInputError(ValueError):
     """Invalid caller parameters, distinct from upstream data/auth failures."""
 
 
+def recommendation_size(feed):
+    count = len(feed["items"]) if "items" in feed else feed["_itemCount"]
+    return count + sum(map(len, feed["pending"].values()))
+
+
 def normalize_web_rank(raw):
     # ranking.php has a different contract from search. Fixed non-adult ranking modes
     # plus its explicit visibility flags own this boundary; never fabricate search-policy fields.
@@ -73,16 +78,21 @@ class DiscoveryService:
             self._epoch += 1
             self._feeds.clear()
 
-    def snapshot(self, batch, *, generation):
+    def snapshot(self, batch, *, generation, metadata_only=False):
         owner, method = self.context(generation)
         with self._guard:
             stored = self._feeds.get((owner, method, batch))
             epoch = self._epoch
-        result = self.pages.saved_cache.read_discovery(owner, method, batch, warm=stored)
+        result = self.pages.saved_cache.read_discovery(owner, method, batch, warm=stored,
+            page=(0, 0, True) if metadata_only else None)
+        if isinstance(result, DiscoveryPage):
+            result = result.feed
         if result is not None and result is stored:
             result = copy.deepcopy(result)
         self._check(generation, epoch)
         if result is None:
+            if metadata_only:
+                return None
             raise AccountError("cache_miss", "原发现批次已清理，请刷新当前页面")
         return result
 
@@ -114,6 +124,8 @@ class DiscoveryService:
                 "created":feed["created"],"kind":feed["kind"],"scope":feed["scope"],"rankMode":feed["rankMode"],"authorizationGeneration":generation}
         if "publicationOrder" in feed:
             result["publicationOrder"] = feed["publicationOrder"]
+        if feed["kind"] == "recommended":
+            result["sourceSize"] = recommendation_size(feed)
         if feed["kind"] == "ranking" and method == "app":
             result["rankingWindow"] = feed["window"]
         return result

@@ -1576,6 +1576,13 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     activeSearchContext = resultContext;
     activeSearchFilters = requestedFilters;
     activeSearchSnapshotId = data.snapshotId || requestedSnapshotId;
+    if(["uid","tags"].includes(resultContext.kind)){
+      const key=gallerySortKey(),previous=galleryDefaultViews.get(key)?.source.snapshot;
+      if((manualRefresh || previous) && previous!==activeSearchSnapshotId){
+        galleryPopularViews.delete(key);
+        galleryPopularityJobs.set(key,{index:"",refresh:true});
+      }
+    }
     searchPageCache.remember(searchPageCache.key(resultTag,page,requestedFilters,activeSearchSnapshotId),data);
     items = Array.isArray(data.items) ? data.items : [];
     reconcileSelectedArtworkPreviews(items);
@@ -1913,25 +1920,38 @@ function restoreSortedView(saved){
   preserveViewport(window,()=>{artistPage.restore(saved.artist);restoreResultPage(saved.source);});
   void refreshDownloadedIndicators();
 }
-async function loadGalleryPopularity(page,{refresh=false,signal=null}={}){
+async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=false}={}){
   cancelGalleryPopularity();cancelSearchPrefetch();
   const task=searchLifecycle.beginSort(signal);
   galleryStopRequested=false;
   const account=lastKnownAuthorizationGeneration,uid=activeSearchContext.value,filters={...activeSearchFilters};
   const author=activeSearchContext.kind==="uid",key=gallerySortKey();
   if(refresh)galleryPopularityJobs.set(key,{index:"",refresh:true});
-  const queued=galleryPopularityJobs.get(key);
+  const queued=restoring?null:galleryPopularityJobs.get(key);
+  let requestedIndex=queued?queued.index:filters.popularityIndex || "";
   setGallerySort("popular",author?"正在准备作者作品元数据…":"正在准备搜索候选池 · 最多 500 件…");
   try{
-    const result=await readPopularityPage(requestAccount,{kind:author?"author":"search",uid:author?uid:"",query:author?"":activeTagQuery,fuzzy:String(Boolean(filters.fuzzy)),mode:filters.mode,workType:filters.workType,
+    const parameters={kind:author?"author":"search",uid:author?uid:"",query:author?"":activeTagQuery,fuzzy:String(Boolean(filters.fuzzy)),mode:filters.mode,workType:filters.workType,
       includeAi:String(filters.includeAi),startDate:filters.startDate || "",endDate:filters.endDate || "",page:String(page),
-      index:queued?queued.index:filters.popularityIndex || "",refresh:queued?.refresh?"1":"0"},{signal:task.signal,
+      index:requestedIndex,refresh:queued?.refresh?"1":"0"};
+    const events={signal:task.signal,
       progress:state=>{if(task.isCurrent()){
-        galleryPopularityJobs.set(key,{index:state.index,refresh:false});
+        requestedIndex=state.index;
+        if(!restoring)galleryPopularityJobs.set(key,{index:state.index,refresh:false});
         setGallerySort("popular",state.ready?`${author?"全部可见作品":"本次搜索候选池"} · ${state.total} 件`:`已读取 ${state.loaded} 件${state.counted?` · 已核对 ${state.counted} 件收藏数`:""}，正在准备…`);
-      }}});
+      }}};
+    let result;
+    try{
+      result=await readPopularityPage(requestAccount,parameters,events);
+    }catch(error){
+      if(restoring || page!==1 || !requestedIndex || error.errorKind!=="cache_miss" ||
+        task.signal.aborted || !task.isCurrent() || account!==lastKnownAuthorizationGeneration)throw error;
+      galleryPopularViews.delete(key);
+      galleryPopularityJobs.set(key,{index:"",refresh:true});
+      result=await readPopularityPage(requestAccount,{...parameters,index:"",refresh:"1"},events);
+    }
     if(!task.isCurrent() || account!==lastKnownAuthorizationGeneration)return false;
-    galleryPopularityJobs.delete(key);
+    if(!restoring)galleryPopularityJobs.delete(key);
     searchGeneration++;
     items=result.items;currentPage=result.page;pageNumbers=[1,result.pages];firstAvailablePage=1;preloadedThrough=result.pages;
     searchHasMore=false;searchOrderingPending=false;resultSelectionEnabled=true;
@@ -1939,7 +1959,7 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null}={}){
     searchLoadedAt=Date.now();reconcileSelectedArtworkPreviews(items);
     $("#count").textContent=`按收藏数排序 · ${author?"全部可见作品":"本次搜索候选池（最多 500 件）"} ${result.total} 件 · 第 ${currentPage}/${result.pages} 页`;
     render();renderPagination();setGallerySort("popular",`${author?"全部可见作品":"本次搜索候选池"} · ${result.total} 件`);
-    void refreshDownloadedIndicators();if(!searchPending)rememberGalleryView();queueNavigationRecord();return true;
+    void refreshDownloadedIndicators();if(!searchPending && !restoring)rememberGalleryView();queueNavigationRecord();return true;
   }catch(error){
     if(!task.signal.aborted && task.isCurrent())setGallerySort(activeSearchFilters.order==="popular"?"popular":"default",`${error.message} · 点击滑块右侧重试`);
     return false;
@@ -1977,7 +1997,7 @@ async function startGalleryLoad({restoring=false,refresh=false}={}){
   const intent=galleryIntent || {tag:activeTagQuery,page:1,filters:{...activeSearchFilters},returnTarget:contextReturns.gallery,preferenceKind:galleryPreferenceKind};
   const revision=navigationRevision,order=galleryDraftOrder;
   const key=galleryViewKey(intent.tag,intent.filters),saved=(order==="popular"?galleryPopularViews:galleryDefaultViews).get(key);
-  if(!refresh && saved && !galleryPopularityJobs.has(key)){
+  if(!refresh && saved && (order!=="popular" || !galleryPopularityJobs.has(key))){
     galleryIntent=null;
     restoreSortedView({...saved,source:{...saved.source,intent:null,linked:galleryLinkedEntry,draft:order,preferenceKind:galleryPreferenceKind}});
     syncSearchSortControl();queueNavigationRecord();return;
@@ -2551,7 +2571,7 @@ async function restorePageState(state,scope) {
   if(source.items===null && state.baseView==="gallery")restoreGalleryChoice(source);
   if(source.items===null && state.baseView==="gallery" && source.filters.order==="popular" && !source.intent){
     activeTagQuery=source.query;activeSearchContext={...source.context};activeSearchFilters={...source.filters};
-    if(!await scope.read(signal=>loadGalleryPopularity(source.page,{signal})))throw new Error("原排序页面读取失败，请重新准备人气排序");
+    if(!await scope.read(signal=>loadGalleryPopularity(source.page,{signal,restoring:true})))throw new Error("原排序页面读取失败，请重新准备人气排序");
   }else if(source.items===null && state.baseView==="gallery" && !source.intent){
     if(!await scope.read(()=>search(source.query,source.page,source.filters,source.snapshot,{preferenceKind:source.preferenceKind})))throw new Error("原页面缓存已清理，读取失败，请重试");
   }else{

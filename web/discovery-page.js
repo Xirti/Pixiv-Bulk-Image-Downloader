@@ -7,6 +7,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   const cache=new Map(),positions=new Map(),staged=new Map(),nextReads=new Map();
   const latest=new Map(),sourceVersions=new Map(),attempts=new Map(),followingDirty=new Set();
   const popularViews=new Map(),startedSources=new Set(),pausedSources=new Set(),refreshRequired=new Set();
+  const recommendationSizes=new Map();
   const previews=createPreviewImageCache({retainUnused:true,maxImages:480,reuseDetached:true});
   const initial=()=>({kind:'recommended',scope:'all',mode:'safe',rank:'day',offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:'',choice:'default',waiting:false});
   let state=initial(),data=null,rendered,active=false,pending=false,error='',revision=0,controller=null;
@@ -24,6 +25,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   sortControl.innerHTML=popularitySortMarkup("data-discovery-sort");
   const sourceKey=s=>JSON.stringify([s.kind,s.scope,s.mode,s.rank]);
   const pageKey=(s,batch=s.batch)=>JSON.stringify([sourceKey(s),batch,s.offset,s.order || "default",s.popularityIndex || ""]);
+  const reusableSort=(saved,source)=>saved && saved.state.batch===source?.batch && (source.kind!=='recommended' ||
+    (saved.state.sortSourceSize ?? 0)>=(recommendationSizes.get(source.batch) ?? 0));
   const sourceVersion=key=>sourceVersions.get(key) || 0;
   const ownsIdleView=(visit=revision)=>active && visit===revision && !pending && !sorting;
   const manual=()=>state.kind!=='following' && !browse.automatic();
@@ -78,6 +81,11 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     cache.delete(key);cache.set(key,result);
     const source=sourceKey(target),known=latest.get(source);
     if(target.order!=="popular" && target.offset===0 && (!known || publicationOrder(result)>=publicationOrder(known)))latest.set(source,result);
+    if(target.order!=="popular" && target.kind==='recommended' && result.sourceSize!=null){
+      const size=Math.max(result.sourceSize,recommendationSizes.get(result.batch) ?? 0);
+      recommendationSizes.delete(result.batch);recommendationSizes.set(result.batch,size);
+      if(recommendationSizes.size>80)recommendationSizes.delete(recommendationSizes.keys().next().value);
+    }
     if(cache.size>80){
       for(const old of cache.keys()){
         if(old!==pageKey(state))cache.delete(old);
@@ -229,7 +237,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }
     const key=sourceKey(target),previousKey=sourceKey(state),choice=browse.order(target.kind);
     const normal=positions.get(key),popular=popularViews.get(key);
-    const saved=(choice==='popular' && popular?.state.batch===normal?.state.batch?popular:null) || normal;
+    const saved=(choice==='popular' && reusableSort(popular,normal?.state)?popular:null) || normal;
     state=saved?structuredClone(saved.state):{...target,offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:''};
     state.choice=choice;state.waiting=manual();data=startedSources.has(key)?saved?.data || null:null;restoreTop=key===previousKey?saved?.scroll || 0:0;error='';
     if(key!==previousKey)root.scrollTop=0;
@@ -418,7 +426,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     const progress=value=>{
       if(version!==revision || signal.aborted)return;
       if(candidate)candidate.index=value.index;
-      else if(!pagination)state.popularityIndex=value.index;
+      else if(!pagination){state.popularityIndex=value.index;state.sortSourceSize=value.sourceSize;}
       sortProgress=`已读取 ${value.loaded} 件${value.counted?` · 已核对 ${value.counted} 件收藏数`:''}，正在准备…`;render();
     };
     try{
@@ -436,7 +444,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
         positions.set(key,{state:candidate.state,data:candidate.data,scroll:candidate.scroll});
         if(staged.get(key)===candidate)staged.delete(key);
       }
-      state={...destination,order:'popular',...(candidate?{choice:'popular',waiting:false}:{}),popularityIndex:result.index,page,
+      state={...destination,order:'popular',...(candidate?{choice:'popular',waiting:false}:{}),popularityIndex:result.index,sortSourceSize:result.sourceSize,page,
         offset:(page-1)*36,trail:Array.from({length:page-1},(_,i)=>i*36)};
       data={...result,batch:destination.batch,scope:destination.scope,edition:candidate?.data.edition || destination.edition || data?.edition || '',popularityIndex:result.index,
         offset:state.offset,nextOffset:page<result.pages?page*36:null};
@@ -482,7 +490,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       state={...structuredClone(normal.state),choice:order,waiting:false};data=normal.data;restoreTop=top;staged.delete(key);error='';render();return;
     }
     const saved=popularViews.get(key);
-    if(saved && saved.state.batch===state.batch){
+    if(reusableSort(saved,state)){
       state={...structuredClone(saved.state),choice:order,waiting:false};data=saved.data;restoreTop=top;error='';render();
       if(data.popularityIndex!==state.popularityIndex)await loadPopularity(state.page,{recoverSource:true});
       return;
@@ -535,7 +543,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   }
   function clear(redraw=true){
     controller?.abort();revision++;settingsRetry=null;void stopBackground();reads.clear();interaction.clear();previews.clear();cache.clear();positions.clear();staged.clear();latest.clear();attempts.clear();sourceVersions.clear();followingDirty.clear();
-    popularViews.clear();startedSources.clear();pausedSources.clear();refreshRequired.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active && redraw)render();
+    popularViews.clear();recommendationSizes.clear();startedSources.clear();pausedSources.clear();refreshRequired.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active && redraw)render();
   }
   root.querySelectorAll('[data-discovery-tab]').forEach(button=>button.onclick=()=>void open({kind:button.dataset.discoveryTab}));
   root.querySelector('[data-discovery-scope]').onchange=e=>void open({scope:e.target.value});
