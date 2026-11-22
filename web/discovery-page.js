@@ -10,9 +10,10 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   const previews=createPreviewImageCache({retainUnused:true,maxImages:480,reuseDetached:true});
   const initial=()=>({kind:'recommended',scope:'all',mode:'safe',rank:'day',offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:'',choice:'default',waiting:false});
   let state=initial(),data=null,rendered,active=false,pending=false,error='',revision=0,controller=null;
-  let background=new AbortController(),preparing=null,networkQueued=false,sessionGeneration=null,preferences=null;
+  let background=new AbortController(),preparing=null,warming=null,networkQueued=false,sessionGeneration=null,preferences=null;
   const reads=createPageReads(request);
   let restoreTop=null,sorting=false,sortProgress="";
+  let settingsRetry=null,updateController=null;
   let viewedData=null,followingVersion=0;
   function markViewed(){
     if(!active || document.hidden || pending || !signedIn() || sessionGeneration!==generation() || state.kind!=='following' || !data?.items.length || viewedData===data)return;
@@ -113,8 +114,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     edition.textContent=state.kind==='ranking'?(date?`${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`:'站方未注明榜次日期 · 数字为来源序位'):'';
     if(data?.created)edition.title=`最近检查 ${new Date(data.created*1000).toLocaleString()}`;
     update.hidden=!staged.has(sourceKey(state));
-    update.disabled=pending || sorting;
-    sortControl.hidden=state.kind==='following';
+    update.disabled=pending || sorting || Boolean(settingsRetry);
+    sortControl.hidden=state.kind==='following' && !settingsRetry;
     setPopularitySort(sortControl,state.choice || state.order || 'default',state.kind==='ranking'?'官方排序':'推荐顺序');
     setPopularityLoad(sortControl,true,pending || sorting,browse.buttonVisible(),Boolean(data) && !state.waiting && state.choice===state.order);
     root.querySelector('[data-discovery-sort-status]').textContent=sorting?sortProgress:state.order==='popular' && data?.total!=null?`${state.kind==='ranking'?'完整榜次':'本次推荐'} · ${data.total} 件 · 按收藏数`:'';
@@ -143,7 +144,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
         if(pageTarget)restoreTop=0;
         render();return;
       }
-      return loadPopularity(destination.page,restoreExpired,Boolean(pageTarget));
+      return loadPopularity(destination.page,{restoreExpired,pagination:Boolean(pageTarget)});
     }
     sorting=false;
     controller?.abort();controller=new AbortController();
@@ -192,25 +193,27 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
     nextReads.set(key,reading);
   }
-  async function open(options={}){
+  async function open(options={},loadOnReady=false){
     if(sessionGeneration!==generation()){clear();sessionGeneration=generation();}
+    const {kind,scope,mode,rank}=options.restore || {...state,...options};
+    const target={kind,scope:kind==='following'?scope:'all',mode:kind==='ranking'?'safe':mode,rank:kind==='ranking'?rank:'day'};
+    settingsRetry=null;
     remember();controller?.abort();const visit=++revision;pending=true;sorting=false;active=true;
     try {
       await browse.ready();
     } catch (problem) {
       if(visit!==revision)return;
+      settingsRetry=options.restore?options:{...target,refresh:options.refresh};
+      if(sourceKey(state)!==sourceKey(target)){state={...initial(),...target,waiting:true};data=null;restoreTop=0;}
       pending=false;error=problem.message || '发现设置读取失败，请重试';render();return;
     }
     if(visit!==revision)return;
     pending=false;
     if(options.restore){
       state=structuredClone(options.restore);data=cache.get(pageKey(state)) || null;restoreTop=null;
-      if(state.waiting){if(manual()){render();return;}await startLoad({restoring:true});return;}
+      if(state.waiting){if(manual() && !loadOnReady){render();return;}await startLoad({restoring:true});return;}
       await load(false,Boolean(state.batch || state.popularityIndex));return;
     }
-    const target={...state,...options};
-    if(target.kind!=='following')target.scope='all';
-    if(target.kind!=='ranking')target.rank='day';else target.mode='safe';
     const key=sourceKey(target),previousKey=sourceKey(state),choice=browse.order(target.kind);
     const normal=positions.get(key),popular=popularViews.get(key);
     const saved=(choice==='popular' && popular?.state.batch===normal?.state.batch?popular:null) || normal;
@@ -218,18 +221,23 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     state.choice=choice;state.waiting=manual();data=startedSources.has(key)?saved?.data || null:null;restoreTop=key===previousKey?saved?.scroll || 0:0;error='';
     if(key!==previousKey)root.scrollTop=0;
     if(!signedIn()){data=null;pending=false;render();return;}
-    if(manual() && !options.refresh){render();void prepare({network:false});return;}
+    if(manual() && !options.refresh && !loadOnReady){render();void prepare({network:false});return;}
     await startLoad({refresh:Boolean(options.refresh) || followingDirty.has(key)});
     void prepare({network:true});
   }
   function cancelLoad(){
-    controller?.abort();revision++;pending=false;sorting=false;state.waiting=true;
+    controller?.abort();revision++;pending=false;sorting=false;
+    if(updateController && updateController===controller){
+      error='加载已中断，可再次应用更新';render();return;
+    }
+    state.waiting=true;
     const key=sourceKey(state);startedSources.delete(key);pausedSources.add(key);sourceVersions.set(key,sourceVersion(key)+1);
     remember();error='加载已中断，可再次开始';render();
   }
   async function startLoad({refresh=false,restoring=false}={}){
     if(pending || sorting){cancelLoad();return;}
     if(!allowed() && !restoring)return;
+    if(settingsRetry)return open(settingsRetry,true);
     state.waiting=false;error='';startedSources.add(sourceKey(state));pausedSources.delete(sourceKey(state));
     const choice=state.choice || 'default';
     if(choice==='default' || state.kind==='following'){
@@ -258,8 +266,9 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     finally{if(version===revision && !signal.aborted){pending=false;render();}}
   }
   function stopBackground(){
-    const stopping=preparing;background.abort();background=new AbortController();preparing=null;nextReads.clear();networkQueued=false;
-    return stopping || Promise.resolve();
+    const stopping=[preparing,warming];
+    background.abort();background=new AbortController();preparing=warming=null;nextReads.clear();networkQueued=false;
+    return Promise.allSettled(stopping);
   }
   function applyPrepared(target,result) {
     const key=sourceKey(target),nextState={...target,batch:result.batch,offset:result.offset};
@@ -268,14 +277,16 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     savePage(nextState,result);
     const existing=positions.get(key);
     const record={state:nextState,data:result,scroll:0};
-    if(!existing){positions.set(key,record);staged.delete(key);return;}
-    if(existing.state.batch===result.batch)return;
-    const first=cache.get(pageKey({...existing.state,offset:0}));
-    // An App ranking may keep the same first page while its old cursor expires.
-    const windowChanged=result.rankingWindow!=null && existing.data.rankingWindow!==result.rankingWindow;
-    const same=!windowChanged && first && first.edition===result.edition && first.items.map(item=>item.id).join(',')===result.items.map(item=>item.id).join(',');
-    if(same)staged.delete(key);
-    else staged.set(key,record);
+    if(!existing){positions.set(key,record);staged.delete(key);}
+    else if(existing.state.batch!==result.batch){
+      const first=cache.get(pageKey({...existing.state,offset:0}));
+      // The same cards can have a different continuation or belong to a new ranking window.
+      const same=first && first.edition===result.edition && first.rankingWindow===result.rankingWindow &&
+        first.nextOffset===result.nextOffset && first.items.map(item=>item.id).join(',')===result.items.map(item=>item.id).join(',');
+      if(same)staged.delete(key);
+      else staged.set(key,record);
+    }
+    if(active && sourceKey(state)===key)update.hidden=!staged.has(key);
   }
   async function reconcileFollowing(){
     const signal=background.signal,auth=generation(),viewRevision=revision;let reload=false;
@@ -335,7 +346,15 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
           result=await readPage(target,{background:'1',refresh:'1',batch:'',offset:'0'},{signal});
           if(signal.aborted || auth!==generation() || version!==sourceVersion(key))continue;
           followingDirty.delete(key);applyPrepared(target,result);
-          if(!document.hidden)await previews.prepare(pageKey({...target,batch:result.batch}),result.items,signal,{warm:'account'});
+          if(!document.hidden && !warming){
+            const imageKey=pageKey({...target,batch:result.batch});
+            const warm=waitForMediaDecode(imageSignal=>previews.prepare(imageKey,result.items,imageSignal,{warm:'account'}),signal)
+              .catch(problem=>{
+                if(!signal.aborted && ownsIdleView(viewRevision) && sourceKey(state)===key && !document.hidden)
+                  report(`预览暂未准备好：${problem.message}`);
+              }).finally(()=>{if(warming===warm)warming=null;});
+            warming=warm;
+          }
         }catch(problem){
           if(signal.aborted || auth!==generation())return;
           if(version!==sourceVersion(key))continue;
@@ -369,25 +388,38 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }
     if(state.kind==='following' && ownsIdleView()){render();void load(true);}
   }
-  async function loadPopularity(page,restoreExpired=false,pagination=false){
-    controller?.abort();controller=new AbortController();
-    const signal=controller.signal,version=++revision,auth=generation(),destination=structuredClone(state);
+  async function loadPopularity(page,{restoreExpired=false,pagination=false,candidate=null}={}){
+    controller?.abort();const operation=controller=new AbortController();
+    const signal=operation.signal,version=++revision,auth=generation(),destination=structuredClone(candidate?.state || state);
+    if(candidate)updateController=operation;
     sorting=true;sortProgress='正在准备作品元数据…';error='';render();
     try{
       const result=await readPopularityPage(request,{kind:destination.kind,batch:destination.batch,mode:destination.mode,
-        index:destination.popularityIndex || '',page:String(page)},{signal,progress:value=>{
+        index:(candidate?candidate.index:destination.popularityIndex) || '',page:String(page)},{signal,progress:value=>{
           if(version!==revision || signal.aborted)return;
-          if(!pagination)state.popularityIndex=value.index;
+          if(candidate)candidate.index=value.index;
+          else if(!pagination)state.popularityIndex=value.index;
           sortProgress=`已读取 ${value.loaded} 件${value.counted?` · 已核对 ${value.counted} 件收藏数`:''}，正在准备…`;render();
         }});
       if(version!==revision || signal.aborted || auth!==generation())return;
-      state={...destination,order:'popular',popularityIndex:result.index,page,offset:(page-1)*36,trail:Array.from({length:page-1},(_,i)=>i*36)};
-      data={...result,batch:destination.batch,scope:destination.scope,edition:destination.edition || data?.edition || '',popularityIndex:result.index,
+      if(candidate){
+        const key=sourceKey(destination);
+        positions.set(key,{state:candidate.state,data:candidate.data,scroll:candidate.scroll});
+        if(staged.get(key)===candidate)staged.delete(key);
+      }
+      state={...destination,order:'popular',...(candidate?{choice:'popular',waiting:false}:{}),popularityIndex:result.index,page,
+        offset:(page-1)*36,trail:Array.from({length:page-1},(_,i)=>i*36)};
+      data={...result,batch:destination.batch,scope:destination.scope,edition:candidate?.data.edition || destination.edition || data?.edition || '',popularityIndex:result.index,
         offset:state.offset,nextOffset:page<result.pages?page*36:null};
       savePage(state,data);restoreTop=pagination?0:root.scrollTop;remember(restoreTop);
     }catch(problem){if(version===revision && !signal.aborted){
       if(restoreExpired && staleHistory(problem))return rebuildHistory(destination,problem.errorKind==='cache_cleared');
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
+      if(candidate){
+        if(staleHistory(problem))candidate.index='';
+        error=`${problem.message || '更新排序失败'} · 可再次应用更新`;
+        return;
+      }
       if(pagination && !staleHistory(problem)){
         error=`${problem.message || '排序读取失败'} · 可再次翻页重试`;
         return;
@@ -405,7 +437,10 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       }
       state.waiting=true;
     }}
-    finally{if(version===revision && !signal.aborted){sorting=false;render();}}
+    finally{
+      if(updateController===operation)updateController=null;
+      if(version===revision && !signal.aborted){sorting=false;render();}
+    }
   }
   async function applySort(order){
     if(!allowed() || pending || state.kind==='following' || !data)return;
@@ -469,7 +504,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     render();
   }
   function clear(redraw=true){
-    controller?.abort();revision++;void stopBackground();reads.clear();interaction.clear();previews.clear();cache.clear();positions.clear();staged.clear();latest.clear();attempts.clear();sourceVersions.clear();followingDirty.clear();
+    controller?.abort();revision++;settingsRetry=null;void stopBackground();reads.clear();interaction.clear();previews.clear();cache.clear();positions.clear();staged.clear();latest.clear();attempts.clear();sourceVersions.clear();followingDirty.clear();
     popularViews.clear();startedSources.clear();pausedSources.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active && redraw)render();
   }
   root.querySelectorAll('[data-discovery-tab]').forEach(button=>button.onclick=()=>void open({kind:button.dataset.discoveryTab}));
@@ -477,10 +512,12 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   root.querySelectorAll('[data-discovery-rank]').forEach(button=>button.onclick=()=>void open({rank:button.dataset.discoveryRank}));
   root.querySelector('[data-discovery-mode]').onchange=e=>void open({mode:e.target.value});
   update.onclick=()=>{
-    if(pending || sorting)return;
+    if(pending || sorting || settingsRetry)return;
     const fresh=staged.get(sourceKey(state));if(!fresh)return;
+    const choice=state.choice || browse.order(fresh.state.kind);
+    if(choice==='popular' && fresh.state.kind!=='following'){void loadPopularity(1,{candidate:fresh});return;}
     controller?.abort();revision++;pending=false;sorting=false;error='';
-    state={...structuredClone(fresh.state),choice:browse.order(fresh.state.kind),waiting:false};
+    state={...structuredClone(fresh.state),choice,waiting:false};
     data=fresh.data;
     staged.delete(sourceKey(state));restoreTop=root.scrollTop;void startLoad();
   };
@@ -488,5 +525,10 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   previous.onclick=()=>{if(previous.disabled)return;remember();const trail=state.trail.slice(),offset=trail.pop();void load(false,false,{...state,offset,page:state.page-1,trail});};
   setInterval(()=>{void prepare({network:true});},30000);
   document.addEventListener('visibilitychange',markViewed);
-  return {open,prepare,stopBackground,clear,configure,followingChanged,refresh,syncSelection,snapshot:()=>structuredClone({...state,waiting:state.waiting || pending || sorting}),suspend(){if(pending || sorting)state.waiting=true;remember();active=false;controller?.abort();revision++;pending=false;sorting=false;interaction.reset({immediate:true});}};
+  return {open,prepare,stopBackground,clear,configure,followingChanged,refresh,syncSelection,
+    snapshot:()=>structuredClone({...state,waiting:state.waiting || pending || sorting}),
+    suspend(){
+      if(pending || (sorting && updateController!==controller))state.waiting=true;
+      remember();active=false;controller?.abort();revision++;pending=false;sorting=false;interaction.reset({immediate:true});
+    }};
 };
