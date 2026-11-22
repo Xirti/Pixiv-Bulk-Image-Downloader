@@ -103,6 +103,31 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     release(entry);
   }
 
+  async function readSource(id, signal, requestId) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      signal.throwIfAborted();
+      const metaId = attempt ? `${requestId}_retry` : requestId;
+      if (active?.controller.signal === signal) active.requestId = metaId;
+      const query = `requestId=${encodeURIComponent(metaId)}`;
+      const meta = await fetchJson(`/api/pixiv/ugoira/${id}?${query}`, { signal });
+      signal.throwIfAborted();
+      if (!Array.isArray(meta.frames) || !meta.frames.length || meta.frames.length > 1500) {
+        throw new Error("动图帧数超出预览范围，仍可下载原始 ZIP");
+      }
+      // Each phase has its own request identity, including after a source change.
+      const zipId = `${metaId}_zip`;
+      if (active?.controller.signal === signal) active.requestId = zipId;
+      const params = new URLSearchParams({ mode: "zip", requestId: zipId, version: meta.version || "" });
+      try {
+        const buffer = await fetchBytes(`/api/pixiv/ugoira/${id}?${params}`, { signal });
+        signal.throwIfAborted();
+        return { meta, buffer };
+      } catch (error) {
+        if (error.errorKind !== "ugoira_source_changed" || attempt) throw error;
+      }
+    }
+  }
+
   async function load(id, signal, showFrames, requestId) {
     if (cache.has(id)) {
       const entry = cache.get(id);
@@ -113,19 +138,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     }
     const entry = { frames: [], bytes: 0, complete: false };
     try {
-      signal.throwIfAborted();
-      const query = `requestId=${encodeURIComponent(requestId)}`;
-      const meta = await fetchJson(`/api/pixiv/ugoira/${id}?${query}`, { signal });
-      signal.throwIfAborted();
-      if (!Array.isArray(meta.frames) || !meta.frames.length || meta.frames.length > 1500) {
-        throw new Error("动图帧数超出预览范围，仍可下载原始 ZIP");
-      }
-      // Do not reuse an HTTP request identity across phases: the manifest
-      // handler may still be finishing after its body reaches the browser.
-      const zipRequestId = `${requestId}_zip`;
-      if (active?.controller.signal === signal) active.requestId = zipRequestId;
-      const buffer = await fetchBytes(`/api/pixiv/ugoira/${id}?mode=zip&requestId=${encodeURIComponent(zipRequestId)}`, { signal });
-      signal.throwIfAborted();
+      const { meta, buffer } = await readSource(id, signal, requestId);
       const entries = parseZipEntries(buffer);
       const width = Number(meta.width);
       const height = Number(meta.height);

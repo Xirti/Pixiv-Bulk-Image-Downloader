@@ -162,6 +162,13 @@ class PreviewResources:
                     del self._loads[key]
                 job.done.set()
 
+    def discard(self, key, expected) -> None:
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is not None and entry[1] == expected:
+                del self._cache[key]
+                self._bytes -= entry[2]
+
     def clear(self) -> None:
         with self._lock:
             self._generation += 1

@@ -33,6 +33,7 @@ from contextvars import copy_context
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 from itertools import islice
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -2902,6 +2903,24 @@ def _fetch_pixiv_detail(
 UGOIRA_ZIP_MAGIC = b"PK\x03\x04"
 
 
+class UgoiraSourceChangedError(PixivPolicyError):
+    pass
+
+
+def ugoira_zip_members(source: BinaryIO) -> set[str]:
+    if source.read(4) != UGOIRA_ZIP_MAGIC:
+        raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
+    try:
+        with ZipFile(source) as archive:
+            names = [entry.filename for entry in archive.infolist() if not entry.is_dir()]
+    except BadZipFile as exc:
+        raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP") from exc
+    entries = set(names)
+    if len(names) != len(entries):
+        raise PixivPolicyError("Pixiv 动图 ZIP 包含重名文件")
+    return entries
+
+
 def pixiv_ugoira_meta(
     artwork_id: str,
     *,
@@ -2927,6 +2946,8 @@ def pixiv_ugoira_meta(
             raise SearchCancelledError("动图信息读取已取消") from exc
         raise PixivPolicyError("动图信息读取已取消，请重试") from exc
     except PreviewBusyError as exc:
+        if network_timeout is None:
+            raise
         raise PixivPolicyError("动图资源繁忙，请稍后再试") from exc
     if authorization_epoch is not None:
         assert_authorization_generation(authorization_epoch)
@@ -3072,16 +3093,7 @@ def _fetch_ugoira_source(
             pixiv_request(zip_url, image_only=True, cancel_event=cancel_event,
                           max_bytes=maximum_bytes, output=source, timeout=90, max_duration=600, download=True, archive=True)
             source.seek(0)
-            if source.read(4) != UGOIRA_ZIP_MAGIC:
-                raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
-            try:
-                with ZipFile(source) as archive:
-                    names = [entry.filename for entry in archive.infolist() if not entry.is_dir()]
-            except BadZipFile as exc:
-                raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP") from exc
-            entries = set(names)
-            if len(names) != len(entries):
-                raise PixivPolicyError("Pixiv 动图 ZIP 包含重名文件")
+            entries = ugoira_zip_members(source)
             if entries != {frame["file"] for frame in meta["frames"]}:
                 if attempt:
                     break
@@ -4178,6 +4190,9 @@ class Handler(SimpleHTTPRequestHandler):
         mode = query.get("mode", ["meta"])[0]
         if mode not in {"meta", "zip"}:
             return self.send_json({"error": "mode 无效"}, 400)
+        wanted = query.get("version", [""])[0]
+        if wanted and not re.fullmatch(r"[a-f0-9]{64}", wanted):
+            return self.send_json({"error": "动图来源版本无效"}, 400)
         request_id = query.get("requestId", [""])[0].strip()
         try:
             with READ_SCOPES.request(request_id) as lease:
@@ -4193,24 +4208,28 @@ class Handler(SimpleHTTPRequestHandler):
                 restricted = item.get("restriction") in RESTRICTED_CONTENT
                 if restricted and not authorized:
                     raise PixivPolicyError("限制级动图预览需要有效账户授权")
-                meta = pixiv_ugoira_meta(
-                    artwork_id,
-                    authorization_epoch=authorization_epoch if restricted else None,
-                    cancel_event=cancel_event,
-                )
+                epoch = authorization_epoch if restricted else None
+                meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=epoch, cancel_event=cancel_event)
+                version = hashlib.sha256(json.dumps(
+                    (meta["src"], meta["mime"], meta["frames"]), sort_keys=True,
+                ).encode("utf-8")).hexdigest()
                 if mode == "meta":
                     return self.send_json({
-                        "frames": meta["frames"], "mime": meta["mime"],
+                        "frames": meta["frames"], "mime": meta["mime"], "version": version,
                         "width": item.get("width"), "height": item.get("height"),
                     }, before_send=lease.check)
+                if wanted and wanted != version:
+                    raise UgoiraSourceChangedError("动图帧表已更新，请重试")
+
                 def fetch_zip(event):
                     raw, _content_type = pixiv_request(str(meta["src"]), image_only=True, cancel_event=event)
-                    if not raw.startswith(UGOIRA_ZIP_MAGIC):
-                        raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
+                    if ugoira_zip_members(BytesIO(raw)) != {frame["file"] for frame in meta["frames"]}:
+                        UGOIRA_RESOURCES.discard(("meta", artwork_id, epoch), meta)
+                        raise UgoiraSourceChangedError("动图帧表与 ZIP 内容不一致，请重试")
                     return raw
 
                 raw = UGOIRA_RESOURCES.get(
-                    ("zip", artwork_id, authorization_epoch if restricted else None),
+                    ("zip", artwork_id, epoch, version),
                     fetch_zip, ttl=15, cancel_event=cancel_event,
                 )
                 raise_if_search_cancelled(cancel_event)
@@ -4218,20 +4237,21 @@ class Handler(SimpleHTTPRequestHandler):
                 # not publish restricted bytes.
                 if restricted and authorization_epoch is not None:
                     assert_authorization_generation(authorization_epoch)
-                if not raw.startswith(UGOIRA_ZIP_MAGIC):
-                    raise PixivPolicyError("Pixiv 动图数据不是有效的 ZIP")
                 lease.check()
                 return self.send_bytes(raw, "application/zip", "private, no-store")
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         except SearchRequestConflictError as exc:
             return self.send_json({"error": str(exc)}, 409)
-        except (SearchRequestLimitError, PreviewBusyError) as exc:
-            return self.send_json({"error": "动图预览繁忙，请稍后再试"}, 429)
+        except (SearchRequestLimitError, PreviewBusyError):
+            return self.send_json({"error": "动图预览繁忙，请稍后再试",
+                                   "errorKind": "request_queue", "retryAfterSeconds": 2}, 429)
         except (SearchCancelledError, PreviewCancelledError):
             return self.send_json({"cancelled": True}, 499)
         except AuthorizationRevokedError as exc:
             return self.send_json({"error": str(exc)}, 403)
+        except UgoiraSourceChangedError as exc:
+            return self.send_json({"error": str(exc), "errorKind": "ugoira_source_changed"}, 409)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json(pixiv_error_payload("动图预览", exc), 502)
 
