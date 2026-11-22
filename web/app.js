@@ -2797,6 +2797,7 @@ async function select(index,suppliedItem=null,suppliedContext=null,{restoring=fa
     if (controller !== detailController || generation !== viewGeneration) return;
     renderDetail(item, index, detailContext);
   } catch (error) {
+    if (restoring) throw error;
     if (controller.signal.aborted) return;
     $("#dTitle").textContent = "作品详情加载失败";
     $("#deck").innerHTML = "";
@@ -3861,6 +3862,7 @@ async function openBatchCollection(id,{restoring=false}={}) {
     queueNavigationRecord();
     $("#basketPage").scrollTop = 0;
   } catch (error) {
+    if (restoring) throw error;
     if (controller.signal.aborted) return;
     announceToast(error.message || "作品详情加载失败");
   } finally {
