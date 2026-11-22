@@ -32,11 +32,23 @@ ACCOUNT_CACHE_ONLY = ContextVar("account_cache_only", default=False)
 RELATION_VIEWS = frozenset({"bookmarks", "following"})
 _DISPLAY_PENDING_KEY = json.dumps(["web-display-pending"])
 _DISPLAY_REVISION_KEY = json.dumps(["display-cache-revision"])
-_DISPLAY_ORDER_KEY = json.dumps(["display-publication-order"])
 _DISPLAY_SETTINGS_KEY = json.dumps(["web-display-settings"])
 _PREVIOUS_WEB_FLAGS_KEY = json.dumps(["web-display-previous-flags"])
 _WEB_POLICY_KEY = json.dumps(["web-policy-revision"])
 _ACCOUNT_CLEAR_KEY = json.dumps(["account-clear-revision"])
+_SNAPSHOT_KINDS = frozenset({"discovery-current", "discovery-feed", "popularity-current", "popularity-index"})
+
+
+def _snapshot_record(key):
+    # The leading space keeps new records outside the old capacity sweep.
+    # Their unchanged JSON kind lets either version clear them deliberately.
+    return " " + json.dumps(key)
+
+
+def _snapshot_pattern(kind):
+    return _snapshot_record([kind])[:-1] + ",%"
+
+
 # Existing snapshots use their creation time until a refresh obtains an order.
 _PUBLICATION_ORDER_SQL = "COALESCE(json_extract(payload,'$.publicationOrder'),json_extract(payload,'$.created')*1000)"
 
@@ -163,7 +175,6 @@ class DiscoveryPage:
 class DisplayPublication:
     order: int | float
     batch: str
-    legacy_batch: str | None
     usable: bool = True
 
 
@@ -237,21 +248,112 @@ class AccountCache:
         connection = sqlite3.connect(self.path, timeout=.25 if shared_reader else 5,
             check_same_thread=not shared_reader)
         try:
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version == 1:
-                return connection
-            if version != 0:
+            version, display_storage = connection.execute(
+                "SELECT user_version, EXISTS(SELECT 1 FROM sqlite_master WHERE name='display_publication_order') "
+                "FROM pragma_user_version").fetchone()
+            if version not in (0, 1):
                 raise ValueError("Unsupported account cache schema")
-            connection.executescript("""BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS cached (owner TEXT, method TEXT, key TEXT, payload TEXT, PRIMARY KEY(owner,method,key));
-                CREATE TABLE IF NOT EXISTS cursor_visits (owner TEXT, method TEXT, scan TEXT, path TEXT, position INTEGER,
-                    PRIMARY KEY(owner,method,scan,path));
-                PRAGMA user_version=1;
-                COMMIT;""")
+            if version == 0:
+                connection.executescript("""BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS cached (owner TEXT, method TEXT, key TEXT, payload TEXT, PRIMARY KEY(owner,method,key));
+                    CREATE TABLE IF NOT EXISTS cursor_visits (owner TEXT, method TEXT, scan TEXT, path TEXT, position INTEGER,
+                        PRIMARY KEY(owner,method,scan,path));
+                    PRAGMA user_version=1;
+                    COMMIT;""")
+            if not display_storage:
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    if not self._display_storage_initialized(connection):
+                        self._migrate_display_storage(connection)
         except BaseException:
             connection.close()
             raise
         return connection
+
+    @staticmethod
+    def _display_storage_initialized(db):
+        return db.execute("SELECT 1 FROM sqlite_master WHERE name='display_publication_order'").fetchone() is not None
+
+    @classmethod
+    def _migrate_display_storage(cls, db):
+        # Import once, under a writer reservation. Legacy writers keep their
+        # original keys and cannot publish into the new authority afterwards.
+        db.execute("""CREATE TABLE display_publication_order (
+            owner TEXT, method TEXT, value INTEGER NOT NULL, PRIMARY KEY(owner,method))""")
+        db.execute("""INSERT INTO display_publication_order
+            SELECT owner,method,CAST(payload AS INTEGER) FROM cached WHERE key='["display-publication-order"]'""")
+        db.execute("""DELETE FROM cached WHERE key='["display-publication-order"]'""")
+        db.execute("""CREATE TABLE IF NOT EXISTS discovery_pages (
+            owner TEXT, method TEXT, header TEXT, checkpoint INTEGER, payload TEXT NOT NULL,
+            PRIMARY KEY(owner,method,header,checkpoint))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS discovery_offsets (
+            owner TEXT, method TEXT, header TEXT, start_offset INTEGER, checkpoint INTEGER,
+            PRIMARY KEY(owner,method,header,start_offset))""")
+        # Legacy clear and display-setting operations also delete these headers.
+        db.execute("""CREATE TRIGGER IF NOT EXISTS delete_discovery_pages AFTER DELETE ON cached
+            WHEN json_extract(OLD.key,'$[0]')='discovery-feed' AND json_extract(OLD.key,'$[2]')='pages'
+            BEGIN DELETE FROM discovery_pages WHERE owner=OLD.owner AND method=OLD.method AND header=OLD.key; END""")
+        db.execute("""CREATE TRIGGER IF NOT EXISTS delete_discovery_offsets AFTER DELETE ON cached
+            WHEN json_extract(OLD.key,'$[0]')='discovery-feed' AND json_extract(OLD.key,'$[2]')='pages'
+            BEGIN DELETE FROM discovery_offsets WHERE owner=OLD.owner AND method=OLD.method AND header=OLD.key; END""")
+        db.execute("""CREATE TABLE IF NOT EXISTS popularity_progress (
+            owner TEXT, method TEXT, key TEXT, base_rowid INTEGER, checkpoint INTEGER, payload TEXT NOT NULL,
+            PRIMARY KEY(owner,method,key,base_rowid,checkpoint)) WITHOUT ROWID""")
+        db.execute("""CREATE TRIGGER IF NOT EXISTS delete_popularity_progress AFTER DELETE ON cached
+            WHEN json_extract(OLD.key,'$[0]')='popularity-index'
+            BEGIN DELETE FROM popularity_progress WHERE owner=OLD.owner AND method=OLD.method AND key=OLD.key; END""")
+
+        db.execute("""INSERT INTO cached
+            SELECT owner,method,' ' || key,payload FROM cached
+            WHERE key LIKE '["popularity-index",%' OR key LIKE '["popularity-current",%'
+               OR (key LIKE '["discovery-feed",%' AND json_extract(key,'$[2]')='pages')
+            ORDER BY rowid""")
+        db.execute("""INSERT INTO discovery_pages
+            SELECT owner,method,' ' || header,checkpoint,payload FROM discovery_pages WHERE header LIKE '["discovery-feed",%'""")
+        db.execute("""INSERT INTO discovery_offsets
+            SELECT owner,method,' ' || header,start_offset,checkpoint FROM discovery_offsets WHERE header LIKE '["discovery-feed",%'""")
+        db.execute("""INSERT INTO popularity_progress
+            SELECT progress.owner,progress.method,snapshot.key,snapshot.rowid,progress.checkpoint,progress.payload
+            FROM popularity_progress progress JOIN cached snapshot ON snapshot.owner=progress.owner
+                AND snapshot.method=progress.method AND snapshot.key=' ' || progress.key
+            JOIN cached legacy ON legacy.rowid=progress.base_rowid AND legacy.key=progress.key
+            WHERE progress.key LIKE '["popularity-index",%'""")
+
+        for owner, method, key, payload in db.execute(
+                "SELECT owner,method,key,payload FROM cached WHERE key LIKE ? AND json_extract(key,'$[2]') IS NULL ORDER BY rowid",
+                ('["discovery-feed",%',)):
+            _, batch = json.loads(key)
+            try:
+                feed = json.loads(payload)
+            except json.JSONDecodeError as error:
+                logging.getLogger("moku.http").warning("Invalid legacy discovery snapshot for %s: %s", batch, error)
+                continue
+            if (not isinstance(feed, dict) or not isinstance(feed.get("items"), list)
+                    or not isinstance(feed.get("seen"), list) or not isinstance(feed.get("visitedPaths", {}), dict)):
+                continue
+            chunk = feed.pop("items"), feed.pop("seen"), feed.pop("visitedPaths", {})
+            header = _snapshot_record(["discovery-feed", batch, "pages"])
+            feed.update(_checkpoint=1, _offsetCheckpoint=1, _itemCount=len(chunk[0]))
+            if not cls._valid_discovery_header(feed, batch):
+                continue
+            if db.execute("INSERT OR IGNORE INTO cached VALUES(?,?,?,?)",
+                          (owner, method, header, json.dumps(feed, ensure_ascii=False))).rowcount:
+                db.execute("INSERT INTO discovery_pages VALUES(?,?,?,?,?)",
+                           (owner, method, header, 1, json.dumps(chunk, ensure_ascii=False)))
+                if chunk[0]:
+                    db.execute("INSERT INTO discovery_offsets VALUES(?,?,?,?,?)", (owner, method, header, 0, 1))
+
+        for owner, method, key, payload in db.execute(
+                "SELECT owner,method,key,payload FROM cached WHERE key LIKE ? "
+                "AND CASE WHEN json_valid(payload) THEN json_type(payload) END='text' ORDER BY rowid",
+                ('["discovery-current",%',)).fetchall():
+            pointer = json.loads(key)[:5]
+            batch = json.loads(payload)
+            incoming = cls._display_snapshot(db, owner, method, "discovery-feed", batch, "pages")
+            if incoming is None:
+                continue
+            if cls._can_publish_display_snapshot(db, owner, method, pointer, (incoming.usable, incoming.order)):
+                cls._save_rows(db, owner, method, [(pointer, batch)])
 
     def web_policy_stamps(self, owner):
         """Read policy for one UID, or for all known UIDs while a session is unresolved."""
@@ -301,91 +403,79 @@ class AccountCache:
                         raise AccountError("page_rebased", "账号列表发生变化，请从第一页继续")
                     return None
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
-                             (owner, method, json.dumps(key))).fetchone()
+                             (owner, method, _snapshot_record(key) if key[0] in _SNAPSHOT_KINDS else json.dumps(key))).fetchone()
             return json.loads(row[0]) if row else None
-
-    def discovery_batch(self, owner, method, descriptor):
-        """A separate pointer keeps the old cache readable after a rollback."""
-        with self.lock, closing(self._connect()) as db:
-            self._begin_display_cache(db, owner, method)
-            current, _ = self._discovery_current(db, owner, method, ["discovery-current", *descriptor])
-            return current.batch if current else ""
 
     def bind_default_snapshot(self, owner, method, pointer, held, *, revision):
         """Select and pin under the same SQLite writer reservation used by retirement."""
         with self.lock, closing(self._connect()) as db:
             self._begin_display_cache(db, owner, method, write=True, revision=revision)
-            current, _ = self._current_display_snapshot(db, owner, method, pointer)
+            current = self._current_display_snapshot(db, owner, method, pointer)
             if current is None:
                 return ""
             kind = "discovery" if pointer[0] == "discovery-current" else "popularity"
             held.enter_context(self.pin_snapshot(owner, method, kind, current.batch))
             return current.batch
 
-    @staticmethod
-    def _decode_discovery_header(payload, batch):
+    @classmethod
+    def _decode_discovery_header(cls, payload, batch):
         try:
             feed = json.loads(payload)
         except json.JSONDecodeError as error:
             logging.getLogger("moku.http").warning("Invalid discovery snapshot header for %s: %s", batch, error)
             return None
+        return feed if cls._valid_discovery_header(feed, batch) else None
+
+    @staticmethod
+    def _valid_discovery_header(feed, batch):
         if not isinstance(feed, dict) or feed.get("batch") != batch:
-            return None
+            return False
         fields = {"kind": str, "scope": str, "mode": str, "rankMode": str, "edition": str,
                   "window": int, "unavailable": int, "sourceCount": int, "stagnant": int,
                   "paths": dict, "pending": dict, "_checkpoint": int}
         if any(type(feed.get(name)) is not field_type for name, field_type in fields.items()) or feed["_checkpoint"] < 1:
-            return None
+            return False
         for value in (feed.get("created"), feed.get("publicationOrder", feed.get("created"))):
             if type(value) not in (int, float) or isinstance(value, float) and not math.isfinite(value):
-                return None
+                return False
         if "_offsetCheckpoint" in feed and (type(feed["_offsetCheckpoint"]) is not int or
                 type(feed.get("_itemCount")) is not int or feed["_itemCount"] < 0):
-            return None
-        return feed
+            return False
+        return True
 
     @classmethod
-    def _snapshot_pointer(cls, db, owner, method, pointer, kind, *suffix):
-        row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
-            (owner, method, json.dumps(pointer))).fetchone()
-        if row is None:
-            return None
-        identity = json.loads(row[0])
-        if kind == "discovery-feed" and suffix:
+    def _display_snapshot(cls, db, owner, method, kind, identity, *suffix):
+        key = _snapshot_record([kind, identity, *suffix])
+        if kind == "discovery-feed":
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, json.dumps([kind, identity, *suffix]))).fetchone()
+                (owner, method, key)).fetchone()
             feed = cls._decode_discovery_header(row[0], identity) if row else None
             if feed is None:
                 return None
-            return DisplayPublication(feed.get("publicationOrder", feed["created"] * 1000), identity,
-                feed.get("legacyBatch"), cls._discovery_usable(feed))
-        snapshot = db.execute(f"SELECT {_PUBLICATION_ORDER_SQL},json_extract(payload,'$.legacyBatch'),json_extract(payload,'$.ready') "
-            "FROM cached WHERE owner=? AND method=? AND key=?",
-            (owner, method, json.dumps([kind, identity, *suffix]))).fetchone()
-        return DisplayPublication(snapshot[0], identity, snapshot[1], kind != "popularity-index" or bool(snapshot[2])) if snapshot is not None else None
+            return DisplayPublication(feed.get("publicationOrder", feed["created"] * 1000), identity, cls._discovery_usable(feed))
+        row = db.execute(f"SELECT {_PUBLICATION_ORDER_SQL},json_extract(payload,'$.ready') "
+            "FROM cached WHERE owner=? AND method=? AND key=?", (owner, method, key)).fetchone()
+        return DisplayPublication(row[0], identity, bool(row[1])) if row is not None else None
 
     @staticmethod
     def _discovery_usable(header):
         return bool(header.get("_itemCount", 1)) or not (any(header["paths"].values()) or any(header["pending"].values()))
 
     @classmethod
-    def _discovery_current(cls, db, owner, method, pointer):
-        legacy = cls._snapshot_pointer(db, owner, method, pointer, "discovery-feed")
-        paged = cls._snapshot_pointer(db, owner, method, [*pointer, "pages"], "discovery-feed", "pages")
-        if legacy is None:
-            return paged, ""
-        if paged is None:
-            return legacy, legacy.batch
-        if paged.legacy_batch is not None:
-            # A different legacy batch was published since the paged request began.
-            return (paged if paged.legacy_batch == legacy.batch else legacy), legacy.batch
-        return (paged if (paged.usable, paged.order) >= (legacy.usable, legacy.order) else legacy), legacy.batch
+    def _current_display_snapshot(cls, db, owner, method, pointer):
+        row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
+            (owner, method, _snapshot_record(pointer))).fetchone()
+        if row is None:
+            return None
+        identity = json.loads(row[0])
+        if pointer[0] == "discovery-current":
+            return cls._display_snapshot(db, owner, method, "discovery-feed", identity, "pages")
+        return cls._display_snapshot(db, owner, method, "popularity-index", identity)
 
     @classmethod
-    def _current_display_snapshot(cls, db, owner, method, pointer):
-        if pointer[0] == "discovery-current":
-            return cls._discovery_current(db, owner, method, pointer)
-        return cls._snapshot_pointer(db, owner, method, pointer, "popularity-index"), None
+    def _can_publish_display_snapshot(cls, db, owner, method, pointer, priority):
+        current = cls._current_display_snapshot(db, owner, method, pointer)
+        return current is None or priority > (current.usable, current.order)
 
     @classmethod
     def _begin_display_cache(cls, db, owner, method, *, write=False, revision=None, exclusive=False):
@@ -413,29 +503,22 @@ class AccountCache:
         """Assign fresh reads their order before any upstream work starts."""
         with self.lock, closing(self._connect()) as db, db:
             self._begin_display_cache(db, owner, method, write=True, revision=revision)
-            last = db.execute("SELECT CAST(payload AS INTEGER) FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, _DISPLAY_ORDER_KEY)).fetchone()
-            current, legacy_batch = self._current_display_snapshot(db, owner, method, pointer)
+            last = db.execute("SELECT value FROM display_publication_order WHERE owner=? AND method=?",
+                (owner, method)).fetchone()
+            current = self._current_display_snapshot(db, owner, method, pointer)
             order = int(max(time.time() * 1000, last[0] if last else 0, current.order if current else 0)) + 1
-            db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", (owner, method, _DISPLAY_ORDER_KEY, str(order)))
-            return order, legacy_batch
+            db.execute("INSERT OR REPLACE INTO display_publication_order VALUES(?,?,?)", (owner, method, order))
+            return order
 
     def read_discovery(self, owner, method, batch, *, page=None, warm=None, revision=None):
         key = ["discovery-feed", batch]
         with self.lock, closing(self._connect()) as db:
             self._begin_display_cache(db, owner, method, revision=revision)
-            header = json.dumps([*key, "pages"])
+            header = _snapshot_record([*key, "pages"])
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, header)).fetchone()
             if row is None:
-                legacy = db.execute("SELECT rowid,payload FROM cached WHERE owner=? AND method=? AND key=?",
-                    (owner, method, json.dumps(key))).fetchone()
-                if legacy is None:
-                    return None
-                rowid, payload = legacy
-                feed = json.loads(payload)
-                feed["_legacy_rowid"] = rowid
-                return feed
+                return None
             feed = self._decode_discovery_header(row[0], batch)
             if feed is None:
                 return None
@@ -471,9 +554,7 @@ class AccountCache:
 
     def save_discovery(self, owner, method, feed, previous, *, revision, current=None, before_commit=None):
         key = ["discovery-feed", feed["batch"]]
-        if previous is not None and "_legacy_rowid" in previous:
-            return self._save_legacy_discovery(owner, method, key, feed, previous["_legacy_rowid"], revision, before_commit)
-        header = json.dumps([*key, "pages"])
+        header = _snapshot_record([*key, "pages"])
         checkpoint = previous["_checkpoint"] if previous else 0
         prefix = previous
         visited = {stream: paths[len(prefix.get("visitedPaths", {}).get(stream, ())) if prefix else 0:]
@@ -491,23 +572,9 @@ class AccountCache:
             # Acquire the commit lock before checking the request at publication.
             self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=before_commit is not None)
             if current is not None:
-                latest, legacy_batch = self._discovery_current(db, owner, method, current)
                 incoming = (self._discovery_usable(metadata), feed["publicationOrder"])
-                if feed["legacyBatch"] == legacy_batch and (latest is None or incoming > (latest.usable, latest.order)):
-                    rows.append((owner, method, json.dumps([*current, "pages"]), json.dumps(feed["batch"])))
-            db.execute("""CREATE TABLE IF NOT EXISTS discovery_pages (
-                owner TEXT, method TEXT, header TEXT, checkpoint INTEGER, payload TEXT NOT NULL,
-                PRIMARY KEY(owner,method,header,checkpoint))""")
-            db.execute("""CREATE TABLE IF NOT EXISTS discovery_offsets (
-                owner TEXT, method TEXT, header TEXT, start_offset INTEGER, checkpoint INTEGER,
-                PRIMARY KEY(owner,method,header,start_offset))""")
-            # Legacy clear and display-setting operations also delete these headers.
-            db.execute("""CREATE TRIGGER IF NOT EXISTS delete_discovery_pages AFTER DELETE ON cached
-                WHEN json_extract(OLD.key,'$[0]')='discovery-feed' AND json_extract(OLD.key,'$[2]')='pages'
-                BEGIN DELETE FROM discovery_pages WHERE owner=OLD.owner AND method=OLD.method AND header=OLD.key; END""")
-            db.execute("""CREATE TRIGGER IF NOT EXISTS delete_discovery_offsets AFTER DELETE ON cached
-                WHEN json_extract(OLD.key,'$[0]')='discovery-feed' AND json_extract(OLD.key,'$[2]')='pages'
-                BEGIN DELETE FROM discovery_offsets WHERE owner=OLD.owner AND method=OLD.method AND header=OLD.key; END""")
+                if self._can_publish_display_snapshot(db, owner, method, current, incoming):
+                    rows.append((owner, method, _snapshot_record(current), json.dumps(feed["batch"])))
             stored = db.execute("SELECT json_extract(payload,'$._checkpoint') FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, header)).fetchone()
             if (stored[0] if stored else 0) != checkpoint:
@@ -534,30 +601,14 @@ class AccountCache:
         return {"_checkpoint": checkpoint + 1, "_offsetCheckpoint": checkpoint + 1,
                 "_itemCount": metadata["_itemCount"]}
 
-    def _save_legacy_discovery(self, owner, method, key, feed, previous_rowid, revision, before_commit):
-        # Continue an existing old-format batch in place so a downgraded
-        # application can resume it too. Refreshes create new paged batches.
-        snapshot = dict(feed, seen=sorted(feed["seen"]))
-        snapshot.pop("_legacy_rowid")
-        with self.lock, closing(self._connect()) as db, db:
-            self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=before_commit is not None)
-            stored = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, json.dumps(key))).fetchone()
-            if stored != (previous_rowid,):
-                raise AccountError("cache_changed", "发现批次已改变，请重试")
-            inserted = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
-                (owner, method, json.dumps(key), json.dumps(snapshot, ensure_ascii=False)))
-            if before_commit is not None:
-                before_commit()
-            return {"_legacy_rowid": inserted.lastrowid}
-
     def save(self, owner, method, key, value, *, revision=None):
         self.save_many(owner,method,[(key,value)], revision=revision)
 
     @staticmethod
     def _save_rows(db, owner, method, pages):
         db.executemany("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
-            [(owner,method,json.dumps(key),json.dumps(value,ensure_ascii=False)) for key,value in pages])
+            [(owner, method, _snapshot_record(key) if key[0] in _SNAPSHOT_KINDS else json.dumps(key),
+              json.dumps(value, ensure_ascii=False)) for key, value in pages])
 
     def save_many(self, owner, method, pages, *, revision=None):
         pages = list(pages)
@@ -569,7 +620,7 @@ class AccountCache:
     def read_popularity(self, owner, method, key, *, revision, warm=None):
         with self.lock, closing(self._connect()) as db:
             self._begin_display_cache(db, owner, method, revision=revision)
-            params = owner, method, json.dumps(key)
+            params = owner, method, _snapshot_record(key)
             row = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?", params).fetchone()
             if row is None:
                 return None, None
@@ -596,14 +647,12 @@ class AccountCache:
 
     @staticmethod
     def _popularity_progress(db, owner, method, key, rowid):
-        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='popularity_progress'").fetchone():
-            return 0
         return db.execute("SELECT COALESCE(MAX(checkpoint),0) FROM popularity_progress WHERE owner=? AND method=? AND key=? AND base_rowid=?",
             (owner, method, key, rowid)).fetchone()[0]
 
     def save_popularity(self, owner, method, snapshot, previous, *, revision, current=None, before_commit=None, changes=None):
         index = snapshot["index"]
-        key = json.dumps(["popularity-index", index])
+        key = _snapshot_record(["popularity-index", index])
         params = owner, method, key
         payload = json.dumps(snapshot, ensure_ascii=False) if changes is None else json.dumps(
             [snapshot["enrichOffset"], snapshot["retryOffset"], changes])
@@ -615,20 +664,12 @@ class AccountCache:
                 raise AccountError("cache_changed", "排序快照已更新，请重试")
             if changes is not None:
                 rowid, progress = version
-                if not progress:
-                    db.execute("""CREATE TABLE IF NOT EXISTS popularity_progress (
-                        owner TEXT, method TEXT, key TEXT, base_rowid INTEGER, checkpoint INTEGER, payload TEXT NOT NULL,
-                        PRIMARY KEY(owner,method,key,base_rowid,checkpoint)) WITHOUT ROWID""")
-                    db.execute("""CREATE TRIGGER IF NOT EXISTS delete_popularity_progress AFTER DELETE ON cached
-                        WHEN json_extract(OLD.key,'$[0]')='popularity-index'
-                        BEGIN DELETE FROM popularity_progress WHERE owner=OLD.owner AND method=OLD.method AND key=OLD.key; END""")
                 db.execute("INSERT INTO popularity_progress VALUES(?,?,?,?,?,?)", (*params, rowid, progress + 1, payload))
                 version = (rowid, progress + 1)
             else:
                 if current is not None:
-                    latest = self._snapshot_pointer(db, owner, method, current, "popularity-index")
                     incoming = (snapshot["ready"], snapshot.get("publicationOrder", snapshot["created"] * 1000))
-                    if latest is None or incoming > (latest.usable, latest.order):
+                    if self._can_publish_display_snapshot(db, owner, method, current, incoming):
                         self._save_rows(db, owner, method, [(current, index)])
                 if version and version[1]:
                     db.execute("DELETE FROM popularity_progress WHERE owner=? AND method=? AND key=?", params)
@@ -752,19 +793,18 @@ class AccountCache:
         with ExitStack() as held, self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             feeds = db.execute("SELECT key,json_extract(key,'$[1]') FROM cached WHERE owner=? AND method=? AND key LIKE ? "
-                "ORDER BY rowid DESC LIMIT -1 OFFSET ?", (owner, method, '["discovery-feed",%', limit)).fetchall()
+                "ORDER BY rowid DESC LIMIT -1 OFFSET ?", (owner, method, _snapshot_pattern("discovery-feed"), limit)).fetchall()
             if not feeds:
                 return
             protected = {batch for (batch,) in db.execute(
                 "SELECT json_extract(payload,'$') FROM cached WHERE owner=? AND method=? AND key LIKE ?",
-                (owner, method, '["discovery-current",%'))}
+                (owner, method, _snapshot_pattern("discovery-current")))}
             if all(batch in protected for _, batch in feeds):
                 return
-            # Ranking sources written by old releases carry the same dependency fields.
             protected.update(batch for (batch,) in db.execute(
                 "SELECT DISTINCT json_extract(payload,'$.batch') FROM cached WHERE owner=? AND method=? AND key LIKE ?"
                 " AND json_extract(payload,'$.kind')='ranking' AND json_extract(payload,'$.collected')=0",
-                (owner, method, '["popularity-index",%')))
+                (owner, method, _snapshot_pattern("popularity-index"))))
             removed = [(owner, method, key) for key, batch in feeds if batch not in protected
                 and self._snapshot_can_be_retired(held, owner, method, "discovery", batch)]
             db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?", removed)
@@ -773,11 +813,11 @@ class AccountCache:
         with ExitStack() as held, self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute("SELECT key FROM cached WHERE owner=? AND method=? AND key LIKE ? "
-                "ORDER BY rowid DESC LIMIT -1 OFFSET ?", (owner, method, '["popularity-index",%', limit)).fetchall()
+                "ORDER BY rowid DESC LIMIT -1 OFFSET ?", (owner, method, _snapshot_pattern("popularity-index"), limit)).fetchall()
             protected = None
             if rows and current is not None:
                 pointer = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
-                    (owner, method, json.dumps(current))).fetchone()
+                    (owner, method, _snapshot_record(current))).fetchone()
                 if pointer is not None:
                     protected = json.loads(pointer[0])
             paused = 0
@@ -797,7 +837,7 @@ class AccountCache:
                 removed)
             db.execute("DELETE FROM cached WHERE owner=? AND method=? AND key LIKE ? AND json_extract(payload,'$') NOT IN "
                 "(SELECT json_extract(key,'$[1]') FROM cached WHERE owner=? AND method=? AND key LIKE ?)",
-                (owner,method,'["popularity-current",%',owner,method,'["popularity-index",%'))
+                (owner,method,_snapshot_pattern("popularity-current"),owner,method,_snapshot_pattern("popularity-index")))
 
     def clear(self, owner):
         with self.lock, closing(self._connect()) as db, db:
@@ -810,8 +850,8 @@ class AccountCache:
             if previous is not None:
                 db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
                            (owner, "web", _PREVIOUS_WEB_FLAGS_KEY, json.dumps(_web_display_flags(previous))))
-            db.execute("DELETE FROM cached WHERE owner=? AND key NOT IN (?,?,?,?)",
-                (owner, _DISPLAY_PENDING_KEY, _DISPLAY_ORDER_KEY, _WEB_POLICY_KEY, _PREVIOUS_WEB_FLAGS_KEY))
+            db.execute("DELETE FROM cached WHERE owner=? AND key NOT IN (?,?,?)",
+                (owner, _DISPLAY_PENDING_KEY, _WEB_POLICY_KEY, _PREVIOUS_WEB_FLAGS_KEY))
             db.execute("DELETE FROM cursor_visits WHERE owner=?",(owner,))
             db.execute("INSERT INTO cached VALUES(?,?,?,?)", (owner, "account", _ACCOUNT_CLEAR_KEY, json.dumps(uuid.uuid4().hex)))
             for method in ("app", "web"):
@@ -856,7 +896,7 @@ class AccountCache:
 
     @staticmethod
     def _is_display_key(key):
-        return key[0] in {"discovery-current", "discovery-feed", "popularity-current", "popularity-index"} or (
+        return key[0] in _SNAPSHOT_KINDS or (
             key[0] == "data" and key[1] in {"bookmarks", "works"})
 
     @staticmethod

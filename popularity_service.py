@@ -225,7 +225,7 @@ class PopularityService:
             if job is None:
                 index = uuid.uuid4().hex
                 held.enter_context(cache.pin_snapshot(owner, method, "popularity", index))
-                order, _ = cache.reserve_display_publication(owner, method, current_key, revision=revision)
+                order = cache.reserve_display_publication(owner, method, current_key, revision=revision)
                 job = self._new(index, kind, uid, batch, mode, work_type, include_ai, start, end, method, generation)
                 job["publicationOrder"] = order
                 job["descriptor"] = descriptor

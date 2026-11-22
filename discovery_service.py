@@ -314,10 +314,10 @@ class DiscoveryService:
                 raise AccountError("cache_miss", "原发现批次已清除，请刷新当前页面")
             previous = stored if not refresh else None
             if previous is None:
-                order, legacy_batch = cache.reserve_display_publication(owner, method, current_key, revision=revision)
+                order = cache.reserve_display_publication(owner, method, current_key, revision=revision)
                 feed = self._new(kind,scope,mode,rank,method)
                 held.enter_context(cache.pin_snapshot(owner, method, "discovery", feed["batch"]))
-                feed.update(publicationOrder=order, legacyBatch=legacy_batch)
+                feed["publicationOrder"] = order
             else:
                 # Existing cards are immutable within a discovery batch. Only the
                 # working lists, cursor map and deduplication state are mutated.
