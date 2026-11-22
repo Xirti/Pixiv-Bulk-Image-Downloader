@@ -99,7 +99,8 @@ let basketCardSizeObserver = null;
 const basketThumbnailControllers = new Set();
 let basketThumbnailQueue = [];
 let basketThumbnailWindow = 0;
-let detailImageIdleTimer = null;
+const detailImageIdleTimers = new Map();
+let pendingViewerDetail = null;
 let pageHistory = null;
 let navigationRecordFrame = null, navigationRecordTimer = null;
 let searchSurface = "home";
@@ -1017,29 +1018,44 @@ function rememberArtworkDetail(item, {supersedePreview=false}={}) {
   const candidateIndex = batchCandidateItems.findIndex((row) => String(row.id) === artworkId);
   if (candidateIndex >= 0) batchCandidateItems[candidateIndex] = item;
   selection.remember(item);
-  if (String(basketDetail.item?.id || "") === artworkId) basketDetail.item = item;
+  if (String(basketDetail.item?.id || "") === artworkId) {
+    basketDetail.item = item;
+    basketDetail.needsRender = true;
+  }
   staleBasketPreviewIds.delete(artworkId);
 }
 
-function refreshDetailControls(item, inBasket = basketPageOpen()) {
+function detailStageVisible(surface, inBasket) {
+  return !document.hidden && (inBasket
+    ? surface === $("#basketPage") && basketReturnMode === "detail"
+    : surface === $("#downloadPage") && !document.body.classList.contains("batch-mode"));
+}
+
+function refreshDetailControls(item, inBasket = basketPageOpen(), {sync = true} = {}) {
+  if (document.hidden) {
+    (inBasket ? basketDetail : normalDetail).needsRender = true;
+    if (!$("#allViewer").hidden) pendingViewerDetail = item;
+    return;
+  }
   if (inBasket && String(basketDetail.item?.id) === String(item.id)) {
+    basketDetail.needsRender = false;
     const visible = basketDetailView.render(item, undefined, {preserve: true});
     renderCollectionWindowInto(item, $("#basketPages"), $("#basketPageMore"), basketDetail);
     $("#basketViewAll").hidden = item.pages <= visible;
     syncBasketArtworkMeta();
   } else if (!inBasket) {
+    normalDetail.needsRender = false;
     const visible = normalDetailView.render(item, undefined, {preserve: true});
     renderCollectionPageWindow(item);
     $("#viewAll").hidden = item.pages <= visible;
     renderSingleDownloadOptions(item, true);
-    normalDetail.needsRender = false;
     updateFormatHint();
   }
   if (!$("#allViewer").hidden) renderViewerWindow(item);
   if (normalDetail.item) $("#download").textContent = downloadButtonLabel(normalDetail.item);
   updateSelectionBar();
   syncResultSelectionControls();
-  syncPreviewResources();
+  if(sync)syncPreviewResources();
 }
 
 async function refreshArtworkPreview(rawArtworkId) {
@@ -1068,21 +1084,13 @@ async function refreshArtworkPreview(rawArtworkId) {
 
       rememberArtworkDetail(fresh);
       detail.item = fresh;
-
-      refreshDetailControls(fresh);
-
-      document.querySelectorAll("[data-detail-artwork]").forEach((img) => {
-        if (String(img.dataset.detailArtwork || "") !== artworkId) return;
-        const page = Number(img.dataset.detailPage);
-        const image = fresh.pageImages?.[page];
-        const source = image?.regular || (page === 0 ? fresh.thumb : "");
-        if (!source) return;
-        delete img.dataset.detailRefreshAttemptedUrl;
-        img.classList.remove("image-unavailable");
-        img.closest(".page-select,.deck-card,figure")?.classList.remove("image-unavailable");
-        if (img.hasAttribute("data-suspended-src")) img.dataset.suspendedSrc = source;
-        else img.setAttribute("src", source);
-      });
+      detail.needsRender = true;
+      const surface = activeScrollSurface(), inBasket = detail === basketDetail;
+      if (detailStageVisible(surface, inBasket)) refreshDetailControls(fresh, inBasket);
+      else if (surface === $("#allViewer")) {
+        if (document.hidden) pendingViewerDetail = fresh;
+        else renderViewerWindow(fresh);
+      }
       announceToast("预览授权已刷新");
       return true;
     } catch (error) {
@@ -1184,8 +1192,8 @@ window.addEventListener("pagehide", () => {
   ugoiraPreview.clear();
   cancelSearchPrefetch();
   stopBasketThumbnails();
-  clearTimeout(detailImageIdleTimer);
-  detailImageIdleTimer = null;
+  for (const timer of detailImageIdleTimers.values()) clearTimeout(timer);
+  detailImageIdleTimers.clear();
 });
 
 function attachUgoiraHoverTargets(root) {
@@ -2279,23 +2287,31 @@ function updateFloatingChrome() {
 }
 
 // Keep page state intact while releasing media owned by inactive views.
-function syncPreviewResources({releaseIdle = false} = {}) {
+function syncPreviewResources({releaseIdle = null} = {}) {
   const surface = activeScrollSurface();
   markAuthorWorksViewed();
-  const normalVisible = !document.hidden && surface === $("#downloadPage");
+  const normalVisible = detailStageVisible(surface, false);
+  const basketDetailVisible = detailStageVisible(surface, true);
   const basketVisible = !document.hidden && surface === $("#basketPage");
-  normalDetailView.setVisible(normalVisible && !document.body.classList.contains("batch-mode"));
-  basketDetailView.setVisible(basketVisible && basketReturnMode==="detail");
+  normalDetailView.setVisible(normalVisible);
+  basketDetailView.setVisible(basketDetailVisible);
+  if (normalVisible && normalDetail.needsRender && normalDetail.item) refreshDetailControls(normalDetail.item, false, {sync:false});
+  if (basketDetailVisible && basketDetail.needsRender && basketDetail.item) refreshDetailControls(basketDetail.item, true, {sync:false});
+  if (!document.hidden && pendingViewerDetail && surface === $("#allViewer")) {
+    const item = pendingViewerDetail;
+    pendingViewerDetail = null;
+    if (item === activeDetail().item) renderViewerWindow(item);
+  }
   if (basketVisible && basketReturnMode === "picker") {
     if (!basketThumbnailObserver) loadBasketThumbnails();
   } else if (basketThumbnailObserver || basketThumbnailQueue.length || basketThumbnailControllers.size) {
     stopBasketThumbnails();
   }
-  let needsRelease = false;
   for (const [selector, visible] of [
     ["#deck, #collectionPages", normalVisible],
-    ["#basketDetailDeck, #basketPages", basketVisible && basketReturnMode === "detail"],
+    ["#basketDetailDeck, #basketPages", basketDetailVisible],
   ]) {
+    let needsRelease = false;
     document.querySelectorAll(selector).forEach(root => {
       if (visible) {
         const suspended = root.querySelectorAll("img[data-suspended-src]");
@@ -2306,28 +2322,32 @@ function syncPreviewResources({releaseIdle = false} = {}) {
           img.src = source;
         });
       } else {
-        root.querySelectorAll("img[src]").forEach(img => {
-          if (releaseIdle) {
+        root.querySelectorAll("img[src], img[data-failed-preview-src]").forEach(img => {
+          const source = img.getAttribute("src") || img.dataset.failedPreviewSrc;
+          if (!source) return;
+          if (releaseIdle === selector) {
             // Retire the old request owner so its queued errors cannot affect
             // the image restored on the next visit.
             const suspended = img.cloneNode(false);
-            suspended.dataset.suspendedSrc = img.getAttribute("src");
+            suspended.dataset.suspendedSrc = source;
             suspended.removeAttribute("src");
             delete suspended.dataset.fallbackReady;
+            delete suspended.dataset.detailRefreshAttemptedUrl;
+            delete suspended.dataset.failedPreviewSrc;
             img.replaceWith(suspended);
             img.removeAttribute("src");
           } else needsRelease = true;
         });
       }
     });
-  }
-  clearTimeout(detailImageIdleTimer);
-  detailImageIdleTimer = null;
-  if (needsRelease) {
-    detailImageIdleTimer = setTimeout(() => {
-      detailImageIdleTimer = null;
-      syncPreviewResources({releaseIdle: true});
-    }, 30000);
+    if (needsRelease) {
+      if (!detailImageIdleTimers.has(selector)) {
+        detailImageIdleTimers.set(selector, setTimeout(() => syncPreviewResources({releaseIdle: selector}), 30000));
+      }
+    } else {
+      clearTimeout(detailImageIdleTimers.get(selector));
+      detailImageIdleTimers.delete(selector);
+    }
   }
 }
 
@@ -2631,8 +2651,10 @@ async function refreshCurrentPage() {
           const fresh=await fetchJson(`/api/pixiv/artwork/${state.basket.id}?refresh=1`,{signal:controller.signal},ARTWORK_DETAIL_TIMEOUT_MS);
           current();rememberArtworkDetail(fresh,{supersedePreview:true});
           basketDetail.item=fresh;basketDetail.artworkId=fresh.id;basketDetail.pageOffset=state.basket.offset;
-          renderBasketArtworkDetail(fresh);
-          basketDetailView.restorePage(state.basket.stagePage || 0);
+          if (!document.hidden) {
+            renderBasketArtworkDetail(fresh);
+            basketDetailView.restorePage(state.basket.stagePage || 0);
+          }
         }else{basketArtworkOffset=state.basket?.artworkOffset || 0;openBasketArtworkPicker();}
       }else if(document.body.classList.contains("batch-mode"))updateBatchDetailSummary();
       else if(surface===window){await syncAuthStatus();renderRecentSearches();}
@@ -2641,7 +2663,7 @@ async function refreshCurrentPage() {
       const fresh=await fetchJson(`/api/pixiv/artwork/${item.id}?refresh=1`,{signal:controller.signal},ARTWORK_DETAIL_TIMEOUT_MS);
       current();rememberArtworkDetail(fresh,{supersedePreview:true});normalDetail.item=fresh;
       refreshDetailControls(fresh,basketPageOpen());
-      if(!basketPageOpen())normalDetailView.restorePage(state.normal?.page || 0);
+      if(!document.hidden && !basketPageOpen())normalDetailView.restorePage(state.normal?.page || 0);
     }
     current();await waitForNavigationFrame(controller.signal);current();applyPageScroll(state);
   }catch(error){if(!controller.signal.aborted && revision===navigationRevision)showTaskDock("刷新失败",error.message || "请稍后重试",5000);}
@@ -2913,6 +2935,7 @@ function renderCollectionPageWindow(item = normalDetail.item) {
 }
 
 function renderViewerWindow(item) {
+  pendingViewerDetail = null;
   $("#viewerTitle").textContent = item?.title || "";
   $("#viewerArtist").textContent = item?.artist || "";
   const pages = Array.isArray(item?.pageImages) ? item.pageImages.slice(0, item.pages) : [];
@@ -2965,6 +2988,7 @@ function openAllViewer({restoring=false}={}) {
 }
 
 function closeAllViewer() {
+  pendingViewerDetail = null;
   viewerPageOffset = 0;
   $("#allViewer").hidden = true;
   document.body.classList.remove("viewer-open");
@@ -3774,6 +3798,7 @@ $("#cancelCapacity").onclick = cancelCapacityDecision;
 function renderBasketArtworkDetail(item) {
   basketDetail.artworkId = item.id;
   basketDetail.item = item;
+  basketDetail.needsRender = false;
   selection.remember(item);
   basketDetailView.reset();
   showBasketPane("detail");
