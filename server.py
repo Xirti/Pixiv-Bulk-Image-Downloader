@@ -4418,10 +4418,10 @@ class Handler(SimpleHTTPRequestHandler):
                 if path == "/api/source-search/settings":
                     return self.send_json(SOURCE_SEARCH.configure(data))
                 if path == "/api/source-search/cancel":
-                    identity = data.get("id")
-                    if not isinstance(identity, str):
+                    identity, request_id = data.get("id"), data.get("requestId")
+                    if (identity is None) == (request_id is None) or (identity is not None and not isinstance(identity, str)):
                         raise SourceSearchError("查询标识无效")
-                    return self.send_json(SOURCE_SEARCH.cancel(identity))
+                    return self.send_json(SOURCE_SEARCH.cancel(identity, request_id=request_id))
                 return self.send_json({"error": "not found"}, 404)
             except (SourceSearchError, RequestInputError) as exc:
                 return self.send_json({"error": str(exc)}, exc.status)

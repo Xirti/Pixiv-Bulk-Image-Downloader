@@ -5,6 +5,7 @@ import base64
 from collections import OrderedDict
 from contextlib import contextmanager
 import ctypes
+from dataclasses import dataclass
 import hashlib
 import io
 import json
@@ -32,6 +33,8 @@ MAX_UPLOAD = 12 * 1024 * 1024
 MAX_PIXELS = 40_000_000
 QUERY_LONG_EDGE = 1200
 HOME = "https://saucenao.com/"
+RECEIPT_TTL = 900
+RECEIPT_LIMIT = 256
 
 
 def prepare_image(raw, *, minimum_side=16):
@@ -95,6 +98,14 @@ class SourceKey:
             raise ctypes.WinError()
 
 
+@dataclass(slots=True)
+class _SourceReceipt:
+    created: float
+    fingerprint: tuple[str, str] | None = None
+    job_id: str | None = None
+    result: dict | None = None
+
+
 class SourceSearch:
     def __init__(self, directory: Path, proxy=lambda: ""):
         self.directory = directory
@@ -103,6 +114,7 @@ class SourceSearch:
         self.vault = SourceKey()
         self.lock = threading.RLock()
         self.jobs = OrderedDict()
+        self.receipts: OrderedDict[str, _SourceReceipt] = OrderedDict()
         self.cache = OrderedDict()
         self.thumbnails = OrderedDict()
         self.thumbnail_bytes = 0
@@ -220,22 +232,57 @@ class SourceSearch:
                     except SourceSearchError:
                         # The launch failure already belongs to this polled job.
                         pass
-            return {**{key: job[key] for key in
-                       ("id", "mode", "state", "message", "candidates", "quota", "cached", "browserFallback")},
-                    "resultEpoch": job["epoch"], "cacheEpoch": self.cache_epoch}
+            return self._public_job(job)
 
-    def _job_for_receipt(self, request_id):
+    def _public_job(self, job):
+        return {**{key: job[key] for key in
+                   ("id", "mode", "state", "message", "candidates", "quota", "cached", "browserFallback")},
+                "resultEpoch": job["epoch"], "cacheEpoch": self.cache_epoch}
+
+    def _receipt(self, request_id):
         if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", request_id):
             raise SourceSearchError("搜图请求编号无效")
-        return next((job for job in self.jobs.values() if request_id in job.get("requestIds", ())), None)
+        cutoff = time.monotonic() - RECEIPT_TTL
+        while self.receipts and next(iter(self.receipts.values())).created <= cutoff:
+            self.receipts.popitem(last=False)
+        return self.receipts.get(request_id)
+
+    def _remember_receipt(self, request_id, *, job_id=None, fingerprint=None, result=None):
+        if len(self.receipts) >= RECEIPT_LIMIT:
+            raise SourceSearchError("短期搜图回执已满，请稍后再试", 429)
+        receipt = _SourceReceipt(time.monotonic(), fingerprint, job_id, result)
+        self.receipts[request_id] = receipt
+        return receipt
+
+    def _receipt_result(self, receipt):
+        if receipt.job_id is not None:
+            return self.snapshot(receipt.job_id)
+        return {**receipt.result, "cacheEpoch": self.cache_epoch}
+
+    def _retain_job(self, job):
+        identity = job["id"]
+        self.jobs[identity] = job
+        if len(self.jobs) <= 8:
+            return
+        retired = next(key for key in self.jobs if key not in {identity, self.active, self.browser_identity})
+        old = self._job(retired)
+        self.jobs.pop(retired)
+        result = self._public_job(old)
+        if result["state"] == "done":
+            result["message"] = "原查询已完成，结果已从任务列表回收"
+        result.update(candidates=[], quota={}, cached=False, browserFallback=False)
+        for receipt in self.receipts.values():
+            if receipt.job_id == retired:
+                receipt.job_id = None
+                receipt.result = result
 
     def receipt(self, request_id):
         with self.lock:
             self._check_open()
-            job = self._job_for_receipt(request_id)
-            if job is None:
+            receipt = self._receipt(request_id)
+            if receipt is None:
                 raise SourceSearchError("没有找到这次搜图的回执", 404)
-            return self.snapshot(job["id"])
+            return self._receipt_result(receipt)
 
     def start(self, raw, mode, backend, *, request_id=None):
         if mode not in {"guest", "key"}:
@@ -244,24 +291,27 @@ class SourceSearch:
         digest = hashlib.sha256(image).hexdigest()
         with self.lock:
             self._check_open()
+            fingerprint = (mode, digest)
             if request_id is not None:
-                received = self._job_for_receipt(request_id)
-                if received is not None:
-                    if received["hash"] != digest or received["mode"] != mode:
+                receipt = self._receipt(request_id)
+                if receipt is not None:
+                    if receipt.fingerprint is None:
+                        receipt.fingerprint = fingerprint
+                        receipt.result["mode"] = mode
+                    elif receipt.fingerprint != fingerprint:
                         raise SourceSearchError("搜图请求编号已用于其他图片或方式", 409)
-                    return self.snapshot(received["id"])
+                    return self._receipt_result(receipt)
             old = self._job(self.active)
             if old and old["state"] in {"queued", "searching", "verification"}:
                 if old["hash"] != digest or old["mode"] != mode:
                     raise SourceSearchError("已有搜图进行中，请先取消或等待", 409)
                 if request_id is not None:
-                    if len(old["requestIds"]) >= 8:
+                    if sum(receipt.job_id == old["id"] for receipt in self.receipts.values()) >= 8:
                         raise SourceSearchError("已有搜图进行中，请先完成当前查询", 409)
-                    old["requestIds"].append(request_id)
+                    self._remember_receipt(request_id, job_id=old["id"], fingerprint=fingerprint)
                 return self.snapshot(old["id"])
             identity = secrets.token_urlsafe(18)
             job = {"id": identity, "hash": digest, "mode": mode, "state": "queued", "message": "正在准备查询…",
-                   "requestIds": [request_id] if request_id is not None else [],
                    "candidates": [], "quota": {}, "cached": False, "browserFallback": False, "secret": secrets.token_urlsafe(32),
                    "image": image, "width": width, "height": height, "epoch": self.epoch, "browser": mode == "guest", "awaitingResponse": False, "created": time.monotonic()}
             cached = self.cache.get((mode, digest))
@@ -277,10 +327,9 @@ class SourceSearch:
                     key = self.vault.read()
                     if not key:
                         job.update(state="error", message="请先配置 SauceNAO API Key", image=b"")
-            self.jobs[identity] = job
-            while len(self.jobs) > 8:
-                expired = next(key for key in self.jobs if key not in {identity, self.active, self.browser_identity})
-                del self.jobs[expired]
+            if request_id is not None:
+                self._remember_receipt(request_id, job_id=identity, fingerprint=fingerprint)
+            self._retain_job(job)
             if job["state"] in {"done", "error"}:
                 return self.snapshot(identity)
             if mode == "key":
@@ -355,17 +404,24 @@ class SourceSearch:
                    "image": b"", "candidates": [], "quota": {}, "cached": False,
                    "browserFallback": False, "awaitingResponse": False, "epoch": self.epoch,
                    "secret": secrets.token_urlsafe(32), "created": time.monotonic()}
-            self.jobs[identity] = job
-            while len(self.jobs) > 8:
-                expired = next(key for key in self.jobs if key not in {identity, self.browser_identity})
-                del self.jobs[expired]
+            self._retain_job(job)
             self.active = identity
             self.website_login = "unknown"
             self._open_browser(job, backend)
             return self.snapshot(identity)
 
-    def cancel(self, identity):
+    def cancel(self, identity=None, *, request_id=None):
         with self.lock:
+            if request_id is not None:
+                receipt = self._receipt(request_id)
+                if receipt is None:
+                    cancelled = {"id": None, "mode": None, "state": "cancelled", "message": "已取消查询，尚未发出",
+                                 "candidates": [], "quota": {}, "cached": False, "browserFallback": False,
+                                 "resultEpoch": self.epoch}
+                    receipt = self._remember_receipt(request_id, result=cancelled)
+                if receipt.job_id is None:
+                    return {"ok": True, "job": self._receipt_result(receipt)}
+                identity = receipt.job_id
             job = self._job(identity)
             if job and job["state"] not in {"done", "error", "cancelled"}:
                 job.update(state="cancelled", awaitingResponse=False, image=b"", message="已取消查询；已发出的请求可能仍计入额度")

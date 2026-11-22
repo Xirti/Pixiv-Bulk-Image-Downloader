@@ -47,8 +47,9 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   function controls(){
     find("[data-source-query]").disabled=!file || busy || Boolean(lastReceipt?.pending);
     find("[data-source-read]").disabled=Boolean(viewReceipt?.pending);
-    find("[data-source-cancel]").hidden=!busy;
-    find("[data-source-cancel]").disabled=!job?.id;
+    const canCancel=busy && job?.id || viewReceipt?.pending || viewReceipt?.unconfirmed;
+    find("[data-source-cancel]").hidden=!canCancel;
+    find("[data-source-cancel]").disabled=!canCancel;
     find("[data-source-file]").disabled=busy;
     find("[data-source-mode]").disabled=busy;
     find("[data-source-browser-fallback]").hidden=!job?.browserFallback;
@@ -325,14 +326,19 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     else if(!viewReceipt?.pending)message("还没有发起查询，请先选择图片。");
   };
   find("[data-source-cancel]").onclick=async()=>{
-    if(!job?.id)return;
-    const revision=sequence,id=job.id;
+    const revision=sequence,id=job?.id,receipt=viewReceipt;
+    if(!id && !receipt?.pending && !receipt?.unconfirmed)return;
+    const ownsView=()=>revision===sequence && (id?job?.id===id:viewReceipt===receipt);
     try{
-      const result=await post("cancel",{id});
-      if(revision!==sequence || job?.id!==id)return;
+      const result=await post("cancel",id?{id}:{requestId:receipt.id});
+      if(!ownsView())return;
       clearTimeout(timer);sequence++;
+      if(!id){
+        if(lastReceipt===receipt)lastReceipt=null;
+        viewReceipt=null;
+      }
       apply(result.job || {...job,state:"cancelled",message:"已取消查询；已发出的请求可能仍计入额度"});
-    }catch(error){if(revision===sequence && job?.id===id)message(error.message,true);}
+    }catch(error){if(ownsView())message(error.message,true);}
   };
   root.addEventListener("dragover",event=>{if(event.dataTransfer.types.includes("Files")){event.preventDefault();root.classList.add("is-dragging");}});
   root.addEventListener("dragleave",event=>{if(!root.contains(event.relatedTarget))root.classList.remove("is-dragging");});
