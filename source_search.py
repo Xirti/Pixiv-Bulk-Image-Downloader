@@ -23,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from runtime_identity import named_mutex
 from source_results import SourceSearchError, normalize_candidates, parse_api, pixiv_id, thumbnail_url
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -128,28 +129,61 @@ class SourceSearch:
         self.requests = []
         self.short_limit = 4
         self.settings_path = directory / "settings.json"
+        self._settings_mutex = "Local\\MOKU.SourceSettings." + hashlib.sha256(
+            os.path.normcase(str(self.settings_path.resolve())).encode("utf-8")).hexdigest()
         self.mode = "guest"
         self.settings_error = ""
-        try:
-            settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        self._settings_revision = None
+        with self._configuration():
             pass
-        except (OSError, ValueError):
-            self.settings_error = "搜图设置无法读取，暂用游客方式；请重新保存搜图设置"
-        else:
-            if not isinstance(settings, dict) or not isinstance(settings.get("mode"), str) or settings["mode"] not in {"guest", "key"}:
-                self.settings_error = "搜图设置损坏，暂用游客方式；请重新保存搜图设置"
+
+    @contextmanager
+    def _configuration(self):
+        # Decisions made inside this scope cannot overlap a credential commit.
+        with named_mutex(self._settings_mutex, timeout_seconds=5):
+            previous_error = self.settings_error
+            mode, revision, error = "guest", None, ""
+            try:
+                settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as cause:
+                error = "搜图设置无法读取，暂用游客方式；请重新保存搜图设置"
+                if not previous_error:
+                    logging.getLogger("moku.source").warning("Source settings read failed: %s", cause)
             else:
-                self.mode = settings["mode"]
+                if (not isinstance(settings, dict) or settings.get("mode") not in ("guest", "key")
+                        or settings.get("credentialRevision") is not None
+                        and not isinstance(settings["credentialRevision"], str)):
+                    error = "搜图设置损坏，暂用游客方式；请重新保存搜图设置"
+                else:
+                    mode, revision = settings["mode"], settings.get("credentialRevision")
+            self._adopt_configuration(mode, revision, error)
+            yield
+
+    def _adopt_configuration(self, mode, revision, error=""):
+        self.mode, self.settings_error = mode, error
+        if revision == self._settings_revision:
+            return
+        self._settings_revision = revision
+        self.epoch += 1
+        self.api_browser_preferred = False
+        self.cache.clear()
+        for job in self.jobs.values():
+            if job["mode"] == "key" and (job["state"] in {"queued", "searching", "verification"} or job["browserFallback"]):
+                self._fail(job, "搜图设置已修改，请重新查询")
 
     def _check_open(self):
         if self._closed:
             raise SourceSearchError("搜图服务已关闭，请重新打开程序", 503)
 
+    def _settings_response(self, key):
+        return {"mode": self.mode, "keyConfigured": bool(key), "websiteLogin": self.website_login,
+                "error": self.settings_error, "cacheEpoch": self.cache_epoch}
+
     def settings(self):
-        with self.lock:
-            return {"mode": self.mode, "keyConfigured": bool(self.vault.read()), "websiteLogin": self.website_login,
-                    "error": self.settings_error, "cacheEpoch": self.cache_epoch}
+        with self.lock, self._configuration():
+            return self._settings_response(self.vault.read())
 
     def cache_state(self):
         with self.lock:
@@ -185,26 +219,37 @@ class SourceSearch:
                     shutil.rmtree(profile)
                 self.website_login = "unknown"
                 return self.settings()
-            mode = data.get("mode", self.mode)
-            if not isinstance(mode, str) or mode not in {"guest", "key"}:
-                raise SourceSearchError("搜图方式无效")
-            if data.get("action") == "remove-key":
-                self.api_browser_preferred = False
-                self.vault.delete()
-                self.cache.clear()
-                self.epoch += 1
-            elif "key" in data:
-                self.api_browser_preferred = False
-                self.vault.save(data["key"])
-                self.cache.clear()
-                self.epoch += 1
-            self.directory.mkdir(parents=True, exist_ok=True)
-            temporary = self.settings_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps({"mode": mode}), encoding="utf-8")
-            os.replace(temporary, self.settings_path)
-            self.mode = mode
-            self.settings_error = ""
-            return self.settings()
+            with self._configuration():
+                mode = data.get("mode", self.mode)
+                if not isinstance(mode, str) or mode not in {"guest", "key"}:
+                    raise SourceSearchError("搜图方式无效")
+                old_key = self.vault.read()
+                key = "" if action == "remove-key" else data.get("key", old_key)
+                key_changed = key != old_key
+                revision = secrets.token_hex(16) if key_changed else self._settings_revision
+                self.directory.mkdir(parents=True, exist_ok=True)
+                temporary = self.settings_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps({"mode": mode, "credentialRevision": revision}), encoding="utf-8")
+                if key_changed:
+                    if action == "remove-key":
+                        self.vault.delete()
+                    else:
+                        self.vault.save(key)
+                try:
+                    os.replace(temporary, self.settings_path)
+                except OSError as error:
+                    if key_changed:
+                        try:
+                            if old_key:
+                                self.vault.save(old_key)
+                            else:
+                                self.vault.delete()
+                        except (OSError, SourceSearchError) as rollback:
+                            causes = ExceptionGroup("Source configuration commit and rollback failed", [error, rollback])
+                            raise SourceSearchError("搜图配置未保存，原凭据恢复失败，请重新配置", 500) from causes
+                    raise
+                self._adopt_configuration(mode, revision)
+                return self._settings_response(key)
 
     def _job(self, identity):
         # Call under self.lock before deciding whether an operation still owns a task.
@@ -217,7 +262,7 @@ class SourceSearch:
         return job
 
     def snapshot(self, identity):
-        with self.lock:
+        with self.lock, self._configuration():
             job = self._job(identity)
             if job is None:
                 raise SourceSearchError("搜图记录已过期，请重新查询", 404)
@@ -289,7 +334,7 @@ class SourceSearch:
             raise SourceSearchError("搜图方式无效")
         image, (width, height) = prepare_image(raw)
         digest = hashlib.sha256(image).hexdigest()
-        with self.lock:
+        with self.lock, self._configuration():
             self._check_open()
             fingerprint = (mode, digest)
             if request_id is not None:
@@ -310,23 +355,21 @@ class SourceSearch:
                         raise SourceSearchError("已有搜图进行中，请先完成当前查询", 409)
                     self._remember_receipt(request_id, job_id=old["id"], fingerprint=fingerprint)
                 return self.snapshot(old["id"])
+            key = self.vault.read() if mode == "key" else None
             identity = secrets.token_urlsafe(18)
             job = {"id": identity, "hash": digest, "mode": mode, "state": "queued", "message": "正在准备查询…",
                    "candidates": [], "quota": {}, "cached": False, "browserFallback": False, "secret": secrets.token_urlsafe(32),
                    "image": image, "width": width, "height": height, "epoch": self.epoch, "browser": mode == "guest", "awaitingResponse": False, "created": time.monotonic()}
             cached = self.cache.get((mode, digest))
-            if cached and time.monotonic() - cached[0] < 900:
+            if cached and (mode != "key" or key) and time.monotonic() - cached[0] < 900:
                 job.update(state="done", candidates=cached[1], quota=cached[2], cached=True, message="已复用最近的搜图结果", image=b"")
             now = time.monotonic()
             self.requests = [stamp for stamp in self.requests if now - stamp < 30]
-            key = None
             if job["state"] != "done":
                 if len(self.requests) >= self.short_limit:
                     job.update(state="error", message="短时间查询较多，请等待 30 秒再试", image=b"")
-                elif mode == "key":
-                    key = self.vault.read()
-                    if not key:
-                        job.update(state="error", message="请先配置 SauceNAO API Key", image=b"")
+                elif mode == "key" and not key:
+                    job.update(state="error", message="请先配置 SauceNAO API Key", image=b"")
             if request_id is not None:
                 self._remember_receipt(request_id, job_id=identity, fingerprint=fingerprint)
             self._retain_job(job)
@@ -370,7 +413,7 @@ class SourceSearch:
             raise SourceSearchError(job["message"], 503) from error
 
     def continue_api(self, identity, backend):
-        with self.lock:
+        with self.lock, self._configuration():
             self._check_open()
             job = self._job(identity)
             if not job or job["mode"] != "key" or not (job["browserFallback"] or job["browser"]) or not job["image"]:
@@ -451,11 +494,8 @@ class SourceSearch:
         try:
             request = self._api_request(job, key)
             opener = self._opener()
-            with self.lock:
-                if self._job(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
-                    return
-                if job["epoch"] != self.epoch:
-                    self._fail(job, "搜图设置已修改，请重新查询")
+            with self.lock, self._configuration():
+                if not self._current_query(job):
                     return
                 self._reserve_send()
                 job.update(state="searching", message="正在向 SauceNAO 查询…")
@@ -470,15 +510,31 @@ class SourceSearch:
             self._complete(job, candidates, quota)
         except urllib.error.HTTPError as error:
             message = "API 返回 403，可打开官网查看提示并继续" if error.code == 403 else "API Key 无效，请检查配置" if error.code == 401 else "查询过于频繁或额度不足，请稍后再试" if error.code == 429 else f"搜图服务返回 HTTP {error.code}"
-            self._fail(job, message, browser_fallback=error.code == 403)
+            self._fail_query(job, message, browser_fallback=error.code == 403)
         except SourceSearchError as error:
-            self._fail(job, str(error), browser_fallback=error.status == 403)
-        except (OSError, ValueError, urllib.error.URLError):
-            self._fail(job, "搜图连接失败或响应无效；为避免重复消耗额度，请手动重试")
+            self._fail_query(job, str(error), browser_fallback=error.status == 403)
+        except (OSError, ValueError) as error:
+            reason = error.reason if isinstance(error, urllib.error.URLError) else error
+            logging.getLogger("moku.source").warning("Source query failed: %s (errno=%s)",
+                                                      type(reason).__name__, getattr(reason, "errno", None))
+            self._fail_query(job, "搜图连接失败或响应无效；为避免重复消耗额度，请手动重试")
         finally:
             with self.lock:
                 if not job["browserFallback"] and not job["browser"]:
                     job["image"] = b""
+
+    def _current_query(self, job):
+        if self._job(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
+            return False
+        if job["epoch"] != self.epoch:
+            self._fail(job, "搜图设置已修改，请重新查询")
+            return False
+        return True
+
+    def _fail_query(self, job, message, *, browser_fallback=False):
+        with self.lock, self._configuration():
+            if self._current_query(job):
+                self._fail(job, message, browser_fallback=browser_fallback)
 
     def _fail(self, job, message, *, browser_fallback=False):
         with self.lock:
@@ -486,11 +542,8 @@ class SourceSearch:
                 job.update(state="error", awaitingResponse=False, message=message, image=job["image"] if browser_fallback else b"", browserFallback=browser_fallback)
 
     def _complete(self, job, candidates, quota):
-        with self.lock:
-            if self._job(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
-                return
-            if job["epoch"] != self.epoch:
-                self._fail(job, "搜图设置已修改，请重新查询")
+        with self.lock, self._configuration():
+            if not self._current_query(job):
                 return
             for row in candidates:
                 source = row.pop("thumbnail")
@@ -520,7 +573,7 @@ class SourceSearch:
         self.requests.append(now)
 
     def browser(self, identity, secret, data):
-        with self.lock:
+        with self.lock, self._configuration():
             self._check_open()
             job = self._job(identity)
             if job is None or not secret.isascii() or not secrets.compare_digest(job["secret"], secret) or not job["browser"]:
