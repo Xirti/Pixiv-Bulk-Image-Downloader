@@ -352,7 +352,7 @@ class SourceSearch:
 
     def _open_browser(self, job, backend):
         if self.process is not None and self.process.poll() is None:
-            # The existing window only owns this job once it requests its payload.
+            # Keep the handoff until the window acts with the new identity.
             job["browserHandoff"] = backend
             return
         job.pop("browserHandoff", None)
@@ -528,9 +528,13 @@ class SourceSearch:
             if action == "payload":
                 if job["state"] in {"cancelled", "done", "error"}:
                     return {"image": "", "state": job["state"], "mode": job["mode"]}
-                self.browser_identity = identity
-                job.pop("browserHandoff", None)
+                if identity == self.active and "browserHandoff" not in job:
+                    self.browser_identity = identity
                 return {"image": base64.b64encode(job["image"]).decode(), "state": job["state"], "mode": job["mode"]}
+            if (action in {"poll", "session", "api-request", "submitted"} and identity == self.active
+                    and job["state"] in {"queued", "searching", "verification"}
+                    and job.pop("browserHandoff", None) is not None):
+                self.browser_identity = identity
             if action == "session":
                 state = data.get("login")
                 if state not in ("signed-in", "signed-out"):

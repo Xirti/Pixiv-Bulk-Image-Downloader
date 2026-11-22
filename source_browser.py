@@ -238,10 +238,15 @@ def run():
             elif kind == "result" and submitted:
                 args = {"json": result["json"]} if "json" in result else {"rows": result["rows"]}
                 response = send("result", attempt=attempt, **args)
-                completed = response.get("state") in {"done", "error", "cancelled"}
+                state = response.get("state")
+                completed = state in {"done", "error", "cancelled"}
                 if completed:
                     encoded = ""
-                window.set_title("MOKU — API 返回错误，请查看主界面" if response.get("state") == "error" else "MOKU — 结果已带回主界面，可关闭此窗口")
+                    window.set_title({
+                        "done": "MOKU — 结果已带回主界面，可关闭此窗口",
+                        "error": "MOKU — 结果返回失败，请查看主界面",
+                        "cancelled": "MOKU — 查询已取消，结果未采用",
+                    }[state])
             elif kind == "error":
                 send("error")
                 completed = True
