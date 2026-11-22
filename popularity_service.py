@@ -44,13 +44,13 @@ class PopularityService:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
 
-    def _save(self, owner, method, job, epoch, generation, rowid, revision, *, current_key=None):
+    def _save(self, owner, method, job, epoch, generation, rowid, revision, *, current_key=None, check_cancel=None):
         snapshot = copy.deepcopy(job)
         with self.pages.publication(generation), self.guard:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
             rowid = self.pages.saved_cache.save_popularity(owner, method, snapshot, rowid,
-                revision=revision, current=current_key)
+                revision=revision, current=current_key, before_commit=check_cancel)
             self.jobs[owner, method, job["index"]] = (rowid, snapshot)
             self.jobs.move_to_end((owner, method, job["index"]))
             while len(self.jobs) > 12:
@@ -170,7 +170,8 @@ class PopularityService:
         job["collected"] = job["webOffset"] >= len(job["webIds"])
 
     def read(self, *, generation, kind, uid="", batch="", mode="safe", work_type="all", include_ai=True,
-             start="", end="", index="", page=1, refresh=False, query="", fuzzy=False, cancel_event=None, account=None):
+             start="", end="", index="", page=1, refresh=False, query="", fuzzy=False,
+             cancel_event=None, account=None, check_cancel=None):
         if kind not in {"author", "ranking", "recommended", "search"} or mode not in CONTENT_MODES:
             raise SearchInputError("排序来源无效")
         if work_type not in {"all", "illustration", "manga", "ugoira"} or type(include_ai) is not bool:
@@ -230,7 +231,8 @@ class PopularityService:
                 job["descriptor"] = descriptor
                 if kind == "search":
                     job.update(query=query, fuzzy=fuzzy)
-                rowid = self._save(owner, method, job, epoch, generation, rowid, revision, current_key=current_key)
+                rowid = self._save(owner, method, job, epoch, generation, rowid, revision,
+                    current_key=current_key, check_cancel=check_cancel)
                 held.callback(cache.retire_display_snapshots, cache.retain_popularity, owner, method, current=current_key)
             deadline = time.monotonic() + 18
             reads = 0
@@ -248,7 +250,7 @@ class PopularityService:
                             job["sourcePage"] += 1
                     else:
                         result = self.discovery.read(generation=generation, kind="ranking", rank=job["rank"],
-                            batch=batch, offset=job["sourceOffset"])
+                            batch=batch, offset=job["sourceOffset"], check_cancel=check_cancel)
                         self._append(job, result["items"])
                         job["sourceOffset"] = result["nextOffset"]
                         job["collected"] = result["nextOffset"] is None
@@ -270,7 +272,7 @@ class PopularityService:
                         job["ready"] = True
                 self._check(generation, epoch)
                 rowid = self._save(owner, method, job, epoch, generation, rowid, revision,
-                    current_key=current_key if job["ready"] else None)
+                    current_key=current_key if job["ready"] else None, check_cancel=check_cancel)
             offset = (page - 1) * 36
             total = len(job["items"])
             if job["ready"] and offset >= total and page != 1:

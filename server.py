@@ -3929,11 +3929,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "发现分页无效"}, 400)
 
         kind = query.get("kind", ["recommended"])[0]
-        def read(generation, _cancel_event, account, clear_revision):
+        def read(generation, cancel_event, account, clear_revision):
             result=DISCOVERY.read(generation=generation,kind=kind,account=account,
                 scope=query.get("scope",["all"])[0],mode=query.get("mode",["safe"])[0],rank=query.get("rank",["day"])[0],
                 offset=offset,batch=query.get("batch",[""])[0],
-                refresh=query.get("refresh",[""])[0]=="1",cached=query.get("cached",[""])[0]=="1")
+                refresh=query.get("refresh",[""])[0]=="1",cached=query.get("cached",[""])[0]=="1",
+                check_cancel=lambda: raise_if_search_cancelled(cancel_event))
             if "items" in result:
                 with CLOUD.publication(generation, *account, revision=clear_revision):
                     if result["kind"]=="following":
@@ -3966,7 +3967,8 @@ class Handler(SimpleHTTPRequestHandler):
                 start=query.get("startDate",[""])[0],end=query.get("endDate",[""])[0],
                 index=query.get("index",[""])[0],page=page,
                 refresh=query.get("refresh",[""])[0]=="1",query=query.get("query",[""])[0],
-                fuzzy=fuzzy=="true",cancel_event=cancel_event,account=account)
+                fuzzy=fuzzy=="true",cancel_event=cancel_event,account=account,
+                check_cancel=lambda: raise_if_search_cancelled(cancel_event))
             with CLOUD.publication(generation, *account, revision=clear_revision):
                 _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
             return result

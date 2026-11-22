@@ -261,7 +261,8 @@ class DiscoveryService:
         else:feed["stagnant"]=0
         feed["pending"][stream].extend(result)
 
-    def read(self, *, generation, kind="recommended", scope="all", mode="safe", rank="day", offset=0, batch="", refresh=False, cached=False, account=None):
+    def read(self, *, generation, kind="recommended", scope="all", mode="safe", rank="day", offset=0, batch="",
+             refresh=False, cached=False, account=None, check_cancel=None):
         if kind not in {"recommended","following","ranking"} or scope not in {"all","public","private"} or mode not in CONTENT_MODES or rank not in RANKS:
             raise DiscoveryInputError("发现参数无效")
         if kind=="ranking" and mode!="safe":
@@ -343,10 +344,15 @@ class DiscoveryService:
             with self.pages.publication(generation), self._guard:
                 if epoch != self._epoch:
                     raise AccountError("cache_cleared", "发现缓存已清除，请重新打开")
-                check_window = (lambda: self._check_ranking_window(feed)) if method == "app" and kind == "ranking" else None
+                before_commit = check_cancel
+                if method == "app" and kind == "ranking":
+                    def before_commit():
+                        self._check_ranking_window(feed)
+                        if check_cancel is not None:
+                            check_cancel()
                 try:
                     feed.update(cache.save_discovery(owner, method, feed, previous,
-                        revision=revision, current=current_key if not batch or refresh else None, check_window=check_window))
+                        revision=revision, current=current_key if not batch or refresh else None, before_commit=before_commit))
                 except AccountError as error:
                     if error.kind == "cache_changed":
                         self._feeds.pop(key, None)

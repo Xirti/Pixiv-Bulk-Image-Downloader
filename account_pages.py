@@ -455,10 +455,10 @@ class AccountCache:
                     feed["visitedPaths"].setdefault(stream, []).extend(paths)
             return feed
 
-    def save_discovery(self, owner, method, feed, previous, *, revision, current=None, check_window=None):
+    def save_discovery(self, owner, method, feed, previous, *, revision, current=None, before_commit=None):
         key = ["discovery-feed", feed["batch"]]
         if previous is not None and "_legacy_rowid" in previous:
-            return self._save_legacy_discovery(owner, method, key, feed, previous["_legacy_rowid"], revision, check_window)
+            return self._save_legacy_discovery(owner, method, key, feed, previous["_legacy_rowid"], revision, before_commit)
         header = json.dumps([*key, "pages"])
         checkpoint = previous["_checkpoint"] if previous else 0
         prefix = previous
@@ -474,8 +474,8 @@ class AccountCache:
         metadata["_itemCount"] = len(feed["items"])
         rows = [(owner, method, header, json.dumps(metadata, ensure_ascii=False))]
         with self.lock, closing(self._connect()) as db, db:
-            # Acquire the commit lock before checking an App ranking's window.
-            self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=check_window is not None)
+            # Acquire the commit lock before checking the request at publication.
+            self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=before_commit is not None)
             if current is not None:
                 latest, legacy_batch = self._discovery_current(db, owner, method, current)
                 incoming = (self._discovery_usable(metadata), feed["publicationOrder"])
@@ -515,26 +515,26 @@ class AccountCache:
             # UPSERT avoids REPLACE's delete trigger when recursive_triggers is enabled.
             db.executemany("INSERT INTO cached VALUES(?,?,?,?) ON CONFLICT(owner,method,key) DO UPDATE SET payload=excluded.payload",
                 rows)
-            if check_window is not None:
-                check_window()
+            if before_commit is not None:
+                before_commit()
         return {"_checkpoint": checkpoint + 1, "_offsetCheckpoint": checkpoint + 1,
                 "_itemCount": metadata["_itemCount"]}
 
-    def _save_legacy_discovery(self, owner, method, key, feed, previous_rowid, revision, check_window):
+    def _save_legacy_discovery(self, owner, method, key, feed, previous_rowid, revision, before_commit):
         # Continue an existing old-format batch in place so a downgraded
         # application can resume it too. Refreshes create new paged batches.
         snapshot = dict(feed, seen=sorted(feed["seen"]))
         snapshot.pop("_legacy_rowid")
         with self.lock, closing(self._connect()) as db, db:
-            self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=check_window is not None)
+            self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=before_commit is not None)
             stored = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, json.dumps(key))).fetchone()
             if stored != (previous_rowid,):
                 raise AccountError("cache_changed", "发现批次已改变，请重试")
             inserted = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
                 (owner, method, json.dumps(key), json.dumps(snapshot, ensure_ascii=False)))
-            if check_window is not None:
-                check_window()
+            if before_commit is not None:
+                before_commit()
             return {"_legacy_rowid": inserted.lastrowid}
 
     def save(self, owner, method, key, value, *, revision=None):
@@ -564,12 +564,12 @@ class AccountCache:
             payload = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?", params).fetchone()[0]
             return row[0], json.loads(payload)
 
-    def save_popularity(self, owner, method, snapshot, previous_rowid, *, revision, current=None):
+    def save_popularity(self, owner, method, snapshot, previous_rowid, *, revision, current=None, before_commit=None):
         index = snapshot["index"]
         key = json.dumps(["popularity-index", index])
         payload = json.dumps(snapshot, ensure_ascii=False)
         with self.lock, closing(self._connect()) as db, db:
-            self._begin_display_cache(db, owner, method, write=True, revision=revision)
+            self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=before_commit is not None)
             row = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?",
                 (owner, method, key)).fetchone()
             if (row[0] if row else None) != previous_rowid:
@@ -580,6 +580,8 @@ class AccountCache:
                 if latest is None or incoming > (latest.usable, latest.order):
                     self._save_rows(db, owner, method, [(current, index)])
             row = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", (owner, method, key, payload))
+            if before_commit is not None:
+                before_commit()
             return row.lastrowid
 
     def read_cursor(self, owner, method, key):
