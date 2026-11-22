@@ -75,7 +75,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
       const reader = stream.getReader();
       const chunks = [];
       let size = 0;
-      const cancel = () => { void reader.cancel().catch(() => {}); };
+      const cancel = () => { void reader.cancel().catch(error => console.warn("Ugoira ZIP stream cancellation failed",error)); };
       signal.addEventListener("abort", cancel, { once: true });
       try {
         while (true) {

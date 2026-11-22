@@ -162,6 +162,7 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
         // Removing src can leave Image.decode() pending in WebView/Chromium.
         try{await Promise.race([image.decode().then(()=>{if(image.src===decodingSource)decoded.set(image,decodingSource);}),stopped]);}
         catch(error){
+          if(!signal.aborted)console.warn("Background image decode failed",error);
           if(!signal.aborted && image.src===decodingSource && images.get(identity)===image && !image.isConnected
               && ![...consumers].some(reader=>reader!==consumer && !reader.signal.aborted)){
             forget(image);images.delete(identity);

@@ -377,8 +377,8 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       if(clearJob!==job || generation!==session().generation)throw new Error("账号已改变，请重新操作");
       let before=cacheRevision;
       try{before=await readRevision() ?? before;}
-      catch{
-        // A failed probe still allows a clear with a successful reply.
+      catch(error){
+        console.warn("Initial account cache revision could not be read",error);
       }
       if(clearJob!==job || generation!==session().generation)throw new Error("账号已改变，请重新操作");
       cacheRevision ??= before;

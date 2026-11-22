@@ -352,7 +352,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         bioReads.set(id,reading);button.disabled=true;button.textContent="读取中…";
         let value;
         try{value=await request(`/api/pixiv/artist/${id}`,{signal:reading.signal});}
-        catch{/* Restore the retry button on the current card. */}
+        catch(error){if(!reading.signal.aborted)console.warn("Account biography could not be read",error);}
         if(bioReads.get(id)!==reading)return;
         bioReads.delete(id);
         if(auth!==generation())return;

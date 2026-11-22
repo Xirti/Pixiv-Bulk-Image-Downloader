@@ -903,13 +903,18 @@ async function notifySearchCancellation(requestId, endpoint = "/api/pixiv/search
   }
 }
 
-function promotePixivRead(requestId, signal) {
-  return fetchJson("/api/pixiv/read/promote", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({requestId}),
-    signal,
-  }, 5000);
+async function promotePixivRead(requestId, signal) {
+  try{
+    return await fetchJson("/api/pixiv/read/promote", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({requestId}),
+      signal,
+    }, 5000);
+  }catch(error){
+    if(!signal?.aborted)console.warn("Background read could not be promoted",error);
+    throw error;
+  }
 }
 
 function cancelActiveSearch(keepPage = null) {

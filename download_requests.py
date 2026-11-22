@@ -158,7 +158,8 @@ class DownloadRequests:
         # check above and allowing successful recovery to replace this row.
         try:
             payload, files = json.loads(row[1]), json.loads(row[2])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            logging.getLogger("moku.http").warning("Download receipt could not be decoded: %s", error)
             return None
         if not isinstance(payload, dict) or not isinstance(files, list):
             return None
@@ -185,7 +186,8 @@ class DownloadRequests:
         for path, size, mtime in files:
             try:
                 info = artifact_file_state(Path(path))
-            except (OSError, ValueError):
+            except (OSError, ValueError) as error:
+                logging.getLogger("moku.http").warning("Download receipt file could not be checked: %s", error)
                 return None
             if info["size"] != size or info["mtime"] != mtime:
                 return None
