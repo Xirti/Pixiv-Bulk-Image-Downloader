@@ -181,11 +181,15 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   function prepareNext(){
     if(state.waiting || state.order==='popular' || !active || document.hidden || !autoPrepare() || !data || data.nextOffset==null)return;
     const target={...state,offset:data.nextOffset},key=pageKey(target),signal=background.signal,auth=generation();
+    const visit=revision;
     if(cache.has(key) || nextReads.has(key))return;
     const reading=readPage(target,{background:'1'},{signal,async accept(result){
       if(auth!==generation() || nextReads.get(key)!==reading)return;
       savePage(target,result);await previews.prepare(key,result.items,signal,{warm:'account'});
-    }}).catch(problem=>{if(!signal.aborted && auth===generation())report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
+    }}).catch(problem=>{
+      if(!signal.aborted && auth===generation() && nextReads.get(key)===reading && ownsIdleView(visit) && !document.hidden)
+        report(`下一页暂未准备好：${problem.message}`);
+    }).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
     nextReads.set(key,reading);
   }
   async function open(options={}){

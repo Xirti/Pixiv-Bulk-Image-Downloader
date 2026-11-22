@@ -118,7 +118,6 @@ AUTHOR_RESOLUTION_TTL_SECONDS = 5 * 60.0
 MAX_IMAGE_TOKENS = 4096
 MAX_PIXIV_CACHE_ITEMS = 256
 MAX_TRACKED_SEARCH_REQUESTS = 64
-MAX_SEARCH_CANCEL_TOMBSTONES = 64
 SEARCH_CANCEL_TOMBSTONE_SECONDS = 120.0
 MAX_ACTIVE_DOWNLOAD_TASKS = 2
 PROTOCOL_VERSION = 5
@@ -312,7 +311,8 @@ SEARCH_SESSION_LOCKS: weakref.WeakValueDictionary[tuple, threading.Lock] = weakr
 SEARCH_SESSION_LOCKS_GUARD = threading.RLock()
 AUTHOR_RESOLUTION_CACHE: OrderedDict[str, tuple[float, str, str]] = OrderedDict()
 AUTHOR_RESOLUTION_CACHE_LOCK = threading.Lock()
-SEARCH_REQUESTS: OrderedDict[str, dict] = OrderedDict()
+SEARCH_REQUESTS: dict[str, TrackedReadEvent] = {}
+SEARCH_CANCELLED: OrderedDict[str, float] = OrderedDict()
 SEARCH_REQUESTS_LOCK = threading.Lock()
 PENDING_READ_PROMOTIONS: OrderedDict[str, float] = OrderedDict()
 AUTHORIZATION_GENERATION = 0
@@ -366,86 +366,69 @@ def parse_search_snapshot_id(value: object) -> str:
     return snapshot_id
 
 
-def _prune_search_requests_locked(now: float) -> None:
-    for request_id, entry in list(SEARCH_REQUESTS.items()):
-        if not entry["active"] and entry["expiresAt"] <= now:
-            SEARCH_REQUESTS.pop(request_id, None)
-    while sum(not entry["active"] for entry in SEARCH_REQUESTS.values()) > MAX_SEARCH_CANCEL_TOMBSTONES:
-        stale_id = next((
-            request_id for request_id, entry in SEARCH_REQUESTS.items()
-            if not entry["active"]
-        ), None)
-        if stale_id is None:
-            break
-        SEARCH_REQUESTS.pop(stale_id, None)
+def _prune_search_cancellations_locked(now: float) -> None:
+    while SEARCH_CANCELLED and next(iter(SEARCH_CANCELLED.values())) <= now:
+        SEARCH_CANCELLED.popitem(last=False)
 
 
-def _search_request_capacity_available_locked() -> bool:
-    return sum(bool(entry["active"]) for entry in SEARCH_REQUESTS.values()) < MAX_TRACKED_SEARCH_REQUESTS
+def _record_search_cancellation_locked(request_id: str, now: float) -> None:
+    SEARCH_CANCELLED[request_id] = now + SEARCH_CANCEL_TOMBSTONE_SECONDS
+    SEARCH_CANCELLED.move_to_end(request_id)
 
 
 def register_search_request(request_id: str) -> TrackedReadEvent:
     clean = parse_search_request_id(request_id, required=True)
-    now = time.monotonic()
     with SEARCH_REQUESTS_LOCK:
-        _prune_search_requests_locked(now)
-        entry = SEARCH_REQUESTS.pop(clean, None)
-        if entry is not None and entry["active"]:
-            SEARCH_REQUESTS[clean] = entry
+        now = time.monotonic()
+        _prune_search_cancellations_locked(now)
+        if clean in SEARCH_CANCELLED:
+            raise SearchCancelledError("搜索已取消")
+        if clean in SEARCH_REQUESTS:
             raise SearchRequestConflictError("搜索请求标识正在使用")
-        if not _search_request_capacity_available_locked():
-            if entry is not None:
-                SEARCH_REQUESTS[clean] = entry
+        if len(SEARCH_REQUESTS) >= MAX_TRACKED_SEARCH_REQUESTS:
             raise SearchRequestLimitError("同时进行的搜索过多，请先停止正在运行的搜索")
-        event = entry["event"] if entry is not None else TrackedReadEvent()
+        event = TrackedReadEvent()
         if PENDING_READ_PROMOTIONS.pop(clean, 0) > now:
             event.priority.promote()
-        SEARCH_REQUESTS[clean] = {
-            "event": event,
-            "active": True,
-            "expiresAt": now + SEARCH_CANCEL_TOMBSTONE_SECONDS,
-        }
+        SEARCH_REQUESTS[clean] = event
         return event
 
 
 def cancel_search_request(request_id: object) -> bool:
     clean = parse_search_request_id(request_id, required=True)
-    now = time.monotonic()
     with SEARCH_REQUESTS_LOCK:
+        now = time.monotonic()
+        _prune_search_cancellations_locked(now)
         PENDING_READ_PROMOTIONS.pop(clean, None)
-        _prune_search_requests_locked(now)
-        entry = SEARCH_REQUESTS.pop(clean, None)
-        found = entry is not None and bool(entry["active"])
-        event = entry["event"] if entry is not None else TrackedReadEvent()
-        event.set()
-        SEARCH_REQUESTS[clean] = {
-            "event": event,
-            "active": bool(entry and entry["active"]),
-            "expiresAt": now + SEARCH_CANCEL_TOMBSTONE_SECONDS,
-        }
-        _prune_search_requests_locked(now)
-        return found
+        _record_search_cancellation_locked(clean, now)
+        event = SEARCH_REQUESTS.get(clean)
+        if event is not None:
+            event.set()
+        return event is not None
 
 
 def promote_read_request(request_id: object) -> None:
     clean = parse_search_request_id(request_id, required=True)
     with SEARCH_REQUESTS_LOCK:
-        entry = SEARCH_REQUESTS.get(clean)
-        if entry is not None:
-            if entry["active"] and not entry["event"].is_set():
-                entry["event"].priority.promote()
+        now = time.monotonic()
+        _prune_search_cancellations_locked(now)
+        if clean in SEARCH_CANCELLED:
+            return
+        event = SEARCH_REQUESTS.get(clean)
+        if event is not None:
+            if not event.is_set():
+                event.priority.promote()
             return
         # GET and POST travel independently. Retain a bounded early signal.
         PENDING_READ_PROMOTIONS.pop(clean, None)
-        PENDING_READ_PROMOTIONS[clean] = time.monotonic() + SEARCH_CANCEL_TOMBSTONE_SECONDS
+        PENDING_READ_PROMOTIONS[clean] = now + SEARCH_CANCEL_TOMBSTONE_SECONDS
         if len(PENDING_READ_PROMOTIONS) > MAX_TRACKED_SEARCH_REQUESTS:
             PENDING_READ_PROMOTIONS.popitem(last=False)
 
 
 def release_search_request(request_id: str, event: threading.Event) -> None:
     with SEARCH_REQUESTS_LOCK:
-        entry = SEARCH_REQUESTS.get(request_id)
-        if entry is not None and entry["event"] is event:
+        if SEARCH_REQUESTS.get(request_id) is event:
             SEARCH_REQUESTS.pop(request_id, None)
 
 
@@ -462,8 +445,11 @@ def tracked_search_request(request_id: str):
 
 def cancel_all_search_requests() -> None:
     with SEARCH_REQUESTS_LOCK:
-        for entry in SEARCH_REQUESTS.values():
-            entry["event"].set()
+        now = time.monotonic()
+        _prune_search_cancellations_locked(now)
+        for request_id, event in SEARCH_REQUESTS.items():
+            event.set()
+            _record_search_cancellation_locked(request_id, now)
         SEARCH_REQUESTS.clear()
         PENDING_READ_PROMOTIONS.clear()
 

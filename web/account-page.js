@@ -15,7 +15,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   const labels={home:"资料",following:"关注",followers:"粉丝",bookmarks:"收藏",settings:"设置"};
   let renderedHeader,renderedOwn,renderedPeople,renderedGrid,ownKey="",peopleKey="",gridKey="";
   let backgroundRevision=0,backgroundController=new AbortController(),backgroundQueue=Promise.resolve();
-  const reads=createPageReads(request),nextReads=new Map();
+  const reads=createPageReads(request),nextReads=new Map(),bioReads=new Map();
   let updatePreferences={detect:true,dots:true},updates={public:{},private:{}},checkingUpdates=null;
   let updateController=new AbortController();
   const acknowledged=new Map();
@@ -162,6 +162,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   function prepareNext(){
     if(!active || !autoPrepare() || !data || data.nextOffset==null || !["following","followers","bookmarks"].includes(state.view))return;
     const target={...state,offset:data.nextOffset},contentMode=mode(),signal=backgroundController.signal,version=backgroundRevision;
+    const visit=revision;
     const key=JSON.stringify([target.view,target.scope,target.tag,target.offset,contentMode]);
     if(cache.has(key) || nextReads.has(key))return;
     const reading=read(target.view,{scope:target.scope,offset:String(target.offset),tag:target.tag,mode:contentMode,background:"1"},{signal,async accept(value){
@@ -169,7 +170,11 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       cachePage(key,value);
       if(value.items)await worksCache.prepare("account-works",value.items,signal,{warm:"account"});
       if(value.people)await avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"});
-    }}).catch(problem=>{if(!signal.aborted && version===backgroundRevision && nextReads.get(key)===reading && !["page_retired","page_rebased"].includes(problem.errorKind))report(`下一页暂未准备好：${problem.message}`);}).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
+    }}).catch(problem=>{
+      if(!signal.aborted && version===backgroundRevision && nextReads.get(key)===reading &&
+          active && visit===revision && !document.hidden && !["page_retired","page_rebased"].includes(problem.errorKind))
+        report(`下一页暂未准备好：${problem.message}`);
+    }).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
     nextReads.set(key,reading);
   }
   const artworkContext=item=>({context:{kind:"pid",value:item.id},resultPage:state.page});
@@ -336,11 +341,36 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     peopleRoot.querySelectorAll("[data-person]").forEach(row=>{
       const person=data.people[Number(row.dataset.person)];
       row.querySelectorAll("a").forEach(link=>link.onclick=event=>{event.preventDefault();if(!mokuHasSelectedText(link))artist(person);});
-      row.querySelector("[data-person-bio]")?.addEventListener("click",async event=>{
-        const button=event.currentTarget;button.disabled=true;button.textContent="读取中…";
-        try{const value=await request(`/api/pixiv/artist/${person.id}`);person.bio=value.description || value.bio || "";person.bioLoaded=true;
-          row.querySelector(".account-person-bio").textContent=person.bio || "暂未填写简介";
-        }catch{button.disabled=false;button.textContent="读取失败，重试";}
+      const button=row.querySelector("[data-person-bio]");
+      if(!button)return;
+      if(bioReads.has(person.id)){button.disabled=true;button.textContent="读取中…";}
+      button.addEventListener("click",async ()=>{
+        const id=person.id;
+        if(bioReads.has(id))return;
+        const reading=new AbortController(),auth=generation();
+        bioReads.set(id,reading);button.disabled=true;button.textContent="读取中…";
+        let value;
+        try{value=await request(`/api/pixiv/artist/${id}`,{signal:reading.signal});}
+        catch{/* Restore the retry button on the current card. */}
+        if(bioReads.get(id)!==reading)return;
+        bioReads.delete(id);
+        if(auth!==generation())return;
+        const bio=value?{bio:value.description || value.bio || "",bioLoaded:true}:null;
+        if(bio){
+          Object.assign(person,bio);
+          for(const page of cache.values())for(const entry of page.people || [])if(entry.id===id)Object.assign(entry,bio);
+        }
+        for(const current of peopleRoot.querySelectorAll("[data-person]")){
+          const entry=renderedPeople[Number(current.dataset.person)];
+          if(entry.id!==id)continue;
+          if(bio){
+            Object.assign(entry,bio);
+            current.querySelector(".account-person-bio").textContent=bio.bio || "暂未填写简介";
+          }else{
+            const retry=current.querySelector("[data-person-bio]");
+            if(retry){retry.disabled=false;retry.textContent="读取失败，重试";}
+          }
+        }
       });
     });
     }
@@ -448,6 +478,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   function clear(keepView=false,keepScroll=false){
     if(keepScroll)remember();
     void stopBackground();
+    for(const reading of bioReads.values())reading.abort();
+    bioReads.clear();
     controller?.abort();controller=null;reads.clear();revision++;profile=null;tags=null;data=null;own=null;ownMode=null;
     state=keepView?{...state,offset:0,page:1,trail:[],scroll:keepScroll?state.scroll:0}:empty();restoreTop=state.scroll;positions.clear();
     updates={public:{},private:{}};acknowledged.clear();pendingUpdateScopes.clear();completedScans.clear();
