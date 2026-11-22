@@ -69,7 +69,7 @@ from ugoira_export import MAX_ARCHIVE_BYTES as MAX_UGOIRA_BYTES, MAX_EXPANDED_BY
 from request_coordinator import REQUEST_PRIORITY, RequestCoordinator, RequestDeferredError, RequestBlockedError, TrackedReadEvent
 from browser_transport import BrowserTransport
 from browser_profile import load_browser_profile
-from shared_request_budget import SharedRequestBudget
+from shared_request_budget import SharedRequestBudget, priority_value
 from network_config import normalize_loopback_proxy
 from network_transport import PooledOpener, classify_network_error
 from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status, valid_pixiv_id
@@ -587,15 +587,49 @@ class ArtworkDetail:
             assert_authorization_generation(self.authorization_epoch)
 
 
+@dataclass
+class _DetailPublication:
+    active: int = 0
+    last_started: int = 0
+    published: int = 0
+
+
+_DETAIL_PUBLICATIONS: dict[str, _DetailPublication] = {}
+
+
+@contextmanager
+def _track_detail_publication(artwork_id: str):
+    # Keep the most recent successful publication until all older reads exit,
+    # including when the published entry is evicted from the detail cache.
+    with PIXIV_STATE_LOCK:
+        publication = _DETAIL_PUBLICATIONS.setdefault(artwork_id, _DetailPublication())
+        publication.active += 1
+        publication.last_started += 1
+        revision = publication.last_started
+    try:
+        yield publication, revision
+    finally:
+        with PIXIV_STATE_LOCK:
+            publication.active -= 1
+            if not publication.active:
+                del _DETAIL_PUBLICATIONS[artwork_id]
+
+
 def cache_pixiv_item(
     item: dict, *, download_urls: tuple[dict[str, str], ...] = (),
     authorization_epoch: int | None = None, browsing_generation: int = 0,
+    publication: tuple[_DetailPublication, int] | None = None,
 ) -> ArtworkDetail:
     artwork_id = str(item.get("id") or "")
     if not artwork_id.isdigit():
         raise PixivPolicyError("无效作品 ID")
     detail = ArtworkDetail(item, download_urls, authorization_epoch, browsing_generation, time.monotonic() + 3600)
     with PIXIV_STATE_LOCK:
+        if publication is not None:
+            owner, revision = publication
+            if revision < owner.published:
+                return detail
+            owner.published = revision
         PIXIV_CACHE.pop(artwork_id, None)
         PIXIV_CACHE[artwork_id] = detail
         while len(PIXIV_CACHE) > MAX_PIXIV_CACHE_ITEMS:
@@ -670,14 +704,8 @@ def pixiv_item_for_download(
             assert_authorization_generation(authorization_epoch)
         raise_if_search_cancelled(cancel_event)
         return cached
-    if authorization_epoch is None and cancel_event is None and network_timeout is None:
-        return pixiv_detail(artwork_id, allow_r18=allow_r18)
-    kwargs = {"authorization_epoch": authorization_epoch}
-    if cancel_event is not None:
-        kwargs["cancel_event"] = cancel_event
-    if network_timeout is not None:
-        kwargs["network_timeout"] = network_timeout
-    return pixiv_detail(artwork_id, allow_r18=allow_r18, **kwargs)
+    return pixiv_detail(artwork_id, allow_r18=allow_r18, authorization_epoch=authorization_epoch,
+                        cancel_event=cancel_event, network_timeout=network_timeout, refresh=refresh)
 
 
 def read_pixiv_download_detail(
@@ -2774,16 +2802,17 @@ def pixiv_detail(
     authorization_epoch: int | None = None,
     cancel_event: threading.Event | None = None,
     network_timeout: float | None = None,
+    refresh: bool = False,
 ) -> dict:
     return _read_pixiv_detail(
         artwork_id, allow_r18, authorization_epoch=authorization_epoch,
-        cancel_event=cancel_event, network_timeout=network_timeout,
+        cancel_event=cancel_event, network_timeout=network_timeout, refresh=refresh,
     ).item
 
 
 def _read_pixiv_detail(
     artwork_id: str, allow_r18: bool, *, authorization_epoch: int | None,
-    cancel_event: threading.Event | None, network_timeout: float | None,
+    cancel_event: threading.Event | None, network_timeout: float | None, refresh: bool = False,
 ) -> ArtworkDetail:
     if not artwork_id.isdigit():
         raise PixivPolicyError("无效作品 ID")
@@ -2791,15 +2820,22 @@ def _read_pixiv_detail(
         generation, browsing = AUTHORIZATION_GENERATION, BROWSING_GENERATION
         method = AUTH_METHOD.get()
     timeout = 90 if network_timeout is None else network_timeout
-    try:
-        item = DETAIL_RESOURCES.get(
-            (artwork_id, generation, browsing, allow_r18, authorization_epoch, timeout),
-            lambda event: _fetch_pixiv_detail(
+    key = (artwork_id, generation, browsing, allow_r18, authorization_epoch, timeout)
+    if refresh:
+        # An explicit refresh owns a new source read, even if another refresh is pending.
+        key += (object(),)
+
+    def load(event):
+        with _track_detail_publication(artwork_id) as publication:
+            return _fetch_pixiv_detail(
                 artwork_id, allow_r18, method=method, generation=generation,
                 browsing=browsing, authorization_epoch=authorization_epoch,
-                cancel_event=event, network_timeout=timeout,
-            ), ttl=0, cancel_event=cancel_event,
-        )
+                cancel_event=event, network_timeout=timeout, publication=publication,
+            )
+
+    try:
+        item = DETAIL_RESOURCES.get(key, load, ttl=0, cancel_event=cancel_event,
+                                   priority=priority_value(REQUEST_PRIORITY.get()))
     except PreviewCancelledError as exc:
         raise SearchCancelledError("作品详情读取已取消") from exc
     except PreviewBusyError as exc:
@@ -2819,6 +2855,7 @@ def _fetch_pixiv_detail(
     generation: int,
     browsing: int,
     authorization_epoch: int | None,
+    publication: tuple[_DetailPublication, int],
     cancel_event: threading.Event | None = None,
     network_timeout: float = 90,
 ) -> ArtworkDetail:
@@ -2858,7 +2895,8 @@ def _fetch_pixiv_detail(
         except (SearchCancelledError, AccountError):
             revoke_item_image_tokens(item)
             raise
-        return cache_pixiv_item(item, download_urls=sources, authorization_epoch=epoch, browsing_generation=browsing)
+        return cache_pixiv_item(item, download_urls=sources, authorization_epoch=epoch,
+                                browsing_generation=browsing, publication=publication)
 
 
 UGOIRA_ZIP_MAGIC = b"PK\x03\x04"

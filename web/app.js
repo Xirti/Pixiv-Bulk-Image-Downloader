@@ -1004,13 +1004,14 @@ function activeDetail() {
   return basketPageOpen() ? basketDetail : normalDetail;
 }
 
-function rememberArtworkDetail(item) {
+function rememberArtworkDetail(item, {supersedePreview=false}={}) {
+  const artworkId = String(item.id);
+  if(supersedePreview)detailRefreshes.get(artworkId)?.controller.abort();
   if (String(normalDetail.artworkId) === String(item.id)) {
     normalDetail.item = item;
     normalDetail.loadedAt = Date.now();
     normalDetail.needsRender = true;
   }
-  const artworkId = String(item.id);
   const itemIndex = items.findIndex((row) => String(row.id) === artworkId);
   if (itemIndex >= 0) items[itemIndex] = item;
   const candidateIndex = batchCandidateItems.findIndex((row) => String(row.id) === artworkId);
@@ -2628,7 +2629,7 @@ async function refreshCurrentPage() {
         }
         if(state.basket?.mode==="detail" && selection.has(state.basket.id)){
           const fresh=await fetchJson(`/api/pixiv/artwork/${state.basket.id}?refresh=1`,{signal:controller.signal},ARTWORK_DETAIL_TIMEOUT_MS);
-          current();rememberArtworkDetail(fresh);
+          current();rememberArtworkDetail(fresh,{supersedePreview:true});
           basketDetail.item=fresh;basketDetail.artworkId=fresh.id;basketDetail.pageOffset=state.basket.offset;
           renderBasketArtworkDetail(fresh);
           basketDetailView.restorePage(state.basket.stagePage || 0);
@@ -2638,7 +2639,7 @@ async function refreshCurrentPage() {
     }else{
       const item=normalDetail.item;
       const fresh=await fetchJson(`/api/pixiv/artwork/${item.id}?refresh=1`,{signal:controller.signal},ARTWORK_DETAIL_TIMEOUT_MS);
-      current();rememberArtworkDetail(fresh);normalDetail.item=fresh;
+      current();rememberArtworkDetail(fresh,{supersedePreview:true});normalDetail.item=fresh;
       refreshDetailControls(fresh,basketPageOpen());
       if(!basketPageOpen())normalDetailView.restorePage(state.normal?.page || 0);
     }

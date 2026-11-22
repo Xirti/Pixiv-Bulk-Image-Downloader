@@ -26,9 +26,9 @@ class RequestDeferredError(PixivPolicyError):
 
 class ReadPriority:
     """One shared reader may promote its request once, including while queued."""
-    def __init__(self):
+    def __init__(self, background: int = 1):
         self._foreground = threading.Event()
-        self.background = 1
+        self.background = background
 
     def promote(self):
         self._foreground.set()

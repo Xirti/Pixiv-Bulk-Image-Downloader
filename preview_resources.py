@@ -9,6 +9,9 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from request_coordinator import REQUEST_PRIORITY
+from shared_request_budget import ReadPriority
+
 
 class PreviewCancelledError(RuntimeError):
     pass
@@ -35,6 +38,7 @@ class _ConsumerCancellation(threading.Event):
 class _Load:
     generation: int
     stop: _ConsumerCancellation
+    priority: ReadPriority | None = None
     done: threading.Event = field(default_factory=threading.Event)
     value: object = None
     error: Exception | None = None
@@ -73,7 +77,7 @@ class PreviewResources:
         return result
 
     def get(self, key: tuple, load: Callable[[threading.Event], object], *,
-            ttl: float, cancel_event: threading.Event | None = None):
+            ttl: float, cancel_event: threading.Event | None = None, priority: int | None = None):
         consumer = object()
         while True:
             self._check_cancel(cancel_event)
@@ -92,16 +96,22 @@ class PreviewResources:
                     if job is None:
                         if len(self._loads) >= self._max_loads:
                             raise PreviewBusyError("动图预览繁忙，请稍后再试")
-                        job = _Load(self._generation, _ConsumerCancellation(self._lock))
+                        job = _Load(self._generation, _ConsumerCancellation(self._lock),
+                                    ReadPriority(priority) if priority is not None else None)
                         self._loads[key] = job
                         try:
-                            threading.Thread(target=copy_context().run, args=(self._run, key, job, load, ttl),
+                            context = copy_context()
+                            if job.priority is not None:
+                                context.run(REQUEST_PRIORITY.set, job.priority)
+                            threading.Thread(target=context.run, args=(self._run, key, job, load, ttl),
                                              name="moku-preview", daemon=True).start()
                         except Exception:
                             del self._loads[key]
                             raise
                     if not job.stop.is_set():
                         job.stop.consumers[consumer] = cancel_event
+                        if priority == 0 and job.priority is not None:
+                            job.priority.promote()
                         break
             if cached is not None:
                 return self._copy_result(cached[1], generation, cancel_event)
