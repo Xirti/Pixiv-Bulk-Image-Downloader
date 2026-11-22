@@ -24,6 +24,11 @@ CARD_FIELDS = ("id", "source", "userId", "title", "artist", "thumb", "width", "h
                "bookmarks", "date", "sortDate", "workType", "restriction", "aiGenerated", "rank", "rankKind")
 
 
+def _copy_job(job):
+    # Checkpoints share artwork cards. A new bookmark count replaces one card.
+    return {key: value.copy() if key == "items" else copy.deepcopy(value) for key, value in job.items()}
+
+
 class PopularityService:
     def __init__(self, *, pages, context, discovery, app_get, web_get, detail, search_get=None):
         self.pages, self.context, self.discovery = pages, context, discovery
@@ -47,7 +52,7 @@ class PopularityService:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
 
     def _save(self, owner, method, job, epoch, generation, rowid, revision, *, current_key=None, check_cancel=None, changes=None):
-        snapshot = copy.deepcopy(job)
+        snapshot = _copy_job(job)
         with self.pages.publication(generation), self.guard:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
@@ -103,7 +108,7 @@ class PopularityService:
                 continue
             if dates and not dates.contains(item["date"]):
                 continue
-            additions.append({key: item[key] for key in CARD_FIELDS if key in item})
+            additions.append(copy.deepcopy({key: item[key] for key in CARD_FIELDS if key in item}))
         job["items"].extend(additions)
         job["seen"] = list(seen)
 
@@ -223,7 +228,7 @@ class PopularityService:
             if needs_source:
                 held.enter_context(cache.pin_snapshot(owner, method, "discovery", batch))
             if job is not None and not job["ready"]:
-                job = copy.deepcopy(job)
+                job = _copy_job(job)
             if job is None:
                 index = uuid.uuid4().hex
                 held.enter_context(cache.pin_snapshot(owner, method, "popularity", index))
@@ -294,7 +299,7 @@ class PopularityService:
                             missing.add(cursor)
                             count = None
                         else:
-                            item["bookmarks"] = count
+                            job["items"][cursor] = {**item, "bookmarks": count}
                             missing.discard(cursor)
                         changes.append((cursor, count))
                         if retrying:

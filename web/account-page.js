@@ -260,10 +260,15 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       if(version!==backgroundRevision || auth!==generation())return;
       const saved=await request('/api/account/seen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({authors:part,proofs:Object.fromEntries(Object.keys(part).map(id=>[id,proofs[id]])),authorizationGeneration:auth})});
       if(version!==backgroundRevision || auth!==generation())return;
-      for(const [id,stamp] of Object.entries(saved.accepted || {})){
-        acknowledged.set(id,[acknowledged.get(id) || '',stamp].sort().at(-1));
+      const accepted=new Map(Object.entries(saved.accepted || {}));
+      if(!accepted.size)continue;
+      for(const [id,stamp] of accepted){
+        if(stamp>(acknowledged.get(id) || ''))acknowledged.set(id,stamp);
         for(const scope of ['public','private'])if(updates[scope][id]?.latestObserved<=stamp)updates[scope][id].isNew=false;
-        for(const value of cache.values())for(const person of value.people || [])if(person.id===id && person.latestObserved<=stamp)person.isNew=false;
+      }
+      for(const value of cache.values())for(const person of value.people || []){
+        const stamp=accepted.get(person.id);
+        if(stamp!==undefined && person.latestObserved<=stamp)person.isNew=false;
       }
     }
     syncPeopleStatus();

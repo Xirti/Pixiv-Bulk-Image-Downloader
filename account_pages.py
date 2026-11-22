@@ -142,12 +142,19 @@ class VisitStore:
                     markers[author] = observed > seen
         return markers
 
-    def status(self, owner, scope=None):
+    def status(self, owner, scope=None, *, authors=None):
+        source = "author_seen"
+        filters, params = ["owner=?"], [owner]
+        if scope is not None:
+            source += " JOIN author_scopes USING (owner, author)"
+            filters.append("scope=?")
+            params.append(scope)
+        if authors is not None:
+            filters.append("author IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(authors))
         with self.lock, closing(self._connect()) as connection:
-            rows=connection.execute("SELECT author,seen,observed FROM author_seen WHERE owner=?"+
-                (" AND author IN (SELECT author FROM author_scopes WHERE owner=? AND scope=?)" if scope is not None else ""),
-                (owner,owner,scope) if scope is not None else (owner,))
-            return {author:{"isNew":observed>seen,"latestObserved":observed} for author,seen,observed in rows}
+            rows = connection.execute(f"SELECT author,seen,observed FROM {source} WHERE " + " AND ".join(filters), params)
+            return {author: {"isNew": observed > seen, "latestObserved": observed} for author, seen, observed in rows}
 
     def mark_seen(self, owner, author):
         with self.lock, closing(self._connect()) as connection, connection:
@@ -1570,7 +1577,8 @@ class AccountPages:
             clear_revision = self.saved_cache.clear_revision(owner)
         if kind == "following":
             result = self._cached((generation, kind, owner, scope, offset), lambda: self._app_people(owner,scope,offset,generation) if self.method()=="app" else self._people(owner, scope, offset), refresh, clear_revision=clear_revision)
-            markers=self.visits.status(owner,scope if self.method()=="app" else None) if check_updates else {}
+            markers = self.visits.status(owner, scope if self.method() == "app" else None,
+                                       authors=[person["id"] for person in result["people"]]) if check_updates else {}
             for person in result["people"]:
                 person.update(markers.get(person["id"],{"isNew":False,"latestObserved":""}))
         elif kind == "followers":
