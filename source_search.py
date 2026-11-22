@@ -423,8 +423,9 @@ class SourceSearch:
                     return {"ok": True, "job": self._receipt_result(receipt)}
                 identity = receipt.job_id
             job = self._job(identity)
-            if job and job["state"] not in {"done", "error", "cancelled"}:
-                job.update(state="cancelled", awaitingResponse=False, image=b"", message="已取消查询；已发出的请求可能仍计入额度")
+            if job and (job["state"] in {"queued", "searching", "verification"} or job["browserFallback"]):
+                job.update(state="cancelled", awaitingResponse=False, browserFallback=False, image=b"",
+                           message="已取消查询；已发出的请求可能仍计入额度")
             return {"ok": True, "job": self.snapshot(identity) if job else None}
 
     def _opener(self):

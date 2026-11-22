@@ -138,6 +138,10 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
     const owner={revision,promise:null};polling=owner;
     owner.promise=request(path).then(data=>{
       if(revision!==sequence)return;
+      if(id && viewReceipt?.taskId===id && viewReceipt.unconfirmed && data.browserFallback){
+        message("仍未确认验证是否已接手，可再次读取或取消原任务。",true);
+        return;
+      }
       apply(data);
       if(busy)timer=setTimeout(()=>void poll(revision),1500);
     }).catch(error=>{
@@ -295,15 +299,27 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   setting("[data-source-login]").onclick=()=>void login();
   find("[data-source-login]").onclick=()=>void login();
   find("[data-source-browser-fallback]").onclick=async()=>{
-    if (!job?.id || busy) return;
-    const revision = ++sequence;
-    clearTimeout(timer);busy=true;controls();
-    try {
-      const data = await post("continue",{id:job.id});
-      if (sequence !== revision) return;
-      apply(data);if(busy)timer=setTimeout(()=>void poll(revision),1500);
-    } catch(error) {
-      if(sequence === revision){busy=false;message(error.message,true);controls();}
+    if(!job?.id || busy)return;
+    const receipt={...viewReceipt,taskId:job.id,pending:true,unconfirmed:false,result:job,error:""};
+    lastReceipt=viewReceipt=receipt;
+    sequence++;clearTimeout(timer);busy=true;controls();
+    try{
+      receipt.result=await post("continue",{id:receipt.taskId});
+    }catch(error){
+      receipt.error=error.message;
+      receipt.unconfirmed=!error.status || error.status>=500;
+    }finally{
+      receipt.pending=false;
+      if(viewReceipt!==receipt)controls();
+      else if(receipt.error){
+        busy=receipt.unconfirmed;
+        message(receipt.unconfirmed?receipt.error+"。可读取状态或取消原任务。":receipt.error,true);
+        render();changed();
+      }else{
+        const revision=sequence;
+        apply(receipt.result);
+        if(busy)timer=setTimeout(()=>void poll(revision),1500);
+      }
     }
   };
   find("[data-source-manual-open]").onclick=()=>{
@@ -333,7 +349,7 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
       const result=await post("cancel",id?{id}:{requestId:receipt.id});
       if(!ownsView())return;
       clearTimeout(timer);sequence++;
-      if(!id){
+      if(!id || receipt?.taskId===id){
         if(lastReceipt===receipt)lastReceipt=null;
         viewReceipt=null;
       }
@@ -391,12 +407,16 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
       }
       const savedImage=state?.imageUrl || "",expired=Boolean(savedImage) && !urls.includes(savedImage);
       if(imageUrl!==savedImage || expired){file=null;find("[data-source-file]").value="";}
-      viewReceipt=lastReceipt && state?.epoch===cacheEpoch && state.submission===lastReceipt.id?lastReceipt:null;
+      const originalReceipt=state?.submission && state.submission===lastReceipt?.id;
+      const originalTask=state?.job?.id && state.job.id===lastReceipt?.taskId;
+      viewReceipt=state?.epoch===cacheEpoch && (originalReceipt || originalTask)?lastReceipt:null;
       job=viewReceipt?.result || (state?.epoch===cacheEpoch?state.job:null);imageUrl=expired?"":savedImage;
       const image=find("[data-source-input-image]");image.hidden=!imageUrl;if(imageUrl)image.src=imageUrl;else image.removeAttribute("src");
       find("[data-source-file-name]").textContent=state?.name || "选择、拖入或粘贴图片";
-      busy=Boolean(viewReceipt?.pending || job && ["queued","searching","verification"].includes(job.state));render();
-      const status=job?.message || (viewReceipt?.pending?"正在准备搜图副本…":viewReceipt?.error);
+      busy=Boolean(viewReceipt?.pending || viewReceipt?.taskId && viewReceipt.unconfirmed
+        || job && ["queued","searching","verification"].includes(job.state));render();
+      const status=viewReceipt?.error || (viewReceipt?.pending?
+        (viewReceipt.taskId?"正在确认原任务的验证入口…":"正在准备搜图副本…"):job?.message);
       message(expired?[status,"图片预览已释放，重新查询请选择图片。"].filter(Boolean).join(" · ")
         : status || "选择图片后，点击上传查询。",Boolean(viewReceipt?.error || job?.state==="error"));
       if(busy && job?.id)void poll(sequence);
