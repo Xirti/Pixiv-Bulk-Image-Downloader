@@ -241,7 +241,9 @@ class DiscoveryService:
                 raise AccountError("sync_required", "请先在我的账号同步关注数据，再按公开范围筛选新作")
             result = [item for item in result if states[item["userId"]]["active"] and states[item["userId"]]["privacy"]==feed["scope"]]
         if feed["kind"]=="following":result.sort(key=lambda item:(item["sortDate"],int(item["id"])),reverse=True)
-        if not result and feed["kind"]=="recommended":
+        # App pagination has an explicit validated continuation. Only the Web
+        # recommendation endpoint lacks an end marker when it repeats cards.
+        if method=="web" and not result and feed["kind"]=="recommended":
             feed["stagnant"] += 1
             if feed["stagnant"]>=3:feed["paths"][stream]=None
         else:feed["stagnant"]=0
