@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import random
+import select
 import shutil
 import tempfile
 import urllib.parse
@@ -3424,18 +3425,46 @@ class Handler(SimpleHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
                 return
 
-    def send_bytes(self, raw: bytes, content_type: str, cache_control: str) -> bool:
+    def send_bytes(self, raw: bytes, content_type: str, cache_control: str, *, publication=None) -> bool:
         try:
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Cache-Control", cache_control)
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
+            with publication() if publication is not None else nullcontext():
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", cache_control)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
             self.wfile.write(raw)
             return True
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
             return False
+
+    @contextmanager
+    def _watch_media_client(self, registered: threading.Event | None):
+        cancel = registered if registered is not None else threading.Event()
+        finished = threading.Event()
+        connection = self.connection
+
+        def watch():
+            while not finished.wait(.05) and not cancel.is_set():
+                try:
+                    # Peek after the headers have been read. A later HTTP
+                    # request, if already buffered by the socket, stays intact.
+                    readable, _, _ = select.select([connection], [], [], 0)
+                    if not readable or connection.recv(1, socket.MSG_PEEK):
+                        continue
+                except (OSError, ValueError):
+                    pass
+                cancel.set()
+                return
+
+        watcher = threading.Thread(target=watch, name="moku-media-client", daemon=True)
+        watcher.start()
+        try:
+            yield cancel
+        finally:
+            finished.set()
+            watcher.join(.2)
 
     def read_body(self, max_bytes: int) -> bytes:
         if self.headers.get("Transfer-Encoding"):
@@ -4200,8 +4229,13 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "动图来源版本无效"}, 400)
         request_id = query.get("requestId", [""])[0].strip()
         try:
-            with READ_SCOPES.request(request_id) as lease:
-                authorized, authorization_epoch, cancel_event = lease.authorized, lease.authorization_epoch, lease.cancel_event
+            with READ_SCOPES.request(request_id) as lease, self._watch_media_client(lease.cancel_event) as cancel_event:
+                authorized, authorization_epoch = lease.authorized, lease.authorization_epoch
+
+                def check():
+                    raise_if_search_cancelled(cancel_event)
+                    lease.check()
+
                 item = pixiv_item_for_download(
                     artwork_id,
                     allow_r18=authorized,
@@ -4222,7 +4256,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({
                         "frames": meta["frames"], "mime": meta["mime"], "version": version,
                         "width": item.get("width"), "height": item.get("height"),
-                    }, before_send=lease.check)
+                    }, before_send=check)
                 if wanted and wanted != version:
                     raise UgoiraSourceChangedError("动图帧表已更新，请重试")
 
@@ -4237,12 +4271,11 @@ class Handler(SimpleHTTPRequestHandler):
                     ("zip", artwork_id, epoch, version),
                     fetch_zip, ttl=15, cancel_event=cancel_event,
                 )
-                raise_if_search_cancelled(cancel_event)
                 # Mirror the download path: revoked authorization mid-flight must
                 # not publish restricted bytes.
                 if restricted and authorization_epoch is not None:
                     assert_authorization_generation(authorization_epoch)
-                lease.check()
+                check()
                 return self.send_bytes(raw, "application/zip", "private, no-store")
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
@@ -4286,24 +4319,29 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             warm = query.get("warm", [""])[0]
             priority = 1 if warm == "account" else 2 if warm == "1" else 0
-            with tracked_search_request(query.get("requestId", [""])[0].strip()) as cancel_event:
+            request_id = query.get("requestId", [""])[0].strip()
+            with tracked_search_request(request_id) as registered, self._watch_media_client(registered) as cancel_event:
                 with read_priority(priority, cancel_event):
                     raw, content_type = pixiv_request(str(approved[2]), image_only=True, cancel_event=cancel_event)
-                raise_if_search_cancelled(cancel_event)
-                with SEARCH_SESSION_LOCKS_GUARD:
-                    pending = _observe_web_policy()
-                    web_session = AUTH_METHOD.get() == "web" and bool(web_session_cookie_header())
-                if pending:
-                    return self.send_json({"error": "浏览设置正在核对，请稍后刷新。", "errorKind": "settings_pending"}, 503)
-                with PIXIV_STATE_LOCK:
-                    still_approved = IMAGE_TOKENS.get(token)
-                    if still_approved != approved or approved[0] < time.monotonic():
-                        return self.send_json({"error": "图片授权已失效"}, 403)
-                assert_image_token_authorization(approved)
                 if not content_type.startswith("image/"):
                     raise PixivPolicyError("Pixiv 返回的不是图片")
+                with SEARCH_SESSION_LOCKS_GUARD:
+                    web_session = AUTH_METHOD.get() == "web" and bool(web_session_cookie_header())
                 cache_control = "no-store" if web_session else image_token_cache_control(approved)
-                return self.send_bytes(raw, content_type, cache_control)
+
+                @contextmanager
+                def publish():
+                    with SEARCH_SESSION_LOCKS_GUARD:
+                        if _observe_web_policy():
+                            raise AccountError("settings_pending", "浏览设置正在核对，请稍后刷新。")
+                        assert_image_token_authorization(approved)
+                        raise_if_search_cancelled(cancel_event)
+                        with PIXIV_STATE_LOCK:
+                            if IMAGE_TOKENS.get(token) != approved or approved[0] < time.monotonic():
+                                raise AuthorizationRevokedError("图片授权已失效")
+                            yield
+
+                return self.send_bytes(raw, content_type, cache_control, publication=publish)
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         except SearchRequestConflictError as exc:
@@ -4312,8 +4350,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(exc), "errorKind": "request_queue", "retryAfterSeconds": 2}, 429)
         except SearchCancelledError:
             return self.send_json({"cancelled": True}, 499)
-        except AuthorizationRevokedError:
-            return self.send_json({"error": "限制级图片授权已失效"}, 403)
+        except AuthorizationRevokedError as exc:
+            return self.send_json({"error": str(exc)}, 403)
+        except AccountError as exc:
+            if exc.kind != "settings_pending":
+                raise
+            return self.send_json({"error": str(exc), "errorKind": exc.kind}, 503)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json(pixiv_error_payload("图片代理", exc), 502)
 
