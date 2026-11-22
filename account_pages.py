@@ -925,6 +925,11 @@ class AccountCache:
         with self.lock, closing(self._connect()) as db, db:
             db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
                 (owner, method, _DISPLAY_PENDING_KEY, json.dumps(pending)))
+            # Check the same invalidation before sending, retaining the pages until readback.
+            db.execute("SAVEPOINT display_preflight")
+            self._delete_display_pages(db, owner, method)
+            db.execute("ROLLBACK TO display_preflight")
+            db.execute("RELEASE display_preflight")
 
     def display_update_pending(self, owner, method):
         with self.lock, closing(self._connect()) as db:

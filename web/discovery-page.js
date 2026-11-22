@@ -58,6 +58,12 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }
   }
 
+  function beginSourceRefresh(key){
+    refreshRequired.add(key);
+    sourceVersions.set(key,sourceVersion(key)+1);
+    staged.delete(key);
+  }
+
   function remember(scroll=root.scrollTop){
     if(!active || !data && !(state.order==='popular' && state.popularityIndex))return;
     const record={state:structuredClone(state),data,scroll};
@@ -167,7 +173,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     sorting=false;
     controller?.abort();controller=new AbortController();
     const signal=controller.signal,version=++revision,auth=generation(),key=sourceKey(destination);
-    if(refresh){refreshRequired.add(key);sourceVersions.set(key,sourceVersion(key)+1);staged.delete(key);}
+    if(refresh)beginSourceRefresh(key);
     const followAtStart=followingVersion;error='';
     const local=cache.get(pageKey(destination));
     if(local && !refresh){
@@ -270,7 +276,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(!refresh && state.order==='popular' && state.popularityIndex){await load({recoverSource:true});return;}
     if(!refresh && data && state.batch){await applySort('popular');return;}
     controller=new AbortController();const signal=controller.signal,version=++revision,auth=generation(),destination=structuredClone(state);
-    if(refresh){refreshRequired.add(key);sourceVersions.set(key,sourceVersion(key)+1);staged.delete(key);}
+    if(refresh)beginSourceRefresh(key);
     pending=true;sortProgress='正在准备作品元数据…';render();
     try{
       // This seed is metadata only. Its default-order images never enter the DOM.
