@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import copy
 import html
 import re
+import secrets
 import threading
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -129,6 +130,7 @@ def artist_profile(raw, details=None):
 @dataclass
 class SearchSnapshot:
     sources: list
+    identity: str = field(default_factory=lambda: secrets.token_hex(16))
     index: SearchResultIndex = field(default_factory=SearchResultIndex)
     lock: threading.Lock = field(default_factory=threading.Lock)
     touched: float = field(default_factory=time.monotonic)
@@ -241,7 +243,8 @@ class AppGallery:
                 if self.artist_reads.get(key) is entry:self.artist_reads.pop(key)
             raise
 
-    def search(self, tag, scope, page, work_type, include_ai, *, generation, fuzzy=False, start_date='',end_date='',snapshot_id='',cancel_event=None,prefetch=False,**unused):
+    def search(self, tag, scope, page, work_type, include_ai, *, generation, fuzzy=False, start_date='',end_date='',
+               snapshot_id='',cancel_event=None,prefetch=False,sort_source_generation=None,**unused):
         if scope not in CONTENT_MODES or work_type not in {'all','illustration','manga','ugoira'}:
             raise SearchInputError('搜索范围无效')
         page=max(1,int(page));query=parse_search_query(tag);dates=parse_search_date_range(start_date,end_date)
@@ -277,7 +280,10 @@ class AppGallery:
             try:
                 self.check(generation,cancel_event)
                 if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
-                session.touched=time.monotonic();requests=0;started=time.monotonic();target=page*36
+                session.touched=time.monotonic()
+                if sort_source_generation and sort_source_generation != session.identity:
+                    return {"sourceChanged": True, "sourceGeneration": session.identity}
+                requests=0;started=time.monotonic();target=page*36
                 while session.index.emitted_count<target:
                     active=[s for s in session.sources if s['next']]
                     if active and any(s['bound'] is None for s in active):ready=[]
@@ -321,6 +327,9 @@ class AppGallery:
                 rows=session.index.read_results((page-1)*36,page*36)
                 pages=list(range(1,max(1,(total+35)//36)+1))
                 if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
-                return {'items':rows,'tag':tag,'page':page,'total':total,'perPage':36,'hasMore':more,'availablePages':pages,'preloadedThrough':max(pages),'snapshotId':snapshot_id,'budgetExhausted':more and len(rows)<36}
+                result = {'items':rows,'tag':tag,'page':page,'total':total,'perPage':36,'hasMore':more,'availablePages':pages,'preloadedThrough':max(pages),'snapshotId':snapshot_id,'budgetExhausted':more and len(rows)<36}
+                if sort_source_generation is not None:
+                    result["sourceGeneration"] = session.identity
+                return result
             finally:
                 if session.invalid:session.index.close()

@@ -243,11 +243,17 @@ class PopularityService:
                         self._author_batch(job, method, generation)
                     elif kind == "search":
                         result = self.search_get(job, generation, cancel_event)
-                        self._append(job, result["items"])
-                        job["collected"] = len(job["items"]) >= 500 or not result["hasMore"]
-                        job["items"] = job["items"][:500]
-                        if len(result["items"]) >= 36:
-                            job["sourcePage"] += 1
+                        if "sourceGeneration" in result:
+                            job["sourceGeneration"] = result["sourceGeneration"]
+                        if result.get("sourceChanged"):
+                            # An evicted or restarted search cannot resume the old page boundary.
+                            job.update(items=[], seen=[], sourcePage=1)
+                        else:
+                            self._append(job, result["items"])
+                            job["collected"] = len(job["items"]) >= 500 or not result["hasMore"]
+                            job["items"] = job["items"][:500]
+                            if len(result["items"]) >= 36:
+                                job["sourcePage"] += 1
                     else:
                         result = self.discovery.read(generation=generation, kind="ranking", rank=job["rank"],
                             batch=batch, offset=job["sourceOffset"], check_cancel=check_cancel)

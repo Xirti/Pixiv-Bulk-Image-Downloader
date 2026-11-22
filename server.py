@@ -1810,7 +1810,8 @@ def popularity_search_metadata(job, generation, cancel_event):
     ACCOUNTS.check(generation)
     result=search_pixiv_results(job["query"],job["mode"],job["sourcePage"],job["workType"],job["includeAi"],
         authorized=True,authorization_epoch=generation,cancel_event=cancel_event,fuzzy=job["fuzzy"],
-        start_date=job["startDate"],end_date=job["endDate"],snapshot_id=job["index"],authorize_images=False)
+        start_date=job["startDate"],end_date=job["endDate"],snapshot_id=job["index"],authorize_images=False,
+        sort_source_generation=job.get("sourceGeneration", "legacy" if job["items"] or job["sourcePage"] > 1 else ""))
     ACCOUNTS.check(generation)
     return result
 
@@ -1986,6 +1987,7 @@ def _touch_search_session(session_key: tuple) -> dict:
             session = {
                 "items": [], "baseIndex": 0,
                 "sourceDone": {}, "budgetExhausted": False, "truncatedDates": set(),
+                "identity": secrets.token_hex(16),
             }
         session["touched"] = now
         SEARCH_SESSIONS[session_key] = session
@@ -2514,6 +2516,7 @@ def search_pixiv_results(
     end_date: str = "",
     snapshot_id: str = "",
     authorize_images: bool = True,
+    sort_source_generation: str | None = None,
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
     snapshot_id = parse_search_snapshot_id(snapshot_id)
@@ -2521,7 +2524,8 @@ def search_pixiv_results(
         if not authorized:raise AccountError("reauth","请先在「我的账号」完成 App 授权，或选择网页登录")
         generation=authorization_generation()
         result=APP_GALLERY.search(tag_query,scope,page,work_type,include_ai,generation=generation,fuzzy=fuzzy,
-            start_date=start_date,end_date=end_date,snapshot_id=snapshot_id,cancel_event=cancel_event,prefetch=prefetch)
+            start_date=start_date,end_date=end_date,snapshot_id=snapshot_id,cancel_event=cancel_event,prefetch=prefetch,
+            sort_source_generation=sort_source_generation)
         if authorize_images:
             _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
         assert_authorization_generation(generation)
@@ -2598,6 +2602,8 @@ def search_pixiv_results(
             elif page < first_retained_page:
                 _drop_search_session(session_key)
                 session = _touch_search_session(session_key)
+            if sort_source_generation and sort_source_generation != session["identity"]:
+                return {"sourceChanged": True, "sourceGeneration": session["identity"]}
             absolute_loaded = result_index.emitted_count if result_index is not None else 0
         budget = {"started": time.monotonic(), "requests": 0}
         source_tags = tuple(dict.fromkeys(alias for group in tag_groups for alias in group))
@@ -2798,6 +2804,7 @@ def search_pixiv_results(
             "truncatedDates": sorted(session["truncatedDates"], reverse=True),
             "workType": work_type, "includeAi": bool(include_ai), "fuzzy": bool(fuzzy),
             "snapshotId": snapshot_id,
+            **({"sourceGeneration": session["identity"]} if sort_source_generation is not None else {}),
             "mode": "pixiv-authorized-all" if scope == "all" else (
                 "pixiv-authorized-" + scope if scope in RESTRICTED_CONTENT else "pixiv-public-history"
             ),
