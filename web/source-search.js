@@ -353,7 +353,7 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
         if(lastReceipt===receipt)lastReceipt=null;
         viewReceipt=null;
       }
-      apply(result.job || {...job,state:"cancelled",message:"已取消查询；已发出的请求可能仍计入额度"});
+      apply(result.job || {...job,state:"cancelled",message:"已停止等待，暂时无法确认此前的请求是否已发出"});
     }catch(error){if(ownsView())message(error.message,true);}
   };
   root.addEventListener("dragover",event=>{if(event.dataTransfer.types.includes("Files")){event.preventDefault();root.classList.add("is-dragging");}});

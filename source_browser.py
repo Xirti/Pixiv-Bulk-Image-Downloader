@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import base64
+import logging
 import os
 from pathlib import Path
 import queue
+import secrets
 import time
 import urllib.parse
 import urllib.request
@@ -96,10 +98,11 @@ def run():
     webview.settings["ALLOW_DOWNLOADS"] = False
     window = webview.create_window("MOKU — SauceNAO · " + ({"key":"API 验证","login":"官网登录","guest":"官网查询"}[mode]), html="<meta charset='utf-8'><p>正在打开 SauceNAO 官网…</p>", width=1020, height=780)
     commands = queue.Queue(maxsize=8)
-    submitted = False
     completed = False
     last_kind = ""
-    attempt = None
+    sequence = 0
+    pending_correction = None
+    dispatch_target = None
     automatic_submit = True
     login_status = "unknown"
     start_url = "https://saucenao.com/user.php" if mode == "login" else "https://saucenao.com/"
@@ -124,26 +127,63 @@ def run():
         navigation = None
         window.load_url(url)
 
-    def claim_submission(document):
-        nonlocal attempt, last_kind
+    def finish_reply(reply):
+        nonlocal completed, encoded, dispatch_target
+        state = reply["state"]
+        title = {
+            "done": "MOKU — 结果已带回主界面，可关闭此窗口",
+            "error": "MOKU — 查询未完成，请查看主界面",
+            "cancelled": "MOKU — 查询已取消，结果未采用",
+        }.get(state)
+        if title is not None:
+            completed = True
+            encoded = ""
+            dispatch_target = None
+            window.set_title(title)
+        return completed
+
+    def confirm_not_sent(number):
+        nonlocal pending_correction
+        pending_correction = number
         try:
-            permit = send("submitted")
-        except urllib.error.HTTPError:
+            reply = send("not-sent", attempt=number)
+        except (OSError, ValueError) as error:
+            logging.getLogger("moku.source").warning("Source submission correction failed: %s", error)
+            window.set_title("MOKU — 本次尚未发出，可点「读取当前结果」确认或重新提交")
+            return False
+        pending_correction = None
+        return not finish_reply(reply)
+
+    def claim_submission():
+        nonlocal sequence, last_kind
+        number = sequence + 1
+        try:
+            permit = send("submitted", attempt=number)
+            if permit.get("attempt") != number and permit["state"] not in {"done", "error", "cancelled"}:
+                raise ValueError("Unexpected source submission reply")
+        except urllib.error.HTTPError as error:
+            logging.getLogger("moku.source").warning("Source submission was declined: HTTP %s", error.code)
             window.set_title("MOKU — 当前不能提交，请查看主界面")
-            return False
-        if "attempt" not in permit:
-            return False
-        attempt, last_kind = permit["attempt"], ""
-        if current_document() is not document:
-            send("not-sent", attempt=attempt)
-            return False
-        return True
+            return None
+        except (OSError, ValueError) as error:
+            logging.getLogger("moku.source").warning("Source submission reply could not be read: %s", error)
+            sequence = number
+            if confirm_not_sent(number):
+                window.set_title("MOKU — 本次尚未发出，可重新提交原图")
+            return None
+        if finish_reply(permit):
+            return None
+        sequence, last_kind = number, ""
+        return number
 
     def submit():
-        nonlocal submitted, post_stream, automatic_submit, navigation
+        nonlocal post_stream, automatic_submit, navigation, dispatch_target
         document = current_document()
         if document is None or completed or window.events.closed.is_set():
             return
+        if pending_correction is not None and not confirm_not_sent(pending_correction):
+            return
+        automatic_submit = False
         if mode == "login":
             window.set_title("MOKU — 请在官网完成登录，再回主界面查询")
             return
@@ -151,19 +191,22 @@ def run():
         if current_document() is not document:
             return
         if result.get("kind") == "verification":
-            send("verification", attempt=attempt)
+            if document[2] is not None or sequence == 0:
+                if finish_reply(send("verification", attempt=document[2])):
+                    return
             window.set_title("MOKU — 请手动通过验证，然后点「提交查询」")
             return
+        marker = "moku-" + secrets.token_urlsafe(16)
         if mode == "key":
             if result.get("kind") == "other":
-                submitted = False
                 automatic_submit = True
                 load_page("https://saucenao.com/")
                 return
             try:
                 request = send("api-request")
-            except urllib.error.HTTPError:
-                window.set_title("MOKU — API 请求等待中或暂不能提交，请查看主界面提示")
+            except (OSError, ValueError) as error:
+                logging.getLogger("moku.source").warning("Browser API request could not be prepared: %s", error)
+                window.set_title("MOKU — API 请求暂不能提交，可查看主界面后重试")
                 return
             from System import Action, Array, Byte
             from System.IO import MemoryStream
@@ -173,23 +216,36 @@ def run():
             destination = urllib.parse.urlsplit(request["url"])
             if destination.scheme != "https" or destination.netloc != "saucenao.com" or destination.path != "/search.php":
                 raise ValueError("Invalid API destination")
+            url = destination._replace(fragment=marker).geturl()
+            number = None
+            sent = False
+
             def navigate_api():
+                nonlocal sent, navigation, dispatch_target, number
+                if current_document() is not document or window.events.closed.is_set():
+                    return
                 core = window.native.webview.CoreWebView2
                 native_request = core.Environment.CreateWebResourceRequest(
-                    request["url"], "POST", post_stream,
-                    "Content-Type: " + request["contentType"] + "\r\nAccept: application/json\r\n")
+                    url, "POST", post_stream, "Content-Type: " + request["contentType"] + "\r\nAccept: application/json\r\n")
+                number = claim_submission()
+                if number is None or current_document() is not document or window.events.closed.is_set():
+                    return
+                dispatch_target = (marker, number)
+                navigation = None
                 core.NavigateWithWebResourceRequest(native_request)
-            if not claim_submission(document):
-                return
-            submitted = True
-            navigation = None
+                sent = True
+
             window.native.Invoke(Action(navigate_api))
-            window.set_title("MOKU — API Key 查询中，请等待 JSON 结果")
-            return
-        script = """(() => {
-              if (location.origin!=='https://saucenao.com' || !['/', '/index.php', '/search.php'].includes(location.pathname)) return false;
+            if number is None:
+                return
+        else:
+            window.evaluate_js("document.__mokuSourceSubmission = " + json.dumps(marker))
+            if current_document() is not document:
+                return
+            script = """(() => {
+              if (document.__mokuSourceSubmission!==MARKER || location.origin!=='https://saucenao.com' || !['/', '/index.php', '/search.php'].includes(location.pathname)) return false;
               if (!document.querySelector('input[type=file]')) return false;
-              const form=document.createElement('form');form.method='POST';form.action='https://saucenao.com/search.php';form.enctype='multipart/form-data';
+              const form=document.createElement('form');form.method='POST';form.action='https://saucenao.com/search.php#'+MARKER;form.enctype='multipart/form-data';
               const input=document.createElement('input');input.type='file';input.name='file';form.append(input);
               for(const [name,value] of [['db','999'],['numres','16'],['output_type','0']]){
                 const field=document.createElement('input');field.type='hidden';field.name=name;field.value=value;form.append(field);
@@ -197,16 +253,21 @@ def run():
               const bytes=Uint8Array.from(atob(ENCODED),c=>c.charCodeAt(0));
               const transfer=new DataTransfer();transfer.items.add(new File([bytes],'query.jpg',{type:'image/jpeg'}));input.files=transfer.files;
               form.hidden=true;document.body.append(form);form.submit();return true;
-            })()""".replace("ENCODED", json.dumps(encoded))
-        if not claim_submission(document):
+            })()""".replace("MARKER", json.dumps(marker)).replace("ENCODED", json.dumps(encoded))
+            number = claim_submission()
+            if number is None:
+                return
+            sent = False
+            if current_document() is document and not window.events.closed.is_set():
+                dispatch_target = (marker, number)
+                sent = window.evaluate_js(script)
+                if sent is not False and navigation is document:
+                    navigation = None
+        if sent is False:
+            dispatch_target = None
+            if confirm_not_sent(number):
+                window.set_title("MOKU — 页面已改变或尚未就绪，本次尚未发出")
             return
-        if not window.evaluate_js(script):
-            send("not-sent", attempt=attempt)
-            window.set_title("MOKU — 官网尚未准备好，可刷新后点「提交查询」")
-            return
-        if navigation is document:
-            navigation = None
-        submitted = True
         window.set_title("MOKU — 正在搜图，请勿重复提交")
 
     def observe():
@@ -231,40 +292,31 @@ def run():
             if current_document() is not document:
                 return
             kind = result.get("kind")
-            if kind == "verification":
-                if last_kind != kind:
-                    send("verification", attempt=attempt)
+            number = document[2]
+            if kind == "verification" and (number is not None or sequence == 0):
+                if last_kind != kind and not finish_reply(send("verification", attempt=number)):
                     window.set_title("MOKU — 验证请手动完成，再点「提交查询」")
-            elif kind == "result" and submitted:
+            elif kind == "result" and number is not None:
                 args = {"json": result["json"]} if "json" in result else {"rows": result["rows"]}
-                response = send("result", attempt=attempt, **args)
-                state = response.get("state")
-                completed = state in {"done", "error", "cancelled"}
-                if completed:
-                    encoded = ""
-                    window.set_title({
-                        "done": "MOKU — 结果已带回主界面，可关闭此窗口",
-                        "error": "MOKU — 结果返回失败，请查看主界面",
-                        "cancelled": "MOKU — 查询已取消，结果未采用",
-                    }[state])
-            elif kind == "error":
+                finish_reply(send("result", attempt=number, **args))
+            elif kind == "error" and (number is not None or sequence == 0):
                 send("error")
                 completed = True
                 encoded = ""
                 window.set_title("MOKU — 查询未完成，请查看官网提示")
-            elif kind == "home" and not submitted and automatic_submit:
+            elif kind == "home" and automatic_submit:
                 automatic_submit = False
                 auto_submit = True
             last_kind = kind
-        except Exception:
-            # This is the visible browser boundary: keep the official page open
-            # for manual recovery; do not silently claim a successful search.
+        except Exception as error:
+            logging.getLogger("moku.source").warning("Browser source result could not be read: %s", type(error).__name__)
             window.set_title("MOKU — 读取结果失败，可点「读取当前结果」重试")
         if auto_submit:
             submit()
 
     def startup():
-        nonlocal identity, secret, encoded, submitted, completed, last_kind, mode, automatic_submit, login_status, attempt
+        nonlocal identity, secret, encoded, completed, last_kind, mode, automatic_submit, login_status
+        nonlocal sequence, pending_correction, dispatch_target
         if not window.events.loaded.wait(25):
             send("error")
             return
@@ -276,7 +328,10 @@ def run():
             def navigation_starting(sender, args):
                 nonlocal navigation
                 if not args.IsRedirected:
-                    navigation = (args.NavigationId, identity)
+                    number = None
+                    if dispatch_target is not None and urllib.parse.urlsplit(args.Uri).fragment == dispatch_target[0]:
+                        _, number = dispatch_target
+                    navigation = (args.NavigationId, identity, number)
 
             def navigation_completed(sender, args):
                 nonlocal ready_navigation
@@ -310,19 +365,22 @@ def run():
                     send(action)
                     completed = True
                     window.set_title("MOKU — 官网连接失败，可从主界面重新查询")
-                elif action == "access-denied":
-                    send(action, attempt=attempt)
-                    automatic_submit = False
-                    window.set_title("MOKU — 官网返回 403，请查看官网提示")
-                elif action == "rate-limited":
-                    send(action, attempt=attempt)
-                    completed = True
-                    encoded = ""
-                    window.set_title("MOKU — 官网限制了查询频率，请稍后重试")
+                elif action in {"access-denied", "rate-limited"}:
+                    number = document[2]
+                    if number is not None or sequence == 0:
+                        reply = send(action, attempt=number)
+                        automatic_submit = False
+                        if action == "rate-limited" and reply["state"] == "error":
+                            completed = True
+                            encoded = ""
+                            window.set_title("MOKU — 官网限制了查询频率，请稍后重试")
+                        elif not finish_reply(reply):
+                            window.set_title("MOKU — 官网返回 403，请查看官网提示")
                 elif action == "submit":
                     submit()
                 elif action == "observe":
-                    observe()
+                    if pending_correction is None or confirm_not_sent(pending_correction):
+                        observe()
                 elif action == "home":
                     load_page("https://saucenao.com/")
                 elif action == "login":
@@ -344,10 +402,12 @@ def run():
                     encoded = payload["image"]
                     mode = payload.get("mode", "guest")
                     login_status = "unknown"
-                    submitted = completed = False
+                    completed = False
                     automatic_submit = True
                     last_kind = ""
-                    attempt = None
+                    sequence = 0
+                    pending_correction = None
+                    dispatch_target = None
                     deadline = time.monotonic() + 600
                     window.set_title("MOKU — SauceNAO · " + {"key":"API 验证","login":"官网登录","guest":"官网查询"}[mode])
                     window.show()

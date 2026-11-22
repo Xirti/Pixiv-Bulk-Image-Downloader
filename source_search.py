@@ -107,6 +107,18 @@ class _SourceReceipt:
     result: dict | None = None
 
 
+@dataclass(eq=False, slots=True)
+class _SourceDispatch:
+    number: int
+    timestamp: float
+    prior_possible: bool
+    phase: str = "awaiting"
+
+    @property
+    def possible(self):
+        return self.prior_possible or self.phase != "not-sent"
+
+
 class SourceSearch:
     def __init__(self, directory: Path, proxy=lambda: ""):
         self.directory = directory
@@ -126,7 +138,7 @@ class SourceSearch:
         self.active = None
         self.epoch = 0
         self.cache_epoch = 0
-        self.requests = []
+        self.requests: list[_SourceDispatch] = []
         self.short_limit = 4
         self.settings_path = directory / "settings.json"
         self._settings_mutex = "Local\\MOKU.SourceSettings." + hashlib.sha256(
@@ -359,12 +371,11 @@ class SourceSearch:
             identity = secrets.token_urlsafe(18)
             job = {"id": identity, "hash": digest, "mode": mode, "state": "queued", "message": "正在准备查询…",
                    "candidates": [], "quota": {}, "cached": False, "browserFallback": False, "secret": secrets.token_urlsafe(32),
-                   "image": image, "width": width, "height": height, "epoch": self.epoch, "browser": mode == "guest", "awaitingResponse": False, "created": time.monotonic()}
+                   "image": image, "width": width, "height": height, "epoch": self.epoch, "browser": mode == "guest", "created": time.monotonic()}
             cached = self.cache.get((mode, digest))
             if cached and (mode != "key" or key) and time.monotonic() - cached[0] < 900:
                 job.update(state="done", candidates=cached[1], quota=cached[2], cached=True, message="已复用最近的搜图结果", image=b"")
-            now = time.monotonic()
-            self.requests = [stamp for stamp in self.requests if now - stamp < 30]
+            self._prune_requests(time.monotonic())
             if job["state"] != "done":
                 if len(self.requests) >= self.short_limit:
                     job.update(state="error", message="短时间查询较多，请等待 30 秒再试", image=b"")
@@ -426,7 +437,10 @@ class SourceSearch:
                 raise SourceSearchError("请先完成或取消当前查询", 409)
             if job["browser"] and job["state"] in {"searching", "verification"}:
                 return self.snapshot(identity)
-            job.update(browser=True, state="verification", browserFallback=False, awaitingResponse=False,
+            dispatch = job.get("dispatch")
+            if dispatch is not None:
+                dispatch.phase = "settled"
+            job.update(browser=True, state="verification", browserFallback=False,
                        message="API 网页验证中，请在窗口完成验证后继续 API 查询")
             self.active = identity
             self._open_browser(job, backend)
@@ -445,7 +459,7 @@ class SourceSearch:
             job = {"id": identity, "hash": "", "mode": "login", "browser": True,
                    "state": "verification", "message": "请在 SauceNAO 官网窗口登录",
                    "image": b"", "candidates": [], "quota": {}, "cached": False,
-                   "browserFallback": False, "awaitingResponse": False, "epoch": self.epoch,
+                   "browserFallback": False, "epoch": self.epoch,
                    "secret": secrets.token_urlsafe(32), "created": time.monotonic()}
             self._retain_job(job)
             self.active = identity
@@ -467,8 +481,10 @@ class SourceSearch:
                 identity = receipt.job_id
             job = self._job(identity)
             if job and (job["state"] in {"queued", "searching", "verification"} or job["browserFallback"]):
-                job.update(state="cancelled", awaitingResponse=False, browserFallback=False, image=b"",
-                           message="已取消查询；已发出的请求可能仍计入额度")
+                dispatch = job.get("dispatch")
+                possible = dispatch is not None and dispatch.possible
+                job.update(state="cancelled", browserFallback=False, image=b"",
+                           message="已取消等待；此前的请求可能已发出并计入额度" if possible else "已取消查询，尚未发出")
             return {"ok": True, "job": self.snapshot(identity) if job else None}
 
     def _opener(self):
@@ -494,12 +510,10 @@ class SourceSearch:
         try:
             request = self._api_request(job, key)
             opener = self._opener()
-            with self.lock, self._configuration():
-                if not self._current_query(job):
-                    return
-                self._reserve_send()
-                job.update(state="searching", message="正在向 SauceNAO 查询…")
-            with opener.open(request, timeout=35) as response:
+            response = self._dispatch_direct(job, opener, request)
+            if response is None:
+                return
+            with response as response:
                 raw = response.read(1024 * 1024 + 1)
                 content_type = response.headers.get_content_type()
             if len(raw) > 1024 * 1024:
@@ -523,6 +537,14 @@ class SourceSearch:
                 if not job["browserFallback"] and not job["browser"]:
                     job["image"] = b""
 
+    def _dispatch_direct(self, job, opener, request):
+        with self.lock, self._configuration():
+            if not self._current_query(job):
+                return None
+            self._commit_dispatch(job, 0)
+            job.update(state="searching", message="正在向 SauceNAO 查询…")
+        return opener.open(request, timeout=35)
+
     def _current_query(self, job):
         if self._job(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
             return False
@@ -539,7 +561,7 @@ class SourceSearch:
     def _fail(self, job, message, *, browser_fallback=False):
         with self.lock:
             if job["state"] != "cancelled":
-                job.update(state="error", awaitingResponse=False, message=message, image=job["image"] if browser_fallback else b"", browserFallback=browser_fallback)
+                job.update(state="error", message=message, image=job["image"] if browser_fallback else b"", browserFallback=browser_fallback)
 
     def _complete(self, job, candidates, quota):
         with self.lock, self._configuration():
@@ -558,19 +580,58 @@ class SourceSearch:
             while len(self.thumbnails) > 1536:
                 _,old=self.thumbnails.popitem(last=False)
                 self.thumbnail_bytes-=len(old["bytes"] or b"")
-            job.update(state="done", awaitingResponse=False, message="已找到匹配来源" if candidates else "没有找到匹配来源", candidates=candidates, quota=quota, image=b"")
+            dispatch = job.get("dispatch")
+            if dispatch is not None:
+                dispatch.phase = "settled"
+            job.update(state="done", message="已找到匹配来源" if candidates else "没有找到匹配来源", candidates=candidates, quota=quota, image=b"")
             if quota.get("short_limit", 0) > 0:
                 self.short_limit = quota["short_limit"]
             self.cache[(job["mode"], job["hash"])] = (time.monotonic(), candidates, quota)
             while len(self.cache) > 16:
                 self.cache.popitem(last=False)
 
-    def _reserve_send(self):
+    def _prune_requests(self, now):
+        self.requests = [dispatch for dispatch in self.requests if now - dispatch.timestamp < 30]
+
+    def _commit_dispatch(self, job, number):
         now = time.monotonic()
-        self.requests = [stamp for stamp in self.requests if now - stamp < 30]
+        self._prune_requests(now)
         if len(self.requests) >= self.short_limit:
             raise SourceSearchError("请等待 30 秒后再提交查询", 429)
-        self.requests.append(now)
+        previous = job.get("dispatch")
+        dispatch = _SourceDispatch(number, now, previous is not None and previous.possible)
+        self.requests.append(dispatch)
+        job["dispatch"] = dispatch
+
+    def _browser_dispatch(self, job, action, number):
+        dispatch = job.get("dispatch")
+        previous = dispatch.number if dispatch else 0
+        awaiting = dispatch is not None and dispatch.phase == "awaiting"
+        if type(number) is not int or number < 1 or number not in {previous, previous + 1}:
+            raise SourceSearchError("官网提交编号已失效，请使用当前页面", 409)
+        if action == "not-sent" and number == previous and dispatch.phase != "settled":
+            dispatch.phase = "not-sent"
+            self.requests = [held for held in self.requests if held is not dispatch]
+            if job["state"] == "cancelled" and not dispatch.possible:
+                job["message"] = "已取消查询，尚未发出"
+            elif job["state"] in {"queued", "searching", "verification"}:
+                job["message"] = "本次尚未发出，可在官网窗口重新提交"
+            return {"state": job["state"]}
+        if not self._current_query(job):
+            return {"state": job["state"]}
+        if self.browser_identity != job["id"] or job["mode"] == "login" or not job["image"]:
+            raise SourceSearchError("官网窗口没有领到可提交的任务", 409)
+        if action == "submitted" and awaiting and number == previous:
+            return {"state": "searching", "attempt": number}
+        if awaiting or number == previous:
+            raise SourceSearchError("官网提交正在等待结果，或已经确认", 409)
+        if action == "not-sent":
+            # A correction can arrive before its original loopback request.
+            job["dispatch"] = _SourceDispatch(number, time.monotonic(), dispatch is not None and dispatch.possible, "not-sent")
+            return {"state": job["state"]}
+        self._commit_dispatch(job, number)
+        job.update(state="searching", message="官网正在查询，请等待结果；无需重复提交")
+        return {"state": "searching", "attempt": number}
 
     def browser(self, identity, secret, data):
         with self.lock, self._configuration():
@@ -597,13 +658,16 @@ class SourceSearch:
                 if job["mode"] == "login" and state == "signed-in" and job["state"] in {"queued", "searching", "verification"}:
                     job.update(state="done", message="SauceNAO 官网已登录")
                 return {"state": job["state"]}
+            dispatch = job.get("dispatch")
+            if action in {"submitted", "not-sent"}:
+                return self._browser_dispatch(job, action, data.get("attempt"))
             if action == "api-request":
                 if job["mode"] != "key" or job["state"] not in {"searching", "verification"} or not job["image"]:
                     raise SourceSearchError("API 验证请求无效", 409)
                 if job["epoch"] != self.epoch:
                     self._fail(job, "API 设置已修改，请重新查询")
                     raise SourceSearchError("API 设置已修改", 409)
-                if job["awaitingResponse"]:
+                if dispatch is not None and dispatch.phase == "awaiting":
                     raise SourceSearchError("API 请求正在等待响应，请勿重复提交", 409)
                 key = self.vault.read()
                 if not key:
@@ -619,11 +683,15 @@ class SourceSearch:
             if job["state"] in {"cancelled", "done", "error"}:
                 return {"state": job["state"]}
             previous = job["state"]
-            if action in {"verification", "result", "not-sent", "access-denied", "rate-limited"} and data.get("attempt") != job.get("attempt"):
-                raise SourceSearchError("请求已交接，请使用当前官网页面", 409)
-            if action == "result":
-                if not job["awaitingResponse"]:
+            number = dispatch.number if dispatch is not None and dispatch.number else None
+            if action in {"verification", "result", "access-denied", "rate-limited"}:
+                if data.get("attempt") != number:
+                    raise SourceSearchError("请求已交接，请使用当前官网页面", 409)
+                if action == "result" and (number is None or dispatch.phase != "awaiting"):
                     raise SourceSearchError("没有等待中的查询", 409)
+                if dispatch is not None and dispatch.phase == "awaiting":
+                    dispatch.phase = "settled"
+            if action == "result":
                 try:
                     if job["mode"] == "key" and "json" not in data:
                         raise SourceSearchError("API 返回了网页内容，请继续 API 验证后重试")
@@ -632,26 +700,11 @@ class SourceSearch:
                 except SourceSearchError as error:
                     self._fail(job, str(error))
             elif action == "verification":
-                job.update(state="verification", awaitingResponse=False, message="请在官网窗口手动通过验证，再点击窗口上方「提交查询」")
+                job.update(state="verification", message="请在官网窗口手动通过验证，再点击窗口上方「提交查询」")
             elif action == "access-denied":
-                job.update(state="verification", awaitingResponse=False, message="官网返回 403，请查看官网提示。如有验证，请手动完成")
+                job.update(state="verification", message="官网返回 403，请查看官网提示。如有验证，请手动完成")
             elif action == "rate-limited":
                 self._fail(job, "官网限制了查询频率或额度，请稍后再试")
-            elif action == "submitted":
-                if self.browser_identity != identity or job["mode"] == "login" or not job["image"]:
-                    raise SourceSearchError("官网窗口没有领到可提交的任务", 409)
-                if job["epoch"] != self.epoch:
-                    self._fail(job, "搜图设置已修改，请重新查询")
-                    return {"state": "error"}
-                if job["awaitingResponse"]:
-                    raise SourceSearchError("查询正在等待响应，请勿重复提交", 409)
-                self._reserve_send()
-                attempt = job.get("attempt", 0) + 1
-                job.update(attempt=attempt, awaitingResponse=True, state="searching",
-                           message="官网正在查询，请等待结果；无需重复提交")
-                return {"state":"searching","attempt":attempt}
-            elif action == "not-sent":
-                job.update(awaitingResponse=False, message="官网尚未准备好，可在窗口重试")
             elif action == "closed":
                 self._fail(job, "官网窗口已关闭，可重新查询")
             elif action == "error":
@@ -660,7 +713,7 @@ class SourceSearch:
                 self._fail(job, "官网连接失败，请关闭官网窗口后重试；请检查当前网络能否访问 SauceNAO")
             else:
                 raise SourceSearchError("游客操作无效")
-            if previous != job["state"] or action in {"submitted", "result"}:
+            if previous != job["state"] or action == "result":
                 logging.getLogger("moku.source").info("guest %s -> %s, candidates=%d", action, job["state"], len(job["candidates"]))
             return {"state": job["state"], "count": len(job["candidates"])}
 
