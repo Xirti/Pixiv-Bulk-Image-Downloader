@@ -97,6 +97,7 @@ CODE_GENERATION_FILES = (
     'web/app-updates.js',
     'web/update-notice.js',
     'web/media-budget.js',
+    'web/media-decode.js',
     'source_search.py',
     'source_results.py',
     'source_browser.py',

@@ -27,11 +27,18 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     if(!next)return;
     size=next;manualSize=true;pendingSize=true;paintSize();
   });
+  function clearPreviews(context,keep=null){
+    for(const entry of context.previews.values()){
+      entry.controller.abort();
+      if(entry.image!==keep)entry.image.removeAttribute("src");
+    }
+    context.previews.clear();
+  }
   function release(context){
     if(!context)return;
     context.controller.abort();
-    for(const entry of context.previews.values())entry.image.removeAttribute("src");
-    context.previews.clear();
+    context.originalController?.abort();
+    clearPreviews(context);
   }
   function preview(context,page,source){
     let entry=context.previews.get(page);
@@ -39,13 +46,18 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     if(entry){context.previews.delete(page);context.previews.set(page,entry);return entry.promise;}
     if(!source)return Promise.reject(new Error("这张图片暂未提供预览，可尝试查看原图"));
     const node=new Image();node.decoding="async";
-    entry={image:node,failed:false,promise:null};context.previews.set(page,entry);
+    const controller=new AbortController();
+    entry={image:node,controller,failed:false,promise:null};context.previews.set(page,entry);
     node.src=source;
-    entry.promise=node.decode().then(()=>node,error=>{entry.failed=true;throw error;});
+    entry.promise=waitForMediaDecode(()=>node.decode(),controller.signal).then(()=>node,error=>{
+      entry.failed=true;node.removeAttribute("src");throw error;
+    });
     // Keep the visible page and target. Idle preview nodes have a small local budget.
     for(const [index,old] of context.previews){
       if(context.previews.size<=6)break;
-      if(index!==context.page && old.image!==image){context.previews.delete(index);old.image.removeAttribute("src");}
+      if(index!==context.page && old.image!==image){
+        context.previews.delete(index);old.controller.abort();old.image.removeAttribute("src");
+      }
     }
     return entry.promise;
   }
@@ -77,10 +89,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     try{item=await request;}
     finally{if(context.detailRead===request)context.detailRead=null;}
     if(context!==current || version!==context.detailVersion)return null;
-    if(refresh){
-      for(const entry of context.previews.values())if(entry.image!==image)entry.image.removeAttribute("src");
-      context.previews.clear();context.initialPreview=null;
-    }
+    if(refresh){clearPreviews(context,image);context.initialPreview=null;}
     return adoptItem(context,item)?item:null;
   }
   function commit(node,page){
@@ -92,6 +101,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   }
   async function paint(context=current,version=revision,refresh=false){
     const page=context.page;
+    context.originalController?.abort();
     original.hidden=!context.allowOriginal;
     cache.pin(context.item,page);originalView=false;busy=true;
     image.style.visibility="hidden";displayed=-1;dialog.setAttribute("aria-busy","true");
@@ -116,7 +126,11 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   async function viewOriginal(){
     if(!current || !current.allowOriginal || busy || originalView)return;
     const context=current,page=context.page,version=++revision;
+    const controller=new AbortController();
+    context.originalController=controller;
+    let node;
     busy=true;original.disabled=true;retry.hidden=true;status.textContent="原图加载中…";
+    dialog.setAttribute("aria-busy","true");
     try{
       const item=await detail(context);if(!item || context!==current || version!==revision || !dialog.open)return;
       let url=cache.peek(item,page);
@@ -130,14 +144,23 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
         }
       }
       if(context!==current || version!==revision || !dialog.open)return;
-      const node=new Image();node.src=url;await node.decode();
+      node=new Image();node.src=url;
+      await waitForMediaDecode(()=>node.decode(),controller.signal);
       if(context!==current || version!==revision || !dialog.open)return;
       commit(node,page);originalView=true;original.textContent="已显示原图";status.textContent="";
     }catch(error){
       if(context!==current || version!==revision || !dialog.open)return;
-      cache.invalidate(context.item,page);status.textContent="原图加载失败，可重试";
+      cache.invalidate(context.item,page);
+      retry.hidden=displayed===page;
+      status.textContent=retry.hidden?"原图加载失败，可重试":"原图加载失败，可重试预览或原图";
       report(error.message || "原图加载失败");
-    }finally{if(context===current && version===revision){busy=false;original.disabled=originalView;}}
+    }finally{
+      if(node && node!==image)node.removeAttribute("src");
+      if(context.originalController===controller)context.originalController=null;
+      if(context===current && version===revision){
+        busy=false;original.disabled=originalView;dialog.setAttribute("aria-busy","false");
+      }
+    }
   }
   function turn(direction){
     if(!current || current.item.pages<2)return;

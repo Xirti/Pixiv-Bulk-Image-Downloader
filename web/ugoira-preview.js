@@ -41,7 +41,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     return entries;
   }
 
-  async function inflateZipEntry(buffer, entry) {
+  async function inflateZipEntry(buffer, entry, signal) {
     const view = new DataView(buffer);
     if (view.getUint32(entry.localOffset, true) !== 0x04034b50) throw new Error("动图数据已损坏");
     const nameLength = view.getUint16(entry.localOffset + 26, true);
@@ -75,17 +75,22 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
       const reader = stream.getReader();
       const chunks = [];
       let size = 0;
+      const cancel = () => { void reader.cancel().catch(() => {}); };
+      signal.addEventListener("abort", cancel, { once: true });
       try {
         while (true) {
+          signal.throwIfAborted();
           const { done, value } = await reader.read();
           if (done) break;
           size += value.byteLength;
           if (size > 16 * 1024 * 1024) throw new Error("动图单帧过大，无法预览");
           chunks.push(value);
         }
+        signal.throwIfAborted();
         return await new Blob(chunks).arrayBuffer();
       } finally {
-        await reader.cancel();
+        signal.removeEventListener("abort", cancel);
+        if (!signal.aborted) cancel();
         reader.releaseLock();
       }
     }
@@ -93,7 +98,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
   }
 
   function release(entry) {
-    entry.frames.forEach(({ bitmap }) => bitmap.close());
+    entry.frames.splice(0).forEach(({ bitmap }) => bitmap.close());
   }
 
   function evictOldest() {
@@ -128,7 +133,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     }
   }
 
-  async function load(id, signal, showFrames, requestId) {
+  async function load(id, player, showFrames) {
     if (cache.has(id)) {
       const entry = cache.get(id);
       cache.delete(id);
@@ -136,9 +141,13 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
       showFrames(entry);
       return entry.frames;
     }
+    const { controller: { signal }, requestId } = player;
     const entry = { frames: [], bytes: 0, complete: false };
+    player.partial = entry;
+    player.loading = true;
     try {
       const { meta, buffer } = await readSource(id, signal, requestId);
+      player.loading = false;
       const entries = parseZipEntries(buffer);
       const width = Number(meta.width);
       const height = Number(meta.height);
@@ -153,9 +162,11 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
         signal.throwIfAborted();
         const zipped = entries.get(frame.file);
         if (!zipped) throw new Error("动图缺少图片帧");
-        const raw = await inflateZipEntry(buffer, zipped);
-        signal.throwIfAborted();
-        const bitmap = await createImageBitmap(new Blob([raw], { type: meta.mime || "image/jpeg" }), resize);
+        const bitmap = await waitForMediaDecode(async decodeSignal => {
+          const raw = await inflateZipEntry(buffer, zipped, decodeSignal);
+          decodeSignal.throwIfAborted();
+          return createImageBitmap(new Blob([raw], { type: meta.mime || "image/jpeg" }), resize);
+        }, signal, { timeout: 12000, discard: value => value.close() });
         if (signal.aborted) {
           bitmap.close();
           signal.throwIfAborted();
@@ -169,6 +180,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
       signal.throwIfAborted();
       entry.complete = true;
       showFrames(entry);
+      signal.throwIfAborted();
       while (cache.size >= 6) evictOldest();
       cache.set(id, entry);
       cachedBytes += entry.bytes;
@@ -176,6 +188,9 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     } catch (error) {
       release(entry);
       throw error;
+    } finally {
+      player.partial = null;
+      player.loading = false;
     }
   }
 
@@ -185,6 +200,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     const player = active;
     active = null;
     player.controller.abort();
+    if (player.partial) release(player.partial);
     if (player.loading) {
       Promise.resolve().then(() => cancelRequest(player.requestId)).catch(() => {});
     }
@@ -216,7 +232,6 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
         if (active !== player) return;
       }
       host.dataset.ugoiraState = "loading";
-      player.loading = !cache.has(id);
       const showFrames = (entry) => {
         if (active !== player) return;
         if (host.isConnected === false) { stop(); return; }
@@ -258,8 +273,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
         player.draw = draw;
         draw();
       };
-      await load(id, player.controller.signal, showFrames, requestId);
-      player.loading = false;
+      await load(id, player, showFrames);
     } catch (error) {
       if (active === player) {
         stop();
