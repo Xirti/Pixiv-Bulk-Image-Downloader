@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 from collections import OrderedDict
+from contextlib import contextmanager
 import ctypes
 import hashlib
 import io
@@ -537,16 +538,16 @@ class SourceSearch:
                 logging.getLogger("moku.source").info("guest %s -> %s, candidates=%d", action, job["state"], len(job["candidates"]))
             return {"state": job["state"], "count": len(job["candidates"])}
 
-    def image(self, token):
+    @contextmanager
+    def _thumbnail_publication(self, token, expected=None):
         with self.lock:
             self._check_open()
             row = self.thumbnails.get(token)
-            if row is None:
+            if row is None or (expected is not None and row is not expected):
                 raise SourceSearchError("候选缩略图已过期", 404)
-            self.thumbnails.move_to_end(token)
-            if row["bytes"] is not None:
-                return row["bytes"]
-            url = row["url"]
+            yield row
+
+    def _read_thumbnail(self, url):
         try:
             with self._opener().open(urllib.request.Request(url, headers={"User-Agent": "MOKU/2.1.0"}), timeout=12) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
@@ -557,13 +558,27 @@ class SourceSearch:
             raise SourceSearchError("来源缩略图暂不可读，可重试或打开来源链接", 502) from error
         except (OSError, urllib.error.URLError) as error:
             raise SourceSearchError("候选缩略图加载失败", 502) from error
-        with self.lock:
-            if self.thumbnails.get(token) is row and row["bytes"] is None:
-                row["bytes"] = image;self.thumbnail_bytes+=len(image)
-                for old in self.thumbnails.values():
-                    if self.thumbnail_bytes<=16*1024*1024:break
-                    if old is row or old["bytes"] is None:continue
-                    self.thumbnail_bytes-=len(old["bytes"]);old["bytes"]=None
+        return image
+
+    def image(self, token, *, deliver=None):
+        with self._thumbnail_publication(token) as row:
+            self.thumbnails.move_to_end(token)
+            image = row["bytes"]
+        if image is None:
+            loaded = self._read_thumbnail(row["url"])
+            with self._thumbnail_publication(token, row):
+                if row["bytes"] is None:
+                    row["bytes"] = loaded
+                    self.thumbnail_bytes += len(loaded)
+                    for old in self.thumbnails.values():
+                        if self.thumbnail_bytes <= 16 * 1024 * 1024:
+                            break
+                        if old is not row and old["bytes"] is not None:
+                            self.thumbnail_bytes -= len(old["bytes"])
+                            old["bytes"] = None
+                image = row["bytes"]
+        if deliver is not None:
+            return deliver(image, lambda: self._thumbnail_publication(token, row))
         return image
 
     def close(self):

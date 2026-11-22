@@ -3554,7 +3554,8 @@ class Handler(SimpleHTTPRequestHandler):
                 if request.path == "/api/source-search/receipt":
                     return self.send_json(SOURCE_SEARCH.receipt(query.get("requestId", [""])[0]))
                 if request.path == "/api/source-search/image":
-                    return self.send_bytes(SOURCE_SEARCH.image(query.get("token", [""])[0]), "image/jpeg", "private, max-age=900")
+                    return SOURCE_SEARCH.image(query.get("token", [""])[0], deliver=lambda raw, publication:
+                        self.send_bytes(raw, "image/jpeg", "no-store", publication=publication))
                 return self.send_json({"error": "not found"}, 404)
             except SourceSearchError as exc:
                 return self.send_json({"error": str(exc)}, exc.status)
