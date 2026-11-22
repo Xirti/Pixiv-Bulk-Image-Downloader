@@ -2725,6 +2725,8 @@ def search_pixiv_results(
                 assert_search_commit_allowed(
                     session_key, session, scope, authorization_epoch, cancel_event,
                 )
+                # The source can only advance after its rows are in the index.
+                session["identityIndex"].add(incoming)
                 session["budgetExhausted"] = (
                     session["budgetExhausted"] or round_budget_exhausted
                 )
@@ -2733,14 +2735,13 @@ def search_pixiv_results(
                 session["sourceBounds"].update(source_bounds)
                 session["sourceAnchors"] = source_anchors
                 session["sourceCursor"] = next_source_cursor
-                session["identityIndex"].add(incoming)
+                for source_tag, source_mode, next_offset in source_commits:
+                    SEARCH_SOURCE_OFFSETS[(session_key, source_tag, source_mode)] = next_offset
                 ready = session["identityIndex"].take_ready(
                     _newest_unread_bound(session, sources, initial_day),
                     max(60, desired_items - absolute_loaded),
                 )
                 session["items"].extend(ready)
-                for source_tag, source_mode, next_offset in source_commits:
-                    SEARCH_SOURCE_OFFSETS[(session_key, source_tag, source_mode)] = next_offset
             for source_tag, source_mode, _next_offset in source_commits:
                 _trim_history_source(session_key, source_tag, source_mode)
             absolute_loaded = session["identityIndex"].emitted_count
