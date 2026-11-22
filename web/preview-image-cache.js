@@ -1,11 +1,45 @@
 "use strict";
 
 // Keep the loaded image itself; recreating <img src> repeats no-store proxy reads.
-globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Infinity,reuseDetached=false,priority=0}={}) {
+globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Infinity,reuseDetached=false,priority=0,
+    promoteRead=globalThis.promotePixivRead,cancelRead=globalThis.notifySearchCancellation,requestId=globalThis.nextSearchRequestId}={}) {
   const pages=new Map();
   const decoded=new WeakMap();
   const pending=new Map(),budget=globalThis.mediaBudget;
+  const warmReads=new WeakMap();
+  function finishWarm(image,cancel=false){
+    const reading=warmReads.get(image);
+    if(!reading)return;
+    warmReads.delete(image);
+    image.removeEventListener("load",reading.loaded);
+    image.removeEventListener("error",reading.failed);
+    reading.controller.abort();
+    if(cancel)void cancelRead?.(reading.id);
+  }
+  function fallbackWarm(image,reading,cancel){
+    if(warmReads.get(image)!==reading)return false;
+    const replace=reading.foreground && image.getAttribute("src")===reading.url && !(image.complete && image.naturalWidth);
+    finishWarm(image,cancel && replace);
+    if(replace)image.src=reading.foreground;
+    return Boolean(replace);
+  }
+  function warmSource(image,source,warm){
+    const url=source+(source.includes("?")?"&":"?")+`warm=${warm}`;
+    if(!source.startsWith("/api/pixiv/image?") || !promoteRead || !requestId)return url;
+    const id=requestId();
+    const reading={id,url:url+`&requestId=${encodeURIComponent(id)}`,controller:new AbortController(),foreground:null};
+    reading.loaded=()=>finishWarm(image);
+    reading.failed=event=>{if(fallbackWarm(image,reading,false))event.stopImmediatePropagation();};
+    image.addEventListener("load",reading.loaded);
+    image.addEventListener("error",reading.failed);
+    image.fetchPriority="low";
+    warmReads.set(image,reading);
+    return reading.url;
+  }
+  const cachedSource=image=>imageSourceKey((image.getAttribute("src") || image.dataset.suspendedSrc || "")
+    .replace(/[?&]warm=(?:1|account)$/,""));
   function forget(image){
+    finishWarm(image,true);
     for(const consumer of pending.get(image) || [])consumer.retire();
     budget?.forget(image);image.removeAttribute("src");image.remove();
   }
@@ -30,28 +64,40 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
     for(const [key,images] of pages)if(!images.size)pages.delete(key);
   }
   function place(images,placeholder,source){
-    const identity=placeholder.dataset.previewArtwork || source;
+    const version=imageSourceKey(source),identity=placeholder.dataset.previewArtwork || version;
     let image=images.get(identity);
     if(!image && reuseDetached){
       for(const previous of pages.values()){
         const candidate=previous.get(identity);
-        if(candidate && !candidate.isConnected && candidate.complete && candidate.naturalWidth>0){
+        if(candidate && !candidate.isConnected && candidate.complete && candidate.naturalWidth>0 &&
+            (!source || cachedSource(candidate)===version)){
           image=candidate;previous.delete(identity);break;
         }
       }
     }
-    if(image && ((image.complete && !image.naturalWidth) || image.classList.contains("image-unavailable"))){
+    if(image && image!==placeholder && ((image.complete && !image.naturalWidth) || image.classList.contains("image-unavailable"))){
       forget(image);images.delete(identity);image=null;
     }
     if(image){
+      const sameSource=cachedSource(image)===version;
+      const reading=warmReads.get(image);
       const previous=(image.getAttribute("src") || "").replace(/[?&]warm=1$/,"");
-      if(source && !image.naturalWidth && previous!==source)image.src=source;
+      if(source && sameSource && reading && !(image.complete && image.naturalWidth)){
+        const first=!reading.foreground;
+        reading.foreground=source;
+        image.fetchPriority="high";
+        if(first)void promoteRead(reading.id,reading.controller.signal).catch(()=>fallbackWarm(image,reading,true));
+      }else if(source && (!sameSource || !image.naturalWidth && previous!==source)){
+        finishWarm(image,true);
+        image.src=source;
+      }
       // Keep runtime listeners, but route retries using the current card's data.
       for(const field of ["previewArtwork","basketArtwork","restoreArtwork","sourcePreviewImage"]){
         if(placeholder.dataset[field]===undefined)delete image.dataset[field];
         else image.dataset[field]=placeholder.dataset[field];
       }
-      image.alt=placeholder.alt;image.className=placeholder.className;placeholder.replaceWith(image);
+      image.alt=placeholder.alt;image.className=placeholder.className;
+      if(image!==placeholder)placeholder.replaceWith(image);
     }
     else{if(!source)return placeholder;image=placeholder;image.src=source;}
     images.delete(identity);images.set(identity,image);
@@ -66,7 +112,7 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
     const used=new Set();
     for(const placeholder of root.querySelectorAll("img[data-gallery-src]")){
       const source=placeholder.dataset.gallerySrc;
-      const identity=placeholder.dataset.previewArtwork || source;
+      const identity=placeholder.dataset.previewArtwork || imageSourceKey(source);
       placeholder.removeAttribute("data-gallery-src");
       used.add(identity);
       place(images,placeholder,source);
@@ -89,13 +135,17 @@ globalThis.createPreviewImageCache = function ({retainUnused=false,maxImages=Inf
         const item=items[cursor++],identity=String(item.id);
         if(!item.thumb)continue;
         let image=images.get(identity);
+        if(image && cachedSource(image)!==imageSourceKey(item.thumb)){
+          if(image.isConnected)continue;
+          forget(image);images.delete(identity);image=null;
+        }
         if(image?.complete && !image.naturalWidth){forget(image);images.delete(identity);image=null;}
         if(image?.complete && image.naturalWidth>0 && decoded.get(image)===image.src){
           track(images,identity,image);continue;
         }
         if(!image){
           image=new Image();image.dataset.previewArtwork=identity;image.alt=item.title;image.decoding="async";
-          image.src=item.thumb+(item.thumb.includes("?")?"&":"?")+`warm=${warm}`;images.set(identity,image);
+          image.src=warmSource(image,item.thumb,warm);images.set(identity,image);
         }
         let consumers=pending.get(image);
         if(!consumers){consumers=new Set();pending.set(image,consumers);}

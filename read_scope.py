@@ -11,6 +11,18 @@ from pixiv_account import ACCOUNT_REQUEST_CHECK, AccountError
 from request_coordinator import REQUEST_PRIORITY, TrackedReadEvent
 
 
+@contextmanager
+def read_priority(priority: int, event: threading.Event | None):
+    if priority > 0 and isinstance(event, TrackedReadEvent):
+        event.priority.background = priority
+        priority = event.priority
+    token = REQUEST_PRIORITY.set(priority)
+    try:
+        yield
+    finally:
+        REQUEST_PRIORITY.reset(token)
+
+
 @dataclass(frozen=True)
 class ReadLease:
     authorized: bool
@@ -43,11 +55,7 @@ class ReadScopes:
                 token = ACCOUNT_REQUEST_CHECK.set(lease.check)
                 bindings.callback(ACCOUNT_REQUEST_CHECK.reset, token)
                 if priority is not None:
-                    if priority > 0 and isinstance(cancel_event, TrackedReadEvent):
-                        cancel_event.priority.background = priority
-                        priority = cancel_event.priority
-                    token = REQUEST_PRIORITY.set(priority)
-                    bindings.callback(REQUEST_PRIORITY.reset, token)
+                    bindings.enter_context(read_priority(priority, cancel_event))
                 if cache_only is not None:
                     token = ACCOUNT_CACHE_ONLY.set(cache_only)
                     bindings.callback(ACCOUNT_CACHE_ONLY.reset, token)

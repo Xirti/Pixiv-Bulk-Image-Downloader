@@ -150,6 +150,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     dialog.setAttribute("aria-busy","true");
     try{
       const item=await detail(context);if(!item || context!==current || version!==revision || !dialog.open)return;
+      cache.pin(item,page);
       let url=cache.peek(item,page);
       if(!url){
         try{url=await cache.get(item,page);}
@@ -157,6 +158,7 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
           if(error.status!==403)throw error;
           const fresh=await detail(context,true);
           if(!fresh || context!==current || version!==revision || !dialog.open)return;
+          cache.pin(fresh,page);
           url=await cache.get(fresh,page);
         }
       }

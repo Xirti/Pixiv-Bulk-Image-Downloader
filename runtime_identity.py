@@ -174,6 +174,7 @@ CODE_GENERATION_FILES = (
     'web/sensitive-image-reveals.js',
     'web/gallery-layout.js',
     'web/preview-image-cache.js',
+    'web/image-source.js',
     'web/preview-image-retry.js',
     'web/search-page-cache.js',
     'web/search-lifecycle.js',

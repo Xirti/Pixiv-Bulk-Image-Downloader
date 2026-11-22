@@ -2,7 +2,7 @@
 // Explicit original-image requests only. The shared viewer pins its visible entry.
 globalThis.createDetailImageCache=function({fetchBytes,maxBytes=96*1024*1024,maxImages=6,ttl=300000}){
   const entries=new Map();let bytes=0,pinned=null;
-  const key=(item,page)=>`${item.id}:${page}`;
+  const key=(item,page)=>JSON.stringify([item.id,page,imageSourceKey(item.pageImages?.[page]?.original)]);
   function drop(entry){
     if(entries.get(entry.key)!==entry)return;
     entries.delete(entry.key);
@@ -35,11 +35,11 @@ globalThis.createDetailImageCache=function({fetchBytes,maxBytes=96*1024*1024,max
     if(previous && (!previous.url || performance.now()>=previous.expires))drop(previous);
   }
   function get(item,page){
+    const source=item.pageImages?.[page]?.original;
+    if(!source)return Promise.reject(new Error("这张图片暂未提供原图"));
     const id=key(item,page);let entry=entries.get(id);
     if(entry?.url && performance.now()>=entry.expires){drop(entry);entry=null;}
     if(entry){entries.delete(id);entries.set(id,entry);return entry.promise;}
-    const source=item.pageImages[page].original;
-    if(!source)return Promise.reject(new Error("这张图片暂未提供原图"));
     entry={key:id,controller:new AbortController(),url:null,size:0,timer:null,expires:0};
     entries.set(id,entry);
     entry.promise=(async()=>{

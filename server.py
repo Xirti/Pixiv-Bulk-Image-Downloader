@@ -65,7 +65,7 @@ from download_history import DownloadHistory, history_path
 from local_catalog import LocalCatalog
 from workspace_store import TaskConflictError, TaskCapacityError, WorkspaceCapacityError, WorkspaceStore, account_scope
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
-from read_scope import ReadScopes
+from read_scope import ReadScopes, read_priority
 from ugoira_export import MAX_ARCHIVE_BYTES as MAX_UGOIRA_BYTES, MAX_EXPANDED_BYTES as MAX_UGOIRA_TEMP_BYTES, UgoiraCancelledError, UgoiraExportError, export_formats, export_ugoira, require_mp4_encoder
 from request_coordinator import REQUEST_PRIORITY, RequestCoordinator, RequestDeferredError, RequestBlockedError, TrackedReadEvent
 from browser_transport import BrowserTransport
@@ -301,6 +301,7 @@ PIXIV_HEADERS = {"Referer": "https://www.pixiv.net/", "User-Agent": "Mozilla/5.0
 MAX_REMOTE_BYTES = 40 * 1024 * 1024
 PIXIV_CACHE: OrderedDict[str, ArtworkDetail] = OrderedDict()
 IMAGE_TOKENS: dict[str, tuple] = {}
+_IMAGE_SOURCE_KEY = secrets.token_bytes(32)
 PIXIV_STATE_LOCK = threading.RLock()
 HISTORY_CACHE: dict[tuple, dict] = {}
 _HISTORY_LOCKS: weakref.WeakValueDictionary[tuple, threading.Lock] = weakref.WeakValueDictionary()
@@ -1009,6 +1010,7 @@ def _authorize_image_proxy_batch(entries: list[tuple]) -> list[str]:
         raise PixivPolicyError("图片授权数量超出上限")
     expires = time.monotonic() + 3600
     prepared: list[tuple[str, tuple]] = []
+    capabilities = []
     for (
         proxy_url,
         artwork_id,
@@ -1036,6 +1038,12 @@ def _authorize_image_proxy_batch(entries: list[tuple]) -> list[str]:
             # restricted rows append their account-generation binding last.
             row += (authorization_epoch,)
         prepared.append((token, row))
+        # Keep the CDN URL private. Renewing a capability for the same source
+        # and authorization scope produces the same cache identity.
+        scope = authorization_epoch if restriction in RESTRICTED_CONTENT | {"account"} else None
+        identity = json.dumps((artwork_id, remote_url, restriction, scope)).encode("utf-8")
+        version = hmac.digest(_IMAGE_SOURCE_KEY, identity, "sha256").hex()
+        capabilities.append("/api/pixiv/image?" + urllib.parse.urlencode({"token": token, "source": version}))
     with SEARCH_SESSION_LOCKS_GUARD:
         for _token, row in prepared:
             assert_image_token_authorization(row)
@@ -1046,10 +1054,7 @@ def _authorize_image_proxy_batch(entries: list[tuple]) -> list[str]:
             # Logout and parallel authorizations cannot leave an over-limit or
             # post-revocation restricted token behind.
             _prune_image_tokens_locked(time.monotonic())
-    return [
-        "/api/pixiv/image?" + urllib.parse.urlencode({"token": token})
-        for token, _row in prepared
-    ]
+    return capabilities
 
 
 def _assign_image_tokens(fields: list[tuple[dict, str, tuple]]) -> None:
@@ -4256,7 +4261,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(pixiv_error_payload("动图预览", exc), 502)
 
     def _get_pixiv_image(self, request):
-        token = urllib.parse.parse_qs(request.query).get("token", [""])[0]
+        query = urllib.parse.parse_qs(request.query)
+        token = query.get("token", [""])[0]
         with PIXIV_STATE_LOCK:
             approved = IMAGE_TOKENS.get(token)
             if not approved or approved[0] < time.monotonic():
@@ -4278,29 +4284,36 @@ class Handler(SimpleHTTPRequestHandler):
         if approved is None:
             return self.send_json({"error": "图片授权已失效"}, 403)
         try:
-            warm=urllib.parse.parse_qs(request.query).get("warm",[""])[0]
-            priority_token = REQUEST_PRIORITY.set(1 if warm=="account" else 2 if warm=="1" else 0)
-            try:
-                raw, content_type = pixiv_request(str(approved[2]), image_only=True)
-            finally:
-                REQUEST_PRIORITY.reset(priority_token)
-            with SEARCH_SESSION_LOCKS_GUARD:
-                pending = _observe_web_policy()
-                web_session = AUTH_METHOD.get() == "web" and bool(web_session_cookie_header())
-            if pending:
-                return self.send_json({"error": "浏览设置正在核对，请稍后刷新。", "errorKind": "settings_pending"}, 503)
-            with PIXIV_STATE_LOCK:
-                still_approved = IMAGE_TOKENS.get(token)
-                if still_approved != approved or approved[0] < time.monotonic():
-                    return self.send_json({"error": "图片授权已失效"}, 403)
-            try:
+            warm = query.get("warm", [""])[0]
+            priority = 1 if warm == "account" else 2 if warm == "1" else 0
+            with tracked_search_request(query.get("requestId", [""])[0].strip()) as cancel_event:
+                with read_priority(priority, cancel_event):
+                    raw, content_type = pixiv_request(str(approved[2]), image_only=True, cancel_event=cancel_event)
+                raise_if_search_cancelled(cancel_event)
+                with SEARCH_SESSION_LOCKS_GUARD:
+                    pending = _observe_web_policy()
+                    web_session = AUTH_METHOD.get() == "web" and bool(web_session_cookie_header())
+                if pending:
+                    return self.send_json({"error": "浏览设置正在核对，请稍后刷新。", "errorKind": "settings_pending"}, 503)
+                with PIXIV_STATE_LOCK:
+                    still_approved = IMAGE_TOKENS.get(token)
+                    if still_approved != approved or approved[0] < time.monotonic():
+                        return self.send_json({"error": "图片授权已失效"}, 403)
                 assert_image_token_authorization(approved)
-            except AuthorizationRevokedError:
-                return self.send_json({"error": "限制级图片授权已失效"}, 403)
-            if not content_type.startswith("image/"):
-                raise PixivPolicyError("Pixiv 返回的不是图片")
-            cache_control = "no-store" if web_session else image_token_cache_control(approved)
-            return self.send_bytes(raw, content_type, cache_control)
+                if not content_type.startswith("image/"):
+                    raise PixivPolicyError("Pixiv 返回的不是图片")
+                cache_control = "no-store" if web_session else image_token_cache_control(approved)
+                return self.send_bytes(raw, content_type, cache_control)
+        except SearchInputError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except SearchRequestConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
+        except SearchRequestLimitError as exc:
+            return self.send_json({"error": str(exc), "errorKind": "request_queue", "retryAfterSeconds": 2}, 429)
+        except SearchCancelledError:
+            return self.send_json({"cancelled": True}, 499)
+        except AuthorizationRevokedError:
+            return self.send_json({"error": "限制级图片授权已失效"}, 403)
         except PIXIV_OPERATION_ERRORS as exc:
             return self.send_json(pixiv_error_payload("图片代理", exc), 502)
 
