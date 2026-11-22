@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager, closing
@@ -13,6 +14,16 @@ from pixiv_adapter import CONTENT_MODES, CONTENT_RESTRICTIONS, RESTRICTED_CONTEN
 
 class TaskConflictError(ValueError):
     pass
+
+
+BASKET_RECEIPT_REVISIONS = 1024
+
+
+class BasketRevisionConflict(ValueError):
+    def __init__(self, *, receipt_expired=False):
+        super().__init__("采集篮旧保存无法确认，请重新打开工作区核对" if receipt_expired
+                         else "采集篮已在另一个窗口更新，请重试保存")
+        self.receipt_expired = receipt_expired
 
 
 class WorkspaceCapacityError(ValueError):
@@ -224,6 +235,18 @@ class WorkspaceStore:
                 connection.execute("CREATE TABLE IF NOT EXISTS task_removals (id TEXT PRIMARY KEY) WITHOUT ROWID")
                 connection.execute("CREATE TABLE IF NOT EXISTS task_chunks (task_id TEXT NOT NULL, ordinal INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(task_id,ordinal)) WITHOUT ROWID")
                 connection.execute("CREATE TABLE IF NOT EXISTS web_workspace_owners (legacy_scope TEXT PRIMARY KEY, account_scope TEXT NOT NULL)")
+                connection.execute("""CREATE TABLE IF NOT EXISTS basket_receipts (
+                    request_id TEXT PRIMARY KEY, scope TEXT NOT NULL, revision INTEGER NOT NULL, fingerprint TEXT NOT NULL
+                ) WITHOUT ROWID""")
+                # Keep the v2.1.9 payload readable and invalidate its row
+                # identities when that version replaces or updates the list.
+                connection.execute("""CREATE TABLE IF NOT EXISTS recent_identity (
+                    singleton INTEGER PRIMARY KEY, generation TEXT NOT NULL, ids TEXT)""")
+                for event in ("INSERT", "UPDATE"):
+                    connection.execute(f"""CREATE TRIGGER IF NOT EXISTS recent_identity_{event}
+                        AFTER {event} ON recent BEGIN
+                            INSERT OR REPLACE INTO recent_identity VALUES (1, lower(hex(randomblob(16))), NULL);
+                        END""")
                 if version != 2:connection.execute("PRAGMA user_version=2")
                 yield connection
         finally:
@@ -268,15 +291,16 @@ class WorkspaceStore:
                     current["archived"] = current.get("archived", True) or row.get("archived", True)
             db.execute("INSERT OR REPLACE INTO basket VALUES(1,?,?)",
                        (revision + 1, json.dumps(updated, ensure_ascii=False)))
-            recent = db.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
-            if recent:
+            recent = self._read_recent(db)
+            if any(owner == legacy_scope for owner, _, _ in recent):
                 merged = []
-                for owner, row in json.loads(recent[0]):
-                    entry = [scope if owner == legacy_scope else owner, row]
-                    if entry not in merged:
-                        merged.append(entry)
-                db.execute("UPDATE recent SET payload=? WHERE singleton=1", (json.dumps(merged, ensure_ascii=False),))
+                for owner, item, identity in recent:
+                    owner = scope if owner == legacy_scope else owner
+                    if not any(old_owner == owner and old == item for old_owner, old, _ in merged):
+                        merged.append((owner, item, identity))
+                self._write_recent(db, merged)
             db.execute("UPDATE tasks SET scope=? WHERE scope=?", (scope, legacy_scope))
+            db.execute("UPDATE basket_receipts SET scope=? WHERE scope=?", (scope, legacy_scope))
             db.execute("INSERT INTO web_workspace_owners VALUES(?,?)", (legacy_scope, scope))
 
     @contextmanager
@@ -301,25 +325,60 @@ class WorkspaceStore:
                     result["revision"] = row[0]
                     result["basket"] = _visible_basket(json.loads(row[1]), scope)
                 result["tasks"] = [self._expand_task(connection,json.loads(row[0])) for row in connection.execute("SELECT payload FROM tasks WHERE scope=? ORDER BY rowid", (scope,))]
-                row = connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
-                if row:
-                    result["recent"] = [item for owner, item in json.loads(row[0]) if owner in {scope, "public"}]
+                result["recent"] = self._visible_recent(self._read_recent(connection), scope)
         return result
 
-    def remember_search(self, value: dict, scope: str) -> None:
-        self._update_recent_search(value, scope, remove=False)
+    @staticmethod
+    def _read_recent(connection):
+        row = connection.execute("""SELECT r.payload, COALESCE(i.generation, 'legacy'), i.ids
+                                    FROM recent r LEFT JOIN recent_identity i USING (singleton)
+                                    WHERE r.singleton=1""").fetchone()
+        if row is None:
+            return []
+        payload, generation, ids = row
+        entries = json.loads(payload)
+        if ids is None:
+            ids = [hashlib.sha256(f"{generation}:{index}:{payload}".encode("utf-8")).hexdigest()[:32]
+                   for index in range(len(entries))]
+        else:
+            ids = json.loads(ids)
+        return [(owner, item, identity) for (owner, item), identity in zip(entries, ids, strict=True)]
 
-    def delete_recent_search(self, value: dict, scope: str) -> None:
-        self._update_recent_search(value, scope, remove=True)
+    @staticmethod
+    def _write_recent(connection, entries):
+        connection.execute("INSERT OR REPLACE INTO recent VALUES (1,?)",
+                           (json.dumps([(owner, item) for owner, item, _ in entries], ensure_ascii=False),))
+        connection.execute("UPDATE recent_identity SET ids=? WHERE singleton=1",
+                           (json.dumps([identity for _, _, identity in entries]),))
 
-    def clear_recent_searches(self, scope: str) -> None:
+    @staticmethod
+    def _visible_recent(entries, scope):
+        return [{**item, "id": identity} for owner, item, identity in entries if owner in {scope, "public"}]
+
+    def change_recent(self, scope, action, *, search=None, identities=None):
+        if action == "remember":
+            value = self._recent_search(search, scope)
+        elif (not isinstance(identities, list) or not 1 <= len(identities) <= 8
+              or any(not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity)
+                     for identity in identities)):
+            raise ValueError("invalid recent identities")
         with self._write(scope) as connection:
-            row=connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
-            recent=json.loads(row[0]) if row else []
-            retained=[(owner,value) for owner,value in recent if owner not in {scope,"public"}]
-            connection.execute("INSERT OR REPLACE INTO recent VALUES(1,?)",(json.dumps(retained,ensure_ascii=False),))
+            entries = self._read_recent(connection)
+            if action == "remember":
+                owner = "public" if value["filters"]["mode"] == "safe" else scope
+                entries = [(owner, value, secrets.token_hex(16)),
+                           *(entry for entry in entries if entry[:2] != (owner, value))][:8]
+                self._write_recent(connection, entries)
+            else:
+                retained = [entry for entry in entries
+                            if entry[0] not in {scope, "public"} or entry[2] not in identities]
+                if retained != entries:
+                    self._write_recent(connection, retained)
+                entries = retained
+            return self._visible_recent(entries, scope)
 
-    def _update_recent_search(self, value: dict, scope: str, *, remove: bool) -> None:
+    @staticmethod
+    def _recent_search(value, scope):
         if not isinstance(value, dict) or set(value) != {"tag", "filters"}:
             raise ValueError("invalid recent search")
         tag, filters = value["tag"], value["filters"]
@@ -331,18 +390,11 @@ class WorkspaceStore:
                 or type(filters["includeAi"]) is not bool or type(filters["fuzzy"]) is not bool
                 or any(not isinstance(filters[key], str) or not re.fullmatch(r"(?:\d{4}-\d{2}-\d{2})?", filters[key]) for key in ("startDate", "endDate"))):
             raise ValueError("invalid recent filters")
-        owner = "public" if filters["mode"] == "safe" else scope
-        if owner == "public" and filters["mode"] != "safe":
+        if scope == "public" and filters["mode"] != "safe":
             raise ValueError("restricted search needs account")
-        with self._write(scope) as connection:
-            row = connection.execute("SELECT payload FROM recent WHERE singleton=1").fetchone()
-            recent = json.loads(row[0]) if row else []
-            recent = [(old_owner, old) for old_owner, old in recent if old != value or old_owner != owner]
-            if not remove:
-                recent.insert(0, (owner, value))
-            connection.execute("INSERT OR REPLACE INTO recent VALUES (1,?)", (json.dumps(recent[:8], ensure_ascii=False),))
+        return value
 
-    def save_basket(self, rows: list[dict], scope: str, *, revision: int) -> int:
+    def save_basket(self, rows: list[dict], scope: str, *, revision: int, request_id=None) -> int:
         _integer(revision, 0, 2**63 - 2)
         if not isinstance(rows, list) or len(rows) > 1000:
             raise ValueError("invalid basket")
@@ -376,15 +428,31 @@ class WorkspaceStore:
             total += len(pages)
         if total > 1000:
             raise WorkspaceCapacityError("采集篮容量为 1000 张，请取消部分选择后重试")
+        if request_id is not None:
+            request_id = _request_id(request_id)
+            fingerprint = hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         with self._write(scope) as connection:
+            if request_id is not None:
+                receipt = connection.execute(
+                    "SELECT scope,revision,fingerprint FROM basket_receipts WHERE request_id=?", (request_id,)
+                ).fetchone()
+                if receipt is not None:
+                    if receipt != (scope, revision + 1, fingerprint):
+                        raise TaskConflictError("原采集篮提交内容已变更，请重新读取")
+                    return receipt[1]
             old = connection.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
-            if (old[0] if old else 0) != revision:
-                raise ValueError("stale basket revision")
+            current_revision = old[0] if old else 0
+            if current_revision != revision:
+                raise BasketRevisionConflict(receipt_expired=request_id is not None and current_revision - revision > BASKET_RECEIPT_REVISIONS)
             normalized = _preserve_basket_ownership(normalized, json.loads(old[1]) if old else [], scope)
             scopes = {"public", *(owner for owner, _row in normalized)}
             if any(sum(len(row["pages"]) for row in _visible_basket(normalized, owner)) > 1000 for owner in scopes):
                 raise WorkspaceCapacityError("共享采集篮容量不足，请减少公开作品的选择后重试")
             connection.execute("INSERT OR REPLACE INTO basket VALUES (1,?,?)", (revision + 1, json.dumps(normalized, ensure_ascii=False)))
+            if request_id is not None:
+                connection.execute("INSERT INTO basket_receipts VALUES (?,?,?,?)",
+                                   (request_id, scope, revision + 1, fingerprint))
+                connection.execute("DELETE FROM basket_receipts WHERE revision<=?", (revision + 1 - BASKET_RECEIPT_REVISIONS,))
         return revision + 1
 
     @contextmanager

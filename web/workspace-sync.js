@@ -1,5 +1,5 @@
 // Own local-record synchronization, including unacknowledged edits and account changes.
-globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace, canRestore, onStatus, onScopeChanged,
+globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace, canRestore, onStatus, onScopeChanged, onRecent = () => {},
   getAuthorizationGeneration = () => null}) {
   const copy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
   const fields = ["context", "resultPage", "archived"];
@@ -14,7 +14,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
   let ready = false, loading = false, needsRestore = false, initialized = false;
   let scope = null, revision = 0, epoch = 0, readGeneration = 0, sequence = 0;
   let applying = false, scheduled = false, recovery = false, error = null;
-  let unacknowledgedBasket = new Map();
+  let pendingBasket = null, recentError = null;
   let tail = Promise.resolve();
   let observed = new Map();
   const edits = new Map(), controllers = new Set();
@@ -78,11 +78,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
         // A title refresh must not roll back another window's page count (or
         // restriction). Keep conflicting remote metadata, but apply our pages.
         if (remoteItem && !same(remoteItem[field], action.before) && !same(remoteItem[field], action.value)) {
-          const sentItem = unacknowledgedBasket.get(id)?.item;
-          if (!sentItem || !same(remoteItem[field], sentItem[field])) continue;
-          // The previous request reached disk but its reply was lost. Newer
-          // local edits can build on that sent value, including after retries.
-          action.before = copy(remoteItem[field]);
+          continue;
         }
         row.item[field] = copy(action.value);
       }
@@ -113,7 +109,8 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     controllers.clear();
     edits.clear();
     observed.clear();
-    unacknowledgedBasket.clear();
+    pendingBasket = null;
+    recentError = null;
     ready = false;
     loading = true;
     needsRestore = true;
@@ -165,11 +162,27 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
         fail(new Error("暂时无法确认 Pixiv 账户，请重试"), changedEpoch);
         return false;
       }
+      if (pendingBasket !== null) {
+        const original = pendingBasket;
+        let committedRevision;
+        try {
+          committedRevision = await writeBasket(original, data.scope);
+        } catch (reason) {
+          if (!reason.basketConflict) throw reason;
+        }
+        if (token !== epoch || generation !== readGeneration) return false;
+        pendingBasket = null;
+        if (committedRevision !== undefined) acknowledge(original.number, original.basket);
+        if (committedRevision > data.revision ||
+            (committedRevision === undefined && original.revision === data.revision)) {
+          return load(token);
+        }
+      }
       const basket = mergeEdits(data.basket || []);
       applying = true;
       applyWorkspace({...data, basket});
+      onRecent(data.recent || []);
       observed = new Map(canonical(readBasket()).map(row => [row.id, row]));
-      unacknowledgedBasket.clear();
       scope = data.scope;
       revision = data.revision || 0;
       initialized = true;
@@ -189,30 +202,61 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     }
   }
 
+  async function writeBasket({basket, revision, requestId}, owner) {
+    const data = await send("/api/workspace/basket", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({basket, revision, requestId, scope: owner})});
+    return data.revision;
+  }
+
   async function save(token) {
     try {
       if (recovery && !await load(token)) return;
       while (token === epoch && ready && edits.size) {
         const number = sequence;
         const basket = canonical(readBasket());
-        unacknowledgedBasket = new Map(basket.map(row => [row.id, row]));
-        const data = await send("/api/workspace/basket", {method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({basket, revision, scope})});
+        const requestId = [Date.now().toString(36), number.toString(36),
+          Math.random().toString(36).slice(2).padEnd(14, "0")].join("-");
+        pendingBasket = {basket, revision, number, requestId};
+        const committedRevision = await writeBasket(pendingBasket, scope);
         if (token !== epoch) return;
-        revision = data.revision;
+        revision = committedRevision;
         acknowledge(number, basket);
-        unacknowledgedBasket.clear();
+        pendingBasket = null;
         error = null;
         notify();
       }
-    } catch (reason) { fail(reason, token); }
+    } catch (reason) {
+      if (token === epoch && (reason.basketCapacity || reason.basketConflict || reason.status === 400)) {
+        pendingBasket = null;
+      }
+      fail(reason, token);
+    }
   }
 
-  function enqueue(operation) {
+  function enqueue(operation, reportFailure = false) {
     const token = epoch;
     const result = tail.then(() => token === epoch ? operation(token) : false);
-    tail = result.catch(reason => fail(reason, token));
-    return tail;
+    tail = result.catch(reason => {
+      if (reportFailure && token === epoch) recentError = reason;
+      else fail(reason, token);
+    });
+    return reportFailure ? result : tail;
+  }
+
+  function changeRecent(change) {
+    const authorization = getAuthorizationGeneration(), owner = scope;
+    return enqueue(async token => {
+      if (authorization !== getAuthorizationGeneration() || scope === null ||
+          (owner !== null && scope !== owner)) {
+        throw new Error("最近搜索尚未就绪或账号已改变，请重试");
+      }
+      const data = await send("/api/workspace/recent", {method: "POST",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify({...change, scope})});
+      if (token === epoch && authorization === getAuthorizationGeneration()) {
+        recentError = null;
+        onRecent(data.recent);
+      }
+    }, true);
   }
 
   function scheduleSave() {
@@ -235,9 +279,12 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     get needsRestore() { return needsRestore; },
     get active() { return initialized || loading || needsRestore || scope !== null || edits.size > 0; },
     changed() { if (!applying) { captureEdits(); return scheduleSave(); } return tail; },
-    restore,
+    restore, changeRecent,
     retry() { return recovery || !initialized ? restore() : scheduleSave(); },
     reset,
-    settled() { return tail; },
+    async settled() {
+      await tail;
+      if (recentError !== null) throw recentError;
+    },
   };
 };

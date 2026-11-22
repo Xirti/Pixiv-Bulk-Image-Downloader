@@ -64,7 +64,7 @@ from file_publish import (
 from download_pipeline import DownloadAhead, DownloadSource, consume_downloads, stream_downloads
 from download_history import DownloadHistory, history_path
 from local_catalog import LocalCatalog
-from workspace_store import TaskConflictError, TaskCapacityError, WorkspaceCapacityError, WorkspaceStore, account_scope
+from workspace_store import BasketRevisionConflict, TaskConflictError, TaskCapacityError, WorkspaceCapacityError, WorkspaceStore, account_scope
 from preview_resources import PreviewBusyError, PreviewCancelledError, PreviewResources
 from read_scope import ReadScopes, read_priority
 from ugoira_export import MAX_ARCHIVE_BYTES as MAX_UGOIRA_BYTES, MAX_EXPANDED_BYTES as MAX_UGOIRA_TEMP_BYTES, UgoiraCancelledError, UgoiraExportError, export_formats, export_ugoira, require_mp4_encoder
@@ -4657,14 +4657,17 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _post_save_basket(self, data: dict):
         try:
-            revision = WORKSPACE_STORE.save_basket(data.get("basket"), data["scope"], revision=data.get("revision"))
+            revision = WORKSPACE_STORE.save_basket(data.get("basket"), data["scope"], revision=data.get("revision"),
+                                                  request_id=data.get("requestId"))
             return self.send_json({"ok": True, "revision": revision})
         except WorkspaceCapacityError as exc:
             return self.send_json({"error": str(exc), "basketCapacity": True}, 409)
         except TaskConflictError as exc:
             return self.send_json({"error": str(exc)}, 409)
-        except ValueError as exc:
-            return self.send_json({"error": "采集篮已在另一个窗口更新，请重试保存" if "stale" in str(exc) else "采集篮数据无效"}, 409 if "stale" in str(exc) else 400)
+        except BasketRevisionConflict as exc:
+            return self.send_json({"error": str(exc), "basketConflict": not exc.receipt_expired}, 409)
+        except ValueError:
+            return self.send_json({"error": "采集篮数据无效"}, 400)
         except (OSError, sqlite3.Error):
             return self.send_json({"error": "无法保存采集篮"}, 500)
 
@@ -4777,13 +4780,9 @@ class Handler(SimpleHTTPRequestHandler):
             action = data.get("action", "remember")
             if action not in ("remember", "remove", "clear"):
                 raise ValueError("invalid recent action")
-            scope = data["scope"]
-            if action == "clear":
-                WORKSPACE_STORE.clear_recent_searches(scope)
-            else:
-                operation = WORKSPACE_STORE.delete_recent_search if action == "remove" else WORKSPACE_STORE.remember_search
-                operation(data.get("search"), scope)
-            return self.send_json({"ok": True})
+            recent = WORKSPACE_STORE.change_recent(data["scope"], action, search=data.get("search"),
+                                                   identities=data.get("ids"))
+            return self.send_json({"ok": True, "recent": recent})
         except TaskConflictError as exc:
             return self.send_json({"error": str(exc)}, 409)
         except ValueError:

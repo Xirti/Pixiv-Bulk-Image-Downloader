@@ -71,7 +71,6 @@ let appConnectionBusy = false;
 const pendingTasks = new Map();
 let pendingTasksMarkup = null;
 let savedRecentSearches = [];
-let recentSearchWrites=Promise.resolve();
 const batchCandidateContextByArtwork = new Map();
 const batchCandidateResultPageByArtwork = new Map();
 const MAX_SELECTED_PAGES = 1000;
@@ -284,26 +283,15 @@ syncDateInputs();
 function readRecentSearches() {
   return savedRecentSearches.slice(0, 8);
 }
-function saveRecentChange(change){
-  const scope=workspaceSync.scope,authorization=lastKnownAuthorizationGeneration;
-  const pending=recentSearchWrites.catch(()=>{}).then(()=>{
-    if(scope!==workspaceSync.scope || authorization!==lastKnownAuthorizationGeneration)throw new Error('账号状态已改变，请重试');
-    return fetchJson('/api/workspace/recent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...change,scope})});
-  });
-  recentSearchWrites=pending;return pending;
-}
-
 function rememberSearch(tag, filters) {
   const {order,popularityIndex,...criteria}=filters;
-  const row = {tag, filters: criteria};
-  const key = JSON.stringify(row);
-  const rows = [row, ...readRecentSearches().filter(old => JSON.stringify(old) !== key)].slice(0, 8);
-  savedRecentSearches = rows;
-  if (workspaceSync.ready) {
-    void saveRecentChange({search:row})
-      .catch(() => { $("#recentSearches").title = "最近搜索暂未保存，重开窗口后可能丢失"; });
-  }
-  renderRecentSearches();
+  const authorization = lastKnownAuthorizationGeneration;
+  void workspaceSync.changeRecent({search:{tag, filters:criteria}}).catch(error => {
+    console.warn("Recent search could not be saved", error);
+    if (authorization === lastKnownAuthorizationGeneration) {
+      $("#recentSearches").title = "最近搜索暂未保存，重开窗口后可能丢失";
+    }
+  });
 }
 
 function restoreSearch(row) {
@@ -328,32 +316,27 @@ function renderRecentSearches() {
   const rows = readRecentSearches();
   holder.hidden = !rows.length;
   holder.innerHTML = '<span class="recent-search-heading"><span>最近搜索</span><button type="button" class="recent-search-clear" data-recent-clear title="清空最近搜索" aria-label="清空最近搜索"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/></svg></button></span>' + rows.map((row, index) => `<span class="recent-search-chip"><button type="button" data-recent-search="${index}" title="恢复这次搜索的标签和筛选条件"><span class="recent-search-label">${esc(row.tag)}</span></button><button type="button" class="recent-search-remove" data-recent-remove="${index}" aria-label="删除最近搜索：${esc(row.tag)}" title="删除">×</button></span>`).join("");
-  holder.querySelector('[data-recent-clear]').onclick=async()=>{
-    if(!workspaceSync.ready){announceToast('最近搜索尚未就绪，请稍后再试');return;}
-    const scope=workspaceSync.scope,authorization=lastKnownAuthorizationGeneration,button=holder.querySelector('[data-recent-clear]');
-    button.disabled=true;
-    try{
-      await saveRecentChange({action:'clear'});
-      if(scope!==workspaceSync.scope || authorization!==lastKnownAuthorizationGeneration)return;
-      savedRecentSearches=savedRecentSearches.filter(row=>!rows.includes(row));renderRecentSearches();
-    }catch(error){button.disabled=false;announceToast(`清空最近搜索失败：${error.message}`);}
-  };
+  async function removeRecent(button, ids, clear) {
+    const authorization = lastKnownAuthorizationGeneration;
+    button.disabled = true;
+    try {
+      await workspaceSync.changeRecent({action:clear ? "clear" : "remove", ids});
+    } catch (error) {
+      button.disabled = false;
+      if (authorization === lastKnownAuthorizationGeneration) {
+        announceToast(`${clear ? "清空" : "删除"}最近搜索失败：${error.message}`);
+      }
+    }
+  }
+  const clear = holder.querySelector("[data-recent-clear]");
+  clear.onclick = () => rows.length ? removeRecent(clear, rows.map(row => row.id), true) : undefined;
   holder.querySelectorAll("[data-recent-search]").forEach(button => {
     button.onclick = () => restoreSearch(rows[Number(button.dataset.recentSearch)]);
   });
   holder.querySelectorAll("[data-recent-remove]").forEach(button => {
-    button.onclick = async event => {
+    button.onclick = event => {
       event.stopPropagation();
-      if (!workspaceSync.ready) { announceToast("最近搜索尚未就绪，请稍后再试"); return; }
-      const row = rows[Number(button.dataset.recentRemove)], scope = workspaceSync.scope;
-      const authorization = lastKnownAuthorizationGeneration;
-      button.disabled = true;
-      try {
-        await saveRecentChange({search:row,action:'remove'});
-        if (scope !== workspaceSync.scope || authorization !== lastKnownAuthorizationGeneration) return;
-        savedRecentSearches = savedRecentSearches.filter(old => old!==row);
-        renderRecentSearches();
-      } catch (error) { button.disabled = false; announceToast(`删除最近搜索失败：${error.message}`); }
+      return removeRecent(button, [rows[Number(button.dataset.recentRemove)].id], false);
     };
   });
 }
@@ -371,10 +354,13 @@ const workspaceSync = createWorkspaceSync({
   getAuthorizationGeneration: () => lastKnownAuthorizationGeneration,
   readBasket: () => selection.snapshot(),
   canRestore: () => !selection.locked && !singleDownloadPending,
+  onRecent: rows => {
+    savedRecentSearches = rows;
+    $("#recentSearches").title = "";
+    renderRecentSearches();
+  },
   applyWorkspace: data => {
     restoreBasketView(data.basket);
-    savedRecentSearches = data.recent || [];
-    renderRecentSearches();
     pendingTasks.clear();
     for (const saved of data.tasks || []) {
       const task = {revision: 0, ...saved, persisted: true, authorizationRevision: downloadAuthorizationRevision};
@@ -789,6 +775,7 @@ function responseError(payload, status) {
   const data = payload !== null && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
   const error = new Error(data.error || `请求失败（HTTP ${status}）`);
   error.status=status;
+  error.basketConflict = data.basketConflict === true;
   error.errorKind = data.errorKind;
   error.retryAfterSeconds = data.retryAfterSeconds;
   if (["verification_required", "authentication_required"].includes(data.errorKind)) {
@@ -1813,7 +1800,7 @@ createAppUpdates({root:$("[data-account-settings]"),request:fetchJson,report:ann
   if(activeDownload || singleDownloadPending || selection.locked)throw Error("请等待下载任务完成或中断后再更新");
   if(settingsView.dirty)throw Error("请先保存设置改动");
   if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
-  await workspaceSync.settled();await recentSearchWrites;await cloudControls.settled();
+  await workspaceSync.settled();await cloudControls.settled();
   if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
   if(workspaceSync.active && !workspaceSync.ready)throw Error("本机记录尚未保存，请重试保存后更新");
 }});
