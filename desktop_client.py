@@ -85,7 +85,7 @@ def desktop_auth_request(
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    uncertain = {"confirmationRequired": True} if action == "session" else {}
+    uncertain = {"confirmationRequired": True} if action in {"session", "update-restart"} else {}
     try:
         try:
             response = opener.open(request, timeout=120.0 if action == "update-restart" else 30.0 if action == "app-connect" else max(1.0, min(float(timeout), 15.0)))
@@ -164,6 +164,8 @@ class DesktopApi:
         self.poll_interval = max(0.0, float(poll_interval))
         self.timeout = max(0.01, float(timeout))
         self._login_lock = threading.Lock()
+        self._exit_lock = threading.Lock()
+        self._exit_state = "open"
         self._backend_url = str(backend_url or "")
         self._desktop_auth_token = str(desktop_auth_token or "")
         self._auth_request = auth_request or (
@@ -176,12 +178,54 @@ class DesktopApi:
         )
 
     def restart_update(self) -> dict:
-        if len(webview.windows)>1:
-            return {"ok":False,"error":"请先关闭登录与官网窗口"}
-        result=desktop_auth_request(self._backend_url,self._desktop_auth_token,"update-restart",{},timeout=15)
-        if result.get("ok"):
-            threading.Timer(.4,self._window.destroy).start()
+        if len(webview.windows) > 1:
+            return {"ok": False, "error": "请先关闭登录与官网窗口"}
+        with self._exit_lock:
+            if self._exit_state == "checking":
+                return {"ok": False, "error": "正在准备退出，请稍候"}
+            self._exit_state = "checking"
+        result = desktop_auth_request(self._backend_url, self._desktop_auth_token, "update-restart", {})
+        with self._exit_lock:
+            self._exit_state = "approved" if result.get("ok") is True else "open"
         return result
+
+    def _on_closing(self):
+        with self._exit_lock:
+            if self._exit_state == "approved" or not self._window.events.loaded.is_set():
+                return True
+            if self._exit_state == "checking":
+                return False
+            self._exit_state = "checking"
+        try:
+            threading.Thread(target=self._confirm_close, name="moku-close-confirmation", daemon=True).start()
+        except RuntimeError:
+            with self._exit_lock:
+                self._exit_state = "open"
+            LOG.exception("Could not start desktop close confirmation")
+        return False
+
+    def _confirm_close(self):
+        confirmed = Future()
+        try:
+            self._window.evaluate_js(
+                "Promise.resolve(globalThis.mokuPrepareDesktopClose?.() ?? true)",
+                callback=confirmed.set_result,
+            )
+            if confirmed.result(timeout=120) is True:
+                with self._exit_lock:
+                    self._exit_state = "approved"
+                self._window.destroy()
+                return
+        except Exception:
+            LOG.exception("Desktop close could not verify the page save result")
+            try:
+                self._window.evaluate_js(
+                    "document.body.inert=false; globalThis.mokuDesktopCloseUnavailable?.()"
+                )
+            except Exception:
+                LOG.exception("Could not show desktop close confirmation error")
+        with self._exit_lock:
+            self._exit_state = "open"
 
     def _notify(self, text: str) -> None:
         if self._window is None:
@@ -549,6 +593,7 @@ def start_desktop(
     )
     window.events.before_show += _fit_main_window
     api._window = window
+    window.events.closing += api._on_closing
     storage_path.mkdir(parents=True, exist_ok=True)
     start_options = dict(gui="edgechromium", private_mode=False, storage_path=str(storage_path), debug=False)
     # Windows proxy selection remains dynamic in the native browser. Only an
@@ -574,6 +619,8 @@ def start_desktop(
             except Exception as error:
                 confirmation.set_exception(error)
                 if not window.events.closed.is_set():
+                    with api._exit_lock:
+                        api._exit_state = "approved"
                     window.destroy()
             else:
                 confirmation.set_result(None)

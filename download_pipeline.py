@@ -187,13 +187,14 @@ class DownloadAhead:
     def __init__(self, *, ttl=30, capacity=1):
         self._condition = threading.Condition()
         self._entries = {}
-        self._workers = set()
+        self._workers = {}
+        self._closed = False
         self._ttl = ttl
         self._capacity = capacity
 
     def start(self, key, prepare, cancel_event, *, hold=False, queue=None):
         with self._condition:
-            if key in self._entries or len(self._entries) >= self._capacity:
+            if self._closed or key in self._entries or len(self._entries) >= self._capacity:
                 return False
             entry = {"key": key, "queue": queue, "stop": _Cancellation(cancel_event),
                      "ready": False, "claimed": False, "released": False,
@@ -202,12 +203,12 @@ class DownloadAhead:
             context = copy_context()
             worker = threading.Thread(target=context.run, args=(self._prepare, entry, prepare),
                                       name="download-ahead", daemon=True)
-            self._workers.add(worker)
+            self._workers[worker] = entry
             try:
                 worker.start()
             except Exception:
                 del self._entries[key]
-                self._workers.remove(worker)
+                del self._workers[worker]
                 raise
             return True
 
@@ -242,7 +243,7 @@ class DownloadAhead:
                 entry["released"] = True
                 if self._entries.get(entry["key"]) is entry:
                     del self._entries[entry["key"]]
-                self._workers.discard(threading.current_thread())
+                del self._workers[threading.current_thread()]
                 self._condition.notify_all()
 
     @contextmanager
@@ -293,9 +294,12 @@ class DownloadAhead:
             self._condition.notify_all()
 
     def close(self):
-        self.clear()
         with self._condition:
-            self._condition.wait_for(lambda: not self._workers, timeout=2)
+            self._closed = True
+            for entry in self._workers.values():
+                entry["stop"].set()
+            self._condition.notify_all()
+            self._condition.wait_for(lambda: not self._workers)
 
     def finish(self, cancel_event, *, keep):
         with self._condition:

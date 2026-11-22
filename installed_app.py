@@ -13,6 +13,13 @@ from edition_profile import DATA_FOLDER
 
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\MOKU_is1"
 LOG = logging.getLogger("moku.installation")
+class InstalledDataCleanupError(OSError):
+    def __init__(self, failures):
+        self.remaining = tuple(failures)
+        lines = [f"{name}：{error}" for name, error in failures.items()]
+        super().__init__("个人数据未清理完毕。请处理以下项目后再次清理：\n" + "\n".join(lines))
+
+
 INSTALLATION_GUARD_NAME = r"Local\MOKU.InstallationGuard.v1"
 MAINTENANCE_GATE_NAME = r"Local\MOKU.MaintenanceGate.v1"
 
@@ -84,6 +91,7 @@ def clear_installed_user_data(program_root: Path) -> None:
         "library/" + name
         for name in (
             "downloads.sqlite3", "requests.sqlite3", "catalog.sqlite3", "workspace.sqlite3",
+            "workspace.v1-backup.sqlite3",
             "account-browse.sqlite3", "account-cache.sqlite3", "cloud-state.sqlite3",
             "guide-v1.seen", "login-context.json", "request-settings.json", "auth-method.json",
             "pixiv-logout-revision", "pixiv-logout-revision.tmp",
@@ -140,28 +148,73 @@ def clear_installed_user_data(program_root: Path) -> None:
     from auth_store import delete_persistent_session
     from pixiv_account import CredentialVault
     from source_search import SourceKey
-    delete_persistent_session()
-    CredentialVault().delete()
-    source_key = SourceKey()
-    if not source_key.disabled:
-        source_key.delete()
-    protocol = r"Software\Classes\pixiv"
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, protocol + r"\shell\open\command") as key:
-            command = winreg.QueryValueEx(key, "")[0]
-    except FileNotFoundError:
-        command = None
-    if command == f'"{program_root / "MOKU.exe"}" --pixiv-account-callback "%1"':
-        for suffix in (r"\shell\open\command", r"\shell\open", r"\shell", ""):
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, protocol + suffix)
+
+    failures = {}
+
+    def attempt(name, operation):
+        try:
+            operation()
+        except (OSError, ValueError) as error:
+            failures[name] = error
+            return False
+        return True
+
+    attempt("Pixiv 网页凭据", delete_persistent_session)
+    attempt("Pixiv App 凭据", lambda: CredentialVault().delete())
+
+    def delete_source_key():
+        source_key = SourceKey()
+        if not source_key.disabled:
+            source_key.delete()
+
+    attempt("SauceNAO API Key", delete_source_key)
+    callback = data / "library/account-callback.json"
+    callback_removed = attempt("Pixiv 回调注册", lambda: _clear_installed_callback(program_root, callback))
     for path in paths:
+        name = path.relative_to(data).as_posix()
+        if path == callback and not callback_removed and path.is_file():
+            failures[name] = ValueError("保留注册归属以供重试")
+            continue
         if path.is_dir():
-            shutil.rmtree(path)
+            attempt(name, lambda: shutil.rmtree(path))
         else:
-            path.unlink(missing_ok=True)
-    for name in ("library/source-search", "library", "runtime", "logs"):
-        directory = data / name
-        if directory.is_dir() and not any(directory.iterdir()):
-            directory.rmdir()
-    if data.is_dir() and not any(data.iterdir()):
-        data.rmdir()
+            attempt(name, lambda: path.unlink(missing_ok=True))
+    for directory in [data / name for name in ("library/source-search", "library", "runtime", "logs")] + [data]:
+        def remove_empty():
+            if directory.is_dir() and not any(directory.iterdir()):
+                directory.rmdir()
+        attempt(directory.relative_to(data).as_posix(), remove_empty)
+
+    if failures:
+        raise InstalledDataCleanupError(failures) from ExceptionGroup("Failed installed data cleanup",
+                                                                    list(failures.values()))
+
+
+def _clear_installed_callback(program_root, callback):
+    from account_authorization import PROTOCOL, protocol_guard
+    from release_security import read_bounded
+
+    hive = winreg.HKEY_CURRENT_USER
+    suffixes = (r"\shell\open\command", r"\shell\open", r"\shell", "")
+    expected = f'"{program_root / "MOKU.exe"}" --pixiv-account-callback "%1"'
+    with protocol_guard():
+        try:
+            with winreg.OpenKey(hive, PROTOCOL + suffixes[0]) as key:
+                command = winreg.QueryValueEx(key, "")[0]
+        except FileNotFoundError:
+            try:
+                with winreg.OpenKey(hive, PROTOCOL) as key:
+                    owner = winreg.QueryValueEx(key, "MOKU Owner")[0]
+                record = json.loads(read_bounded(callback))
+            except FileNotFoundError:
+                return
+            if not isinstance(record, dict) or record.get("owner") != owner:
+                return
+            command = record.get("command")
+        if command != expected:
+            return
+        for suffix in suffixes:
+            try:
+                winreg.DeleteKey(hive, PROTOCOL + suffix)
+            except FileNotFoundError:
+                continue

@@ -18,7 +18,7 @@ globalThis.createAppUpdates=function({root,request,beforeRestart,report,openUpda
     check.disabled=acting || busy();channel.disabled=acting || busy();automatic.disabled=acting || busy();
     channel.value=state.options.channel;automatic.checked=state.options.automatic;
     download.hidden=phase!=="available";download.disabled=acting;
-    restart.hidden=phase!=="ready";restart.disabled=acting || !state.installable;
+    restart.hidden=!["ready","restarting"].includes(phase);restart.disabled=acting || !state.installable;
     cancel.hidden=!["downloading","verifying"].includes(phase);cancel.disabled=acting;
     progress.hidden=!["downloading","verifying"].includes(phase);progress.max=release?.size || 1;progress.value=state.received;
     const labels={idle:"尚未检查更新",checking:"正在检查…",current:"当前没有更新版本",available:`可更新至 v${release?.version}`,
@@ -64,16 +64,25 @@ globalThis.createAppUpdates=function({root,request,beforeRestart,report,openUpda
   automatic.onchange=()=>void act("configure",{options:{automatic:automatic.checked}});
   restart.onclick=async()=>{
     if(!beginAction())return;
+    let prepared=false, closing=false;
     try{
+      const desktop=window.pywebview?.api;
+      if(!desktop?.restart_update || !desktop?.window_action)throw Error("请在 MOKU 桌面窗口中重启更新");
       await beforeRestart();
-      if(!window.pywebview?.api?.restart_update)throw Error("请在 MOKU 桌面窗口中重启更新");
-      document.body.inert=true;
+      prepared=true;
       status.textContent="正在准备重启…";
-      const result=await window.pywebview.api.restart_update();
+      const result=await desktop.restart_update();
       if(!result.ok)throw Error(result.error || "无法重启更新");
       state.phase="restarting";
+      const reply=await desktop.window_action("close");
+      if(!reply.ok)throw Error(reply.error || "无法关闭桌面窗口，请再次确认重启");
+      closing=true;
     }catch(error){report(error.message);}
-    finally{acting=false;if(state.phase!=="restarting")document.body.inert=false;render();}
+    finally{
+      acting=false;
+      if(prepared && !closing)document.body.inert=false;
+      render();
+    }
   };
   // Daily checks belong to the backend. This timer observes local state only,
   // including checks completed while the user browses another page.

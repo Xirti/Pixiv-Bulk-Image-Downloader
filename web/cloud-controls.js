@@ -358,9 +358,14 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   async function clearCache(){
     if(!session().logged){login();throw new Error("请先登录后清除当前账号缓存");}
     if(clearing)throw new Error("正在清除当前账号缓存");
-    const generation=session().generation,job={};
-    let completed=false;
+    const job={generation:session().generation};
     clearing=true;clearJob=job;
+    job.result=clearAccountCache(job);
+    return job.result;
+  }
+  async function clearAccountCache(job){
+    const {generation}=job;
+    let completed=false;
     notifySettings();
     epoch++;close();manual.clear();restart.clear();busy.clear();hydration=null;hydrationAgain=null;
     paint();
@@ -473,5 +478,12 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
   }).observe(document.body,{subtree:true,childList:true});
   setInterval(()=>{void tick();},5000);
   return {get busy(){return busy.size>0;},canPrepareBackground:()=>!clearing && Date.now()>=autoNotBefore,
-    settled:()=>preferenceWrites,setSession,hydrate,refresh,clearCache,savePreferences,ready,getPreferences:()=>({...prefs}),getSync:()=>structuredClone(syncState)};
+    async settled(){
+      let preferences, clearing;
+      do {
+        preferences=preferenceWrites;clearing=clearJob;
+        await Promise.all([preferences, clearing?.result]);
+      } while(preferences!==preferenceWrites || (clearJob && clearJob!==clearing));
+    },
+    setSession,hydrate,refresh,clearCache,savePreferences,ready,getPreferences:()=>({...prefs}),getSync:()=>structuredClone(syncState)};
 };

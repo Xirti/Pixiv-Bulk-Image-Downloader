@@ -175,9 +175,13 @@ var
 begin
   if CurUninstallStep <> usUninstall then exit;
   if PurgeUserData then
+  begin
     if not Exec(ExpandConstant('{app}\app\MOKU.exe'), '--uninstall-data', '',
-      SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
-      RaiseException('个人数据清理失败，请处理提示后重试卸载。');
+      SW_HIDE, ewWaitUntilTerminated, Code) then
+      RaiseException('个人数据清理程序未能启动，请修复 MOKU 后重试卸载。');
+    if Code <> 0 then
+      RaiseException('个人数据尚未清理完毕。请按 MOKU 提示处理，再选择同时清理个人数据并重试卸载。');
+  end;
   if OwnsRecoveryEntry then RemoveComponent(RecoveryEntryPath);
 end;
 

@@ -1792,18 +1792,41 @@ document.querySelectorAll("a[data-project-external]").forEach(link=>{
       .catch(()=>showTaskDock("项目链接","链接打开失败，可右键复制链接",5000));
   };
 });
+async function prepareDesktopExit({update=false}={}) {
+  if(document.body.inert)throw Error("正在准备退出，请稍候");
+  document.body.inert=true;
+  try {
+    if(update && (activeDownload || singleDownloadPending || selection.locked)){
+      throw Error("请等待下载任务完成或中断后再更新");
+    }
+    if(searchPending)throw Error("请等待当前搜索完成或取消后退出");
+    if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
+    await cloudControls.settled();
+    await workspaceSync.waitForSave();
+    if(settingsView.dirty)throw Error("请先保存设置改动");
+    if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
+  }catch(error){
+    document.body.inert=false;
+    throw error;
+  }
+}
+
+globalThis.mokuDesktopCloseUnavailable=()=>announceToast("无法确认本机记录已保存，请检查后重试关窗");
+globalThis.mokuPrepareDesktopClose=async()=>{
+  try{
+    await prepareDesktopExit();
+    return true;
+  }catch(error){
+    announceToast(error.message);
+    return false;
+  }
+};
+
 createAppUpdates({root:$("[data-account-settings]"),request:fetchJson,report:announceToast,openUpdates:async()=>{
   const category=$('[data-settings-category="updates"]');category.click();
   await openAccount("settings");
   if(activeWorkspace==="account"){$("#accountPage").scrollTop=0;category.focus({preventScroll:true});queueNavigationRecord();}
-},beforeRestart:async()=>{
-  if(activeDownload || singleDownloadPending || selection.locked)throw Error("请等待下载任务完成或中断后再更新");
-  if(settingsView.dirty)throw Error("请先保存设置改动");
-  if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
-  await workspaceSync.settled();await cloudControls.settled();
-  if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
-  if(workspaceSync.active && !workspaceSync.ready)throw Error("本机记录尚未保存，请重试保存后更新");
-}});
+},beforeRestart:()=>prepareDesktopExit({update:true})});
 for(const id of ["saveRoot","createFolder"])$("#"+id).addEventListener("input",()=>{downloadDefaultsTouched=true;});
 $("#openRequestSettings").onclick=()=>{helpDialog.close();void openAccount("settings");};
 

@@ -287,14 +287,13 @@ class LocalThreadingHTTPServer(ThreadingHTTPServer):
                 self._download_idle.notify_all()
 
     def server_close(self):
-        DOWNLOAD_AHEAD.clear()
         with self._download_idle:
             self._closing_downloads = True
             for cancel in self._download_jobs:
                 cancel.set()
-            while self._download_jobs:
-                self._download_idle.wait()
         DOWNLOAD_AHEAD.close()
+        with self._download_idle:
+            self._download_idle.wait_for(lambda: not self._download_jobs)
         super().server_close()
 
 

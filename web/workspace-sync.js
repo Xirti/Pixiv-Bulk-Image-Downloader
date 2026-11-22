@@ -282,9 +282,17 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     restore, changeRecent,
     retry() { return recovery || !initialized ? restore() : scheduleSave(); },
     reset,
-    async settled() {
-      await tail;
+    settled() { return tail; },
+    async waitForSave() {
+      let current;
+      do {
+        current = tail;
+        await current;
+      } while (current !== tail);
       if (recentError !== null) throw recentError;
+      if (edits.size || pendingBasket !== null || error) {
+        throw error || new Error("本机记录尚未保存，请重试保存");
+      }
     },
   };
 };

@@ -236,6 +236,8 @@ class AppUpdates:
         """Native host only. Gate download admission until the process exits."""
         with self.gate,self.lock:
             self._check_open()
+            if self.restarting:
+                return {"ok":True}
             if not self.frozen:raise UpdateError("源码运行不替换文件，请使用便携版")
             if self.active_downloads:raise UpdateError("请等待下载任务完成或中断后再重启更新")
             if not self.allow_restart:raise UpdateError("请关闭共享后端并重新打开 MOKU 桌面窗口后更新")
