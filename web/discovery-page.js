@@ -6,7 +6,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   const update=root.querySelector('[data-discovery-update]');
   const cache=new Map(),positions=new Map(),staged=new Map(),nextReads=new Map();
   const latest=new Map(),sourceVersions=new Map(),attempts=new Map(),followingDirty=new Set();
-  const popularViews=new Map(),startedSources=new Set(),pausedSources=new Set(),refreshRequired=new Set();
+  const popularViews=new Map(),startedSources=new Set(),pausedSources=new Set(),refreshRequired=new Map(),backgroundBatches=new Map();
   const recommendationSizes=new Map();
   const previews=createPreviewImageCache({retainUnused:true,maxImages:480,reuseDetached:true});
   const initial=()=>({kind:'recommended',scope:'all',mode:'safe',rank:'day',offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:'',choice:'default',waiting:false});
@@ -54,12 +54,12 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     followingVersion++;
     for(const key of new Set([...positions.keys(),...latest.keys(),sourceKey(state),sourceKey({...initial(),kind:'following'})])){
       if(JSON.parse(key)[0]!=='following')continue;
-      sourceVersions.set(key,sourceVersion(key)+1);latest.delete(key);staged.delete(key);attempts.delete(key);followingDirty.add(key);
+      sourceVersions.set(key,sourceVersion(key)+1);latest.delete(key);staged.delete(key);attempts.delete(key);followingDirty.add(key);backgroundBatches.delete(key);refreshRequired.delete(key);
     }
   }
 
   function beginSourceRefresh(key){
-    refreshRequired.add(key);
+    refreshRequired.set(key,'');backgroundBatches.delete(key);
     sourceVersions.set(key,sourceVersion(key)+1);
     staged.delete(key);
   }
@@ -159,7 +159,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(!pending){restoreTop=null;markViewed();changed();}
   }
   function syncSelection(){grid.querySelectorAll('[data-select]').forEach(box=>{box.checked=selected(data.items[Number(box.dataset.select)].id);box.disabled=!canChoose();});}
-  async function load({refresh=false,restoreExpired=false,pageTarget=null,recoverSource=false}={}){
+  async function load({refresh=false,checkpoint='',restoreExpired=false,pageTarget=null,recoverSource=false}={}){
     const destination=pageTarget || structuredClone(state);
     if(destination.order==='popular' && !refresh){
       const local=cache.get(pageKey(destination));
@@ -173,7 +173,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     sorting=false;
     controller?.abort();controller=new AbortController();
     const signal=controller.signal,version=++revision,auth=generation(),key=sourceKey(destination);
-    if(refresh)beginSourceRefresh(key);
+    if(refresh && !checkpoint)beginSourceRefresh(key);
     const followAtStart=followingVersion;error='';
     const local=cache.get(pageKey(destination));
     if(local && !refresh){
@@ -183,7 +183,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }
     pending=true;if(!refresh && !pageTarget)data=null;render();
     try{
-      await readPage(destination,refresh?{refresh:'1',batch:'',offset:'0',revision:String(version)}:{},{signal,accept(result){
+      await readPage(destination,refresh?{...(checkpoint?{batch:checkpoint}:{refresh:'1',batch:''}),offset:'0',revision:String(version)}:{},{signal,accept(result){
         if(version!==revision || auth!==generation())return;
         data=result;state={...destination,batch:result.batch,offset:result.offset,...(refresh?{page:1,trail:[]}:{} )};
         if(pageTarget)restoreTop=0;
@@ -196,6 +196,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       }});
     }catch(problem){
       if(version!==revision || signal.aborted)return;
+      if(!pageTarget && problem.errorKind==='filtered' && problem.batch)refreshRequired.set(key,problem.batch);
+      if(checkpoint && staleHistory(problem))refreshRequired.set(key,'');
       if(restoreExpired && staleHistory(problem))return rebuildHistory(destination,problem.errorKind==='cache_cleared');
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
       if(pageTarget && !staleHistory(problem)){
@@ -266,21 +268,22 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(!allowed() && !restoring)return;
     if(settingsRetry)return open(settingsRetry,true);
     const key=sourceKey(state);
+    const checkpoint=refresh?'':refreshRequired.get(key) || '';
     refresh ||= refreshRequired.has(key);
     state.waiting=false;error='';startedSources.add(key);pausedSources.delete(key);
     const choice=state.choice || 'default';
     if(choice==='default' || state.kind==='following'){
       if(!refresh && data && state.order==='popular'){await applySort('default');return;}
-      state.order='default';state.popularityIndex='';await load({refresh});return;
+      state.order='default';state.popularityIndex='';await load({refresh,checkpoint});return;
     }
     if(!refresh && state.order==='popular' && state.popularityIndex){await load({recoverSource:true});return;}
     if(!refresh && data && state.batch){await applySort('popular');return;}
     controller=new AbortController();const signal=controller.signal,version=++revision,auth=generation(),destination=structuredClone(state);
-    if(refresh)beginSourceRefresh(key);
+    if(refresh && !checkpoint)beginSourceRefresh(key);
     pending=true;sortProgress='正在准备作品元数据…';render();
     try{
       // This seed is metadata only. Its default-order images never enter the DOM.
-      const seed=await readPage({...destination,offset:0,batch:refresh?'':destination.batch},refresh?{refresh:'1',revision:String(version)}:{},{signal});
+      const seed=await readPage({...destination,offset:0,batch:refresh?checkpoint:destination.batch},refresh && !checkpoint?{refresh:'1',revision:String(version)}:{},{signal});
       if(signal.aborted || version!==revision || auth!==generation())return;
       if(refresh)refreshRequired.delete(key);
       const normal={...destination,batch:seed.batch,offset:0,page:1,trail:[],order:'default',popularityIndex:'',waiting:false};
@@ -290,6 +293,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }catch(problem){
       if(version!==revision || signal.aborted)return;
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
+      if(problem.errorKind==='filtered' && problem.batch)refreshRequired.set(key,problem.batch);
+      if(checkpoint && staleHistory(problem))refreshRequired.set(key,'');
       if(!refresh && destination.batch && staleHistory(problem)){
         pending=false;return startLoad({refresh:true,restoring});
       }
@@ -377,9 +382,10 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
           const now=performance.now();
           if(now-(attempts.get(key) ?? -Infinity)<interval)continue;
           attempts.set(key,now);
-          result=await readPage(target,{background:'1',refresh:'1',batch:'',offset:'0'},{signal});
+          const batch=backgroundBatches.get(key);
+          result=await readPage(target,{background:'1',...(batch?{batch}:{refresh:'1',batch:''}),offset:'0'},{signal});
           if(signal.aborted || auth!==generation() || version!==sourceVersion(key))continue;
-          followingDirty.delete(key);applyPrepared(target,result);
+          backgroundBatches.delete(key);followingDirty.delete(key);applyPrepared(target,result);
           if(!document.hidden && !warming){
             const imageKey=pageKey({...target,batch:result.batch});
             const warm=waitForMediaDecode(imageSignal=>previews.prepare(imageKey,result.items,imageSignal,{warm:'account'}),signal)
@@ -392,6 +398,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
         }catch(problem){
           if(signal.aborted || auth!==generation())return;
           if(version!==sourceVersion(key))continue;
+          if(problem.errorKind==='filtered' && problem.batch)backgroundBatches.set(key,problem.batch);
+          else if(staleHistory(problem))backgroundBatches.delete(key);
           if(ownsIdleView(viewRevision) && sourceKey(state)===key && !error){error=problem.message;render();}
         }
       }
@@ -518,7 +526,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   sortControl.querySelectorAll('[data-discovery-sort]').forEach(button=>button.onclick=()=>void changeSort((state.choice || state.order)==='popular'?'default':'popular'));
   sortControl.querySelector('[data-popularity-start]').onclick=()=>{
     const resuming=state.waiting && state.choice==='popular' && state.order==='popular' && state.popularityIndex;
-    const refresh=!resuming && (state.kind==='ranking' || Boolean(data) && !state.waiting && state.choice===state.order);
+    const refresh=!resuming && !refreshRequired.has(sourceKey(state)) && (state.kind==='ranking' || Boolean(data) && !state.waiting && state.choice===state.order);
     void startLoad({refresh});
   };
   function configure(value,loaded){
@@ -549,7 +557,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   }
   function clear(redraw=true){
     controller?.abort();revision++;settingsRetry=null;void stopBackground();reads.clear();interaction.clear();previews.clear();cache.clear();positions.clear();staged.clear();latest.clear();attempts.clear();sourceVersions.clear();followingDirty.clear();
-    popularViews.clear();recommendationSizes.clear();startedSources.clear();pausedSources.clear();refreshRequired.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active && redraw)render();
+    popularViews.clear();recommendationSizes.clear();startedSources.clear();pausedSources.clear();refreshRequired.clear();backgroundBatches.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active && redraw)render();
   }
   root.querySelectorAll('[data-discovery-tab]').forEach(button=>button.onclick=()=>void open({kind:button.dataset.discoveryTab}));
   root.querySelector('[data-discovery-scope]').onchange=e=>void open({scope:e.target.value});

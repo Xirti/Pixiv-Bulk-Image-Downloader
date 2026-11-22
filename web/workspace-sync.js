@@ -15,10 +15,12 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
   let scope = null, revision = 0, epoch = 0, readGeneration = 0, sequence = 0;
   let applying = false, scheduled = false, recovery = false, error = null;
   let pendingBasket = null, recentError = null;
+  let recentSequence = 0, recentWriter;
+  const pendingRecent = [];
   let tail = Promise.resolve();
   let observed = new Map();
   const edits = new Map(), controllers = new Set();
-  const notify = () => onStatus({ready, loading, needsRestore, scope, revision, error});
+  const notify = () => onStatus({ready, loading, needsRestore, scope, revision, error: error || recentError});
 
   async function send(url, options = {}) {
     const controller = new AbortController();
@@ -111,6 +113,9 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     observed.clear();
     pendingBasket = null;
     recentError = null;
+    pendingRecent.length = 0;
+    recentWriter = null;
+    recentSequence = 0;
     ready = false;
     loading = true;
     needsRestore = true;
@@ -183,6 +188,9 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
       applyWorkspace({...data, basket});
       onRecent(data.recent || []);
       observed = new Map(canonical(readBasket()).map(row => [row.id, row]));
+      if(previousScope !== null && previousScope === data.priorScope){
+        for(const {body} of pendingRecent)if(body.scope === previousScope)body.scope = data.scope;
+      }
       scope = data.scope;
       revision = data.revision || 0;
       initialized = true;
@@ -237,7 +245,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     const token = epoch;
     const result = tail.then(() => token === epoch ? operation(token) : false);
     tail = result.catch(reason => {
-      if (reportFailure && token === epoch) recentError = reason;
+      if (reportFailure && token === epoch) { recentError = reason; notify(); }
       else fail(reason, token);
     });
     return reportFailure ? result : tail;
@@ -246,17 +254,28 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
   function changeRecent(change) {
     const authorization = getAuthorizationGeneration(), owner = scope;
     return enqueue(async token => {
-      if (authorization !== getAuthorizationGeneration() || scope === null ||
-          (owner !== null && scope !== owner)) {
+      if (authorization !== getAuthorizationGeneration() || (owner !== null && scope !== owner))
         throw new Error("最近搜索尚未就绪或账号已改变，请重试");
-      }
-      const data = await send("/api/workspace/recent", {method: "POST",
-        headers: {"Content-Type": "application/json"}, body: JSON.stringify({...change, scope})});
-      if (token === epoch && authorization === getAuthorizationGeneration()) {
-        recentError = null;
-        onRecent(data.recent);
-      }
+      recentWriter ||= globalThis.crypto?.randomUUID?.() || [Date.now().toString(36), Math.random().toString(36).slice(2).padEnd(14,"0")].join("-");
+      pendingRecent.push({authorization, body:{...copy(change), scope, writer:recentWriter, sequence:++recentSequence}});
+      await flushRecent(token);
     }, true);
+  }
+
+  async function flushRecent(token) {
+    while (token === epoch && pendingRecent.length) {
+      const {authorization, body} = pendingRecent[0];
+      if (authorization !== getAuthorizationGeneration()) throw new Error("最近搜索的账号已改变，请重新读取");
+      if (scope === null) throw new Error("最近搜索尚未就绪，请重新读取");
+      body.scope ??= scope;
+      if (body.scope !== scope) throw new Error("最近搜索的账号已改变，请重新读取");
+      const data = await send("/api/workspace/recent", {method: "POST",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      if (token !== epoch || authorization !== getAuthorizationGeneration()) return;
+      pendingRecent.shift();
+      onRecent(data.recent);
+    }
+    if (token === epoch) { recentError = null; notify(); }
   }
 
   function scheduleSave() {
@@ -280,7 +299,11 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     get active() { return initialized || loading || needsRestore || scope !== null || edits.size > 0; },
     changed() { if (!applying) { captureEdits(); return scheduleSave(); } return tail; },
     restore, changeRecent,
-    retry() { return recovery || !initialized ? restore() : scheduleSave(); },
+    retry() {
+      const basket = recovery || !initialized ? restore() : scheduleSave();
+      if (!recentError && !pendingRecent.length) return basket;
+      return enqueue(async token => { if (ready) await flushRecent(token); }, true).catch(()=>{});
+    },
     reset,
     settled() { return tail; },
     async waitForSave() {
@@ -289,7 +312,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
         current = tail;
         await current;
       } while (current !== tail);
-      if (recentError !== null) throw recentError;
+      if (recentError || pendingRecent.length) throw recentError || new Error("最近搜索尚未保存");
       if (edits.size || pendingBasket !== null || error) {
         throw error || new Error("本机记录尚未保存，请重试保存");
       }

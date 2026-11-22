@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from runtime_identity import named_mutex
+from runtime_identity import named_mutex, presence_handle, process_presence
 from source_results import SourceSearchError, normalize_candidates, parse_api, pixiv_id, thumbnail_url
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -133,6 +133,8 @@ class SourceSearch:
         self.thumbnail_bytes = 0
         self.process = None
         self.browser_identity = None
+        self.guest_profile = directory / "guest-profile"
+        self._profile_identity = None
         self.api_browser_preferred = False
         self.website_login = "unknown"
         self.active = None
@@ -153,6 +155,8 @@ class SourceSearch:
     def _configuration(self):
         # Decisions made inside this scope cannot overlap a credential commit.
         with named_mutex(self._settings_mutex, timeout_seconds=5):
+            if self._profile_identity is not None and self._profile_stamp() != self._profile_identity:
+                self._forget_guest_profile()
             previous_error = self.settings_error
             mode, revision, error = "guest", None, ""
             try:
@@ -180,10 +184,32 @@ class SourceSearch:
         self._settings_revision = revision
         self.epoch += 1
         self.api_browser_preferred = False
-        self.cache.clear()
+        for key in list(self.cache):
+            if key[0] == "key":
+                del self.cache[key]
         for job in self.jobs.values():
             if job["mode"] == "key" and (job["state"] in {"queued", "searching", "verification"} or job["browserFallback"]):
                 self._fail(job, "搜图设置已修改，请重新查询")
+
+    def _profile_stamp(self):
+        try:
+            info = self.guest_profile.stat()
+        except FileNotFoundError:
+            return None
+        # Directory contents change during normal use. Its Windows file ID and
+        # creation time survive those changes, but not a profile replacement.
+        return info.st_dev, info.st_ino, getattr(info, "st_birthtime_ns", None)
+
+    def _forget_guest_profile(self):
+        self._profile_identity = None
+        self.website_login = "unknown"
+        self.api_browser_preferred = False
+        for key in list(self.cache):
+            if key[0] == "guest":
+                del self.cache[key]
+        for job in self.jobs.values():
+            if job["browser"] and job["state"] in {"queued", "searching", "verification"}:
+                self._fail(job, "游客会话已重置，请重新查询")
 
     def _check_open(self):
         if self._closed:
@@ -222,15 +248,16 @@ class SourceSearch:
                 self.cache_epoch = self.epoch
                 return self.cache_state()
             if data.get("action") == "reset-guest":
-                if self.process is not None and self.process.poll() is None:
-                    raise SourceSearchError("请先关闭官网窗口，再重置会话", 409)
-                profile = (self.directory / "guest-profile").absolute()
-                if profile.exists():
+                with self._configuration(), process_presence(self._settings_mutex + ".browser") as occupied:
+                    if occupied or self.process is not None and self.process.poll() is None:
+                        raise SourceSearchError("请先关闭官网窗口，再重置会话", 409)
+                    profile = self.guest_profile.absolute()
                     if profile.is_symlink() or profile.is_junction() or profile.parent != self.directory.absolute():
                         raise SourceSearchError("游客资料路径异常，未执行清除")
-                    shutil.rmtree(profile)
-                self.website_login = "unknown"
-                return self.settings()
+                    if self._profile_stamp() is not None:
+                        shutil.rmtree(profile)
+                    self._forget_guest_profile()
+                    return self._settings_response(self.vault.read())
             with self._configuration():
                 mode = data.get("mode", self.mode)
                 if not isinstance(mode, str) or mode not in {"guest", "key"}:
@@ -406,6 +433,10 @@ class SourceSearch:
 
     def _open_browser(self, job, backend):
         if self.process is not None and self.process.poll() is None:
+            if self._profile_identity is None:
+                self._fail(job, "游客会话已重置，请关闭原官网窗口后重试")
+                raise SourceSearchError(job["message"], 409)
+            job["profileIdentity"] = self._profile_identity
             # Keep the handoff until the window acts with the new identity.
             job["browserHandoff"] = backend
             return
@@ -414,10 +445,18 @@ class SourceSearch:
         environment = os.environ.copy()
         environment.pop("MOKU_DESKTOP_AUTH_TOKEN", None)
         environment.update(MOKU_SOURCE_JOB=identity, MOKU_SOURCE_SECRET=job["secret"], MOKU_SOURCE_BACKEND=backend,
-                           MOKU_SOURCE_PROFILE=str(self.directory / "guest-profile"), MOKU_SOURCE_PROXY=self.proxy())
+                           MOKU_SOURCE_PROFILE=str(self.guest_profile), MOKU_SOURCE_PROXY=self.proxy())
         command = [sys.executable, "--source-guest"] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).with_name("moku_app.py")), "--source-guest"]
         try:
-            self.process = subprocess.Popen(command, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.guest_profile.mkdir(parents=True, exist_ok=True)
+            self._profile_identity = self._profile_stamp()
+            job["profileIdentity"] = self._profile_identity
+            # The child owns the marker from process creation until it exits, even if the backend dies.
+            with presence_handle(self._settings_mutex + ".browser") as (handle, _):
+                os.set_handle_inheritable(handle, True)
+                startup = subprocess.STARTUPINFO(lpAttributeList={"handle_list": [handle]})
+                self.process = subprocess.Popen(command, env=environment, startupinfo=startup,
+                                                close_fds=True, creationflags=subprocess.CREATE_NO_WINDOW)
             self.browser_identity = identity
         except OSError as error:
             job.update(state="error", message="无法打开官网窗口，请重试", image=b"")
@@ -448,7 +487,7 @@ class SourceSearch:
             return self.snapshot(identity)
 
     def open_login(self, backend):
-        with self.lock:
+        with self.lock, self._configuration():
             self._check_open()
             active = self._job(self.active)
             if active and active["state"] in {"queued", "searching", "verification"}:
@@ -548,7 +587,7 @@ class SourceSearch:
     def _current_query(self, job):
         if self._job(job["id"]) is not job or job["state"] not in {"queued", "searching", "verification"}:
             return False
-        if job["epoch"] != self.epoch:
+        if job["epoch"] < self.cache_epoch or (job["mode"] == "key" and job["epoch"] != self.epoch):
             self._fail(job, "搜图设置已修改，请重新查询")
             return False
         return True
@@ -654,6 +693,8 @@ class SourceSearch:
                 state = data.get("login")
                 if state not in ("signed-in", "signed-out"):
                     raise SourceSearchError("官网登录状态无效")
+                if self._profile_identity is None or job.get("profileIdentity") != self._profile_identity:
+                    return {"state": job["state"]}
                 self.website_login = state
                 if job["mode"] == "login" and state == "signed-in" and job["state"] in {"queued", "searching", "verification"}:
                     job.update(state="done", message="SauceNAO 官网已登录")

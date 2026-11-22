@@ -777,6 +777,7 @@ function responseError(payload, status) {
   error.status=status;
   error.basketConflict = data.basketConflict === true;
   error.errorKind = data.errorKind;
+  if (data.errorKind === 'filtered') error.batch = data.batch;
   error.retryAfterSeconds = data.retryAfterSeconds;
   if (["verification_required", "authentication_required"].includes(data.errorKind)) {
     requestPolicyReadSequence++;
@@ -1803,6 +1804,8 @@ async function prepareDesktopExit({update=false}={}) {
     if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
     await cloudControls.settled();
     await workspaceSync.waitForSave();
+    if(typeof pixivDisplayView!=='undefined')await pixivDisplayView?.waitForSave();
+    if(typeof sourceSearchView!=='undefined')await sourceSearchView.waitForSave();
     if(settingsView.dirty)throw Error("请先保存设置改动");
     if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
   }catch(error){

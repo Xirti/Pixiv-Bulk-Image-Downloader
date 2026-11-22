@@ -114,7 +114,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       if(!detectedUpdates && prefs.autoFollowing){lastUpdateCheck=0;void tick();}
       return {...prefs};
     });
-    preferenceWrites=pending;return pending;
+    preferenceWrites=pending;
+    const release=()=>{if(preferenceWrites===pending)preferenceWrites=Promise.resolve();};
+    pending.then(release,release);
+    return pending;
   }
   function visibleTargets(){
     const result={bookmark:new Set(),follow:new Set()};
@@ -423,6 +426,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     const value=session(),next=JSON.stringify([value.logged,value.generation,value.method]);
     if(next===sessionKey)return;
     sessionKey=next;epoch++;sessionEpoch++;close();busy.clear();pendingWrites.clear();manual.clear();restart.clear();
+    preferenceWrites=Promise.resolve();
     settingsRevision=-1;
     cacheRevision=undefined;
     hydration=null;hydrationAgain=null;syncBusy=false;syncRequest=null;syncJob=null;clearing=false;clearJob=null;

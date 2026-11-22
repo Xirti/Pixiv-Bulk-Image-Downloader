@@ -16,6 +16,14 @@ from edition_profile import DATA_FOLDER
 ReceiptRow = tuple[str, str, str, str]
 
 
+def receipt_journal_exists(path: Path) -> bool:
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def create_receipt_table(connection: sqlite3.Connection) -> None:
     connection.execute("""
         CREATE TABLE IF NOT EXISTS completed (
@@ -121,7 +129,7 @@ class DownloadHistory:
     def recovery_journal(self):
         """Open the temporary completion records if this history has any."""
         with self._lock:
-            if not self.path.exists():
+            if not receipt_journal_exists(self.path):
                 yield None
                 return
             with self._connection() as connection:

@@ -54,12 +54,29 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     }
     throw new Error("账号列表仍在更新，请稍后重试");
   }
+  const pendingImages=new Map();
+  let warming=null;
+  function queueImages(key,decode,signal){
+    pendingImages.set(key,decode);
+    if(warming)return;
+    warming=(async()=>{
+      try{
+        while(!signal.aborted && pendingImages.size){
+          const [key,prepare]=pendingImages.entries().next().value;
+          pendingImages.delete(key);
+          try{await waitForMediaDecode(prepare,signal);}
+          catch(problem){if(!signal.aborted)report(`账号缩略图暂未准备好：${problem.message}`);}
+        }
+      }finally{if(!signal.aborted)warming=null;}
+    })();
+  }
   function stopBackground(){
     const pendingUpdates=checkingUpdates;
     stopUpdates();
     backgroundRevision++;backgroundController.abort();backgroundController=new AbortController();nextReads.clear();
     // Callers are stopping work; its original caller owns any reported failure.
-    return Promise.allSettled([backgroundQueue,pendingUpdates]);
+    const images=warming;warming=null;pendingImages.clear();
+    return Promise.allSettled([backgroundQueue,pendingUpdates,images]);
   }
   function prepare({network=false,refresh=false,page=null,completed=null}={}){
     const version=backgroundRevision,signal=backgroundController.signal,contentMode=mode();
@@ -99,7 +116,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       if(!valid())return;
       if(!page || refresh){
         const entries=[{id:`self:${profile.uid}`,thumb:profile.avatar,title:profile.name},{id:`cover:${profile.uid}`,thumb:profile.background,title:""}];
-        images.push(()=>avatars.prepare("account-self",entries,signal,{warm:"account"}));
+        images.push(["account-self",signal=>avatars.prepare("account-self",entries,signal,{warm:"account"})]);
       }
       const pages=page?[{view:page.kind==="bookmark"?"bookmarks":"following",scope:page.scope,offset:page.offset}]:[
         {view:"bookmarks",scope:"public",offset:0},{view:"bookmarks",scope:"private",offset:0},
@@ -119,8 +136,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         catch(problem){if(signal.aborted)throw problem;failures.push(`${labels[target.view]}：${problem.message}`);continue;}
         if(!valid())return;
         if(value && target.offset===0){
-          if(value.items)images.push(()=>worksCache.prepare("account-works",value.items,signal,{warm:"account"}));
-          if(value.people)images.push(()=>avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"}));
+          if(value.items)images.push(["account-works",signal=>worksCache.prepare("account-works",value.items,signal,{warm:"account"})]);
+          if(value.people)images.push(["account-people",signal=>avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"})]);
         }
       }
       if(!page){
@@ -138,7 +155,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
           }});}
           catch(problem){if(signal.aborted)throw problem;failures.push(`${view==="tags"?"收藏标签":"本人作品"}：${problem.message}`);continue;}
           if(!valid())return;
-          if(value)images.push(()=>ownCache.prepare("account-own-works",value.items,signal,{warm:"account"}));
+          if(value)images.push(["account-own-works",signal=>ownCache.prepare("account-own-works",value.items,signal,{warm:"account"})]);
         }
         if(profile===catalog && catalog.workCount===0){own={items:[]};ownMode=contentMode;}
       }
@@ -151,7 +168,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
           const available=cache.get(pageKey());if(available && available!==data){data=available;render();}
         }
       }
-      if(!document.hidden && (network || page))for(const warm of images){if(!valid())return;await warm();}
+      if(valid() && !document.hidden && (network || page))for(const [key,decode] of images)
+        queueImages(key,media=>valid()?decode(media):undefined,signal);
       if(failures.length)throw new Error(failures.join("；"));
     };
     // A failed task is reported to its caller without poisoning subsequent work.
@@ -168,8 +186,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     const reading=read(target.view,{scope:target.scope,offset:String(target.offset),tag:target.tag,mode:contentMode,background:"1"},{signal,async accept(value){
       if(version!==backgroundRevision || signal.aborted || contentMode!==mode() || nextReads.get(key)!==reading || cache.has(key))return;
       cachePage(key,value);
-      if(value.items)await worksCache.prepare("account-works",value.items,signal,{warm:"account"});
-      if(value.people)await avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),signal,{warm:"account"});
+      if(value.items)queueImages("account-works",media=>worksCache.prepare("account-works",value.items,media,{warm:"account"}),signal);
+      if(value.people)queueImages("account-people",media=>avatars.prepare("account-people",value.people.map(person=>({id:`avatar:${person.id}`,thumb:person.avatar,title:person.name})),media,{warm:"account"}),signal);
     }}).catch(problem=>{
       if(!signal.aborted && version===backgroundRevision && nextReads.get(key)===reading &&
           active && visit===revision && !document.hidden && !["page_retired","page_rebased"].includes(problem.errorKind))
@@ -234,15 +252,15 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     })().finally(()=>{if(checkingUpdates===task)checkingUpdates=null;});
     checkingUpdates=task;return task;
   }
-  async function acknowledge(authors){
+  async function acknowledge(authors,proofs){
     const version=backgroundRevision,auth=generation();
     const entries=Object.entries(authors);
-    for(let offset=0;offset<entries.length;offset+=500){
-      const part=Object.fromEntries(entries.slice(offset,offset+500));
+    for(let offset=0;offset<entries.length;offset+=250){
+      const part=Object.fromEntries(entries.slice(offset,offset+250));
       if(version!==backgroundRevision || auth!==generation())return;
-      await request('/api/account/seen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({authors:part,authorizationGeneration:auth})});
+      const saved=await request('/api/account/seen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({authors:part,proofs:Object.fromEntries(Object.keys(part).map(id=>[id,proofs[id]])),authorizationGeneration:auth})});
       if(version!==backgroundRevision || auth!==generation())return;
-      for(const [id,stamp] of Object.entries(part)){
+      for(const [id,stamp] of Object.entries(saved.accepted || {})){
         acknowledged.set(id,[acknowledged.get(id) || '',stamp].sort().at(-1));
         for(const scope of ['public','private'])if(updates[scope][id]?.latestObserved<=stamp)updates[scope][id].isNew=false;
         for(const value of cache.values())for(const person of value.people || [])if(person.id===id && person.latestObserved<=stamp)person.isNew=false;
@@ -252,13 +270,15 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   }
   function seenWorks(items){
     if(!updatePreferences.detect)return Promise.resolve();
-    const dates={};
+    const dates={},proofs={};
     for(const item of items){
       if(!item.sortDate)continue;
       const stamp=new Date(item.sortDate).toISOString().slice(0,19)+'+00:00';
-      if(stamp>(acknowledged.get(item.userId) || '') && stamp>(dates[item.userId] || ''))dates[item.userId]=stamp;
+      if(stamp>(acknowledged.get(item.userId) || '') && stamp>(dates[item.userId] || '')){
+        dates[item.userId]=stamp;proofs[item.userId]=item.viewProof;
+      }
     }
-    return acknowledge(dates);
+    return acknowledge(dates,proofs);
   }
   function artist(person){
     if(!allowed())return;

@@ -14,11 +14,11 @@ from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from local_catalog import artifact_file_state
+from local_catalog import StaleArtifactError, artifact_file_state
 from download_execution import (
     cancel_download_execution, download_execution, download_execution_active, download_migration_guard,
 )
-from download_history import DownloadHistory, ReceiptRow, create_receipt_table
+from download_history import DownloadHistory, ReceiptRow, create_receipt_table, receipt_journal_exists
 from workspace_store import WorkspaceStore
 
 
@@ -132,7 +132,7 @@ class DownloadRequests:
                 if row is not None:
                     # A pending publication record belongs to the last attempt.
                     return self._verify_receipt(row, fingerprints)
-        if self._path is not None and self._path.exists():
+        if self._path is not None and receipt_journal_exists(self._path):
             connection = self._journal_connection()
             try:
                 row = connection.execute(lookup, (request_id,)).fetchone()
@@ -186,8 +186,7 @@ class DownloadRequests:
         for path, size, mtime in files:
             try:
                 info = artifact_file_state(Path(path))
-            except (OSError, ValueError) as error:
-                logging.getLogger("moku.http").warning("Download receipt file could not be checked: %s", error)
+            except (FileNotFoundError, NotADirectoryError, StaleArtifactError):
                 return None
             if info["size"] != size or info["mtime"] != mtime:
                 return None

@@ -11,6 +11,8 @@ import weakref
 
 from account_pages import source_body
 from discovery_service import recommendation_size
+from urllib.error import HTTPError
+
 from pixiv_account import AccountError
 from pixiv_adapter import (PixivPolicyError, valid_pixiv_id, normalize_search_item,
     build_user_profile_all_url, build_user_profile_works_url,CONTENT_MODES,matches_content_mode)
@@ -278,7 +280,16 @@ class PopularityService:
                     while cursor is not None and reads < 3 and time.monotonic() < deadline:
                         self._check(generation, epoch)
                         item = job["items"][cursor]
-                        count = self.detail(item["id"], job["mode"], generation).get("bookmarks")
+                        try:
+                            count = self.detail(item["id"], job["mode"], generation).get("bookmarks")
+                        except HTTPError as error:
+                            if error.code not in (404, 410):
+                                raise
+                            count = None
+                        except AccountError as error:
+                            if error.kind != "not_found":
+                                raise
+                            count = None
                         if type(count) is not int or count < 0:
                             missing.add(cursor)
                             count = None

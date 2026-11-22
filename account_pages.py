@@ -151,13 +151,21 @@ class VisitStore:
 
     def mark_seen(self, owner, author):
         with self.lock, closing(self._connect()) as connection, connection:
-            connection.execute("UPDATE author_seen SET seen=observed,touched=? WHERE owner=? AND author=?", (time.time(), owner, author))
+            connection.execute("UPDATE author_seen SET seen=MAX(seen,observed),touched=? WHERE owner=? AND author=?", (time.time(), owner, author))
 
-    def acknowledge(self, owner, authors):
+    def acknowledge(self, owner, authors, *, verified=()):
+        accepted = {}
         with self.lock, closing(self._connect()) as connection, connection:
-            connection.executemany("UPDATE author_seen SET seen=MAX(seen,?),touched=?"
-                " WHERE owner=? AND author=? AND observed>=?",
-                [(stamp,time.time(),owner,author,stamp) for author,stamp in authors.items()])
+            connection.execute("BEGIN IMMEDIATE")
+            for author, stamp in authors.items():
+                if author not in verified and not connection.execute(
+                        "SELECT 1 FROM author_seen WHERE owner=? AND author=? AND observed>=?", (owner, author, stamp)).fetchone():
+                    continue
+                connection.execute("INSERT INTO author_seen(owner,author,seen,observed,touched) VALUES(?,?,?,'',?) "
+                    "ON CONFLICT(owner,author) DO UPDATE SET seen=MAX(seen,excluded.seen),touched=excluded.touched",
+                    (owner, author, stamp, time.time()))
+                accepted[author] = stamp
+        return accepted
 
     def clear(self, owner):
         with self.lock, closing(self._connect()) as connection, connection:
@@ -572,7 +580,7 @@ class AccountCache:
             # Acquire the commit lock before checking the request at publication.
             self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=before_commit is not None)
             if current is not None:
-                incoming = (self._discovery_usable(metadata), feed["publicationOrder"])
+                incoming = (self._discovery_usable(metadata), feed.get("publicationOrder", feed["created"] * 1000))
                 if self._can_publish_display_snapshot(db, owner, method, current, incoming):
                     rows.append((owner, method, _snapshot_record(current), json.dumps(feed["batch"])))
             stored = db.execute("SELECT json_extract(payload,'$._checkpoint') FROM cached WHERE owner=? AND method=? AND key=?",

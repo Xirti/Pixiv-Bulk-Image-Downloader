@@ -72,8 +72,8 @@ def named_mutex(name: str, timeout_seconds: float = 30.0):
 
 
 @contextmanager
-def process_presence(name: str):
-    """Hold a shared presence marker, released automatically on process exit."""
+def presence_handle(name: str):
+    """Open a shared process marker and expose its handle for child inheritance."""
     api = _process_kernel()
     ctypes.set_last_error(0)
     handle = api.CreateMutexW(None, False, name)
@@ -81,9 +81,16 @@ def process_presence(name: str):
         raise ctypes.WinError(ctypes.get_last_error())
     existed = ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
     try:
-        yield existed
+        yield handle, existed
     finally:
         api.CloseHandle(handle)
+
+
+@contextmanager
+def process_presence(name: str):
+    """Hold a shared presence marker, released automatically on process exit."""
+    with presence_handle(name) as (_, existed):
+        yield existed
 
 
 CODE_GENERATION_FILES = (

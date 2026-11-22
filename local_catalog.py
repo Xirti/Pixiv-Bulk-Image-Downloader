@@ -14,7 +14,7 @@ from pathlib import Path
 LOG = logging.getLogger(__name__)
 
 
-class _StaleArtifactError(OSError):
+class StaleArtifactError(OSError):
     """The indexed regular file has been replaced by another object."""
 
 
@@ -24,7 +24,7 @@ def artifact_file_state(path: Path, checked_directories: set[Path] | None = None
     # Never turn an unreadable directory into an apparent missing file.
     current = Path(path.anchor)
     if path == current:
-        raise _StaleArtifactError("索引路径不是普通文件")
+        raise StaleArtifactError("索引路径不是普通文件")
     for part in path.parts[1:]:
         current /= part
         if current != path and checked_directories is not None and current in checked_directories:
@@ -35,7 +35,7 @@ def artifact_file_state(path: Path, checked_directories: set[Path] | None = None
         if current != path and checked_directories is not None and stat.S_ISDIR(info.st_mode):
             checked_directories.add(current)
     if not stat.S_ISREG(info.st_mode):
-        raise _StaleArtifactError("下载文件已变为非普通文件")
+        raise StaleArtifactError("下载文件已变为非普通文件")
     return {"path": str(path), "size": info.st_size, "mtime": info.st_mtime_ns}
 
 
@@ -90,7 +90,7 @@ class LocalCatalog:
     def _present(self, files: list[dict], checked_directories: set[Path] | None = None) -> bool:
         try:
             return bool(files) and all(self._file_state(Path(file["path"]), checked_directories) == file for file in files)
-        except (FileNotFoundError, NotADirectoryError, _StaleArtifactError):
+        except (FileNotFoundError, NotADirectoryError, StaleArtifactError):
             return False
 
     def record(self, artwork: str, pages: list[int], quality: str, format: str,

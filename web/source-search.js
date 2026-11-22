@@ -394,6 +394,12 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   settingsRoot.querySelectorAll("[data-source-config-action]").forEach(button=>button.onclick=()=>void saveSettings(button.dataset.sourceConfigAction));
   controls();
   return {
+    async waitForSave(){
+      if(settingsWrite)await settingsWrite;
+      if(setting("[data-source-key]").value.trim() ||
+          settingsModeChosen && setting("[data-source-setting-mode]").value!==configuration.mode)
+        throw new Error("请先保存搜图设置改动");
+    },
     setMaskSensitive(enabled){if(maskSensitive===enabled)return;maskSensitive=enabled;revealed.clear();clearTimeout(clickTimer);render();},
     async open(){if(!settingsLoaded)await loadSettings();controls();},loadSettings,
     snapshot:()=>({job,imageUrl,name:find("[data-source-file-name]").textContent,epoch:cacheEpoch,submission:viewReceipt?.id ?? null}),

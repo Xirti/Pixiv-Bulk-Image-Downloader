@@ -82,7 +82,10 @@ class CloudState:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version == 1:
                 if not self._clear_table_ready:
+                    db.execute("BEGIN IMMEDIATE")
                     db.execute("CREATE TABLE IF NOT EXISTS cache_clear_pending(owner TEXT PRIMARY KEY)")
+                    self._install_relation_clock(db)
+                    db.commit()
                     self._clear_table_ready = True
                 return db
             if version != 0:
@@ -122,6 +125,7 @@ class CloudState:
                           INSERT INTO {revision_table} VALUES(1,1)
                             ON CONFLICT(singleton) DO UPDATE SET version=version+1;
                         END""")
+            self._install_relation_clock(db)
             db.execute("PRAGMA user_version=1")
             db.commit()
             self._clear_table_ready = True
@@ -129,6 +133,24 @@ class CloudState:
             db.close()
             raise
         return db
+
+    @staticmethod
+    def _install_relation_clock(db):
+        # Both v2.1.9 and current clients allocate versions using the indexed
+        # MAX over relations. Preserve deleted versions in a reserved non-UID
+        # row invisible to account queries, including when v2.1.9 clears data.
+        db.execute("""INSERT INTO relations(owner,method,kind,target,active,touched,version)
+            SELECT '', '', '', '', 0, 0, COALESCE(MAX(json_extract(payload,'$.version')),0) FROM scans WHERE 1
+            ON CONFLICT(owner,method,kind,target) DO UPDATE SET version=excluded.version
+            WHERE relations.version<excluded.version""")
+        db.execute("""CREATE TRIGGER IF NOT EXISTS retain_relation_version AFTER DELETE ON relations
+            WHEN OLD.owner<>'' AND OLD.version>(SELECT version FROM relations
+                WHERE owner='' AND method='' AND kind='' AND target='')
+            BEGIN UPDATE relations SET version=OLD.version WHERE owner='' AND method='' AND kind='' AND target=''; END""")
+
+    @staticmethod
+    def _relation_clock(db):
+        return db.execute("SELECT COALESCE(MAX(version),0) FROM relations").fetchone()[0]
 
     @contextmanager
     def _write(self):
@@ -231,7 +253,7 @@ class CloudState:
 
     def put(self, owner, method, kind, target, state, *, repair_id=None):
         with self._write() as db:
-            version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM relations").fetchone()[0]
+            version = self._relation_clock(db) + 1
             self._put(db, owner, method, kind, target, state, version)
             if repair_id is not None:
                 db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, method, repair_id))
@@ -242,7 +264,7 @@ class CloudState:
     def put_verified(self, owner, method, peer, kind, target, state, repair_id, *, peer_observed):
         """Publish verified relationship facts to both methods in one transaction."""
         with self._write() as db:
-            version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM relations").fetchone()[0]
+            version = self._relation_clock(db) + 1
             revision = self._relation_revision(db)
             select = "SELECT * FROM relations WHERE owner=? AND method=? AND kind=? AND target=?"
             prior = self._decode(db.execute(select, (owner, peer, kind, target)).fetchone(), revision)
@@ -259,6 +281,10 @@ class CloudState:
             if peer_unchanged and (not prior["known"] or relationship_stamp(shared) != prior["stamp"]
                                    or shared["bookmarkId"] != prior["bookmarkId"]):
                 changes[peer] = shared
+            elif peer_unchanged:
+                # Reconfirming the same fact must also fence scans already in flight.
+                db.execute("UPDATE relations SET version=?,touched=? WHERE owner=? AND method=? AND kind=? AND target=?",
+                           (version, time.time(), owner, peer, kind, target))
             for destination, value in changes.items():
                 self._put(db, owner, destination, kind, target, value, version)
                 db.execute("INSERT INTO page_repairs VALUES(?,?,?)", (owner, destination, repair_id))
@@ -290,24 +316,31 @@ class CloudState:
 
     def remember_active(self, owner, method, kind, targets, privacy):
         with self._write() as db:
-            version=db.execute("SELECT COALESCE(MAX(version),0)+1 FROM relations").fetchone()[0]
+            version=self._relation_clock(db) + 1
             for target in targets:
                 found=db.execute("SELECT 1 FROM relations WHERE owner=? AND method=? AND kind=? AND target=?",(owner,method,kind,target)).fetchone()
                 if not found:self._put(db,owner,method,kind,target,{"active":True,"privacy":privacy,"tags":None},version)
 
-    def operation(self, owner, method, request_id, signature):
+    def operation(self, owner, method, request_id, signature, *, reserve=True):
         with self._write() as db:
+            prepared = json.dumps("prepared")
             row = db.execute("SELECT signature,result FROM operations WHERE owner=? AND method=? AND request_id=?",
                              (owner, method, request_id)).fetchone()
             if row:
                 if row[0] != signature:
                     raise ValueError("操作编号已用于另一项操作")
-                return True, json.loads(row[1]) if row[1] else None
+                if row[1] != prepared:
+                    return True, json.loads(row[1]) if row[1] else None
+                if reserve:
+                    db.execute("UPDATE operations SET result=NULL,touched=? WHERE owner=? AND method=? AND request_id=?",
+                               (time.time(), owner, method, request_id))
+                return False, None
             now = time.time()
             # An unresolved receipt is the only record that this intent may
             # have reached Pixiv. Its age alone cannot authorize another write.
             db.execute("DELETE FROM operations WHERE result IS NOT NULL AND touched<?", (now - 7 * 86400,))
-            db.execute("INSERT INTO operations VALUES(?,?,?,?,NULL,?)", (owner, method, request_id, signature, now))
+            db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?)",
+                       (owner, method, request_id, signature, None if reserve else prepared, now))
             return False, None
 
     def finish_operation(self, owner, method, request_id, state, *, preferences: tuple[str, dict] | None = None):
@@ -350,7 +383,7 @@ class CloudState:
         state = {"id": uuid.uuid4().hex, "scope": "public", "cursor": "", "offset":0, "positions":{}, "finished":[],
                  "running": True, "completed": completed, "pageOffsets": {}, "visitedPaths": {},
                  "displayRevision": display_revision, "started": time.time(),
-                 "version": db.execute("SELECT COALESCE(MAX(version),0) FROM relations").fetchone()[0]}
+                 "version": CloudState._relation_clock(db)}
         db.execute("DELETE FROM scan_seen WHERE owner=? AND method=? AND kind=?", (owner, method, kind))
         db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(state)))
         return state

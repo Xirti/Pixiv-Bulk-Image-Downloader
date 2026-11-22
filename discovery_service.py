@@ -21,6 +21,12 @@ from request_coordinator import checked_lock
 RANKS = {"day":"daily", "week":"weekly", "month":"monthly", "week_rookie":"rookie", "week_original":"original"}
 
 
+class FilteredDiscoveryPage(AccountError):
+    def __init__(self, batch):
+        super().__init__("filtered", "当前范围暂未取得可展示作品，可继续读取或调整范围")
+        self.batch = batch
+
+
 class DiscoveryInputError(ValueError):
     """Invalid caller parameters, distinct from upstream data/auth failures."""
 
@@ -353,7 +359,7 @@ class DiscoveryService:
                             check_cancel()
                 try:
                     feed.update(cache.save_discovery(owner, method, feed, previous,
-                        revision=revision, current=current_key if not batch or refresh else None, before_commit=before_commit))
+                        revision=revision, current=current_key if not batch or refresh or (previous and not previous["items"]) else None, before_commit=before_commit))
                 except AccountError as error:
                     if error.kind == "cache_changed":
                         self._feeds.pop(key, None)
@@ -362,5 +368,6 @@ class DiscoveryService:
             if not stored or refresh:
                 cache.retire_display_snapshots(cache.retain_discovery, owner, method)
                 self._check(generation, epoch)
-            if not items and has_more:raise AccountError("filtered", "当前范围暂未取得可展示作品，再次进入可继续读取，或调整范围")
+            if not items and has_more:
+                raise FilteredDiscoveryPage(feed["batch"])
             return self._response(feed, owner, method, generation, offset, items, has_more)

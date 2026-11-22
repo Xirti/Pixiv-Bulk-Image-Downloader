@@ -20,7 +20,7 @@ from pixiv_adapter import PixivPolicyError
 
 
 ACCOUNT_REQUEST_CHECK=ContextVar("account_request_check",default=lambda:None)
-ACCOUNT_WRITE_PREFLIGHT = ContextVar("account_write_preflight", default=lambda: None)
+ACCOUNT_WRITE_PREFLIGHT = ContextVar("account_write_preflight", default=lambda **_: None)
 
 class AccountError(PixivPolicyError):
     def __init__(self, kind, message):
@@ -212,6 +212,8 @@ class AppTransport:
         check()
         if response.status_code == 429:
             raise self.coordinator.limit(response.headers.get("Retry-After"))
+        if method == "GET" and response.status_code in (404, 410):
+            raise AccountError("not_found", "Pixiv 未找到此资源")
         if not response.headers.get("Content-Type", "").startswith("application/json"):
             raise AccountError("verification" if response.status_code in (400, 403) else "invalid_data",
                                "Pixiv 要求网页验证或拒绝本次请求，请在官方页面处理" if response.status_code in (400, 403) else "Pixiv 返回了非 JSON 账号数据")

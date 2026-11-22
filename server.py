@@ -82,7 +82,7 @@ from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 from artist_service import ArtistService
 from account_pages import AccountPages, ACCOUNT_CACHE_ONLY, source_body
 from pixiv_adapter import bookmark_count, validate_detail_policy, CONTENT_MODES, RESTRICTED_CONTENT, matches_content_mode
-from discovery_service import DiscoveryService, DiscoveryInputError
+from discovery_service import DiscoveryService, DiscoveryInputError, FilteredDiscoveryPage
 from popularity_service import PopularityService
 from account_authorization import AccountAuthorization
 from pixiv_account import AccountError, ACCOUNT_REQUEST_CHECK
@@ -127,6 +127,7 @@ APPLICATION_ID = "MOKU.PixivTagGallery"
 CODE_GENERATION = os.getenv("MOKU_CODE_GENERATION") or compute_code_generation()
 INSTANCE_ID = os.getenv("MOKU_INSTANCE_ID") or secrets.token_hex(16)
 REQUEST_TOKEN = secrets.token_urlsafe(32)
+_VIEW_DATE_SECRET = secrets.token_bytes(32)
 DESKTOP_AUTH_TOKEN = os.getenv("MOKU_DESKTOP_AUTH_TOKEN") or secrets.token_urlsafe(32)
 DESKTOP_AUTH_HEADER = "X-MOKU-Desktop-Capability"
 BACKEND_STOP = threading.Event()
@@ -1061,6 +1062,21 @@ def _assign_image_tokens(fields: list[tuple[dict, str, tuple]]) -> None:
     urls = _authorize_image_proxy_batch([entry for _, _, entry in fields])
     for (target, key, _), url in zip(fields, urls, strict=True):
         target[key] = url
+
+
+def _view_date_proof(generation, author, stamp):
+    return hmac.digest(_VIEW_DATE_SECRET, f"{generation}/{author}/{stamp}".encode(), "sha256").hex()
+
+
+def _author_page_for_display(result, generation):
+    # Sign copies at delivery. Cached items are shared by windows and sessions.
+    items = []
+    for item in result["items"]:
+        if item.get("sortDate"):
+            stamp = datetime.fromisoformat(item["sortDate"]).astimezone(timezone.utc).isoformat(timespec="seconds")
+            item = {**item, "viewProof": _view_date_proof(generation, item["userId"], stamp)}
+        items.append(item)
+    return {**result, "items": items}
 
 
 def _authorize_artwork_images(
@@ -3038,6 +3054,8 @@ def pixiv_error_payload(action: str, exc: Exception, *, saving: bool = False) ->
         payload.update(errorKind=exc.kind, retryAfterSeconds=exc.retry_after)
     elif isinstance(exc, (RequestBlockedError, AccountError)):
         payload["errorKind"] = exc.kind
+        if isinstance(exc, FilteredDiscoveryPage):
+            payload["batch"] = exc.batch
     return payload
 
 
@@ -3981,7 +3999,7 @@ class Handler(SimpleHTTPRequestHandler):
                 check_cancel=lambda: raise_if_search_cancelled(cancel_event))
             with CLOUD.publication(generation, *account, revision=clear_revision):
                 _authorize_artwork_images(result["items"], authorization_epoch=generation, account_bound=True)
-            return result
+            return _author_page_for_display(result, generation) if query.get("kind", [""])[0] == "author" else result
 
         return self._read_pixiv_response(query, "排序元数据", read, priority=1, cache_owned=True)
 
@@ -4057,10 +4075,21 @@ class Handler(SimpleHTTPRequestHandler):
             owner, method = CLOUD.context(generation)
             with CLOUD.publication(generation, owner, method):
                 if authors is not None:
-                    ACCOUNTS.visits.acknowledge(owner, authors)
+                    proofs = data.get("proofs", {})
+                    if not isinstance(proofs, dict):
+                        return self.send_json({"error":"已读回执无效"},400)
+                    verified = {author for author, stamp in authors.items()
+                                if isinstance(proofs.get(author), str) and proofs[author].isascii() and
+                                hmac.compare_digest(proofs[author], _view_date_proof(generation, author, stamp))}
+                    accepted = ACCOUNTS.visits.acknowledge(owner, authors, verified=verified)
                 else:
                     ACCOUNTS.visits.mark_seen(owner, author)
+                    accepted = {}
             assert_authorization_generation(generation)
+            if "proofs" in data:
+                return self.send_json({"ok": True, "accepted": accepted})
+            if authors and accepted.keys() != authors.keys():
+                return self.send_json({"error": "尚未核对所展示的作品，请重新读取页面"}, 409)
             return self.send_json({"ok": True})
         except AccountError as error:
             return self._cloud_error(error)
@@ -4184,6 +4213,8 @@ class Handler(SimpleHTTPRequestHandler):
                 result = search_pixiv_results(
                     tag_query, search_scope, page, work_type, include_ai, **kwargs,
                 )
+                if session_authorized and parse_search_query(tag_query).kind in {"uid", "author"}:
+                    result = _author_page_for_display(result, read_generation)
                 return self.send_json(result, before_send=lease.check)
         except SearchCancelledError:
             return self.send_json({"error": "搜索已取消", "cancelled": True}, 409)
@@ -4780,7 +4811,7 @@ class Handler(SimpleHTTPRequestHandler):
             if action not in ("remember", "remove", "clear"):
                 raise ValueError("invalid recent action")
             recent = WORKSPACE_STORE.change_recent(data["scope"], action, search=data.get("search"),
-                                                   identities=data.get("ids"))
+                                                   identities=data.get("ids"), writer=data.get("writer"), sequence=data.get("sequence"))
             return self.send_json({"ok": True, "recent": recent})
         except TaskConflictError as exc:
             return self.send_json({"error": str(exc)}, 409)

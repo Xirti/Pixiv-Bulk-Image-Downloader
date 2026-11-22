@@ -238,6 +238,9 @@ class WorkspaceStore:
                 connection.execute("""CREATE TABLE IF NOT EXISTS basket_receipts (
                     request_id TEXT PRIMARY KEY, scope TEXT NOT NULL, revision INTEGER NOT NULL, fingerprint TEXT NOT NULL
                 ) WITHOUT ROWID""")
+                connection.execute("""CREATE TABLE IF NOT EXISTS recent_writers (
+                    writer TEXT PRIMARY KEY, scope TEXT NOT NULL, sequence INTEGER NOT NULL, fingerprint TEXT NOT NULL
+                ) WITHOUT ROWID""")
                 # Keep the v2.1.9 payload readable and invalidate its row
                 # identities when that version replaces or updates the list.
                 connection.execute("""CREATE TABLE IF NOT EXISTS recent_identity (
@@ -300,6 +303,7 @@ class WorkspaceStore:
                         merged.append((owner, item, identity))
                 self._write_recent(db, merged)
             db.execute("UPDATE tasks SET scope=? WHERE scope=?", (scope, legacy_scope))
+            db.execute("UPDATE recent_writers SET scope=? WHERE scope=?", (scope, legacy_scope))
             db.execute("UPDATE basket_receipts SET scope=? WHERE scope=?", (scope, legacy_scope))
             db.execute("INSERT INTO web_workspace_owners VALUES(?,?)", (legacy_scope, scope))
 
@@ -355,15 +359,27 @@ class WorkspaceStore:
     def _visible_recent(entries, scope):
         return [{**item, "id": identity} for owner, item, identity in entries if owner in {scope, "public"}]
 
-    def change_recent(self, scope, action, *, search=None, identities=None):
+    def change_recent(self, scope, action, *, search=None, identities=None, writer=None, sequence=None):
         if action == "remember":
             value = self._recent_search(search, scope)
         elif (not isinstance(identities, list) or not 1 <= len(identities) <= 8
               or any(not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity)
                      for identity in identities)):
             raise ValueError("invalid recent identities")
+        if writer is not None or sequence is not None:
+            writer = _request_id(writer)
+            _integer(sequence, 1, 2**53 - 1)
+            fingerprint = hashlib.sha256(json.dumps([action, search, identities], sort_keys=True).encode()).hexdigest()
         with self._write(scope) as connection:
             entries = self._read_recent(connection)
+            if writer is not None:
+                previous = connection.execute("SELECT scope,sequence,fingerprint FROM recent_writers WHERE writer=?", (writer,)).fetchone()
+                if previous:
+                    if previous[0] != scope or (previous[1] == sequence and previous[2] != fingerprint):
+                        raise TaskConflictError("最近搜索操作编号冲突")
+                    if previous[1] >= sequence:
+                        return self._visible_recent(entries, scope)
+                connection.execute("INSERT OR REPLACE INTO recent_writers VALUES(?,?,?,?)", (writer, scope, sequence, fingerprint))
             if action == "remember":
                 owner = "public" if value["filters"]["mode"] == "safe" else scope
                 entries = [(owner, value, secrets.token_hex(16)),

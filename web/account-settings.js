@@ -38,7 +38,7 @@ globalThis.createPixivDisplaySettings = function ({root,request,session,reconcil
     if(!readable()){paint();return Promise.resolve();}
     if(operation)return operation.promise;
     const auth=session().generation;
-    const active={};
+    const active={writing:Boolean(change)};
     operation=active;
     error='';notice=change?'正在保存…':'正在读取…';
     paint();
@@ -97,6 +97,12 @@ globalThis.createPixivDisplaySettings = function ({root,request,session,reconcil
   refresh.onclick=()=>run(null,true);
   loginButton.onclick=login;
   return {
+    async waitForSave(){
+      const active=operation;
+      if(!active?.writing)return;
+      await active.promise;
+      if(error)throw new Error(error);
+    },
     load:()=>state && !operation?Promise.resolve():run(null,needsReadback),
     setSession(){
       const current=session(),next=`${current.method}:${current.logged}:${current.generation}`;

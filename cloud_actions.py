@@ -295,7 +295,7 @@ class CloudActions:
                 if kind == "bookmark" and intent["tags"] is not None:
                     form["tags[]"] = " ".join(intent["tags"])
             path = ("/v2/illust/bookmark/add" if active else "/v1/illust/bookmark/delete") if kind == "bookmark" else "/v1/user/follow/" + ("add" if active else "delete")
-            ACCOUNT_WRITE_PREFLIGHT.get()()
+            ACCOUNT_WRITE_PREFLIGHT.get()(dispatch=False)
             self._app(generation, "POST", path, form)
             return
         parser = HomepageIdentity()
@@ -317,14 +317,14 @@ class CloudActions:
         else:
             path, payload, form = "/bookmark_add.php", {"mode": "add", "type": "user", "user_id": target, "tag": "", "restrict": int(privacy == "private"), "format": "json"}, True
         preflight = ACCOUNT_WRITE_PREFLIGHT.get()
-        preflight()
+        preflight(dispatch=False)
         self.web_post(path, payload, token, form, generation)
         if kind == "bookmark" and active and before["active"] and intent["tags"] is not None:
             removed = sorted(set(before["tags"]) - set(intent["tags"]))
             if removed:
                 # Web add merges tags; an empty tags list does not clear existing tags.
                 try:
-                    preflight()
+                    preflight(dispatch=False)
                     self.web_post("/ajax/illusts/bookmarks/remove_tags", {"removeTags": removed,
                         "bookmarkIds": [before["bookmarkId"]]}, token, False, generation)
                 except CloudActionError as error:
@@ -348,7 +348,7 @@ class CloudActions:
                 current = self._cached_relation(owner, method, kind, target)
                 if current.get("stamp") != cached.get("stamp"):
                     raise CloudActionError("conflict", "账号状态已更新，请核对后重新操作", state=current)
-                replay, result = self.store.operation(owner, method, intent["requestId"], signature)
+                replay, result = self.store.operation(owner, method, intent["requestId"], signature, reserve=False)
                 page_versions = None if replay else {
                     destination: self.pages.relation_page_versions(owner, destination, kind)
                     for destination in ("web", "app")
@@ -387,11 +387,19 @@ class CloudActions:
             error = None
             needs_write = not self._matches(effective, before)
 
-            def preflight():
+            reserved = False
+
+            def preflight(*, dispatch=True):
+                nonlocal reserved
                 with self.publication(generation, owner, method, revision=revision):
                     current = self._cached_relation(owner, method, kind, target)
                     if (current.get("stamp"), current.get("bookmarkId")) != (cached.get("stamp"), cached.get("bookmarkId")):
                         raise CloudActionError("conflict", "此对象已更新，请核对后重新提交", state=current)
+                    if dispatch and not reserved:
+                        exists, _ = self.store.operation(owner, method, intent["requestId"], signature)
+                        if exists:
+                            raise CloudActionError("conflict", "操作已被其他窗口接手，请刷新核对", state=current)
+                        reserved = True
 
             try:
                 if needs_write:
@@ -400,8 +408,10 @@ class CloudActions:
                         self._write(generation, owner, method, effective, before)
                     finally:
                         ACCOUNT_WRITE_PREFLIGHT.reset(check)
+                if not reserved:
+                    preflight()
             except (PixivPolicyError, OSError, TimeoutError) as failure:
-                if isinstance(failure, CloudActionError) and failure.kind == "conflict":
+                if not reserved or isinstance(failure, CloudActionError) and failure.kind == "conflict":
                     raise
                 self.pages.check(generation)
                 error = failure
@@ -457,7 +467,7 @@ class CloudActions:
                         try:
                             observed = self._read(owner, method, kind, target, generation)
                         except AccountError as error:
-                            if error.kind != "invalid_data":
+                            if error.kind not in ("invalid_data", "not_found"):
                                 raise
                             observed = None
                         except HTTPError as error:
