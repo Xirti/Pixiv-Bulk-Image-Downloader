@@ -43,7 +43,8 @@ class ReadScopes:
                 token = ACCOUNT_REQUEST_CHECK.set(lease.check)
                 bindings.callback(ACCOUNT_REQUEST_CHECK.reset, token)
                 if priority is not None:
-                    if priority == 1 and isinstance(cancel_event, TrackedReadEvent):
+                    if priority > 0 and isinstance(cancel_event, TrackedReadEvent):
+                        cancel_event.priority.background = priority
                         priority = cancel_event.priority
                     token = REQUEST_PRIORITY.set(priority)
                     bindings.callback(REQUEST_PRIORITY.reset, token)

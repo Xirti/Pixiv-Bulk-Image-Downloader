@@ -54,9 +54,9 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }
   }
 
-  function remember(){
+  function remember(scroll=root.scrollTop){
     if(!active || !data && !(state.order==='popular' && state.popularityIndex))return;
-    const record={state:structuredClone(state),data,scroll:root.scrollTop};
+    const record={state:structuredClone(state),data,scroll};
     const views=state.order==='popular'?popularViews:positions;
     views.set(sourceKey(state),record);
   }
@@ -134,37 +134,49 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(!pending){restoreTop=null;markViewed();changed();}
   }
   function syncSelection(){grid.querySelectorAll('[data-select]').forEach(box=>{box.checked=selected(data.items[Number(box.dataset.select)].id);box.disabled=!canChoose();});}
-  async function load(refresh=false,restoreExpired=false){
-    if(state.order==='popular' && !refresh){
-      const local=cache.get(pageKey(state));
-      if(local?.popularityIndex===state.popularityIndex){
-        controller?.abort();revision++;data=local;pending=false;sorting=false;error='';render();return;
+  async function load(refresh=false,restoreExpired=false,pageTarget=null){
+    const destination=pageTarget || structuredClone(state);
+    if(destination.order==='popular' && !refresh){
+      const local=cache.get(pageKey(destination));
+      if(local?.popularityIndex===destination.popularityIndex){
+        controller?.abort();revision++;state=destination;data=local;pending=false;sorting=false;error='';
+        if(pageTarget)restoreTop=0;
+        render();return;
       }
-      return loadPopularity(state.page,restoreExpired);
+      return loadPopularity(destination.page,restoreExpired,Boolean(pageTarget));
     }
     sorting=false;
     controller?.abort();controller=new AbortController();
-    const signal=controller.signal,version=++revision,auth=generation(),destination=structuredClone(state),key=sourceKey(destination);
+    const signal=controller.signal,version=++revision,auth=generation(),key=sourceKey(destination);
     if(refresh){sourceVersions.set(key,sourceVersion(key)+1);staged.delete(key);}
     const followAtStart=followingVersion;error='';
     const local=cache.get(pageKey(destination));
-    if(local && !refresh){data=local;pending=false;render();prepareNext();return;}
-    pending=true;if(!refresh)data=null;render();
+    if(local && !refresh){
+      state=destination;data=local;pending=false;
+      if(pageTarget)restoreTop=0;
+      render();prepareNext();return;
+    }
+    pending=true;if(!refresh && !pageTarget)data=null;render();
     try{
       await readPage(destination,refresh?{refresh:'1',batch:'',offset:'0',revision:String(version)}:{},{signal,accept(result){
         if(version!==revision || auth!==generation())return;
         data=result;state={...destination,batch:result.batch,offset:result.offset,...(refresh?{page:1,trail:[]}:{} )};
+        if(pageTarget)restoreTop=0;
         if(refresh){restoreTop=root.scrollTop;if(followAtStart===followingVersion)followingDirty.delete(key);}
-        savePage(state,result);positions.set(key,{state:structuredClone(state),data,scroll:root.scrollTop});
+        savePage(state,result);remember(restoreTop ?? root.scrollTop);
         if(staged.get(key)?.state.batch===result.batch)staged.delete(key);
       }});
     }catch(problem){
       if(version!==revision || signal.aborted)return;
       if(restoreExpired && staleHistory(problem))return rebuildHistory(destination,problem.errorKind==='cache_cleared');
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
+      if(pageTarget && !staleHistory(problem)){
+        error=`${problem.message || '发现读取失败'} · 可再次翻页重试`;
+        return;
+      }
       error=problem.message || '发现读取失败，请右键刷新重试';
       state.waiting=true;
-    }finally{if(version===revision && !signal.aborted){pending=false;render();prepareNext();}}
+    }finally{if(version===revision && !signal.aborted){pending=false;render();if(!error)prepareNext();}}
   }
   function prepareNext(){
     if(state.waiting || state.order==='popular' || !active || document.hidden || !autoPrepare() || !data || data.nextOffset==null)return;
@@ -353,7 +365,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }
     if(state.kind==='following' && ownsIdleView()){render();void load(true);}
   }
-  async function loadPopularity(page,restoreExpired=false){
+  async function loadPopularity(page,restoreExpired=false,pagination=false){
     controller?.abort();controller=new AbortController();
     const signal=controller.signal,version=++revision,auth=generation(),destination=structuredClone(state);
     sorting=true;sortProgress='正在准备作品元数据…';error='';render();
@@ -361,16 +373,21 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       const result=await readPopularityPage(request,{kind:destination.kind,batch:destination.batch,mode:destination.mode,
         index:destination.popularityIndex || '',page:String(page)},{signal,progress:value=>{
           if(version!==revision || signal.aborted)return;
-          state.popularityIndex=value.index;sortProgress=`已读取 ${value.loaded} 件${value.counted?` · 已核对 ${value.counted} 件收藏数`:''}，正在准备…`;render();
+          if(!pagination)state.popularityIndex=value.index;
+          sortProgress=`已读取 ${value.loaded} 件${value.counted?` · 已核对 ${value.counted} 件收藏数`:''}，正在准备…`;render();
         }});
       if(version!==revision || signal.aborted || auth!==generation())return;
       state={...destination,order:'popular',popularityIndex:result.index,page,offset:(page-1)*36,trail:Array.from({length:page-1},(_,i)=>i*36)};
       data={...result,batch:destination.batch,scope:destination.scope,edition:destination.edition || data?.edition || '',popularityIndex:result.index,
         offset:state.offset,nextOffset:page<result.pages?page*36:null};
-      savePage(state,data);restoreTop=root.scrollTop;remember();
+      savePage(state,data);restoreTop=pagination?0:root.scrollTop;remember(restoreTop);
     }catch(problem){if(version===revision && !signal.aborted){
       if(restoreExpired && staleHistory(problem))return rebuildHistory(destination,problem.errorKind==='cache_cleared');
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
+      if(pagination && !staleHistory(problem)){
+        error=`${problem.message || '排序读取失败'} · 可再次翻页重试`;
+        return;
+      }
       error=`${problem.message} · 可重新开启排序重试`;
       const expired=['cache_miss','source_changed','ranking_changed'].includes(problem.errorKind);
       if(expired){popularViews.delete(sourceKey(state));state.popularityIndex='';}
@@ -382,8 +399,9 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
           data=normal.data;
         }
       }
+      state.waiting=true;
     }}
-    finally{if(version===revision && !signal.aborted){sorting=false;if(error)state.waiting=true;render();}}
+    finally{if(version===revision && !signal.aborted){sorting=false;render();}}
   }
   async function applySort(order){
     if(!allowed() || pending || state.kind==='following' || !data)return;
@@ -462,8 +480,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     data=fresh.data;
     staged.delete(sourceKey(state));restoreTop=root.scrollTop;void startLoad();
   };
-  next.onclick=()=>{if(data?.nextOffset==null || pending || sorting)return;remember();state={...state,offset:data.nextOffset,page:state.page+1,trail:[...state.trail,state.offset]};root.scrollTop=0;void load();};
-  previous.onclick=()=>{if(!state.trail.length || pending || sorting)return;remember();const trail=state.trail.slice(),offset=trail.pop();state={...state,offset,page:state.page-1,trail};root.scrollTop=0;void load();};
+  next.onclick=()=>{if(next.disabled)return;remember();void load(false,false,{...state,offset:data.nextOffset,page:state.page+1,trail:[...state.trail,state.offset]});};
+  previous.onclick=()=>{if(previous.disabled)return;remember();const trail=state.trail.slice(),offset=trail.pop();void load(false,false,{...state,offset,page:state.page-1,trail});};
   setInterval(()=>{void prepare({network:true});},30000);
   document.addEventListener('visibilitychange',markViewed);
   return {open,prepare,stopBackground,clear,configure,followingChanged,refresh,syncSelection,snapshot:()=>structuredClone({...state,waiting:state.waiting || pending || sorting}),suspend(){if(pending || sorting)state.waiting=true;remember();active=false;controller?.abort();revision++;pending=false;sorting=false;interaction.reset({immediate:true});}};

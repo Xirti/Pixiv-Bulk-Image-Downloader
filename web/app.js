@@ -902,6 +902,15 @@ async function notifySearchCancellation(requestId, endpoint = "/api/pixiv/search
   }
 }
 
+function promotePixivRead(requestId, signal) {
+  return fetchJson("/api/pixiv/read/promote", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({requestId}),
+    signal,
+  }, 5000);
+}
+
 function cancelActiveSearch(keepPage = null) {
   return searchLifecycle.cancel(keepPage);
 }
@@ -1537,7 +1546,17 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
       snapshotId: requestedSnapshotId,
     });
     let data=prepared?.data;
-    if(!data && prepared?.pending)data=await task.read(prepared.id, signal => waitForPromiseOrAbort(prepared.promise,signal),preparedKey);
+    if(!data && prepared?.pending){
+      void promotePixivRead(prepared.id,task.signal).catch(()=>{/* The warm read may still succeed. */});
+      try{
+        data=await task.read(prepared.id, signal => waitForPromiseOrAbort(prepared.promise,signal),preparedKey);
+      }catch(error){
+        task.signal.throwIfAborted();
+        if(error.timedOut)void notifySearchCancellation(prepared.id);
+        if(error.status===400 || error.status===401 || error.status===403 || error.status===429
+          || ["verification_required","authentication_required","upstream_rate_limit"].includes(error.errorKind))throw error;
+      }
+    }
     if(!data)data=await task.read(requestId, signal => fetchJson(`/api/pixiv/search?${query}`, {signal}, 90000));
     if (task !== searchLifecycle.active) return;
 
@@ -1994,13 +2013,7 @@ async function requestAccount(url,options={}) {
   const {signal}=fetchOptions;
   signal?.throwIfAborted();
   signal?.addEventListener("abort",cancel,{once:true});
-  onPromote?.(()=>{
-    void fetchJson("/api/pixiv/read/promote",{
-      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:id}),signal,
-    },5000).catch(()=>{
-      // The original request can still finish with its original priority.
-    });
-  });
+  onPromote?.(()=>promotePixivRead(id,signal));
   try{
     const result=await fetchJson(`${url}${url.includes("?")?"&":"?"}requestId=${encodeURIComponent(id)}`,fetchOptions,url.startsWith("/api/popularity?")?90000:60000);
     if(typeof result.workspaceScope==="string" && typeof workspaceSync.scope==="string"

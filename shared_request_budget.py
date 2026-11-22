@@ -28,13 +28,14 @@ class ReadPriority:
     """One shared reader may promote its request once, including while queued."""
     def __init__(self):
         self._foreground = threading.Event()
+        self.background = 1
 
     def promote(self):
         self._foreground.set()
 
     @property
     def value(self) -> int:
-        return 0 if self._foreground.is_set() else 1
+        return 0 if self._foreground.is_set() else self.background
 
 
 def priority_value(priority: int | ReadPriority) -> int:
