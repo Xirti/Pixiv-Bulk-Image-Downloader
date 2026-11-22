@@ -4,7 +4,8 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   let image=dialog.querySelector("img");
   const count=dialog.querySelector("[data-stage-count]"),original=dialog.querySelector("[data-stage-original]");
   const status=dialog.querySelector("[data-stage-status]"),retry=dialog.querySelector("[data-stage-retry]");
-  let current=null,revision=0,size="large",originalView=false,busy=false,displayed=-1,manualSize=false,pendingSize=false;
+  let current=null,revision=0,size="large",originalView=false,busy=false,displayed=-1;
+  let preferredSize=size,sizeRevision=0,sizeDraft=null;
   function resize(){
     if(!current || !dialog.open)return;
     const frame=current.item.pageImages?.[current.page];
@@ -24,9 +25,25 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
   }
   dialog.querySelectorAll("[data-stage-size]").forEach(button=>button.onclick=()=>{
     const sizes=["small","medium","large"],next=sizes[sizes.indexOf(size)+Number(button.dataset.stageSize)];
-    if(!next)return;
-    size=next;manualSize=true;pendingSize=true;paintSize();
+    if(!current || !next)return;
+    current.manualSize=true;size=next;sizeDraft={value:next,saving:false};paintSize();
   });
+  function setSize(value){
+    preferredSize=value;sizeRevision++;
+    if(!current?.manualSize && !sizeDraft){size=value;paintSize();}
+  }
+  async function saveSize(){
+    const draft=sizeDraft;
+    if(!draft || draft.saving)return;
+    draft.saving=true;
+    const before=sizeRevision;
+    try{await sizeChanged(draft.value);}
+    catch{draft.saving=false;return;}
+    if(before===sizeRevision)preferredSize=draft.value;
+    if(sizeDraft!==draft)return;
+    sizeDraft=null;
+    if(!current?.manualSize){size=preferredSize;paintSize();}
+  }
   function clearPreviews(context,keep=null){
     for(const entry of context.previews.values()){
       entry.controller.abort();
@@ -168,9 +185,10 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
     void paint(current,++revision);
   }
   function open({owner=null,item,page=0,preview:source=null,onPage=null,onClose=null,allowOriginal=true}){
-    if(dialog.open)dialog.close();
-    release(current);revision++;cache.unpin();displayed=-1;
+    close();
+    revision++;
     current={owner,item,page,initialPage:page,initialPreview:source,previews:new Map(),controller:new AbortController(),onPage,onClose,allowOriginal,opener:document.activeElement};
+    size=sizeDraft?.value || preferredSize;
     showDialog(dialog);paintSize();void paint();dialog.querySelector("[data-stage-close]").focus({preventScroll:true});
     // Prepare only the next preview of a multi-page work, never its original.
     if(item.pages>1 && !item.pageImages){
@@ -180,22 +198,26 @@ globalThis.createImageViewer=function({dialog,cache,showDialog,report,loadItem,s
       });
     }
   }
-  function close(){if(dialog.open)dialog.close();}
+  function finishClose(){
+    const previous=current;
+    if(!previous)return;
+    current=null;revision++;busy=false;displayed=-1;
+    cache.unpin();retry.hidden=true;dialog.setAttribute("aria-busy","false");
+    release(previous);image.removeAttribute("src");void saveSize();
+    previous.opener?.isConnected && previous.opener.focus({preventScroll:true});previous.onClose?.();
+  }
+  function close(){
+    if(dialog.open)dialog.close();
+    finishClose();
+  }
   dialog.querySelector("[data-stage-close]").onclick=close;
   original.onclick=()=>void viewOriginal();retry.onclick=()=>{if(current)void paint(current,++revision,current.item.source==="pixiv");};
   dialog.querySelectorAll("[data-stage-turn]").forEach(button=>button.onclick=()=>turn(Number(button.dataset.stageTurn)));
   dialog.addEventListener("keydown",event=>{
     if(event.key==="ArrowLeft" || event.key==="ArrowRight"){event.preventDefault();turn(event.key==="ArrowRight"?1:-1);}
   });
-  dialog.addEventListener("close",()=>{
-    if(dialog.open)return;
-    const previous=current;current=null;revision++;busy=false;displayed=-1;
-    cache.unpin();retry.hidden=true;dialog.setAttribute("aria-busy","false");
-    previous?.opener?.isConnected && previous.opener.focus({preventScroll:true});previous?.onClose?.();
-    release(previous);image.removeAttribute("src");
-    if(pendingSize){pendingSize=false;sizeChanged(size);}
-  });
+  dialog.addEventListener("close",()=>{if(!dialog.open)finishClose();});
   window.addEventListener("resize",resize);
   document.addEventListener("visibilitychange",()=>{if(document.hidden)close();});
-  return {open,close,owns:owner=>current?.owner===owner,setSize(value){if(!manualSize){size=value;paintSize();}},clear(){close();cache.clear();}};
+  return {open,close,owns:owner=>current?.owner===owner,setSize,clear(){close();cache.clear();}};
 };

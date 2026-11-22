@@ -2786,7 +2786,11 @@ const detailHdCache=createDetailImageCache({fetchBytes:(url,options)=>fetchBytes
 let previewSizeWrite=Promise.resolve();
 const imageViewer=createImageViewer({dialog:$("#imageViewer"),cache:detailHdCache,showDialog:showAppDialog,report:announceToast,
   loadItem:(id,{refresh=false,...options}={})=>fetchJson(`/api/pixiv/artwork/${id}${refresh?"?refresh=1":""}`,options,ARTWORK_DETAIL_TIMEOUT_MS),
-  sizeChanged:value=>{previewSizeWrite=previewSizeWrite.then(()=>cloudControls.savePreferences({previewSize:value})).catch(error=>announceToast(error.message));}});
+  sizeChanged:value=>{
+    const saving=previewSizeWrite.then(()=>cloudControls.savePreferences({previewSize:value}));
+    previewSizeWrite=saving.catch(error=>announceToast(error.message));
+    return saving;
+  }});
 globalThis.openListPreview=(item,image)=>{
   if(!item || !image?.naturalWidth){announceToast("预览图尚未加载完成，请稍后再试");return;}
   imageViewer.open({item,preview:image.currentSrc || image.src});
