@@ -44,13 +44,13 @@ class PopularityService:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
 
-    def _save(self, owner, method, job, epoch, generation, rowid, revision, *, current_key=None, check_cancel=None):
+    def _save(self, owner, method, job, epoch, generation, rowid, revision, *, current_key=None, check_cancel=None, changes=None):
         snapshot = copy.deepcopy(job)
         with self.pages.publication(generation), self.guard:
             if epoch != self.epoch:
                 raise AccountError("cache_cleared", "排序缓存已清理，请重新准备")
             rowid = self.pages.saved_cache.save_popularity(owner, method, snapshot, rowid,
-                revision=revision, current=current_key, before_commit=check_cancel)
+                revision=revision, current=current_key, before_commit=check_cancel, changes=changes)
             self.jobs[owner, method, job["index"]] = (rowid, snapshot)
             self.jobs.move_to_end((owner, method, job["index"]))
             while len(self.jobs) > 12:
@@ -236,54 +236,84 @@ class PopularityService:
                 held.callback(cache.retire_display_snapshots, cache.retain_popularity, owner, method, current=current_key)
             deadline = time.monotonic() + 18
             reads = 0
-            while not job["ready"] and reads < 3 and time.monotonic() < deadline:
+            while not job["collected"] and reads < 3 and time.monotonic() < deadline:
                 self._check(generation, epoch)
-                if not job["collected"]:
-                    if kind == "author":
-                        self._author_batch(job, method, generation)
-                    elif kind == "search":
-                        result = self.search_get(job, generation, cancel_event)
-                        if "sourceGeneration" in result:
-                            job["sourceGeneration"] = result["sourceGeneration"]
-                        if result.get("sourceChanged"):
-                            # An evicted or restarted search cannot resume the old page boundary.
-                            job.update(items=[], seen=[], sourcePage=1)
-                        else:
-                            self._append(job, result["items"])
-                            job["collected"] = len(job["items"]) >= 500 or not result["hasMore"]
-                            job["items"] = job["items"][:500]
-                            if len(result["items"]) >= 36:
-                                job["sourcePage"] += 1
+                if kind == "author":
+                    self._author_batch(job, method, generation)
+                elif kind == "search":
+                    result = self.search_get(job, generation, cancel_event)
+                    if "sourceGeneration" in result:
+                        job["sourceGeneration"] = result["sourceGeneration"]
+                    if result.get("sourceChanged"):
+                        # A replaced search cannot resume the previous page boundary.
+                        job.update(items=[], seen=[], sourcePage=1)
                     else:
-                        result = self.discovery.read(generation=generation, kind="ranking", rank=job["rank"],
-                            batch=batch, offset=job["sourceOffset"], check_cancel=check_cancel)
                         self._append(job, result["items"])
-                        job["sourceOffset"] = result["nextOffset"]
-                        job["collected"] = result["nextOffset"] is None
-                    reads += 1
+                        job["collected"] = len(job["items"]) >= 500 or not result["hasMore"]
+                        job["items"] = job["items"][:500]
+                        if len(result["items"]) >= 36:
+                            job["sourcePage"] += 1
                 else:
-                    while job["enrichOffset"] < len(job["items"]) and job["items"][job["enrichOffset"]].get("bookmarks") is not None:
-                        job["enrichOffset"] += 1
-                    if job["enrichOffset"] < len(job["items"]):
-                        item = job["items"][job["enrichOffset"]]
-                        fresh = self.detail(item["id"], job["mode"], generation)
-                        count = fresh.get("bookmarks")
-                        if type(count) is not int or count < 0:
-                            raise AccountError("incomplete", "部分作品暂未提供收藏数，可稍后重试")
-                        item["bookmarks"] = count
-                        job["enrichOffset"] += 1
-                        reads += 1
-                    else:
-                        job["items"].sort(key=lambda item: (item["bookmarks"], item.get("sortDate", ""), int(item["id"])), reverse=True)
-                        job["ready"] = True
+                    result = self.discovery.read(generation=generation, kind="ranking", rank=job["rank"],
+                        batch=batch, offset=job["sourceOffset"], check_cancel=check_cancel)
+                    self._append(job, result["items"])
+                    job["sourceOffset"] = result["nextOffset"]
+                    job["collected"] = result["nextOffset"] is None
+                reads += 1
                 self._check(generation, epoch)
-                rowid = self._save(owner, method, job, epoch, generation, rowid, revision,
-                    current_key=current_key if job["ready"] else None, check_cancel=check_cancel)
-            offset = (page - 1) * 36
+                rowid = self._save(owner, method, job, epoch, generation, rowid, revision, check_cancel=check_cancel)
             total = len(job["items"])
+            missing = set(job.get("missingOffsets", ()))
+            blocked = False
+            if job["collected"] and not job["ready"]:
+                retrying = job["enrichOffset"] >= total
+                if retrying:
+                    candidates = iter(sorted(index for index in missing if index > job.get("retryOffset", -1)))
+                else:
+                    candidates = (index for index in range(job["enrichOffset"], total) if job["items"][index].get("bookmarks") is None)
+                cursor = next(candidates, None)
+                changes = []
+                job.setdefault("retryOffset", -1)
+                try:
+                    while cursor is not None and reads < 3 and time.monotonic() < deadline:
+                        self._check(generation, epoch)
+                        item = job["items"][cursor]
+                        count = self.detail(item["id"], job["mode"], generation).get("bookmarks")
+                        if type(count) is not int or count < 0:
+                            missing.add(cursor)
+                            count = None
+                        else:
+                            item["bookmarks"] = count
+                            missing.discard(cursor)
+                        changes.append((cursor, count))
+                        if retrying:
+                            job["retryOffset"] = cursor
+                        else:
+                            job["enrichOffset"] = cursor + 1
+                        reads += 1
+                        cursor = next(candidates, None)
+                    if cursor is None:
+                        job["enrichOffset"] = total
+                        job["retryOffset"] = -1
+                        blocked = bool(missing)
+                finally:
+                    if changes:
+                        job["missingOffsets"] = sorted(missing)
+                        self._check(generation, epoch)
+                        rowid = self._save(owner, method, job, epoch, generation, rowid, revision,
+                            check_cancel=check_cancel, changes=changes)
+                if cursor is None and not missing:
+                    job["items"].sort(key=lambda item: (item["bookmarks"], item.get("sortDate", ""), int(item["id"])), reverse=True)
+                    job["ready"] = True
+                    self._check(generation, epoch)
+                    self._save(owner, method, job, epoch, generation, rowid, revision,
+                        current_key=current_key, check_cancel=check_cancel)
+            offset = (page - 1) * 36
             if job["ready"] and offset >= total and page != 1:
                 raise SearchInputError("排序页码超出范围")
-            result = {"index": job["index"], "ready": job["ready"], "loaded": total, "counted": job["enrichOffset"], "total": total if job["ready"] else None,
+            counted = job["enrichOffset"] - len(missing)
+            result = {"index": job["index"], "ready": job["ready"], "loaded": total, "counted": counted,
+                    "missing": len(missing), "blocked": blocked, "total": total if job["ready"] else None,
                     "items": copy.deepcopy(job["items"][offset:offset + 36]) if job["ready"] else [],
                     "page": page, "pages": max(1, (total + 35) // 36) if job["ready"] else None,
                     "created": job["created"], "kind": kind, "limit": 500 if kind == "search" else None,

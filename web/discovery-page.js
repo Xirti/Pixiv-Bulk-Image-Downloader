@@ -427,7 +427,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       if(version!==revision || signal.aborted)return;
       if(candidate)candidate.index=value.index;
       else if(!pagination){state.popularityIndex=value.index;state.sortSourceSize=value.sourceSize;}
-      sortProgress=`已读取 ${value.loaded} 件${value.counted?` · 已核对 ${value.counted} 件收藏数`:''}，正在准备…`;render();
+      sortProgress=`已读取 ${value.loaded} 件${value.counted?` · 已核对 ${value.counted} 件收藏数`:''}${value.missing?` · ${value.missing} 件缺少收藏数`:''}，正在准备…`;render();
     };
     try{
       let result;

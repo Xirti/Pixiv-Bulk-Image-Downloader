@@ -1938,7 +1938,7 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
       progress:state=>{if(task.isCurrent()){
         requestedIndex=state.index;
         if(!restoring)galleryPopularityJobs.set(key,{index:state.index,refresh:false});
-        setGallerySort("popular",state.ready?`${author?"全部可见作品":"本次搜索候选池"} · ${state.total} 件`:`已读取 ${state.loaded} 件${state.counted?` · 已核对 ${state.counted} 件收藏数`:""}，正在准备…`);
+        setGallerySort("popular",state.ready?`${author?"全部可见作品":"本次搜索候选池"} · ${state.total} 件`:`已读取 ${state.loaded} 件${state.counted?` · 已核对 ${state.counted} 件收藏数`:""}${state.missing?` · ${state.missing} 件缺少收藏数`:""}，正在准备…`);
       }}};
     let result;
     try{

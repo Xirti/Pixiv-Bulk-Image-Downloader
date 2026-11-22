@@ -559,30 +559,70 @@ class AccountCache:
             row = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?", params).fetchone()
             if row is None:
                 return None, None
-            if warm is not None and warm[0] == row[0]:
+            rowid = row[0]
+            progress = self._popularity_progress(db, *params, rowid)
+            version = (rowid, progress)
+            if warm is not None and warm[0] == version:
                 return warm
             payload = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?", params).fetchone()[0]
-            return row[0], json.loads(payload)
+            job = json.loads(payload)
+            if progress:
+                missing = set(job.get("missingOffsets", ()))
+                for (payload,) in db.execute("SELECT payload FROM popularity_progress WHERE owner=? AND method=? AND key=? AND base_rowid=? ORDER BY checkpoint",
+                        (*params, rowid)):
+                    job["enrichOffset"], job["retryOffset"], changes = json.loads(payload)
+                    for index, count in changes:
+                        if count is None:
+                            missing.add(index)
+                        else:
+                            job["items"][index]["bookmarks"] = count
+                            missing.discard(index)
+                job["missingOffsets"] = sorted(missing)
+            return version, job
 
-    def save_popularity(self, owner, method, snapshot, previous_rowid, *, revision, current=None, before_commit=None):
+    @staticmethod
+    def _popularity_progress(db, owner, method, key, rowid):
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='popularity_progress'").fetchone():
+            return 0
+        return db.execute("SELECT COALESCE(MAX(checkpoint),0) FROM popularity_progress WHERE owner=? AND method=? AND key=? AND base_rowid=?",
+            (owner, method, key, rowid)).fetchone()[0]
+
+    def save_popularity(self, owner, method, snapshot, previous, *, revision, current=None, before_commit=None, changes=None):
         index = snapshot["index"]
         key = json.dumps(["popularity-index", index])
-        payload = json.dumps(snapshot, ensure_ascii=False)
+        params = owner, method, key
+        payload = json.dumps(snapshot, ensure_ascii=False) if changes is None else json.dumps(
+            [snapshot["enrichOffset"], snapshot["retryOffset"], changes])
         with self.lock, closing(self._connect()) as db, db:
             self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=before_commit is not None)
-            row = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?",
-                (owner, method, key)).fetchone()
-            if (row[0] if row else None) != previous_rowid:
+            row = db.execute("SELECT rowid FROM cached WHERE owner=? AND method=? AND key=?", params).fetchone()
+            version = (row[0], self._popularity_progress(db, *params, row[0])) if row else None
+            if version != previous:
                 raise AccountError("cache_changed", "排序快照已更新，请重试")
-            if current is not None:
-                latest = self._snapshot_pointer(db, owner, method, current, "popularity-index")
-                incoming = (snapshot["ready"], snapshot.get("publicationOrder", snapshot["created"] * 1000))
-                if latest is None or incoming > (latest.usable, latest.order):
-                    self._save_rows(db, owner, method, [(current, index)])
-            row = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", (owner, method, key, payload))
+            if changes is not None:
+                rowid, progress = version
+                if not progress:
+                    db.execute("""CREATE TABLE IF NOT EXISTS popularity_progress (
+                        owner TEXT, method TEXT, key TEXT, base_rowid INTEGER, checkpoint INTEGER, payload TEXT NOT NULL,
+                        PRIMARY KEY(owner,method,key,base_rowid,checkpoint)) WITHOUT ROWID""")
+                    db.execute("""CREATE TRIGGER IF NOT EXISTS delete_popularity_progress AFTER DELETE ON cached
+                        WHEN json_extract(OLD.key,'$[0]')='popularity-index'
+                        BEGIN DELETE FROM popularity_progress WHERE owner=OLD.owner AND method=OLD.method AND key=OLD.key; END""")
+                db.execute("INSERT INTO popularity_progress VALUES(?,?,?,?,?,?)", (*params, rowid, progress + 1, payload))
+                version = (rowid, progress + 1)
+            else:
+                if current is not None:
+                    latest = self._snapshot_pointer(db, owner, method, current, "popularity-index")
+                    incoming = (snapshot["ready"], snapshot.get("publicationOrder", snapshot["created"] * 1000))
+                    if latest is None or incoming > (latest.usable, latest.order):
+                        self._save_rows(db, owner, method, [(current, index)])
+                if version and version[1]:
+                    db.execute("DELETE FROM popularity_progress WHERE owner=? AND method=? AND key=?", params)
+                row = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", (*params, payload))
+                version = (row.lastrowid, 0)
             if before_commit is not None:
                 before_commit()
-            return row.lastrowid
+            return version
 
     def read_cursor(self, owner, method, key):
         with self.lock, closing(self._connect()) as db:

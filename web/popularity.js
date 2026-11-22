@@ -10,6 +10,7 @@ globalThis.readPopularityPage = async function (request, parameters, {signal,pro
     signal?.throwIfAborted();
     index=result.index;progress(result);
     if(result.ready)return result;
+    if(result.blocked)throw Object.assign(new Error(`还有 ${result.missing} 件作品缺少收藏数，已核对的数据已保存`),{errorKind:"incomplete"});
   }
 };
 
