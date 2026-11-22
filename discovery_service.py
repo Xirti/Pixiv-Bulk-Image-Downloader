@@ -337,7 +337,9 @@ class DiscoveryService:
                     if error.kind == "cache_changed":
                         self._feeds.pop(key, None)
                     raise
-                if not stored or refresh:cache.retain_discovery(owner,method)
                 self._retain(owner,method,feed,epoch)
+            if not stored or refresh:
+                cache.retire_display_snapshots(cache.retain_discovery, owner, method)
+                self._check(generation, epoch)
             if not items and has_more:raise AccountError("filtered", "当前范围暂未取得可展示作品，再次进入可继续读取，或调整范围")
             return self._response(feed, owner, method, generation, offset, items, has_more)

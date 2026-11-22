@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 from html.parser import HTMLParser
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -163,6 +164,7 @@ class DisplayPublication:
     order: int | float
     batch: str
     legacy_batch: str | None
+    usable: bool = True
 
 
 @dataclass(frozen=True)
@@ -343,11 +345,16 @@ class AccountCache:
             feed = cls._decode_discovery_header(row[0], identity) if row else None
             if feed is None:
                 return None
-            return DisplayPublication(feed.get("publicationOrder", feed["created"] * 1000), identity, feed.get("legacyBatch"))
-        snapshot = db.execute(f"SELECT {_PUBLICATION_ORDER_SQL},json_extract(payload,'$.legacyBatch') "
+            return DisplayPublication(feed.get("publicationOrder", feed["created"] * 1000), identity,
+                feed.get("legacyBatch"), cls._discovery_usable(feed))
+        snapshot = db.execute(f"SELECT {_PUBLICATION_ORDER_SQL},json_extract(payload,'$.legacyBatch'),json_extract(payload,'$.ready') "
             "FROM cached WHERE owner=? AND method=? AND key=?",
             (owner, method, json.dumps([kind, identity, *suffix]))).fetchone()
-        return DisplayPublication(snapshot[0], identity, snapshot[1]) if snapshot is not None else None
+        return DisplayPublication(snapshot[0], identity, snapshot[1], kind != "popularity-index" or bool(snapshot[2])) if snapshot is not None else None
+
+    @staticmethod
+    def _discovery_usable(header):
+        return bool(header.get("_itemCount", 1)) or not (any(header["paths"].values()) or any(header["pending"].values()))
 
     @classmethod
     def _discovery_current(cls, db, owner, method, pointer):
@@ -360,7 +367,7 @@ class AccountCache:
         if paged.legacy_batch is not None:
             # A different legacy batch was published since the paged request began.
             return (paged if paged.legacy_batch == legacy.batch else legacy), legacy.batch
-        return (paged if paged.order >= legacy.order else legacy), legacy.batch
+        return (paged if (paged.usable, paged.order) >= (legacy.usable, legacy.order) else legacy), legacy.batch
 
     @classmethod
     def _begin_display_cache(cls, db, owner, method, *, write=False, revision=None, exclusive=False):
@@ -471,7 +478,8 @@ class AccountCache:
             self._begin_display_cache(db, owner, method, write=True, revision=revision, exclusive=check_window is not None)
             if current is not None:
                 latest, legacy_batch = self._discovery_current(db, owner, method, current)
-                if feed["legacyBatch"] == legacy_batch and (latest is None or feed["publicationOrder"] > latest.order):
+                incoming = (self._discovery_usable(metadata), feed["publicationOrder"])
+                if feed["legacyBatch"] == legacy_batch and (latest is None or incoming > (latest.usable, latest.order)):
                     rows.append((owner, method, json.dumps([*current, "pages"]), json.dumps(feed["batch"])))
             db.execute("""CREATE TABLE IF NOT EXISTS discovery_pages (
                 owner TEXT, method TEXT, header TEXT, checkpoint INTEGER, payload TEXT NOT NULL,
@@ -568,7 +576,8 @@ class AccountCache:
                 raise AccountError("cache_changed", "排序快照已更新，请重试")
             if current is not None:
                 latest = self._snapshot_pointer(db, owner, method, current, "popularity-index")
-                if latest is None or snapshot["publicationOrder"] > latest.order:
+                incoming = (snapshot["ready"], snapshot.get("publicationOrder", snapshot["created"] * 1000))
+                if latest is None or incoming > (latest.usable, latest.order):
                     self._save_rows(db, owner, method, [(current, index)])
             row = db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", (owner, method, key, payload))
             return row.lastrowid
@@ -675,6 +684,14 @@ class AccountCache:
             db.executemany("DELETE FROM cursor_visits WHERE owner=? AND method=? AND scan=?",
                 [(owner,method,identity) for (identity,) in obsolete])
 
+    @staticmethod
+    def retire_display_snapshots(retain, owner, method, **options):
+        # Publication has committed. This maintenance can be retried on the next publication.
+        try:
+            retain(owner, method, **options)
+        except (sqlite3.Error, OSError) as exc:
+            logging.getLogger("moku.http").warning("Display snapshot cleanup deferred (%s): %s", method, exc)
+
     def retain_discovery(self, owner, method, limit=32):
         with ExitStack() as held, self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -696,15 +713,23 @@ class AccountCache:
                 and self._snapshot_can_be_retired(held, owner, method, "discovery", batch)]
             db.executemany("DELETE FROM cached WHERE owner=? AND method=? AND key=?", removed)
 
-    def retain_popularity(self, owner, method, limit=24):
+    def retain_popularity(self, owner, method, limit=24, *, current=None):
         with ExitStack() as held, self.lock, closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute("SELECT key FROM cached WHERE owner=? AND method=? AND key LIKE ? "
                 "ORDER BY rowid DESC LIMIT -1 OFFSET ?", (owner, method, '["popularity-index",%', limit)).fetchall()
+            protected = None
+            if rows and current is not None:
+                pointer = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
+                    (owner, method, json.dumps(current))).fetchone()
+                if pointer is not None:
+                    protected = json.loads(pointer[0])
             paused = 0
             removed = []
             for (key,) in rows:
                 _, index = json.loads(key)
+                if index == protected:
+                    continue
                 if paused < 8 and db.execute(
                         "SELECT json_extract(payload,'$.ready') FROM cached WHERE owner=? AND method=? AND key=?",
                         (owner, method, key)).fetchone()[0] == 0:

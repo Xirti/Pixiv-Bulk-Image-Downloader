@@ -225,8 +225,7 @@ class PopularityService:
                 if kind == "search":
                     job.update(query=query, fuzzy=fuzzy)
                 rowid = self._save(owner, method, job, epoch, generation, rowid, revision, current_key=current_key)
-                with self.pages.publication(generation), self.guard:
-                    cache.retain_popularity(owner, method)
+                held.callback(cache.retire_display_snapshots, cache.retain_popularity, owner, method, current=current_key)
             deadline = time.monotonic() + 18
             reads = 0
             while not job["ready"] and reads < 3 and time.monotonic() < deadline:
@@ -264,7 +263,8 @@ class PopularityService:
                         job["items"].sort(key=lambda item: (item["bookmarks"], item.get("sortDate", ""), int(item["id"])), reverse=True)
                         job["ready"] = True
                 self._check(generation, epoch)
-                rowid = self._save(owner, method, job, epoch, generation, rowid, revision)
+                rowid = self._save(owner, method, job, epoch, generation, rowid, revision,
+                    current_key=current_key if job["ready"] else None)
             offset = (page - 1) * 36
             total = len(job["items"])
             if job["ready"] and offset >= total and page != 1:
