@@ -1088,11 +1088,10 @@ class AccountPages:
             if self._closed or self.stopped():
                 raise AccountError("closed", "账号连接已关闭，请重新打开程序")
             if self._account is None:
-                transport = AppTransport(self.directory / "request-settings.json", self.proxy(), coordinator=self.coordinator)
+                transport = AppTransport(self.directory / "request-settings.json", self.proxy, coordinator=self.coordinator)
                 self._account = AppAccount(CredentialVault(), transport, CLIENT_CONFIG,
                     credential_publication=self.credential_publication, login_publication=self.login_publication,
                     credentials_revoked=self._app_credentials_revoked)
-            self._account.transport.proxy = self.proxy()
             return self._account
 
     def check(self, generation):

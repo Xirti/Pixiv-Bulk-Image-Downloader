@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from email.message import Message
 import http.client
@@ -115,13 +116,32 @@ class AsyncCurlPool:
         if job.task is not None and not job.task.done():
             job.task.cancel()
 
-    def perform(self, operation, *, check, deadline):
-        check()
-        job = _AsyncRequest()
+    @contextmanager
+    def reserve(self):
+        """Pin a selected route until its operation has settled."""
         with self._lock:
             if self._retired:
                 raise TransportClosedError("Native connection pool retired")
             self._active += 1
+        try:
+            yield self._perform_reserved
+        finally:
+            with self._lock:
+                self._active -= 1
+                close = self._retired and self._active == 0
+            if close:
+                self._shutdown()
+
+    def perform(self, operation, *, check, deadline):
+        check()
+        with self.reserve() as perform:
+            return perform(operation, check=check, deadline=deadline)
+
+    def _perform_reserved(self, operation, *, check, deadline):
+        check()
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Pixiv response deadline exceeded")
+        job = _AsyncRequest()
         submitted = False
         try:
             self._loop.call_soon_threadsafe(self._submit, job, operation)
@@ -136,18 +156,11 @@ class AsyncCurlPool:
                     if job.result.done():
                         return job.result.result()
         finally:
-            try:
-                if submitted and not job.done.is_set():
-                    self._loop.call_soon_threadsafe(self._cancel, job)
-                    # A Future may report cancellation before its Task's finally
-                    # releases native handles. Wait for the Task's actual completion.
-                    job.done.wait()
-            finally:
-                with self._lock:
-                    self._active -= 1
-                    close = self._retired and self._active == 0
-                if close:
-                    self._shutdown()
+            if submitted and not job.done.is_set():
+                self._loop.call_soon_threadsafe(self._cancel, job)
+                # A Future may report cancellation before its Task's finally
+                # releases native handles. Wait for the Task's actual completion.
+                job.done.wait()
 
     def _stop_loop(self):
         if not self._loop.is_closed():
@@ -251,7 +264,7 @@ class BrowserTransport(AsyncCurlPool):
             message.get_content_type() == "text/html"
             and (b"/cdn-cgi/challenge-platform/" in prefix.lower() or b"cf-chl-" in prefix.lower())
         ):
-            raise RequestBlockedError("verification_required")
+            raise RequestBlockedError("verification_required", upstream=True)
         if 300 <= response.status_code < 400:
             raise PixivPolicyError("Pixiv 响应包含重定向，已按安全策略拒绝")
         if response.status_code >= 400:
@@ -269,9 +282,10 @@ class BrowserTransport(AsyncCurlPool):
                 raise http.client.IncompleteRead(b"", expected - received)
         return b"".join(chunks) if output is None else b"", message.get_content_type()
 
-    def fetch(self, url, headers, *, output, maximum, timeout, deadline, check, before_send, on_chunk=None):
+    def fetch(self, url, headers, *, output, maximum, timeout, deadline, check, before_send, on_chunk=None, perform=None):
         check()
         before_send()
-        return self.perform(lambda session: self._transfer(
+        send = self.perform if perform is None else perform
+        return send(lambda session: self._transfer(
             session, url, headers, output, maximum, timeout,
             max(.1, deadline - time.monotonic()), check, on_chunk), check=check, deadline=deadline)

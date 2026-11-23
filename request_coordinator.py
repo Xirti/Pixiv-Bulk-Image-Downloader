@@ -5,6 +5,7 @@ from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import math
@@ -17,10 +18,21 @@ import time
 from pixiv_adapter import PixivPolicyError
 from download_feedback import DownloadFeedback
 from request_rhythm import RequestRhythm
+from runtime_identity import named_mutex
 from shared_request_budget import ReadPriority, RequestDeferredError, SharedRequestBudget, priority_value, retry_after_seconds
 
 
 REQUEST_PRIORITY = ContextVar("pixiv_request_priority", default=0)
+_AUTHENTICATION_RECOVERY = ContextVar("pixiv_authentication_recovery", default=None)
+
+
+@contextmanager
+def authentication_recovery(coordinator):
+    token = _AUTHENTICATION_RECOVERY.set(coordinator)
+    try:
+        yield
+    finally:
+        _AUTHENTICATION_RECOVERY.reset(token)
 
 
 class TrackedReadEvent(threading.Event):
@@ -49,8 +61,9 @@ class _Ticket:
 
 
 class RequestBlockedError(PixivPolicyError):
-    def __init__(self, kind: str):
+    def __init__(self, kind: str, *, upstream=False):
         self.kind = kind
+        self.upstream = upstream
         super().__init__({
             "verification_required": "Pixiv 要求完成页面验证，请打开官方登录页面处理后继续",
             "authentication_required": "Pixiv 登录状态已失效，请重新登录后继续",
@@ -71,10 +84,14 @@ class RequestCoordinator:
     def __init__(self, path: Path, *, shared: SharedRequestBudget | None = None):
         self._shared = shared
         self._path = path
+        settings_key = os.path.normcase(str(path.resolve())).encode()
+        self._settings_mutex = "Local\\MOKU.RequestSettings." + hashlib.sha256(settings_key).hexdigest()
+        self._settings_stamp = None
         self._condition = threading.Condition()
         self._mode = "safe"
         self._cooldown = 0.0
         self._blocked = ""
+        self._unsaved_block = ""
         self._active = {lane: 0 for lane in self.PROFILES[self._mode]}
         self._next_send = {"api": 0.0, "image": 0.0}
         self._burst_after = {"api": 0.0, "image": 0.0}
@@ -91,18 +108,12 @@ class RequestCoordinator:
         self._requests = 0
         self._limits = 0
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or not isinstance(data.get("mode"), str) or data["mode"] not in self.PROFILES:
-                raise ValueError("Invalid request settings")
-            deadline = data.get("cooldownUntil", 0)
-            if type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline < 0:
-                raise ValueError("Invalid cooldown")
-            blocked = data.get("blockedKind", "")
-            if blocked not in ("", "verification_required", "authentication_required"):
-                raise ValueError("Invalid blocked state")
-            self._blocked = blocked
+            with named_mutex(self._settings_mutex, timeout_seconds=2):
+                data = self._read_settings()
+                self._settings_stamp = self._file_stamp()
+            self._blocked = data.get("blockedKind", "")
             self._mode = data["mode"]
-            self._cooldown = time.monotonic() + max(0.0, deadline - time.time())
+            self._cooldown = time.monotonic() + max(0.0, data.get("cooldownUntil", 0) - time.time())
         except FileNotFoundError:
             pass
         except (OSError, ValueError, OverflowError):
@@ -121,15 +132,70 @@ class RequestCoordinator:
             self._refill_interval[lane] = interval + jitter / 2
         self._credits = {lane: self._capacity(lane) for lane in self._credits}
 
-    def _save_locked(self):
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix="request-settings-", suffix=".tmp", dir=self._path.parent)
+    def _read_settings(self):
+        data = json.loads(self._path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("mode"), str) or data["mode"] not in self.PROFILES:
+            raise ValueError("Invalid request settings")
+        deadline = data.get("cooldownUntil", 0)
+        if type(deadline) not in (int, float) or not math.isfinite(deadline) or deadline < 0:
+            raise ValueError("Invalid cooldown")
+        if data.get("blockedKind", "") not in ("", "verification_required", "authentication_required"):
+            raise ValueError("Invalid blocked state")
+        return data
+
+    def _file_stamp(self):
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                json.dump({"mode": self._mode, "blockedKind": self._blocked, "cooldownUntil": time.time() + max(0.0, self._cooldown - time.monotonic())}, stream)
-            os.replace(temporary, self._path)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
+            info = self._path.stat()
+        except FileNotFoundError:
+            return None
+        return info.st_mtime_ns, info.st_ino, info.st_size
+
+    def _effective_block(self, stored):
+        if "verification_required" in (stored, self._unsaved_block):
+            return "verification_required"
+        return stored or self._unsaved_block
+
+    def _refresh_block_locked(self):
+        stamp = self._file_stamp()
+        if stamp == self._settings_stamp:
+            return
+        with named_mutex(self._settings_mutex, timeout_seconds=2):
+            stamp = self._file_stamp()
+            if stamp is not None and stamp != self._settings_stamp:
+                try:
+                    self._blocked = self._effective_block(self._read_settings().get("blockedKind", ""))
+                except (ValueError, OverflowError):
+                    logging.getLogger("moku.http").warning("Request settings changed but could not be parsed")
+            self._settings_stamp = stamp
+
+    def _save_locked(self, *, only_blocked_kind=None, **changes):
+        with named_mutex(self._settings_mutex, timeout_seconds=2):
+            try:
+                data = self._read_settings()
+            except (FileNotFoundError, ValueError, OverflowError):
+                data = {"mode": self._mode, "blockedKind": self._blocked, "cooldownUntil": 0}
+            blocked = self._effective_block(data.get("blockedKind", ""))
+            if only_blocked_kind is not None and blocked != only_blocked_kind:
+                self._blocked = blocked
+                return
+            if blocked == "verification_required" and changes.get("blockedKind") == "authentication_required":
+                # A late login failure cannot undo an outstanding verification.
+                del changes["blockedKind"]
+            if "cooldownUntil" in changes:
+                changes["cooldownUntil"] = max(data.get("cooldownUntil", 0), changes["cooldownUntil"])
+            data["blockedKind"] = blocked
+            data.update(changes)
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(prefix="request-settings-", suffix=".tmp", dir=self._path.parent)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    json.dump(data, stream)
+                os.replace(temporary, self._path)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            self._unsaved_block = ""
+            self._blocked = data["blockedKind"]
+            self._settings_stamp = self._file_stamp()
 
     def set_mode(self, mode: str):
         if mode not in self.PROFILES:
@@ -140,7 +206,7 @@ class RequestCoordinator:
                 self._shared.set_mode(mode)
             self._mode = mode
             try:
-                self._save_locked()
+                self._save_locked(mode=mode)
             except OSError:
                 self._mode = previous
                 if self._shared is not None:
@@ -160,6 +226,7 @@ class RequestCoordinator:
     def snapshot(self):
         shared = self._shared.snapshot() if self._shared is not None else {}
         with self._condition:
+            self._refresh_block_locked()
             return {"mode": self._mode, "blockedKind": self._blocked, "cooldownSeconds": max(shared.get("cooldownSeconds", 0), 0, math.ceil(self._cooldown - time.monotonic())),
                     "queued": sum(map(len, self._queues.values())), "active": sum(self._active.values()),
                     "requests": self._requests, "rateLimits": self._limits,
@@ -202,7 +269,8 @@ class RequestCoordinator:
             seconds = max(1.0, seconds if seconds is not None else min(600, 60 * 2 ** min(self._limits - 1, 4)))
             self._cooldown = max(self._cooldown, time.monotonic() + seconds)
             try:
-                self._save_locked()
+                until = time.time() + max(0.0, self._cooldown - time.monotonic())
+                self._save_locked(cooldownUntil=until)
             except OSError:
                 logging.getLogger("moku.http").warning("Upstream cooldown is active; persistence failed")
             self._condition.notify_all()
@@ -242,7 +310,10 @@ class RequestCoordinator:
         return min(queue, key=lambda ticket: (max(0, priority_value(ticket.priority) - (now - ticket.created) / 5), ticket.created))
 
     def _check_state(self, priority):
-        if self._blocked:
+        self._refresh_block_locked()
+        if self._blocked and not (
+            self._blocked == "authentication_required" and _AUTHENTICATION_RECOVERY.get() is self
+        ):
             raise RequestBlockedError(self._blocked)
         if priority >= 2 and self._mode == "safe":
             raise RequestDeferredError("background_paused", 1)
@@ -252,25 +323,21 @@ class RequestCoordinator:
 
     def block(self, kind):
         with self._condition:
-            self._blocked = kind
             self._failure_locked()
             try:
-                self._save_locked()
+                self._save_locked(blockedKind=kind)
             except OSError:
+                self._unsaved_block = self._blocked = (
+                    self._blocked if self._blocked == "verification_required" else self._effective_block(kind))
                 logging.getLogger("moku.http").warning("Pixiv verification pause persistence failed")
             self._condition.notify_all()
-        return RequestBlockedError(kind)
+            return RequestBlockedError(self._blocked)
 
     def _clear_block(self, blocked_kind: str | None = None):
         with self._condition:
-            if blocked_kind is None or self._blocked == blocked_kind:
-                previous = self._blocked
-                self._blocked = ""
-                try:
-                    self._save_locked()
-                except OSError:
-                    self._blocked = previous
-                    raise
+            self._refresh_block_locked()
+            if (blocked_kind is None and self._blocked) or self._blocked == blocked_kind:
+                self._save_locked(blockedKind="", only_blocked_kind=blocked_kind)
                 self._condition.notify_all()
 
     def session_connected(self):

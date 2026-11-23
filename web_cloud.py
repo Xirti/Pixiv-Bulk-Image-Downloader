@@ -14,6 +14,7 @@ class WebCloudTransport:
         self.coordinator, self.context = coordinator, context
         self.lock = threading.Lock()
         self.session = None
+        self.session_profile = None
 
     def post(self, path, payload, csrf, form, generation):
         # Callers select fixed account-operation endpoints.
@@ -24,11 +25,7 @@ class WebCloudTransport:
         while not self.lock.acquire(timeout=.1):
             self.context(generation)
         try:
-            headers, proxy, check, profile = self.context(generation)
-            if self.session is None:
-                self.session = Session(impersonate=profile, trust_env=False)
-            headers.update({"Origin": "https://www.pixiv.net", "Referer": "https://www.pixiv.net/",
-                            "Accept": "application/json", "X-CSRF-Token": csrf})
+            _, _, check, _ = self.context(generation)
             chunks, count = [], 0
 
             def consume(chunk):
@@ -42,6 +39,15 @@ class WebCloudTransport:
 
             with self.coordinator.slot(False, check, priority=0):
                 self.coordinator.before_send(False, check, priority=0, activity="detail")
+                headers, proxy, check, profile = self.context(generation)
+                if self.session is None or self.session_profile != profile:
+                    session = Session(impersonate=profile, trust_env=False)
+                    if self.session is not None:
+                        self.session.close()
+                    self.session, self.session_profile = session, profile
+                headers.update({"Origin": "https://www.pixiv.net", "Referer": "https://www.pixiv.net/",
+                                "Accept": "application/json", "X-CSRF-Token": csrf})
+                check()
                 ACCOUNT_WRITE_PREFLIGHT.get()()
                 try:
                     response = self.session.post("https://www.pixiv.net" + path, headers=headers,

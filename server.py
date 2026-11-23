@@ -142,7 +142,7 @@ DOWNLOAD_REQUESTS = DownloadRequests(path=history_path().with_name("requests.sql
 LOCAL_CATALOG = LocalCatalog(history_path().with_name("catalog.sqlite3"))
 GUIDE_SEEN_MARKER = history_path().with_name("guide-v1.seen")
 REQUEST_COORDINATOR = RequestCoordinator(history_path().with_name("request-settings.json"), shared=SharedRequestBudget())
-SOURCE_SEARCH = SourceSearch(history_path().with_name("source-search"), proxy=lambda: PIXIV_PROXY)
+SOURCE_SEARCH = SourceSearch(history_path().with_name("source-search"), proxy=lambda: configured_loopback_proxy())
 APP_UPDATES = AppUpdates(history_path().with_name("app-updates.json"))
 DOWNLOAD_AHEAD = DownloadAhead(capacity=2)
 DOWNLOAD_ADMISSION = DownloadAdmission(
@@ -1134,6 +1134,14 @@ def revoke_item_image_tokens(item: dict) -> None:
             IMAGE_TOKENS.pop(token, None)
 
 
+def configured_loopback_proxy() -> str:
+    state = windows_proxy_state()
+    proxy = normalize_loopback_proxy(os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or "")
+    if not proxy and state.get("proxyEnabled"):
+        proxy = normalize_loopback_proxy(state.get("proxyServer", ""))
+    return proxy
+
+
 def _update_network_opener(*, max_age: float) -> str:
     global PIXIV_OPENER, PIXIV_PROXY, PIXIV_NETWORK_FINGERPRINT, PIXIV_NETWORK_CHECKED_AT
     with PIXIV_NETWORK_LOCK:
@@ -1144,14 +1152,13 @@ def _update_network_opener(*, max_age: float) -> str:
             and now - PIXIV_NETWORK_CHECKED_AT < max_age
         ):
             return PIXIV_PROXY
-        state = windows_proxy_state()
-        proxy = normalize_loopback_proxy(os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or "")
-        if not proxy and state.get("proxyEnabled"):
-            proxy = normalize_loopback_proxy(state.get("proxyServer", ""))
+        proxy = configured_loopback_proxy()
         fingerprint = (proxy,)
-        PIXIV_NETWORK_CHECKED_AT = now
         if fingerprint == PIXIV_NETWORK_FINGERPRINT:
+            PIXIV_NETWORK_CHECKED_AT = now
             return PIXIV_PROXY
+        # A failed replacement may not mark the old route as freshly checked.
+        PIXIV_NETWORK_CHECKED_AT = float("-inf")
         configuration = (PIXIV_OPENER.configuration if isinstance(PIXIV_OPENER, BrowserTransport)
                          else load_browser_profile(history_path().with_name("browser-profile.json")))
         configuration = replace(configuration, language=LOGIN_CONTEXT.accept_language)
@@ -1161,6 +1168,7 @@ def _update_network_opener(*, max_age: float) -> str:
         PIXIV_OPENER = opener
         PIXIV_PROXY = proxy
         PIXIV_NETWORK_FINGERPRINT = fingerprint
+        PIXIV_NETWORK_CHECKED_AT = time.monotonic()
         previous.close()
         return proxy
 
@@ -1295,11 +1303,17 @@ def pixiv_request(
         succeeded = False
         track_download = download and image_only and priority == 1
 
-        def before_send():
-            nonlocal sample
+        def pace():
             REQUEST_COORDINATOR.before_send(image_only, check_queue, priority=priority, activity=activity)
+
+        def start_sample():
+            nonlocal sample
             if track_download:
                 sample = REQUEST_COORDINATOR.start_download_sample(opener, archive=archive)
+
+        def before_send():
+            pace()
+            start_sample()
 
         def received_chunk(size):
             if sample is not None:
@@ -1308,29 +1322,38 @@ def pixiv_request(
         request._moku_before_send = before_send
         request._moku_phase = "open"
         request._moku_reused = False
-        with PIXIV_NETWORK_LOCK:
-            opener, proxy = PIXIV_OPENER, PIXIV_PROXY
+        opener, proxy = None, ""
         started = time.monotonic()
         try:
             with REQUEST_COORDINATOR.slot(image_only, check_queue, download=download, priority=priority):
-                deadline = time.monotonic() + (max_duration if max_duration is not None else request_timeout)
-                request._moku_deadline = deadline
+                with PIXIV_NETWORK_LOCK:
+                    opener, proxy = PIXIV_OPENER, PIXIV_PROXY
+                duration = max_duration if max_duration is not None else request_timeout
                 if output is not None:
                     output.seek(0)
                     output.truncate()
                 if isinstance(opener, BrowserTransport):
+                    pace()
+                    check_queue()
+                    ensure_network_opener_current()
                     request._moku_phase = "browser_transfer"
-                    raw, content_type = opener.fetch(
-                        url, request_headers, output=output, maximum=max_bytes,
-                        timeout=request_timeout, deadline=deadline, check=check_request,
-                        before_send=request._moku_before_send,
-                        **({"on_chunk": received_chunk} if track_download else {}),
-                    )
+                    with ExitStack() as route:
+                        # Select and pin together, after all pacing waits.
+                        with PIXIV_NETWORK_LOCK:
+                            opener, proxy = PIXIV_OPENER, PIXIV_PROXY
+                            perform = route.enter_context(opener.reserve())
+                        raw, content_type = opener.fetch(
+                            url, request_headers, output=output, maximum=max_bytes,
+                            timeout=request_timeout, deadline=time.monotonic() + duration, check=check_request,
+                            before_send=start_sample, perform=perform,
+                            **({"on_chunk": received_chunk} if track_download else {}),
+                        )
                     if content_type == "text/html":
                         detect_pixiv_verification_response(raw, output)
                     REQUEST_COORDINATOR.success()
                     succeeded = True
                     return raw, content_type
+                deadline = request._moku_deadline = time.monotonic() + duration
                 with opener.open(request, timeout=request_timeout) as response:
                     final_url = response.geturl()
                     if not is_allowed_pixiv_url(final_url, image_only=image_only):
@@ -1367,7 +1390,7 @@ def pixiv_request(
                     succeeded = True
                     return raw if output is None else b"", content_type
         except RequestBlockedError as exc:
-            if exc.kind in {"verification_required", "authentication_required"}:
+            if exc.upstream:
                 raise block_response(exc.kind) from exc
             raise
         except (OSError, http.client.HTTPException) as exc:
@@ -1413,7 +1436,7 @@ def pixiv_request(
 def detect_pixiv_verification(raw: bytes) -> None:
     prefix = raw[:16384].lower()
     if b"/cdn-cgi/challenge-platform/" in prefix or b"cf-chl-" in prefix:
-        raise RequestBlockedError("verification_required")
+        raise RequestBlockedError("verification_required", upstream=True)
 
 
 def detect_pixiv_verification_response(raw: bytes, output: BinaryIO | None) -> None:
@@ -1773,7 +1796,7 @@ def extend_history(
 ARTISTS = ArtistService(search_pixiv_json)
 ACCOUNTS = AccountPages(directory=history_path().parent, request_json=pixiv_json,
     request_homepage=lambda: pixiv_request("https://www.pixiv.net/", max_bytes=8*1024*1024)[0].decode("utf-8"),
-    generation=authorization_generation, coordinator=REQUEST_COORDINATOR, proxy=lambda: PIXIV_PROXY,method=AUTH_METHOD.get,
+    generation=authorization_generation, coordinator=REQUEST_COORDINATOR, proxy=ensure_network_opener_current,method=AUTH_METHOD.get,
     commit_guard=SEARCH_SESSION_LOCKS_GUARD, stopped=lambda:BACKEND_STOP.is_set(),
     credential_publication=credential_publication, login_publication=app_login_publication,
     confirm_web_owner=confirm_web_workspace)
@@ -1789,6 +1812,7 @@ def cloud_web_context(generation):
     headers.update(web_session_cookie_header())
     if not headers.get("Cookie"):
         raise AccountError("reauth", "请先完成网页登录")
+    ensure_network_opener_current()
     with PIXIV_NETWORK_LOCK:
         return headers, PIXIV_PROXY, lambda: assert_authorization_generation(generation), getattr(PIXIV_OPENER, "profile", "chrome152")
 

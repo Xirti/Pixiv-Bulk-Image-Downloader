@@ -548,8 +548,7 @@ class SourceSearch:
     def _query(self, job, key):
         try:
             request = self._api_request(job, key)
-            opener = self._opener()
-            response = self._dispatch_direct(job, opener, request)
+            response = self._dispatch_direct(job, request)
             if response is None:
                 return
             with response as response:
@@ -576,10 +575,11 @@ class SourceSearch:
                 if not job["browserFallback"] and not job["browser"]:
                     job["image"] = b""
 
-    def _dispatch_direct(self, job, opener, request):
+    def _dispatch_direct(self, job, request):
         with self.lock, self._configuration():
             if not self._current_query(job):
                 return None
+            opener = self._opener()
             self._commit_dispatch(job, 0)
             job.update(state="searching", message="正在向 SauceNAO 查询…")
         return opener.open(request, timeout=35)

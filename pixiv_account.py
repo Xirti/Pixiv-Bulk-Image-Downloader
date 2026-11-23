@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 from curl_cffi.requests.exceptions import RequestException
 from browser_transport import AsyncCurlPool, TransportClosedError
 from auth_store import CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHINE, ERROR_NOT_FOUND, advapi32, persistent_session_disabled
-from request_coordinator import RequestCoordinator, REQUEST_PRIORITY, checked_lock
+from request_coordinator import RequestCoordinator, REQUEST_PRIORITY, authentication_recovery, checked_lock
 from shared_request_budget import SharedRequestBudget
 from pixiv_adapter import PixivPolicyError
 
@@ -183,7 +183,7 @@ class AppTransport:
         def send(session):
             if preflight is not None:
                 preflight()
-            return session.request(method, url, headers=headers, data=form, proxy=self.proxy or None,
+            return session.request(method, url, headers=headers, data=form, proxy=proxy or None,
                                    timeout=20, allow_redirects=False, discard_cookies=True, content_callback=consume)
 
         check()
@@ -191,6 +191,7 @@ class AppTransport:
         with self.coordinator.slot(False, check, priority=priority):
             for attempt in range(2 if method=="GET" else 1):
                 self.coordinator.before_send(False, check, priority=priority, activity="search")
+                proxy = self.proxy() if callable(self.proxy) else self.proxy
                 chunks.clear()
                 received = 0
                 callback_error = None
@@ -295,15 +296,16 @@ class AppAccount:
         with self._lock:
             epoch = self._epoch if epoch is None else epoch
         self._check(epoch)
-        raw = self.transport.request("POST", "/auth/token", form={**self.client_config,
-            "grant_type": "authorization_code", "code": code, "code_verifier": verifier,
-            "redirect_uri": "https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback", "include_policy": "true"},
-            check=lambda: self._check(epoch))
-        tokens = Tokens.from_response(raw, now=self.clock())
-        if expected_uid and tokens.uid != expected_uid:
-            raise AccountError("identity_mismatch", "授权账号与当前网页账号不同，本次未保存，请使用同一账号")
-        detail = self.transport.request("GET", "/v1/user/detail?" + urlencode({"user_id": tokens.uid, "filter": "for_android"}),
-                                        bearer=tokens.access, check=lambda: self._check(epoch))
+        with authentication_recovery(self.transport.coordinator):
+            raw = self.transport.request("POST", "/auth/token", form={**self.client_config,
+                "grant_type": "authorization_code", "code": code, "code_verifier": verifier,
+                "redirect_uri": "https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback", "include_policy": "true"},
+                check=lambda: self._check(epoch))
+            tokens = Tokens.from_response(raw, now=self.clock())
+            if expected_uid and tokens.uid != expected_uid:
+                raise AccountError("identity_mismatch", "授权账号与当前网页账号不同，本次未保存，请使用同一账号")
+            detail = self.transport.request("GET", "/v1/user/detail?" + urlencode({"user_id": tokens.uid, "filter": "for_android"}),
+                                            bearer=tokens.access, check=lambda: self._check(epoch))
         user = detail.get("user")
         if not isinstance(user, dict) or str(user.get("id")) != tokens.uid:
             raise AccountError("identity_mismatch", "App API 未确认相同账号，本次未保存")
