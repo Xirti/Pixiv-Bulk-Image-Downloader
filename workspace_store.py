@@ -230,6 +230,9 @@ class WorkspaceStore:
                     connection.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, scope TEXT NOT NULL, payload TEXT NOT NULL)")
                     connection.execute("CREATE TABLE IF NOT EXISTS recent (singleton INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
                     connection.execute("PRAGMA user_version=1")
+                connection.execute("""CREATE TABLE IF NOT EXISTS basket_page_checks (
+                    scope TEXT NOT NULL, artwork TEXT NOT NULL, token TEXT NOT NULL, pages TEXT NOT NULL,
+                    PRIMARY KEY(scope,artwork))""")
                 # Retain only task identities so a lost initial-save reply
                 # cannot turn a removed task into a new create operation.
                 connection.execute("CREATE TABLE IF NOT EXISTS task_removals (id TEXT PRIMARY KEY) WITHOUT ROWID")
@@ -246,6 +249,15 @@ class WorkspaceStore:
                 connection.execute("""CREATE TABLE IF NOT EXISTS recent_identity (
                     singleton INTEGER PRIMARY KEY, generation TEXT NOT NULL, ids TEXT)""")
                 for event in ("INSERT", "UPDATE"):
+                    # Old windows also replace the basket. Retire the check in the same
+                    # transaction that removes the work, before its ID can be selected again.
+                    connection.execute(f"""CREATE TRIGGER IF NOT EXISTS prune_basket_checks_{event}
+                        AFTER {event} ON basket WHEN EXISTS (SELECT 1 FROM basket_page_checks) BEGIN
+                        DELETE FROM basket_page_checks WHERE NOT EXISTS (
+                            SELECT 1 FROM json_each(NEW.payload) AS entry
+                            WHERE json_extract(entry.value,'$[1].id') = basket_page_checks.artwork
+                            AND json_extract(entry.value,'$[0]') IN (basket_page_checks.scope,'public'));
+                        END""")
                     connection.execute(f"""CREATE TRIGGER IF NOT EXISTS recent_identity_{event}
                         AFTER {event} ON recent BEGIN
                             INSERT OR REPLACE INTO recent_identity VALUES (1, lower(hex(randomblob(16))), NULL);
@@ -290,7 +302,17 @@ class WorkspaceStore:
                     updated.append((scope, row))
                 else:
                     pages = set(current["pages"]) | set(row["pages"])
-                    current["pages"] = sorted(page for page in pages if page < current["item"]["pages"])
+                    count = min(current["item"]["pages"], row["item"]["pages"])
+                    current["pages"] = sorted(page for page in pages if page < count)
+                    disputed = pages.difference(current["pages"])
+                    if disputed:
+                        current["item"]["pages"] = count
+                        prior = db.execute("SELECT pages FROM basket_page_checks WHERE scope=? AND artwork=?",
+                                           (scope, row["id"])).fetchone()
+                        if prior:
+                            disputed.update(json.loads(prior[0]))
+                        db.execute("INSERT OR REPLACE INTO basket_page_checks VALUES(?,?,?,?)",
+                                   (scope, row["id"], secrets.token_hex(16), json.dumps(sorted(disputed))))
                     current["archived"] = current.get("archived", True) or row.get("archived", True)
             db.execute("INSERT OR REPLACE INTO basket VALUES(1,?,?)",
                        (revision + 1, json.dumps(updated, ensure_ascii=False)))
@@ -328,6 +350,10 @@ class WorkspaceStore:
                 if row:
                     result["revision"] = row[0]
                     result["basket"] = _visible_basket(json.loads(row[1]), scope)
+                    checks = {artwork: {"token": token, "pages": json.loads(pages)} for artwork, token, pages in
+                              connection.execute("SELECT artwork,token,pages FROM basket_page_checks WHERE scope=?", (scope,))}
+                    if checks:
+                        result["basketPageChecks"] = checks
                 result["tasks"] = [self._expand_task(connection,json.loads(row[0])) for row in connection.execute("SELECT payload FROM tasks WHERE scope=? ORDER BY rowid", (scope,))]
                 result["recent"] = self._visible_recent(self._read_recent(connection), scope)
         return result
@@ -470,6 +496,39 @@ class WorkspaceStore:
                                    (request_id, scope, revision + 1, fingerprint))
                 connection.execute("DELETE FROM basket_receipts WHERE revision<=?", (revision + 1 - BASKET_RECEIPT_REVISIONS,))
         return revision + 1
+
+    def confirm_basket_pages(self, scope, artwork, token, count):
+        artwork, token = _id(artwork), _request_id(token)
+        count = _integer(count, 1, 1000001)
+        with self._write(scope) as db:
+            check = db.execute("SELECT pages FROM basket_page_checks WHERE scope=? AND artwork=? AND token=?",
+                               (scope, artwork, token)).fetchone()
+            if not check:
+                return
+            revision, payload = db.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
+            entries = json.loads(payload)
+            pending = {page for page in json.loads(check[0]) if page < count}
+            updated = []
+            shared = None
+            for owner, row in entries:
+                if owner in (scope, "public") and row["id"] == artwork:
+                    pages = {page for page in row["pages"] if page < count}
+                    if owner == scope:
+                        pages.update(pending)
+                        pending.clear()
+                    else:
+                        shared = row
+                    row["item"]["pages"] = count
+                    row["pages"] = sorted(pages)
+                    if not pages:
+                        continue
+                updated.append((owner, row))
+            if pending and shared:
+                # A change in classification must keep the account's old choices private.
+                updated.append((scope, {**shared, "pages": sorted(pending)}))
+            db.execute("UPDATE basket SET revision=?,payload=? WHERE singleton=1",
+                       (revision + 1, json.dumps(updated, ensure_ascii=False)))
+            db.execute("DELETE FROM basket_page_checks WHERE scope=? AND artwork=?", (scope, artwork))
 
     @contextmanager
     def pending_download_ids(self):

@@ -4685,6 +4685,15 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             FOLDER_PICKER_LOCK.release()
 
+    def _post_confirm_basket_pages(self, data: dict):
+        try:
+            WORKSPACE_STORE.confirm_basket_pages(data["scope"], data.get("id"), data.get("token"), data.get("pages"))
+        except TaskConflictError as exc:
+            return self.send_json({"error": str(exc)}, 409)
+        except ValueError:
+            return self.send_json({"error": "采集篮页数核验参数无效"}, 400)
+        return self.send_json({"ok": True})
+
     def _post_save_basket(self, data: dict):
         try:
             revision = WORKSPACE_STORE.save_basket(data.get("basket"), data["scope"], revision=data.get("revision"),

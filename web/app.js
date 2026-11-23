@@ -998,6 +998,17 @@ function activeDetail() {
   return basketPageOpen() ? basketDetail : normalDetail;
 }
 
+async function readArtworkDetail(id, options={}, refresh=false) {
+  const check=workspaceSync.pageCheck(id);
+  const query=refresh || check ? "?refresh=1" : "";
+  const item=await fetchJson(`/api/pixiv/artwork/${id}${query}`,options,ARTWORK_DETAIL_TIMEOUT_MS);
+  if(check && item.id===String(id) && !options.signal?.aborted){
+    await workspaceSync.confirmPages(String(id),check,item.pages);
+    options.signal?.throwIfAborted();
+  }
+  return item;
+}
+
 function rememberArtworkDetail(item, {supersedePreview=false}={}) {
   const artworkId = String(item.id);
   if(supersedePreview)detailRefreshes.get(artworkId)?.controller.abort();
@@ -1066,7 +1077,7 @@ async function refreshArtworkPreview(rawArtworkId) {
   let task;
   task = (async () => {
     try {
-      const fresh = await fetchJson(`/api/pixiv/artwork/${artworkId}`, { signal: controller.signal }, ARTWORK_DETAIL_TIMEOUT_MS);
+      const fresh = await readArtworkDetail(artworkId,{ signal: controller.signal });
       if (
         controller.signal.aborted
         || generation !== viewGeneration
@@ -1138,7 +1149,7 @@ function installImageFallbacks(root = document) {
 }
 
 installPreviewImageRetry({root:document,allowed:()=>!contextNavigationLocked(),report:announceToast,
-  loadArtwork:id=>fetchJson(`/api/pixiv/artwork/${id}`,{},ARTWORK_DETAIL_TIMEOUT_MS)});
+  loadArtwork:id=>readArtworkDetail(id,{})});
 
 async function fetchBytes(url, { signal, cache } = {}, timeoutMs = 30000) {
   signal?.throwIfAborted();
@@ -2599,7 +2610,7 @@ async function restorePageState(state,scope) {
   searchSurface=state.searchSurface;
   const wantsNormal=state.baseView==="detail" || state.baseView==="batch" || state.workspaceReturn==="download" || state.basket;
   if(wantsNormal && state.normal){
-    const item=state.normal.item || await scope.read(signal=>fetchJson(`/api/pixiv/artwork/${state.normalId}`,{signal},ARTWORK_DETAIL_TIMEOUT_MS));
+    const item=state.normal.item || await scope.read(signal=>readArtworkDetail(state.normalId,{signal}));
     if(!state.normal.item)rememberArtworkDetail(item);
     normalDetail.artworkId=item.id;renderDetail(item,items.findIndex(row=>row.id===item.id),state.normal.context);
     normalDetail.loadedAt=state.normal.item?state.normal.loadedAt:Date.now();normalDetail.pageOffset=state.normal.offset;renderCollectionPageWindow(item);
@@ -2687,7 +2698,7 @@ async function refreshCurrentPage() {
           if(failed.has(row.id)){staleBasketPreviewIds.add(row.id);selection.remember({...row.item,thumb:""});}
         }
         if(state.basket?.mode==="detail" && selection.has(state.basket.id)){
-          const fresh=await fetchJson(`/api/pixiv/artwork/${state.basket.id}?refresh=1`,{signal:controller.signal},ARTWORK_DETAIL_TIMEOUT_MS);
+          const fresh=await readArtworkDetail(state.basket.id,{signal:controller.signal},true);
           current();rememberArtworkDetail(fresh,{supersedePreview:true});
           basketDetail.item=fresh;basketDetail.artworkId=fresh.id;basketDetail.pageOffset=state.basket.offset;
           if (!document.hidden) {
@@ -2699,7 +2710,7 @@ async function refreshCurrentPage() {
       else if(surface===window){await syncAuthStatus();renderRecentSearches();}
     }else{
       const item=normalDetail.item;
-      const fresh=await fetchJson(`/api/pixiv/artwork/${item.id}?refresh=1`,{signal:controller.signal},ARTWORK_DETAIL_TIMEOUT_MS);
+      const fresh=await readArtworkDetail(item.id,{signal:controller.signal},true);
       current();rememberArtworkDetail(fresh,{supersedePreview:true});normalDetail.item=fresh;
       refreshDetailControls(fresh,basketPageOpen());
       if(!document.hidden && !basketPageOpen())normalDetailView.restorePage(state.normal?.page || 0);
@@ -2807,8 +2818,8 @@ async function select(index,suppliedItem=null,suppliedContext=null,{restoring=fa
   $("#download").disabled = true;
 
   try {
-    if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)))) {
-      item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, ARTWORK_DETAIL_TIMEOUT_MS);
+    if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)) || workspaceSync.pageCheck(item.id))) {
+      item = await readArtworkDetail(item.id,{ signal: controller.signal });
       if (controller !== detailController || generation !== viewGeneration) return;
       rememberArtworkDetail(item);
     }
@@ -2847,7 +2858,7 @@ function currentDownloadPages(item) {
 const detailHdCache=createDetailImageCache({fetchBytes:(url,options)=>fetchBytes(url,{...options,cache:"no-store"},60000)});
 let previewSizeWrite=Promise.resolve();
 const imageViewer=createImageViewer({dialog:$("#imageViewer"),cache:detailHdCache,showDialog:showAppDialog,report:announceToast,
-  loadItem:(id,{refresh=false,...options}={})=>fetchJson(`/api/pixiv/artwork/${id}${refresh?"?refresh=1":""}`,options,ARTWORK_DETAIL_TIMEOUT_MS),
+  loadItem:(id,{refresh=false,...options}={})=>readArtworkDetail(id,options,refresh),
   sizeChanged:value=>{
     const saving=previewSizeWrite.then(()=>cloudControls.savePreferences({previewSize:value}));
     previewSizeWrite=saving.catch(error=>announceToast(error.message));
@@ -3294,7 +3305,8 @@ function openBasketArtworkPicker() {
   $("#batchCollections").innerHTML = `${navigation}${chosen.slice(start, end).map((item) => {
     const selectedPages = selection.pageCountFor(item.id);
     const selected = selectedPages > 0;
-    const selectedPagesLabel = `${selectedPages}/${item.pages} 张`;
+    const pending = workspaceSync.pageCheck(item.id)?.pages.length || 0;
+    const selectedPagesLabel = `${selectedPages}/${item.pages} 张${pending ? ` · ${pending} 张待核实` : ""}`;
     const ugoiraHover = item.workType === "ugoira" ? ` data-ugoira-preview="${esc(String(item.id))}"` : "";
     return `<article class="batch-collection ${selected ? "is-selected" : ""}" data-batch-artwork="${esc(item.id)}"><label class="batch-card-select" aria-label="${selected ? "取消选择" : "选择"} ${esc(item.title)}"><input type="checkbox" data-batch-select="${esc(item.id)}" ${selected ? "checked" : ""}><span aria-hidden="true">✓</span></label><button class="batch-card-open" type="button" data-open-collection="${esc(item.id)}" aria-label="打开 ${esc(item.title)} 的作品详情并选择图片"><span class="batch-card-cover"${ugoiraHover}><img data-gallery-src="${esc(item.thumb || "")}" data-preview-artwork="${esc(item.id)}" ${item.thumb ? "" : `data-restore-artwork="${esc(item.id)}"`} data-basket-artwork="${esc(item.id)}" alt="${esc(item.title)}" loading="lazy" decoding="async"><span class="batch-page-count" aria-hidden="true">${item.pages}P</span></span><span class="batch-card-copy"><b title="${esc(item.title)}">${esc(item.title)}</b><small title="${esc(item.artist)} · 已选 ${selectedPagesLabel}">${esc(item.artist)} · 已选 ${selectedPagesLabel}</small></span></button></article>`;
   }).join("")}`;
@@ -3348,7 +3360,7 @@ function pumpBasketThumbnails() {
       const id = image.dataset.restoreArtwork;
       const controller = new AbortController();
       basketThumbnailControllers.add(controller);
-      fetchJson(`/api/pixiv/artwork/${id}`, {signal: controller.signal}, ARTWORK_DETAIL_TIMEOUT_MS).then(fresh => {
+      readArtworkDetail(id,{signal: controller.signal}).then(fresh => {
         if (controller.signal.aborted || generation !== basketThumbnailWindow || activeScrollSurface() !== $("#basketPage") || basketReturnMode !== "picker" || !batchCandidateItems.some(item => String(item.id) === id) || String(fresh.id) !== id) return;
         rememberArtworkDetail(fresh);
         const preview=basketPreviewCache.assign("basket",image,fresh.thumb || "");
@@ -3861,9 +3873,9 @@ async function openBatchCollection(id,{restoring=false}={}) {
   const controller = detailController;
   const generation = viewGeneration;
   try {
-    if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)))) {
+    if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)) || workspaceSync.pageCheck(item.id))) {
       $("#basketTitle").textContent = "正在加载合集详情…";
-      item = await fetchJson(`/api/pixiv/artwork/${item.id}`, { signal: controller.signal }, ARTWORK_DETAIL_TIMEOUT_MS);
+      item = await readArtworkDetail(item.id,{ signal: controller.signal });
       if (controller !== detailController || generation !== viewGeneration) return;
       rememberArtworkDetail(item);
     }

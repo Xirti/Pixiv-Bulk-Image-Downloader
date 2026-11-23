@@ -18,7 +18,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
   let recentSequence = 0, recentWriter;
   const pendingRecent = [];
   let tail = Promise.resolve();
-  let observed = new Map();
+  let observed = new Map(), pageChecks = new Map();
   const edits = new Map(), controllers = new Set();
   const notify = () => onStatus({ready, loading, needsRestore, scope, revision, error: error || recentError});
 
@@ -111,6 +111,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     controllers.clear();
     edits.clear();
     observed.clear();
+    pageChecks.clear();
     pendingBasket = null;
     recentError = null;
     pendingRecent.length = 0;
@@ -185,6 +186,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
       }
       const basket = mergeEdits(data.basket || []);
       applying = true;
+      pageChecks = new Map(Object.entries(data.basketPageChecks || {}));
       applyWorkspace({...data, basket});
       onRecent(data.recent || []);
       observed = new Map(canonical(readBasket()).map(row => [row.id, row]));
@@ -298,6 +300,19 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     get needsRestore() { return needsRestore; },
     get active() { return initialized || loading || needsRestore || scope !== null || edits.size > 0; },
     changed() { if (!applying) { captureEdits(); return scheduleSave(); } return tail; },
+    pageCheck: id => pageChecks.get(String(id)),
+    confirmPages(id, check, pages) {
+      return enqueue(async token => {
+        if (!ready || pageChecks.get(id) !== check || !observed.has(id)) return;
+        await send("/api/workspace/basket/confirm-pages", {method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({scope, id, token:check.token, pages})});
+        if (token !== epoch) return;
+        // Removing the work while its detail was being confirmed also removes its disputed pages.
+        const removed = !observed.has(id) && edits.get(id);
+        if (removed) for (const page of check.pages) removed.pages.set(page, {number: sequence, checked:false});
+        if (await load(token) && edits.size) await save(token);
+      });
+    },
     restore, changeRecent,
     retry() {
       const basket = recovery || !initialized ? restore() : scheduleSave();

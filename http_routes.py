@@ -37,6 +37,7 @@ POST_ROUTES = MappingProxyType({
     '/api/library/history/clear': (4096, '_post_clear_history'),
     '/api/library/history/delete': (65536, '_post_delete_history'),
     '/api/library/history/open': (4096, '_post_open_history'),
+    '/api/workspace/basket/confirm-pages': (4096, '_post_confirm_basket_pages'),
     '/api/workspace/basket': (8388608, '_post_save_basket'),
     '/api/workspace/task': (4194304, '_post_save_task'),
     '/api/workspace/task/delete': (4096, '_post_delete_task'),
