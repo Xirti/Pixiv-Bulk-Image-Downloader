@@ -107,6 +107,10 @@ class RequestCoordinator:
             pass
         except (OSError, ValueError, OverflowError):
             logging.getLogger("moku.http").warning("Request settings could not be restored; using safe mode")
+        if shared is not None:
+            shared.set_mode(self._mode)
+            remaining = shared.restore_cooldown(max(0, self._cooldown - time.monotonic()))
+            self._cooldown = time.monotonic() + remaining
         if self._cooldown > time.monotonic():
             self._backoff = 1
             self._last_failure = time.monotonic()
@@ -116,9 +120,6 @@ class RequestCoordinator:
             _, interval, jitter = self.PROFILES[self._mode][lane]
             self._refill_interval[lane] = interval + jitter / 2
         self._credits = {lane: self._capacity(lane) for lane in self._credits}
-        if shared is not None:
-            shared.set_mode(self._mode)
-            shared.restore_cooldown(max(0, self._cooldown - time.monotonic()))
 
     def _save_locked(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,13 +289,23 @@ class RequestCoordinator:
         lane = "image" if image_only else "api"
         profile_lane = "download" if image_only and priority_value(priority) == 1 else lane
         if self._shared is not None:
-            with self._condition:
-                value = priority_value(priority)
-                self._check_state(value)
-                _, interval, jitter = self.PROFILES[self._mode][profile_lane]
-                delay = self._rhythm.interval(self._mode, lane, value, time.monotonic(), interval, jitter, activity)
-                backoff = self._backoff
-            self._shared.before_send(image_only, lambda: self._check_shared_state(check, priority), priority=priority, delay=delay, backoff=backoff)
+            previous = None
+            delay = 0.0
+
+            def pacing():
+                nonlocal previous, delay
+                with self._condition:
+                    value = priority_value(priority)
+                    self._check_state(value)
+                    current = self._mode, value, self._backoff
+                    if current != previous:
+                        _, interval, jitter = self.PROFILES[self._mode][profile_lane]
+                        delay = self._rhythm.interval(self._mode, lane, value, time.monotonic(), interval, jitter, activity)
+                        previous = current
+                    return delay, self._backoff
+
+            self._shared.before_send(image_only, lambda: self._check_shared_state(check, priority),
+                                     priority=priority, pacing=pacing)
             with self._condition:
                 self._requests += 1
             return
@@ -331,6 +342,11 @@ class RequestCoordinator:
                 queue.remove(ticket)
                 self._condition.notify_all()
 
+    def _slot_limit(self, lane):
+        maximum, _, _ = self.PROFILES[self._mode][lane]
+        maximum = max(1, maximum // (2 ** self._backoff))
+        return min(maximum, self._feedback.width) if lane == "download" else maximum
+
     @contextmanager
     def slot(self, image_only: bool, check, *, download: bool = False, priority: int | ReadPriority = 0):
         lane = "download" if image_only and download else "image" if image_only else "api"
@@ -350,11 +366,7 @@ class RequestCoordinator:
                     now = time.monotonic()
                     if now >= deadline:
                         raise RequestDeferredError("request_queue", 2)
-                    maximum, _, _ = self.PROFILES[self._mode][lane]
-                    if self._backoff:
-                        maximum = max(1, maximum // (2 ** self._backoff))
-                    if lane == "download":
-                        maximum = min(maximum, self._feedback.width)
+                    maximum = self._slot_limit(lane)
                     if self._first(queue, now) is ticket and self._active[lane] < maximum:
                         queue.remove(ticket)
                         self._active[lane] += 1
@@ -371,7 +383,12 @@ class RequestCoordinator:
             if self._shared is None:
                 yield
             else:
-                with self._shared.slot(lane, lambda: self._check_shared_state(check, priority), priority=priority, maximum=maximum):
+                def current_maximum():
+                    with self._condition:
+                        return self._slot_limit(lane)
+
+                with self._shared.slot(lane, lambda: self._check_shared_state(check, priority),
+                                       priority=priority, maximum=current_maximum):
                     yield
         finally:
             with self._condition:

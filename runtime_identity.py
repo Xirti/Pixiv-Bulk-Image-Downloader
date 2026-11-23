@@ -7,6 +7,7 @@ from ctypes import wintypes
 from functools import cache
 import hashlib
 import sys
+import time
 from pathlib import Path
 
 
@@ -48,6 +49,27 @@ def process_identity(pid: int) -> int | None:
         return (created.dwHighDateTime << 32) | created.dwLowDateTime
     finally:
         api.CloseHandle(handle)
+
+
+@cache
+def windows_boot() -> tuple[str | None, int]:
+    """Return Windows' boot counter, when available, and a FILETIME bound."""
+    import winreg
+
+    uptime = _process_kernel().GetTickCount64
+    uptime.argtypes = []
+    uptime.restype = ctypes.c_ulonglong
+    # Sample wall time first, so a scheduling delay makes this bound earlier.
+    now = time.time_ns()
+    ticks = uptime()
+    before_boot = now // 100 + 116_444_736_000_000_000 - ticks * 10_000 - 10_000_000
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters") as key:
+            boot, kind = winreg.QueryValueEx(key, "BootId")
+    except OSError:
+        return None, before_boot
+    return (str(boot) if kind == winreg.REG_DWORD else None), before_boot
 
 
 @contextmanager

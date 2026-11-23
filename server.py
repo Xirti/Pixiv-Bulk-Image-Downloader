@@ -1252,7 +1252,7 @@ def pixiv_request(
     attempts: int = 2, cancel_event: threading.Event | None = None,
     output: BinaryIO | None = None, max_duration: float | None = None,
     download: bool = False,
-    archive: bool = False,
+    archive: bool = False, queue_deadline: float | None = None,
 ) -> tuple[bytes, str]:
     """Read small responses in memory, or stream to a seekable caller-owned file."""
     if not is_allowed_pixiv_url(url, image_only=image_only):
@@ -1270,6 +1270,11 @@ def pixiv_request(
         raise_if_search_cancelled(cancel_event)
         if "Cookie" in request_headers and authorization_generation() != epoch:
             raise AuthorizationRevokedError("Pixiv 账户状态已变更，请重新发起请求")
+
+    def check_queue():
+        check_request()
+        if queue_deadline is not None and time.monotonic() >= queue_deadline:
+            raise RequestDeferredError("request_queue", 2)
 
     def block_response(kind):
         with SEARCH_SESSION_LOCKS_GUARD:
@@ -1292,7 +1297,7 @@ def pixiv_request(
 
         def before_send():
             nonlocal sample
-            REQUEST_COORDINATOR.before_send(image_only, check_request, priority=priority, activity=activity)
+            REQUEST_COORDINATOR.before_send(image_only, check_queue, priority=priority, activity=activity)
             if track_download:
                 sample = REQUEST_COORDINATOR.start_download_sample(opener, archive=archive)
 
@@ -1307,7 +1312,7 @@ def pixiv_request(
             opener, proxy = PIXIV_OPENER, PIXIV_PROXY
         started = time.monotonic()
         try:
-            with REQUEST_COORDINATOR.slot(image_only, check_request, download=download, priority=priority):
+            with REQUEST_COORDINATOR.slot(image_only, check_queue, download=download, priority=priority):
                 deadline = time.monotonic() + (max_duration if max_duration is not None else request_timeout)
                 request._moku_deadline = deadline
                 if output is not None:
@@ -1527,7 +1532,7 @@ def _run_network_diagnostic_check(target: tuple[str, str, bool]) -> dict:
     try:
         raw, content_type = pixiv_request(
             url, image_only=image_only, max_bytes=1024 * 1024,
-            anonymous=True, timeout=7, attempts=1,
+            anonymous=True, timeout=7, attempts=1, queue_deadline=started + 5,
         )
         return {
             "name": name, "ok": True, "contentType": content_type,

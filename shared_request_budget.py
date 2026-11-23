@@ -1,6 +1,7 @@
 """Per-user Pixiv admission, pacing and cooldown shared by MOKU editions."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 import math
@@ -12,7 +13,13 @@ import time
 import uuid
 
 from pixiv_adapter import PixivPolicyError
-from runtime_identity import process_identity
+from runtime_identity import process_identity, windows_boot
+
+
+SLOT_WAIT_SECONDS = 15
+SEND_WAIT_SECONDS = 30
+# A safe download's longest rest (4.7 seconds) with maximum backoff is 18.8 s.
+MAX_LOCAL_PACING_SECONDS = 20
 
 
 class RequestDeferredError(PixivPolicyError):
@@ -57,7 +64,10 @@ class SharedRequestBudget:
     def __init__(self, path: Path | None = None):
         directory = os.environ.get("MOKU_SHARED_NETWORK_DIR")
         self.path = path or ((Path(directory) if directory else Path(os.environ["LOCALAPPDATA"]) / "MOKU-Shared") / "network.sqlite3")
-        self.owner = uuid.uuid4().hex
+        self._boot, self._before_boot = windows_boot()
+        # Previous releases also share this database and treat owner IDs as opaque.
+        identifier = uuid.uuid4().hex
+        self.owner = f"boot:{self._boot}:{identifier}" if self._boot is not None else identifier
         self.pid = os.getpid()
         self.created = process_identity(self.pid)
         self._mode = "safe"
@@ -107,6 +117,9 @@ class SharedRequestBudget:
                         next_send REAL NOT NULL, burst_after REAL NOT NULL, refill REAL NOT NULL);
                     CREATE TABLE IF NOT EXISTS policy (
                         id INTEGER PRIMARY KEY CHECK(id=1), cooldown REAL NOT NULL, limits INTEGER NOT NULL);
+                    CREATE TABLE IF NOT EXISTS cooldown_clock (
+                        id INTEGER PRIMARY KEY CHECK(id=1), boot TEXT NOT NULL,
+                        wall_deadline REAL NOT NULL, limits INTEGER NOT NULL, deadline REAL NOT NULL);
                     INSERT OR IGNORE INTO policy VALUES(1,0,0);
                     PRAGMA user_version=1;
                 """)
@@ -138,8 +151,17 @@ class SharedRequestBudget:
                     owners = connection.execute("SELECT id,pid,created FROM owners").fetchall()
                     # Native liveness queries run outside the write transaction.
                     for owner, pid, created in owners:
+                        recorded_boot = owner.split(":", 2)[1] if owner.startswith("boot:") else None
+                        if self._boot is not None and recorded_boot is not None and recorded_boot != self._boot:
+                            dead.append(owner)
+                            continue
                         identity = process_identity(pid)
-                        if identity is None or (identity != -1 and identity != created):
+                        if identity == -1:
+                            # Legacy IDs cannot prove which boot created them.
+                            # Retain ambiguous claims; old FILETIMEs prove PID reuse.
+                            if (recorded_boot is None or self._boot is None) and 0 < created < self._before_boot:
+                                dead.append(owner)
+                        elif identity is None or identity != created:
                             dead.append(owner)
                     self._gc_at = now + .5
                 connection.execute("BEGIN IMMEDIATE")
@@ -180,24 +202,51 @@ class SharedRequestBudget:
                 connection.execute("UPDATE owners SET mode=? WHERE id=?", (mode, self.owner))
             self._mode = mode
 
+    def _cooldown(self, connection):
+        wall_deadline, limits, boot_deadline = connection.execute("""
+            SELECT p.cooldown, p.limits, c.deadline
+            FROM policy AS p LEFT JOIN cooldown_clock AS c
+                ON p.id=c.id AND c.boot=? AND c.wall_deadline=p.cooldown AND c.limits=p.limits
+            WHERE p.id=1
+        """, (self._boot,)).fetchone()
+        # A reboot or a write by an older edition falls back to the wall clock.
+        if boot_deadline is None:
+            return max(0.0, wall_deadline - time.time()), limits, False
+        return max(0.0, boot_deadline - time.monotonic()), limits, True
+
+    def _save_cooldown(self, connection, seconds, limits):
+        wall_deadline = time.time() + seconds
+        connection.execute("UPDATE policy SET cooldown=?,limits=? WHERE id=1", (wall_deadline, limits))
+        if self._boot is not None:
+            connection.execute("INSERT OR REPLACE INTO cooldown_clock VALUES(1,?,?,?,?)",
+                               (self._boot, wall_deadline, limits, time.monotonic() + seconds))
+
     def snapshot(self) -> dict:
         with self._transaction() as connection:
-            cooldown, limits = connection.execute("SELECT cooldown,limits FROM policy WHERE id=1").fetchone()
+            cooldown, limits, _ = self._cooldown(connection)
             active, queued = connection.execute("SELECT COALESCE(SUM(running),0),COUNT(*)-COALESCE(SUM(running),0) FROM tickets WHERE kind='slot'").fetchone()
-        return {"cooldownSeconds": max(0, math.ceil(cooldown - time.time())), "active": active, "queued": queued, "rateLimits": limits}
+        return {"cooldownSeconds": math.ceil(cooldown), "active": active, "queued": queued, "rateLimits": limits}
 
-    def restore_cooldown(self, seconds: float):
-        if seconds > 0:
-            with self._transaction() as connection:
-                connection.execute("UPDATE policy SET cooldown=MAX(cooldown,?) WHERE id=1", (time.time() + seconds,))
+    def restore_cooldown(self, seconds: float) -> float:
+        with self._transaction() as connection:
+            remaining, limits, current_boot = self._cooldown(connection)
+            # Treat the settings file as an older copy once SQLite owns the
+            # cooldown for this boot, even if that cooldown has already elapsed.
+            if not current_boot:
+                remaining = max(remaining, seconds)
+                if remaining:
+                    self._save_cooldown(connection, remaining, limits)
+            return remaining
 
     def limit(self, seconds: float | None) -> RequestDeferredError:
         with self._transaction() as connection:
-            count = connection.execute("SELECT limits FROM policy WHERE id=1").fetchone()[0] + 1
-            delay = max(1, seconds if seconds is not None else min(600, 60 * 2 ** min(count - 1, 4)))
-            connection.execute("UPDATE policy SET cooldown=MAX(cooldown,?),limits=? WHERE id=1", (time.time() + delay, count))
-            remaining = connection.execute("SELECT cooldown FROM policy WHERE id=1").fetchone()[0] - time.time()
-            connection.execute("UPDATE lanes SET credits=0,updated=?,next_send=MAX(next_send,?),burst_after=MAX(burst_after,?)", (time.monotonic()+remaining,time.monotonic()+remaining,time.monotonic()+remaining))
+            remaining, limits, _ = self._cooldown(connection)
+            delay = seconds if seconds is not None else min(600, 60 * 2 ** min(limits, 4))
+            remaining = max(remaining, delay, 1)
+            self._save_cooldown(connection, remaining, limits + 1)
+            deadline = time.monotonic() + remaining
+            connection.execute("UPDATE lanes SET credits=0,updated=?,next_send=MAX(next_send,?),burst_after=MAX(burst_after,?)",
+                               (deadline, deadline, deadline))
         return RequestDeferredError("upstream_rate_limit", remaining)
 
     @contextmanager
@@ -219,7 +268,7 @@ class SharedRequestBudget:
                 pass
 
     def _turn(self, connection, token, kind, lane):
-        cooldown = connection.execute("SELECT cooldown FROM policy WHERE id=1").fetchone()[0] - time.time()
+        cooldown, _, _ = self._cooldown(connection)
         if cooldown > 0:
             raise RequestDeferredError("upstream_rate_limit", cooldown)
         safe = connection.execute("SELECT 1 FROM owners JOIN tickets ON owners.id=tickets.owner WHERE owners.mode='safe' LIMIT 1").fetchone() is not None
@@ -227,14 +276,18 @@ class SharedRequestBudget:
         return first is not None and first[0] == token, safe
 
     @contextmanager
-    def slot(self, lane: str, check, *, priority: int | ReadPriority = 0, maximum: int = 2):
-        deadline = time.monotonic() + 15
+    def slot(self, lane: str, check, *, priority: int | ReadPriority = 0,
+             maximum: int | Callable[[], int] = 2):
+        deadline = time.monotonic() + SLOT_WAIT_SECONDS
         queued_priority = priority_value(priority)
         with self._ticket("slot", lane, queued_priority, check) as token:
             while True:
                 check()
                 if time.monotonic() >= deadline:
                     raise RequestDeferredError("request_queue", 2)
+                # The coordinator can publish its mode while holding its lock
+                # and opening a database transaction. Read its state first.
+                current_maximum = maximum() if callable(maximum) else maximum
                 with self._transaction(check) as connection:
                     value = priority_value(priority)
                     if value != queued_priority:
@@ -247,7 +300,7 @@ class SharedRequestBudget:
                         ordinary = connection.execute("SELECT 1 FROM tickets JOIN owners ON tickets.owner=owners.id WHERE tickets.kind='slot' AND tickets.lane=? AND owners.mode!='fast' LIMIT 1", (lane,)).fetchone() is not None
                         if not ordinary:
                             shared_maximum = 4
-                    admitted = first and active < min(maximum, shared_maximum)
+                    admitted = first and active < min(current_maximum, shared_maximum)
                     if admitted:
                         connection.execute("UPDATE tickets SET running=1 WHERE id=?", (token,))
                 if admitted:
@@ -255,12 +308,16 @@ class SharedRequestBudget:
                 time.sleep(.05)
             yield
 
-    def before_send(self, image_only: bool, check, *, priority=0, delay=.275, backoff=0):
+    def before_send(self, image_only: bool, check, *, priority=0, delay=.275, backoff=0, pacing=None):
         lane = "image" if image_only else "api"
+        deadline = time.monotonic() + SEND_WAIT_SECONDS
         queued_priority = priority_value(priority)
         with self._ticket("send", lane, queued_priority, check) as token:
             while True:
                 check()
+                if time.monotonic() >= deadline:
+                    raise RequestDeferredError("request_queue", 2)
+                current_delay, current_backoff = pacing() if pacing else (delay, backoff)
                 with self._transaction(check) as connection:
                     value = priority_value(priority)
                     if value != queued_priority:
@@ -270,16 +327,28 @@ class SharedRequestBudget:
                     if safe and value >= 2:
                         raise RequestDeferredError("background_paused", 1)
                     now = time.monotonic()
-                    interval = max(delay, (1.5 if lane == "api" else .35) if safe else 0) * (2 ** backoff)
-                    capacity = 1 if safe or backoff else 4 if image_only else 2
+                    interval = max(current_delay, (1.5 if lane == "api" else .35) if safe else 0) * (2 ** current_backoff)
+                    capacity = 1 if safe or current_backoff else 4 if image_only else 2
                     connection.execute("INSERT OR IGNORE INTO lanes VALUES(?,1,?,0,0,?)", (lane,now,interval))
                     credits, updated, next_send, burst_after, refill = connection.execute("SELECT credits,updated,next_send,burst_after,refill FROM lanes WHERE name=?", (lane,)).fetchone()
+                    # _turn has already enforced Pixiv's persisted wall-clock cooldown.
+                    # Waiting clients can replace refill without changing the
+                    # last sender's deadline, so use the full local pacing range.
+                    maximum_debt = max(MAX_LOCAL_PACING_SECONDS, interval, refill)
+                    valid_refill = math.isfinite(refill) and refill > 0
+                    if not valid_refill or updated > now or max(next_send, burst_after) > now + maximum_debt:
+                        credits, updated, refill = 0, now, interval
+                        next_send = burst_after = now + interval
                     credits = min(capacity, credits + max(0,now-updated)/max(interval,refill))
-                    burst = not safe and not backoff and value == 0
+                    burst = not safe and not current_backoff and value == 0
                     admitted = first and credits >= 1 and now >= (burst_after if burst else next_send)
-                    connection.execute("UPDATE lanes SET credits=?,updated=?,refill=? WHERE name=?", (credits,now,interval,lane))
                     if admitted:
-                        connection.execute("UPDATE lanes SET credits=credits-1,next_send=?,burst_after=? WHERE name=?", (now+interval, now+(.025 if image_only else .04),lane))
+                        credits -= 1
+                        next_send = now + interval
+                        burst_after = now + (.025 if image_only else .04)
+                        refill = interval
+                    connection.execute("UPDATE lanes SET credits=?,updated=?,next_send=?,burst_after=?,refill=? WHERE name=?",
+                                       (credits, now, next_send, burst_after, refill, lane))
                 if admitted:
                     return
                 time.sleep(.05)

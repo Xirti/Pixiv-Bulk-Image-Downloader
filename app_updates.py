@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,7 @@ from version import __version__
 from edition_profile import PROJECT_REPOSITORY
 
 REPOSITORY=PROJECT_REPOSITORY
+CHECK_INTERVAL_SECONDS = 86400
 LOG=logging.getLogger("moku.updates")
 
 
@@ -90,9 +92,18 @@ class AppUpdates:
         self.bundle=None;self.timer_stop=threading.Event();self.last_attempt=0;self.allow_restart=False
         self.attempt_path=self.path.with_suffix(".last-check")
         self.trust_path=self.path.with_suffix(".trust-state.json")
-        if self.attempt_path.exists():
-            try:self.last_attempt=float(self.attempt_path.read_text(encoding="ascii"))
-            except (OSError,ValueError) as exc:LOG.warning("update check timestamp could not be read: %s",exc)
+        self.next_check = time.monotonic()
+        try:
+            stamp = float(self.attempt_path.read_text(encoding="ascii"))
+            now = time.time()
+            if not math.isfinite(stamp) or not 0 <= stamp <= now:
+                raise ValueError("update check timestamp outside elapsed wall time")
+            self.last_attempt = stamp
+            self.next_check += max(0, CHECK_INTERVAL_SECONDS - (now - stamp))
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            LOG.warning("update check timestamp could not be read: %s", exc)
 
     @staticmethod
     def validate_options(raw):
@@ -180,7 +191,9 @@ class AppUpdates:
         job=None
         try:
             if action=="check":
-                self.last_attempt=time.time()
+                with self.lock:
+                    self.last_attempt = time.time()
+                    self.next_check = time.monotonic() + CHECK_INTERVAL_SECONDS
                 self.path.parent.mkdir(parents=True,exist_ok=True)
                 self.attempt_path.write_text(str(self.last_attempt),encoding="ascii")
                 endpoint="/releases/latest" if channel=="stable" else "/releases?per_page=100"
@@ -274,7 +287,9 @@ class AppUpdates:
     def start_scheduler(self):
         def schedule():
             while not self.timer_stop.wait(30):
-                with self.lock:due=self.options["automatic"] and time.time()-self.last_attempt>=86400 and self.state["phase"] not in {"checking","downloading","verifying","ready","restarting"}
+                with self.lock:
+                    due = (self.options["automatic"] and time.monotonic() >= self.next_check
+                           and self.state["phase"] not in {"checking","downloading","verifying","ready","restarting"})
                 if due:
                     try:self.start("check")
                     except UpdateError:pass  # A foreground operation acquired it first.
