@@ -74,20 +74,20 @@ from browser_profile import load_browser_profile
 from shared_request_budget import SharedRequestBudget, priority_value
 from network_config import normalize_loopback_proxy
 from network_transport import PooledOpener, classify_network_error
-from pixiv_adapter import PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status, valid_pixiv_id
+from pixiv_adapter import ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status, valid_pixiv_id
 from search_service import SearchDateRange, SearchResultIndex, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
 
 from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 from artist_service import ArtistService
 from account_pages import AccountPages, ACCOUNT_CACHE_ONLY, source_body
-from pixiv_adapter import bookmark_count, validate_detail_policy, CONTENT_MODES, RESTRICTED_CONTENT, matches_content_mode
+from pixiv_adapter import bookmark_count, validate_web_artwork, CONTENT_MODES, RESTRICTED_CONTENT, matches_content_mode
 from discovery_service import DiscoveryService, DiscoveryInputError, FilteredDiscoveryPage
 from popularity_service import PopularityService
 from account_authorization import AccountAuthorization
 from pixiv_account import AccountError, ACCOUNT_REQUEST_CHECK
 from auth_method import AuthMethod
-from pixiv_app_gallery import AppGallery, normalize_work
+from pixiv_app_gallery import AppGallery, number as app_number, validate_app_artwork
 from cloud_state import CloudState, ScanConflictError, validate_preferences
 from cloud_actions import CloudActions, CloudActionError, validate_target, validate_intent
 from web_cloud import WebCloudTransport, WebDisplaySettings
@@ -579,6 +579,7 @@ class ArtworkDetail:
     authorization_epoch: int | None = None
     browsing_generation: int = 0
     expires_at: float = 0.0
+    publication: tuple[_DetailPublication, int] | None = None
 
     def check_download(self) -> None:
         with SEARCH_SESSION_LOCKS_GUARD:
@@ -588,34 +589,42 @@ class ArtworkDetail:
             if pending:
                 raise AccountError("settings_pending", "浏览设置正在核对，请稍后下载。")
             assert_authorization_generation(self.authorization_epoch)
+            if self.publication is not None:
+                owner, revision = self.publication
+                owner.check_visible(revision)
 
 
 @dataclass
 class _DetailPublication:
-    active: int = 0
     last_started: int = 0
     published: int = 0
+    last_denial: int = 0
+
+    def check_visible(self, revision: int):
+        if revision < self.last_denial:
+            raise ArtworkVisibilityError("作品可见性已更新，请重新打开作品")
 
 
-_DETAIL_PUBLICATIONS: dict[str, _DetailPublication] = {}
+# Readers and detail snapshots keep their publication alive, including after LRU eviction.
+_DETAIL_PUBLICATIONS = weakref.WeakValueDictionary()
 
 
-@contextmanager
-def _track_detail_publication(artwork_id: str):
-    # Keep the most recent successful publication until all older reads exit,
-    # including when the published entry is evicted from the detail cache.
+def _claim_detail_publication(artwork_id: str):
     with PIXIV_STATE_LOCK:
-        publication = _DETAIL_PUBLICATIONS.setdefault(artwork_id, _DetailPublication())
-        publication.active += 1
-        publication.last_started += 1
-        revision = publication.last_started
-    try:
-        yield publication, revision
-    finally:
-        with PIXIV_STATE_LOCK:
-            publication.active -= 1
-            if not publication.active:
-                del _DETAIL_PUBLICATIONS[artwork_id]
+        owner = _DETAIL_PUBLICATIONS.setdefault(artwork_id, _DetailPublication())
+        owner.last_started += 1
+        return owner, owner.last_started
+
+
+def _withdraw_detail(artwork_id: str, publication: tuple[_DetailPublication, int]):
+    owner, revision = publication
+    with PIXIV_STATE_LOCK:
+        if revision < owner.published:
+            return
+        owner.published = owner.last_denial = revision
+        PIXIV_CACHE.pop(artwork_id, None)
+        for token in [token for token, row in IMAGE_TOKENS.items() if row[1] == artwork_id]:
+            del IMAGE_TOKENS[token]
 
 
 def cache_pixiv_item(
@@ -626,7 +635,8 @@ def cache_pixiv_item(
     artwork_id = str(item.get("id") or "")
     if not artwork_id.isdigit():
         raise PixivPolicyError("无效作品 ID")
-    detail = ArtworkDetail(item, download_urls, authorization_epoch, browsing_generation, time.monotonic() + 3600)
+    detail = ArtworkDetail(item, download_urls, authorization_epoch, browsing_generation,
+                           time.monotonic() + 3600, publication)
     with PIXIV_STATE_LOCK:
         if publication is not None:
             owner, revision = publication
@@ -701,7 +711,7 @@ def pixiv_item_for_download(
     ):
         if cached.get("restriction") in RESTRICTED_CONTENT:
             if not allow_r18:
-                raise PixivPolicyError("restricted artwork")
+                raise ArtworkRatingError("restricted artwork")
             if authorization_epoch is None:
                 raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新发起下载")
             assert_authorization_generation(authorization_epoch)
@@ -1835,20 +1845,21 @@ def popularity_bookmark_metadata(identifier, mode, generation):
     if AUTH_METHOD.get()=="app":
         raw=ACCOUNTS.account().request("GET","/v1/illust/detail?"+urllib.parse.urlencode({"illust_id":identifier,"filter":"for_android"}),
             check=lambda:ACCOUNTS.check(generation))
-        body=normalize_work(raw.get("illust"),allow_r18=mode!="safe",require_bookmarks=False)
-        if body["id"]!=identifier:
-            raise AccountError("invalid_data","收藏数摘要的作品身份不符")
-        if not matches_content_mode(body["restriction"],mode):
-            raise AccountError("source_changed","作品分级已变化，请刷新当前列表")
-        return {"bookmarks":body["bookmarks"]}
-    body=source_body(pixiv_json(f"https://www.pixiv.net/ajax/illust/{identifier}?lang=zh"))
-    if str(body.get("id"))!=identifier:
-        raise AccountError("invalid_data","收藏数摘要的作品身份不符")
-    restriction=validate_detail_policy(body,allow_r18=mode!="safe")
-    if not matches_content_mode(restriction,mode):
-        raise AccountError("source_changed","作品分级已变化，请刷新当前列表")
+        body = raw.get("illust")
+        if not isinstance(body, dict) or str(body.get("id")) != identifier:
+            raise AccountError("invalid_data", "收藏数摘要的作品身份不符")
+        restriction = validate_app_artwork(body, allow_r18=mode != "safe")
+        count = app_number(body, "total_bookmarks", optional=True)
+    else:
+        body = source_body(pixiv_json(f"https://www.pixiv.net/ajax/illust/{identifier}?lang=zh"))
+        if str(body.get("id")) != identifier:
+            raise AccountError("invalid_data", "收藏数摘要的作品身份不符")
+        restriction = validate_web_artwork(body, allow_r18=mode != "safe", detail=True)
+        count = bookmark_count(body)
+    if not matches_content_mode(restriction, mode):
+        raise ArtworkRatingError("作品分级已变化，请刷新当前列表")
     ACCOUNTS.check(generation)
-    return {"bookmarks":bookmark_count(body)}
+    return {"bookmarks": count}
 
 def popularity_search_metadata(job, generation, cancel_event):
     ACCOUNTS.check(generation)
@@ -2511,15 +2522,11 @@ def search_artwork_result(
             cancel_event=network_cancel_event,
             require_thumb=True,
         )
-    except PixivPolicyError as exc:
-        if scope != "safe" or str(exc) != "restricted artwork":
-            raise
+    except ArtworkRatingError:
         item = None
     raise_if_search_cancelled(cancel_event)
 
-    matches = item is not None
-    if matches and scope != "all" and item.get("restriction") != scope:
-        matches = False
+    matches = item is not None and matches_content_mode(item.get("restriction"), scope)
     if matches and work_type != "all" and item.get("workType") != work_type:
         matches = False
     if matches and not include_ai and bool(item.get("aiGenerated")):
@@ -2885,12 +2892,19 @@ def _read_pixiv_detail(
         key += (object(),)
 
     def load(event):
-        with _track_detail_publication(artwork_id) as publication:
+        publication = _claim_detail_publication(artwork_id)
+        try:
             return _fetch_pixiv_detail(
                 artwork_id, allow_r18, method=method, generation=generation,
                 browsing=browsing, authorization_epoch=authorization_epoch,
                 cancel_event=event, network_timeout=timeout, publication=publication,
             )
+        except ArtworkVisibilityError:
+            with SEARCH_SESSION_LOCKS_GUARD:
+                assert_read_current(event, generation)
+                if browsing == BROWSING_GENERATION:
+                    _withdraw_detail(artwork_id, publication)
+            raise
 
     try:
         item = DETAIL_RESOURCES.get(key, load, ttl=0, cancel_event=cancel_event,
@@ -2926,11 +2940,13 @@ def _fetch_pixiv_detail(
         pages_url = f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages?lang=zh"
         detail = pixiv_json(detail_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or {}
         assert_read_current(cancel_event, generation)
-        pages = pixiv_json(pages_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or []
-        normalized = normalize_detail(detail, pages, allow_r18=allow_r18)
+        if not isinstance(detail, dict) or str(detail.get("illustId") or detail.get("id")) != artwork_id:
+            raise PixivPolicyError("Pixiv 返回的作品 ID 不匹配")
+        normalized = normalize_detail(
+            detail, lambda: pixiv_json(pages_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or [],
+            allow_r18=allow_r18,
+        )
     raise_if_search_cancelled(cancel_event)
-    if normalized.get("id") != artwork_id:
-        raise PixivPolicyError("Pixiv 返回的作品 ID 不匹配")
     restricted = normalized.get("restriction") in RESTRICTED_CONTENT
     if restricted and authorization_epoch is None:
         raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新打开作品")
@@ -2948,6 +2964,8 @@ def _fetch_pixiv_detail(
         assert_read_current(cancel_event, generation, epoch)
         if browsing != BROWSING_GENERATION:
             raise AccountError("content_changed", "浏览设置已更新，请重新打开作品")
+        owner, revision = publication
+        owner.check_visible(revision)
         item = authorize_item_images(normalized, authorization_epoch=epoch, account_bound=method == "app")
         try:
             raise_if_search_cancelled(cancel_event)
@@ -3078,6 +3096,8 @@ PIXIV_OPERATION_ERRORS = (
 
 
 def pixiv_error_payload(action: str, exc: Exception, *, saving: bool = False) -> dict:
+    if isinstance(exc, ArtworkVisibilityError):
+        return {"error": str(exc), "errorKind": "artwork_visibility"}
     payload = {"error": public_pixiv_error(action, exc, saving=saving)}
     if isinstance(exc, RequestDeferredError):
         payload.update(errorKind=exc.kind, retryAfterSeconds=exc.retry_after)
@@ -3465,7 +3485,7 @@ class Handler(SimpleHTTPRequestHandler):
             if before_send is not None:
                 before_send()
             try:
-                if code == 502 and obj.get("errorKind") in {"verification_required", "authentication_required", "access_denied"}:
+                if code == 502 and obj.get("errorKind") in {"verification_required", "authentication_required", "access_denied", "artwork_visibility"}:
                     code = 403
                 self.send_response(code)
                 if obj.get("errorKind") == "upstream_rate_limit":

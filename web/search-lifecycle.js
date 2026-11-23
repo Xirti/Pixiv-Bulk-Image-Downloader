@@ -112,6 +112,7 @@ globalThis.createSearchLifecycle = function ({cancelRequest, pages}) {
   return {
     begin, cancel, finish, reset, beginSort, cancelSort, prefetch, cancelPrefetch,
     get active() { return active?.task || null; },
+    get paging() { return active?.task.page != null ? active.task : sorting?.task; },
     get sorting() { return Boolean(sorting); },
   };
 };

@@ -10,7 +10,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from pixiv_adapter import (PixivPolicyError, valid_pixiv_id, is_allowed_pixiv_url,
+from pixiv_adapter import (ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, valid_pixiv_id, is_allowed_pixiv_url,
     small_full_preview_url, publication_date, publication_timestamp, matches_tag_groups,
     CONTENT_RESTRICTIONS, CONTENT_MODES, matches_content_mode)
 from search_service import (SearchInputError, SearchResultIndex, parse_search_query,
@@ -33,12 +33,21 @@ def number(raw, key, *, minimum=0, optional=False):
     return value
 
 
-def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True):
-    if not isinstance(raw, dict) or raw.get("visible") is not True:
-        raise PixivPolicyError("App 作品当前不可见")
+def validate_app_artwork(raw, allow_r18=False):
+    if not isinstance(raw, dict) or type(raw.get("visible")) is not bool:
+        raise PixivPolicyError("App 作品可见性数据无效")
+    if not raw["visible"] or number(raw, "restrict") != 0 or raw.get("is_muted") is True:
+        raise ArtworkVisibilityError("App 作品当前不可见，请在 Pixiv 官网确认访问权限")
     restriction = number(raw, "x_restrict")
-    if number(raw,"restrict") != 0 or restriction not in (CONTENT_RESTRICTIONS if allow_r18 else {0}) or raw.get("is_muted") is True:
-        raise PixivPolicyError("App 作品不在当前内容范围")
+    if restriction not in CONTENT_RESTRICTIONS:
+        raise PixivPolicyError("App 作品分级无效")
+    if restriction != 0 and not allow_r18:
+        raise ArtworkRatingError("App 作品不在当前内容范围")
+    return CONTENT_RESTRICTIONS[restriction]
+
+
+def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True):
+    restriction = validate_app_artwork(raw, allow_r18)
     uid, artist = raw.get("user"), None
     if isinstance(uid, dict):
         artist = str(uid.get("id", ""))
@@ -65,7 +74,7 @@ def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True
     ai = raw.get("illust_ai_type")
     if type(ai) is not int or ai not in {0,1,2}:
         raise PixivPolicyError("App AI 标记异常")
-    item = {"id": identifier, "source": "pixiv", "restriction": CONTENT_RESTRICTIONS[restriction],
+    item = {"id": identifier, "source": "pixiv", "restriction": restriction,
         "title": str(raw.get("title") or "未命名作品"), "artist": str(uid.get("name") or "未知画师"), "userId": artist,
         "pages": count, "width": width, "height": height, "tags": list(dict.fromkeys(translated)),
         "date": publication_date(raw.get("create_date")), "sortDate": publication_timestamp(raw.get("create_date")),
@@ -182,10 +191,10 @@ class AppGallery:
 
     def detail(self, identifier, *, generation, allow_r18=False, cancel_event=None):
         raw = self.get('/v1/illust/detail?'+urlencode({'illust_id':identifier,'filter':'for_android'}),generation,cancel_event)
-        item = normalize_work(raw.get('illust'),allow_r18=allow_r18,detail=True)
-        if item['id'] != identifier:
-            raise PixivPolicyError('App 返回的作品 ID 不匹配')
-        return item
+        item = raw.get("illust")
+        if not isinstance(item, dict) or str(item.get("id")) != identifier:
+            raise PixivPolicyError("App 返回的作品 ID 不匹配")
+        return normalize_work(item, allow_r18=allow_r18, detail=True)
 
     def ugoira(self,identifier,*,generation,cancel_event=None):
         raw=self.get('/v1/ugoira/metadata?'+urlencode({'illust_id':identifier}),generation,cancel_event)
@@ -273,8 +282,16 @@ class AppGallery:
             if len(candidates)!=1:raise SearchInputError('请先选择具体作者')
             query=parse_search_query('uid:'+candidates[0]['userId'])
         if query.kind=='pid':
-            item=self.detail(query.value,generation=generation,allow_r18=scope!='safe',cancel_event=cancel_event)
-            rows=[item] if matches_content_mode(item['restriction'],scope) and (include_ai or not item['aiGenerated']) and (work_type=='all' or item['workType']==work_type) and (not dates or dates.contains(item['date'])) else []
+            rows = []
+            try:
+                item = self.detail(query.value, generation=generation, allow_r18=scope != "safe", cancel_event=cancel_event)
+            except ArtworkRatingError:
+                pass
+            else:
+                if (matches_content_mode(item["restriction"], scope) and (include_ai or not item["aiGenerated"])
+                        and (work_type == "all" or item["workType"] == work_type)
+                        and (not dates or dates.contains(item["date"]))):
+                    rows.append(item)
             return {'items':rows if page==1 else [],'page':page,'total':len(rows),'perPage':36,'hasMore':False,'availablePages':[1],'preloadedThrough':1,'snapshotId':snapshot_id,'tag':tag}
         key=(generation,query,scope,work_type,include_ai,groups,dates,snapshot_id)
         with self.lock:

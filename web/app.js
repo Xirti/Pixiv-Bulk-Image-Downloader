@@ -1498,6 +1498,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
   if(order==="popular")requestedFilters.order="popular";
   const keepGrid = previousView.hadCommittedResults && cleanTag === activeTagQuery
     && JSON.stringify(requestedFilters) === JSON.stringify(activeSearchFilters);
+  task.page = keepGrid ? page : null;
   let committed = false;
 
   searchPending = true;
@@ -1514,6 +1515,8 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     galleryInteraction.clear();
     grid.innerHTML = '<p class="loading-state">正在连接 Pixiv，可随时继续操作页面…</p>';
     $("#pagination").innerHTML = "";
+  } else {
+    renderPagination();
   }
   $("#count").textContent = `正在加载第 ${page} 页${keepGrid ? " · 当前仍显示上一页" : ""}`;
 
@@ -1572,6 +1575,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     }
     if(!data)data=await task.read(requestId, signal => fetchJson(`/api/pixiv/search?${query}`, {signal}, 90000));
     if (task !== searchLifecycle.active) return;
+    task.page = null;
 
     rememberSearch(cleanTag, requestedFilters);
     activeTagQuery = resultTag;
@@ -1612,6 +1616,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     void refreshDownloadedIndicators();
     committed = true;
   } catch (error) {
+    if (task === searchLifecycle.active) task.page = null;
     if (task.signal.aborted) {
       if (task === searchLifecycle.active) {
         artistPage.restore(previousView.artist);
@@ -1641,8 +1646,11 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
       renderPagination();
       $("#count").textContent = `第 ${page} 页加载失败：${error.message || "连接未完成"} · 仍显示第 ${currentPage} 页，可再次翻页重试`;
     } else {
-      grid.innerHTML = `<div class="error-state"><b>加载失败</b><p>${esc(error.message || "Pixiv 搜索失败")}</p><button id="retrySearch" type="button">重试当前搜索</button></div>`;
-      $("#count").textContent = "连接未完成";
+      const visibilityDenied = error.errorKind === "artwork_visibility";
+      const title = visibilityDenied ? "作品无法显示" : "加载失败";
+      const retry = visibilityDenied ? "" : '<button id="retrySearch" type="button">重试当前搜索</button>';
+      grid.innerHTML = `<div class="error-state"><b>${title}</b><p>${esc(error.message || "Pixiv 搜索失败")}</p>${retry}</div>`;
+      $("#count").textContent = visibilityDenied ? title : "连接未完成";
     }
     $("#retrySearch")?.addEventListener("click", () => search(cleanTag, page, requestedFilters, requestedSnapshotId,{order,preferenceKind:galleryPreferenceKind}));
   } finally {
@@ -1955,6 +1963,10 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
   galleryStopRequested=false;
   const account=lastKnownAuthorizationGeneration,uid=activeSearchContext.value,filters={...activeSearchFilters};
   const author=activeSearchContext.kind==="uid",key=gallerySortKey();
+  if (resultSelectionEnabled && filters.order === "popular") {
+    task.page = page;
+    renderPagination();
+  }
   if(refresh)galleryPopularityJobs.set(key,{index:"",refresh:true});
   const queued=restoring?null:galleryPopularityJobs.get(key);
   let requestedIndex=queued?queued.index:filters.popularityIndex || "";
@@ -1980,6 +1992,7 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
       result=await readPopularityPage(requestAccount,{...parameters,index:"",refresh:"1"},events);
     }
     if(!task.isCurrent() || account!==lastKnownAuthorizationGeneration)return false;
+    task.page = null;
     if(!restoring)galleryPopularityJobs.delete(key);
     searchGeneration++;
     items=result.items;currentPage=result.page;pageNumbers=[1,result.pages];firstAvailablePage=1;preloadedThrough=result.pages;
@@ -1992,7 +2005,12 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
   }catch(error){
     if(!task.signal.aborted && task.isCurrent())setGallerySort(activeSearchFilters.order==="popular"?"popular":"default",`${error.message} · 点击滑块右侧重试`);
     return false;
-  }finally{if(task.finish())syncSearchSortControl();}
+  } finally {
+    if (task.finish()) {
+      if (task.page != null) renderPagination();
+      syncSearchSortControl();
+    }
+  }
 }
 
 async function openLinkedSearch(tag,returnTarget,options={}){
@@ -2020,6 +2038,7 @@ async function startGalleryLoad({restoring=false,refresh=false}={}){
     const wanted=galleryDraftOrder;galleryStopRequested=true;
     artistPage.suspend();
     cancelGalleryPopularity();cancelActiveSearch();galleryDraftOrder=wanted;
+    if (!searchPending) renderPagination();
     syncSearchSortControl();return;
   }
   if(contextNavigationLocked() && !restoring)return;
@@ -2248,18 +2267,19 @@ async function refreshDownloadedIndicators() {
 
 function renderPagination() {
   const pagination = $("#pagination");
-  const canLoadNext = currentPage < preloadedThrough || searchHasMore;
-  const incomplete = currentPageNeedsMoreResults();
-  const nextPage = incomplete ? currentPage : currentPage + 1;
-  const nextLabel = incomplete ? "继续加载当前页" : (currentPage < preloadedThrough ? "下一页" : "继续加载下一页");
+  const targetPage = searchLifecycle.paging?.page ?? currentPage;
+  const canLoadNext = targetPage < preloadedThrough || (targetPage === currentPage && searchHasMore);
+  const incomplete = targetPage === currentPage && currentPageNeedsMoreResults();
+  const nextPage = incomplete ? currentPage : targetPage + 1;
+  const nextLabel = incomplete ? "继续加载当前页" : (targetPage < preloadedThrough ? "下一页" : "继续加载下一页");
   // Cache residency is not a navigation boundary: evicted pages can be reloaded.
-  const lastPage = Math.max(currentPage, preloadedThrough, ...pageNumbers.filter(Number.isInteger));
-  const visiblePages = new Set([1, lastPage]);
-  for (let number = Math.max(1, currentPage - 2); number <= Math.min(lastPage, currentPage + 2); number += 1) visiblePages.add(number);
+  const lastPage = Math.max(targetPage, currentPage, preloadedThrough, ...pageNumbers.filter(Number.isInteger));
+  const visiblePages = new Set([1, currentPage, lastPage]);
+  for (let number = Math.max(1, targetPage - 2); number <= Math.min(lastPage, targetPage + 2); number += 1) visiblePages.add(number);
   const navigationPages = [...visiblePages].sort((a, b) => a - b).flatMap((number, index, pages) => (
     index && number > pages[index - 1] + 1 ? [null, number] : [number]
   ));
-  pagination.innerHTML = `<button ${currentPage <= 1 ? "disabled" : ""} data-page="${currentPage - 1}" aria-label="上一页">←</button>${navigationPages.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" ${incomplete && number > currentPage ? "disabled" : ""} data-page="${number}">${number}</button>`).join("")}<button ${canLoadNext ? "" : "disabled"} data-page="${nextPage}" aria-label="${nextLabel}">${incomplete ? "继续加载本页" : "→"}</button>`;
+  pagination.innerHTML = `<button ${targetPage <= 1 ? "disabled" : ""} data-page="${targetPage - 1}" aria-label="上一页">←</button>${navigationPages.map((number) => number === null ? '<span class="page-gap">…</span>' : `<button class="${number === currentPage ? "active" : ""}" ${incomplete && number > currentPage ? "disabled" : ""} data-page="${number}">${number}</button>`).join("")}<button ${canLoadNext ? "" : "disabled"} data-page="${nextPage}" aria-label="${nextLabel}">${incomplete ? "继续加载本页" : "→"}</button>`;
   pagination.querySelectorAll("button:not([disabled])").forEach((button) => {
     button.onclick = () => {
       navigateToPage(Number(button.dataset.page));
@@ -3805,8 +3825,28 @@ function selectionWouldBeEvicted(targetPage) {
 
 function navigateToPage(page) {
   if (selection.locked) return;
-  if(activeSearchFilters.order==="popular"){checkpointNavigation();void loadGalleryPopularity(page);scrollToResults();return;}
-  if (page > currentPage && currentPageNeedsMoreResults()) page = currentPage;
+  const popular = activeSearchFilters.order === "popular";
+  const incomplete = currentPageNeedsMoreResults();
+  if (!popular && page > currentPage && incomplete) page = currentPage;
+  const active = searchLifecycle.paging;
+  if (active?.page != null && !active.signal.aborted) {
+    if (active.page === page) return;
+    if (page === currentPage && !incomplete) {
+      if (popular) {
+        cancelGalleryPopularity();
+        renderPagination();
+      } else {
+        cancelActiveSearch();
+      }
+      return;
+    }
+  }
+  if (popular) {
+    checkpointNavigation();
+    void loadGalleryPopularity(page);
+    scrollToResults();
+    return;
+  }
   if (selectionWouldBeEvicted(page)) {
     openCapacityDialog(page);
     return;
@@ -3822,8 +3862,7 @@ function archiveAndContinue() {
   $("#capacityDialog")?.close();
   if (page !== null) {
     announceToast(`已将当前 ${detached} 个作品放入采集篮；继续翻页不会下载原图`);
-    search(activeTagQuery, page, { ...activeSearchFilters }, activeSearchSnapshotId, {continuePage:page===currentPage && currentPageNeedsMoreResults(),preferenceKind:galleryPreferenceKind});
-    scrollToResults();
+    navigateToPage(page);
   }
 }
 
@@ -3832,10 +3871,7 @@ function clearAndContinue() {
   pendingNavigationPage = null;
   clearSelection(unarchivedSelectionIds());
   $("#capacityDialog")?.close();
-  if (page !== null) {
-    search(activeTagQuery, page, { ...activeSearchFilters }, activeSearchSnapshotId, {continuePage:page===currentPage && currentPageNeedsMoreResults(),preferenceKind:galleryPreferenceKind});
-    scrollToResults();
-  }
+  if (page !== null) navigateToPage(page);
 }
 
 function cancelCapacityDecision() {

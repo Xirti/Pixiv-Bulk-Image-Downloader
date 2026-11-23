@@ -14,11 +14,11 @@ from discovery_service import recommendation_size
 from urllib.error import HTTPError
 
 from pixiv_account import AccountError
-from pixiv_adapter import (PixivPolicyError, valid_pixiv_id, normalize_search_item,
+from pixiv_adapter import (ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, valid_pixiv_id, normalize_search_item,
     build_user_profile_all_url, build_user_profile_works_url,CONTENT_MODES,matches_content_mode)
 from pixiv_app_gallery import normalize_work, continuation
 from search_service import SearchInputError, parse_search_date_range, parse_search_query, parse_search_tags
-from request_coordinator import checked_lock
+from request_coordinator import RequestBlockedError, checked_lock
 
 CARD_FIELDS = ("id", "source", "userId", "title", "artist", "thumb", "width", "height", "pages",
                "bookmarks", "date", "sortDate", "workType", "restriction", "aiGenerated", "rank", "rankKind")
@@ -280,6 +280,7 @@ class PopularityService:
                     candidates = (index for index in range(job["enrichOffset"], total) if job["items"][index].get("bookmarks") is None)
                 cursor = next(candidates, None)
                 changes = []
+                unavailable_positions = set()
                 job.setdefault("retryOffset", -1)
                 try:
                     while cursor is not None and reads < 3 and time.monotonic() < deadline:
@@ -287,21 +288,24 @@ class PopularityService:
                         item = job["items"][cursor]
                         try:
                             count = self.detail(item["id"], job["mode"], generation).get("bookmarks")
-                        except HTTPError as error:
-                            if error.code not in (404, 410):
+                        except (ArtworkVisibilityError, ArtworkRatingError, HTTPError, AccountError, RequestBlockedError) as error:
+                            unavailable = (
+                                isinstance(error, (ArtworkVisibilityError, ArtworkRatingError))
+                                or isinstance(error, HTTPError) and error.code in (404, 410)
+                                or isinstance(error, (AccountError, RequestBlockedError)) and error.kind == "not_found"
+                            )
+                            if not unavailable:
                                 raise
-                            count = None
-                        except AccountError as error:
-                            if error.kind != "not_found":
-                                raise
-                            count = None
-                        if type(count) is not int or count < 0:
-                            missing.add(cursor)
-                            count = None
-                        else:
-                            job["items"][cursor] = {**item, "bookmarks": count}
+                            unavailable_positions.add(cursor)
                             missing.discard(cursor)
-                        changes.append((cursor, count))
+                        else:
+                            if type(count) is not int or count < 0:
+                                missing.add(cursor)
+                                count = None
+                            else:
+                                job["items"][cursor] = {**item, "bookmarks": count}
+                                missing.discard(cursor)
+                            changes.append((cursor, count))
                         if retrying:
                             job["retryOffset"] = cursor
                         else:
@@ -313,11 +317,19 @@ class PopularityService:
                         job["retryOffset"] = -1
                         blocked = bool(missing)
                 finally:
-                    if changes:
+                    if unavailable_positions:
+                        # Ordinal checkpoints refer to the old rows. Compact once and save a new base.
+                        job["items"] = [item for index, item in enumerate(job["items"]) if index not in unavailable_positions]
+                        total = len(job["items"])
+                        missing = {index - sum(removed < index for removed in unavailable_positions) for index in missing}
+                        job["enrichOffset"] -= sum(removed < job["enrichOffset"] for removed in unavailable_positions)
+                        job["retryOffset"] -= sum(removed <= job["retryOffset"] for removed in unavailable_positions)
+                    if changes or unavailable_positions:
                         job["missingOffsets"] = sorted(missing)
-                        self._check(generation, epoch)
-                        rowid = self._save(owner, method, job, epoch, generation, rowid, revision,
-                            check_cancel=check_cancel, changes=changes)
+                        if cursor is not None or missing:
+                            self._check(generation, epoch)
+                            rowid = self._save(owner, method, job, epoch, generation, rowid, revision,
+                                check_cancel=check_cancel, changes=None if unavailable_positions else changes)
                 if cursor is None and not missing:
                     job["items"].sort(key=lambda item: (item["bookmarks"], item.get("sortDate", ""), int(item["id"])), reverse=True)
                     job["ready"] = True

@@ -4,6 +4,7 @@ import html
 import re
 import urllib.parse
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -11,6 +12,14 @@ from typing import Any
 
 class PixivPolicyError(ValueError):
     pass
+
+
+class ArtworkVisibilityError(PixivPolicyError):
+    """The source explicitly marks this artwork unavailable to this view."""
+
+
+class ArtworkRatingError(PixivPolicyError):
+    """The artwork's rating is outside the current content filter."""
 
 
 # The legacy allow_r18 argument authorizes adult ratings. Exact R-18 / R-18G
@@ -85,26 +94,25 @@ def resolve_web_path(root: Path, request_path: str) -> Path:
     return candidate
 
 
-def validate_public_policy(raw: dict[str, Any], detail: bool = False) -> None:
+def validate_web_artwork(raw: dict[str, Any], allow_r18: bool = False, *, detail: bool = False) -> str:
     if not isinstance(raw, dict):
         raise PixivPolicyError("invalid artwork data")
-    required = ["xRestrict", "isUnlisted"] + (["isLoginOnly"] if detail else [])
+    required = ("xRestrict", "isUnlisted", "isLoginOnly") if detail else ("xRestrict", "isUnlisted")
     if any(field not in raw for field in required):
         raise PixivPolicyError("missing public policy field")
-    if _integer_field(raw, "xRestrict", -1) != 0 or bool(raw["isUnlisted"]):
-        raise PixivPolicyError("restricted artwork")
-    if detail and (bool(raw.get("isMasked", False)) or _integer_field(raw, "visibilityScope") != 0 or bool(raw["isLoginOnly"])):
-        raise PixivPolicyError("non-public artwork")
-
-
-def validate_detail_policy(raw: dict[str, Any], allow_r18: bool = False) -> str:
-    if not isinstance(raw, dict):
-        raise PixivPolicyError("invalid artwork data")
-    required = ["xRestrict", "isUnlisted", "isLoginOnly"]
-    if any(field not in raw for field in required): raise PixivPolicyError("missing public policy field")
-    restriction = _integer_field(raw, "xRestrict", -1)
-    if restriction not in (CONTENT_RESTRICTIONS if allow_r18 else {0}) or bool(raw["isUnlisted"]): raise PixivPolicyError("restricted artwork")
-    if bool(raw.get("isMasked", False)) or _integer_field(raw, "visibilityScope") != 0 or bool(raw["isLoginOnly"]): raise PixivPolicyError("non-public artwork")
+    restriction = _integer_field(raw, "xRestrict")
+    if restriction not in CONTENT_RESTRICTIONS:
+        raise PixivPolicyError("invalid xRestrict")
+    if restriction != 0 and not allow_r18:
+        raise ArtworkRatingError("restricted artwork")
+    if raw["isUnlisted"]:
+        raise ArtworkVisibilityError("该作品未公开列出，请使用原链接在 Pixiv 官网查看")
+    if raw.get("isMasked"):
+        raise ArtworkVisibilityError("Pixiv 只返回了作品的遮罩内容，请在官网确认当前账号能否查看")
+    if _integer_field(raw, "visibilityScope") != 0:
+        raise ArtworkVisibilityError("该作品的公开范围受限，请在 Pixiv 官网确认当前账号能否查看")
+    if raw.get("isLoginOnly"):
+        raise ArtworkVisibilityError("该作品仅对登录用户开放，请在 Pixiv 官网登录后查看")
     return CONTENT_RESTRICTIONS[restriction]
 
 
@@ -166,25 +174,7 @@ def artwork_classification(raw: dict[str, Any]) -> tuple[str, bool]:
 
 
 def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise PixivPolicyError("invalid artwork data")
-    restriction = _integer_field(raw, "xRestrict", -1)
-    if restriction == 0:
-        validate_public_policy(raw, detail=False)
-    elif restriction in {1, 2} and allow_r18:
-        # R-18 search rows use the same explicit publication-policy contract as
-        # safe rows. Treat an omitted flag as unknown instead of assuming that
-        # the work is public.
-        if "isUnlisted" not in raw:
-            raise PixivPolicyError("missing public policy field")
-        if bool(raw["isUnlisted"]):
-            raise PixivPolicyError("restricted artwork")
-    else:
-        raise PixivPolicyError("restricted artwork")
-    if raw.get("isMasked"):
-        raise PixivPolicyError("masked artwork is not available")
-    if _integer_field(raw, "visibilityScope") != 0:
-        raise PixivPolicyError("non-public artwork is not available")
+    restriction = validate_web_artwork(raw, allow_r18)
     artwork_id = str(raw.get("id") or "")
     if not valid_pixiv_id(artwork_id):
         raise PixivPolicyError("invalid artwork id")
@@ -208,7 +198,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
     work_type, ai_generated = artwork_classification(raw)
     return {
         "id": artwork_id,
-        "restriction": CONTENT_RESTRICTIONS[restriction],
+        "restriction": restriction,
         "source": "pixiv",
         "title": str(raw.get("title") or "未命名作品"),
         "artist": str(raw.get("userName") or "未知画师"),
@@ -330,11 +320,17 @@ def valid_pixiv_id(value: str) -> bool:
     return 1 <= len(value) <= 30 and value.isascii() and value.isdigit()
 
 
-def normalize_detail(raw: dict[str, Any], pages: list[dict[str, Any]], allow_r18: bool = False) -> dict[str, Any]:
-    restriction = validate_detail_policy(raw, allow_r18=allow_r18)
+def normalize_detail(
+    raw: dict[str, Any],
+    pages: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]],
+    allow_r18: bool = False,
+) -> dict[str, Any]:
+    restriction = validate_web_artwork(raw, allow_r18, detail=True)
     artwork_id = str(raw.get("illustId") or raw.get("id") or "")
     if not valid_pixiv_id(artwork_id):
         raise PixivPolicyError("invalid artwork id")
+    if callable(pages):
+        pages = pages()
     if (not isinstance(pages, list) or not pages
             or any(not isinstance(page, dict) or not isinstance(page.get("urls") or {}, dict) for page in pages)):
         # Page positions are download identities. Reject the whole malformed
