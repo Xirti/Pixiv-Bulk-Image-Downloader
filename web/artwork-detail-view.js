@@ -1,17 +1,14 @@
 "use strict";
 
 // Each renderer shares its own detail state with page navigation.
-globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, installImages, stage = null, detail = {item: null}, openOfficial = null, noticeBefore = null, isDownloaded = () => false}) {
+globalThis.createArtworkDetailView = function ({fields, escape, stage = null, detail = {item: null}, openOfficial = null, noticeBefore = null}) {
   const actions=document.createElement("div");actions.className="cloud-detail-actions";
   fields.Tags.after(actions);
-  const notice=document.createElement("p"),message=document.createElement("span");
+  const notice=document.createElement("p");
   notice.className="artwork-encouragement";
   notice.classList.toggle("single-only",fields.Tags.classList.contains("single-only"));
   notice.hidden=true;
   if(noticeBefore)noticeBefore.before(notice);else actions.after(notice);
-  function refreshDownloadStatus(){
-    message.textContent=detail.item && isDownloaded(detail.item)?"👍 下载成功，快去给画师点赞评论吧！":"👍 喜欢的话就去给画师点赞评论吧！";
-  }
   let foldFrame=null;
   function measureFolds(){
     if(foldFrame!==null)return;
@@ -46,9 +43,9 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
     detail.item=item;actions.innerHTML=cloudActionButton("bookmark",item.id,true)+(item.userId?cloudActionButton("follow",item.userId,true):"");
     const official=document.createElement("a");official.className="artwork-source-link";
     official.href=`https://www.pixiv.net/artworks/${item.id}`;official.target="_blank";official.rel="noopener noreferrer";
-    official.dataset.copyLink="";official.textContent=official.href;official.title=official.href;
+    official.dataset.copyLink="";official.textContent="Pixiv 原页 ↗";official.title=official.href;
     official.onclick=event=>{if(!event.button && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey)openOfficial?.(item.id,event);};
-    notice.replaceChildren(message,official);notice.hidden=false;refreshDownloadStatus();
+    notice.replaceChildren(official);notice.hidden=false;
     fields.Title.textContent = item.title;
     fields.WorkType.hidden = item.workType !== "ugoira";
     fields.Desc.textContent = item.description;
@@ -64,6 +61,6 @@ globalThis.createArtworkDetailView = function ({deck, hint, fields, escape, inst
     measureFolds();
     return stage.render(item, {preserve});
   }
-  return {render, reset, refreshDownloadStatus, snapshot:()=>({item:detail.item,stagePage:stage.state().page}), suspend: () => stage?.suspend(), setVisible: value => stage?.setVisible(value), clear: () => {detail.item=null;actions.replaceChildren();notice.hidden=true;notice.replaceChildren();stage.clear();},
+  return {render, reset, snapshot:()=>({item:detail.item,stagePage:stage.state().page}), suspend: () => stage?.suspend(), setVisible: value => stage?.setVisible(value), clear: () => {detail.item=null;actions.replaceChildren();notice.hidden=true;notice.replaceChildren();stage.clear();},
     restorePage:index=>stage?.restorePage(index), state:()=>stage?.state() || {page:0}};
 };

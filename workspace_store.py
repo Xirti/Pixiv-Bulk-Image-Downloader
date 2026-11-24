@@ -163,7 +163,7 @@ def normalize_task(value: dict) -> dict:
             "firstSaved": str(value.get("firstSaved") or "")[:32768], "status": "paused"}
 
 
-def _visible_basket(rows: list, scope: str) -> list[dict]:
+def _visible_basket(rows: list, scope: str, checks: dict | None = None) -> list[dict]:
     public = {row["id"]: row for owner, row in rows if owner == "public"}
     visible = {}
     for owner, row in rows:
@@ -173,11 +173,19 @@ def _visible_basket(rows: list, scope: str) -> list[dict]:
         if owner == "public" or shared is None:
             visible.setdefault(row["id"], row)
             continue
-        # A formerly restricted work may now be in the shared basket.
-        # Keep this account's choices and origin, using its newer public metadata.
+        # Use the shared metadata for display. A shorter summary cannot
+        # confirm that this account's extra choices no longer exist.
         pages = sorted(set(row["pages"]) | set(shared["pages"]))
+        count = shared["item"]["pages"]
+        hidden = [page for page in row["pages"] if page >= count]
+        if checks is not None and hidden:
+            prior = checks.get(row["id"])
+            pending = sorted(set(hidden) | set(prior["pages"] if prior else ()))
+            check_input = (scope, row["id"], count, pending, prior["token"] if prior else None)
+            token = hashlib.sha256(json.dumps(check_input).encode()).hexdigest()[:32]
+            checks[row["id"]] = {"token": token, "pages": pending}
         visible[row["id"]] = {**row, "item": shared["item"],
-                              "pages": [page for page in pages if page < shared["item"]["pages"]],
+                              "pages": [page for page in pages if page < count],
                               "archived": row.get("archived", True) or shared.get("archived", True)}
     return list(visible.values())
 
@@ -193,11 +201,13 @@ def _preserve_basket_ownership(rows: list, previous: list, scope: str) -> list:
             continue
         # Public metadata must not promote this account's existing private choices.
         selected, private_pages = set(row["pages"]), set(private["pages"])
-        kept_private = sorted(selected & private_pages)
-        if kept_private:
-            result.append((scope, {**row, "pages": kept_private, "context": private["context"],
-                                   "resultPage": private["resultPage"]}))
         shared = public.get(row["id"])
+        hidden = {page for page in private_pages if shared and page >= shared["item"]["pages"]}
+        kept_private = sorted((selected & private_pages) | hidden)
+        if kept_private:
+            metadata = private["item"] if hidden else row["item"]
+            result.append((scope, {**row, "item": metadata, "pages": kept_private, "context": private["context"],
+                                   "resultPage": private["resultPage"]}))
         shared_pages = set(shared["pages"]) if shared else set()
         kept_public = sorted((selected - private_pages) | (selected & shared_pages))
         if kept_public:
@@ -349,14 +359,18 @@ class WorkspaceStore:
                 row = connection.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
                 if row:
                     result["revision"] = row[0]
-                    result["basket"] = _visible_basket(json.loads(row[1]), scope)
-                    checks = {artwork: {"token": token, "pages": json.loads(pages)} for artwork, token, pages in
-                              connection.execute("SELECT artwork,token,pages FROM basket_page_checks WHERE scope=?", (scope,))}
+                    checks = self._stored_page_checks(connection, scope)
+                    result["basket"] = _visible_basket(json.loads(row[1]), scope, checks)
                     if checks:
                         result["basketPageChecks"] = checks
                 result["tasks"] = [self._expand_task(connection,json.loads(row[0])) for row in connection.execute("SELECT payload FROM tasks WHERE scope=? ORDER BY rowid", (scope,))]
                 result["recent"] = self._visible_recent(self._read_recent(connection), scope)
         return result
+
+    @staticmethod
+    def _stored_page_checks(db, scope):
+        return {artwork: {"token": token, "pages": json.loads(pages)} for artwork, token, pages in
+                db.execute("SELECT artwork,token,pages FROM basket_page_checks WHERE scope=?", (scope,))}
 
     @staticmethod
     def _read_recent(connection):
@@ -497,6 +511,9 @@ class WorkspaceStore:
             if any(sum(len(row["pages"]) for row in _visible_basket(normalized, owner)) > 1000 for owner in scopes):
                 raise WorkspaceCapacityError("共享采集篮容量不足，请减少公开作品的选择后重试")
             connection.execute("INSERT OR REPLACE INTO basket VALUES (1,?,?)", (revision + 1, json.dumps(normalized, ensure_ascii=False)))
+            obsolete_checks = self._stored_page_checks(connection, scope).keys() - ids
+            connection.executemany("DELETE FROM basket_page_checks WHERE scope=? AND artwork=?",
+                                   ((scope, artwork) for artwork in obsolete_checks))
             if request_id is not None:
                 connection.execute("INSERT INTO basket_receipts VALUES (?,?,?,?)",
                                    (request_id, scope, revision + 1, fingerprint))
@@ -507,13 +524,17 @@ class WorkspaceStore:
         artwork, token = _id(artwork), _request_id(token)
         count = _integer(count, 1, 1000001)
         with self._write(scope) as db:
-            check = db.execute("SELECT pages FROM basket_page_checks WHERE scope=? AND artwork=? AND token=?",
-                               (scope, artwork, token)).fetchone()
-            if not check:
+            saved = db.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
+            if not saved:
                 return
-            revision, payload = db.execute("SELECT revision,payload FROM basket WHERE singleton=1").fetchone()
+            revision, payload = saved
             entries = json.loads(payload)
-            pending = {page for page in json.loads(check[0]) if page < count}
+            checks = self._stored_page_checks(db, scope)
+            _visible_basket(entries, scope, checks)
+            check = checks.get(artwork)
+            if check is None or check["token"] != token:
+                return
+            pending = {page for page in check["pages"] if page < count}
             updated = []
             shared = None
             for owner, row in entries:

@@ -131,22 +131,23 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     root.querySelector('[data-discovery-ranks]').hidden=state.kind!=='ranking';
     root.querySelectorAll('[data-discovery-rank]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.discoveryRank===state.rank)));
     root.querySelector('[data-discovery-mode]').value=state.mode;root.querySelector('[data-discovery-mode]').hidden=state.kind==='ranking';
-    message.textContent=error || (state.waiting?'选择排序后点击开始加载':pending?'正在准备作品…':!signedIn()?'请在我的账号登录后查看发现。':data?.unavailable?`${data.unavailable} 件未在当前范围展示`:'');
+    message.textContent=error || (pending?'正在加载…':!signedIn()?'登录 Pixiv 后查看发现':'');
     message.classList.toggle('is-error',Boolean(error));
     const edition=root.querySelector('[data-discovery-edition]');
     const date=data?.edition;
-    edition.textContent=state.kind==='ranking'?(date?`${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`:'站方未注明榜次日期 · 数字为来源序位'):'';
+    edition.textContent=state.kind==='ranking' && date?`${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`:'';
     if(data?.created)edition.title=`最近检查 ${new Date(data.created*1000).toLocaleString()}`;
     update.hidden=!staged.has(sourceKey(state));
     update.disabled=pending || sorting || Boolean(settingsRetry);
     sortControl.hidden=state.kind==='following' && !settingsRetry;
     setPopularitySort(sortControl,state.choice || state.order || 'default',state.kind==='ranking'?'官方排序':'推荐顺序');
     setPopularityLoad(sortControl,true,pending || sorting,browse.buttonVisible(),Boolean(data) && !state.waiting && state.choice===state.order);
-    root.querySelector('[data-discovery-sort-status]').textContent=sorting?sortProgress:state.order==='popular' && data?.total!=null?`${state.kind==='ranking'?'完整榜次':'本次推荐'} · ${data.total} 件 · 按收藏数`:'';
+    root.querySelector('[data-discovery-sort-status]').textContent=sorting?sortProgress:'';
 
     if(rendered!==data){
       interaction.reset({immediate:true});previews.park(grid);rendered=data;
-      grid.innerHTML=data?.items.length?renderArtworkCards(data.items,{escape:esc,selected}):`<p class="account-empty">${pending?'正在读取作品…':signedIn()?'当前范围没有可展示的作品。':'登录后可浏览推荐、关注新作与榜单。'}</p>`;
+      grid.innerHTML=data?.items.length?renderArtworkCards(data.items,{escape:esc,selected}):
+        data?'<p class="account-empty">没有符合条件的作品</p>':'';
       previews.mount(grid,pageKey(state));installImages(grid);attachUgoira(grid);interaction.mount(data?.items || []);
       grid.querySelectorAll('[data-select]').forEach(box=>box.onchange=()=>{const item=data.items[Number(box.dataset.select)];if(!choose(item,box.checked,{context:{kind:'pid',value:item.id},resultPage:state.page}))box.checked=selected(item.id);});
     }

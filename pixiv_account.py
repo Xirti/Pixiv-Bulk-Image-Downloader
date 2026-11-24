@@ -354,6 +354,7 @@ class AppAccount:
                     self._refresh_error = str(error) if isinstance(error, AccountError) else "刷新暂时失败，请稍后重试"
                     if isinstance(error, AccountError) and error.kind == "reauth":
                         self._reauth_required = True
+                        self._epoch += 1
                     if not force and tokens.expires > self.clock() and not (isinstance(error, AccountError) and error.kind == "reauth"):
                         return tokens, epoch
                 raise
@@ -384,6 +385,7 @@ class AppAccount:
                 if self._tokens is not tokens:
                     raise AccountError("unconfirmed", "会话已更新，请核对本次操作结果后再试")
                 self._reauth_required=True
+                self._epoch += 1
                 self._refresh_error="Pixiv 登录已失效，请重新授权"
             raise AccountError("reauth","Pixiv 登录已失效，请重新授权")
 

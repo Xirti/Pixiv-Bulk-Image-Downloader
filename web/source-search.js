@@ -418,7 +418,7 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
       viewReceipt=state?.epoch===cacheEpoch && (originalReceipt || originalTask)?lastReceipt:null;
       job=viewReceipt?.result || (state?.epoch===cacheEpoch?state.job:null);imageUrl=expired?"":savedImage;
       const image=find("[data-source-input-image]");image.hidden=!imageUrl;if(imageUrl)image.src=imageUrl;else image.removeAttribute("src");
-      find("[data-source-file-name]").textContent=state?.name || "选择、拖入或粘贴图片";
+      find("[data-source-file-name]").textContent=state?.name || "";
       busy=Boolean(viewReceipt?.pending || viewReceipt?.taskId && viewReceipt.unconfirmed
         || job && ["queued","searching","verification"].includes(job.state));render();
       const status=viewReceipt?.error || (viewReceipt?.pending?

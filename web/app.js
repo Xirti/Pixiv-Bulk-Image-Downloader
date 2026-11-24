@@ -54,6 +54,7 @@ let resumableBatchTask = null;
 let resumableSingleTask = null;
 let activeDownload = null;
 let lastKnownLoggedIn = null;
+let lastKnownAuthState = "unauthenticated";
 let lastKnownAuthorizationGeneration = null;
 let lastKnownBrowsingGeneration = null;
 let lastKnownBrowsingPolicyStatus = "ready";
@@ -203,11 +204,9 @@ document.documentElement.classList.add("conservative");
 
 const searchInput = $("#tag");
 const searchKind = $("#searchKind");
-const searchHelp = $("#searchHelp");
-const tagSearchHelp = searchHelp.textContent;
 const searchPrefixPattern = /^\s*(pid|uid|author)\s*[:：]\s*/i;
 const searchPlaceholders = {
-  tags: "输入标签，多个标签用 ; 分隔",
+  tags: "标签用 ; 分隔",
   pid: "输入作品 ID",
   uid: "输入画师 ID",
   author: "输入画师名称",
@@ -222,9 +221,6 @@ function syncSearchKind() {
   }
   syncHomeSortControl();
   searchInput.placeholder = searchPlaceholders[kind];
-  searchHelp.textContent = kind === "tags" ? tagSearchHelp
-    : kind === "author" ? "按画师名称寻找作品；也可以直接输入 author:画师名。"
-    : `填写 Pixiv 的纯数字${kind === "pid" ? "作品" : "画师"} ID；也可以直接粘贴带 ${kind}: 前缀的内容。`;
 }
 
 searchKind.onchange = () => {
@@ -960,9 +956,8 @@ function scheduleSearchPrefetch(tag, page, filters, generation, ahead = 1, inten
         preloadedThrough = Math.max(Number(data.preloadedThrough) || page, Number(data.page) || page);
         searchHasMore = Boolean(data.hasMore);
         renderPagination();
-        renderCacheStatus();
       } catch (error) {
-        if (task.isCurrent()) $("#cacheStatus").textContent = "下一页暂未准备完成，翻页时重试。";
+        if (task.isCurrent()) console.debug("下一页预加载未完成", error);
       }
     },
   });
@@ -1260,7 +1255,6 @@ function clearDetail(message = "选择一件作品查看详情") {
   $("#deck").innerHTML = "";
   $("#collectionPages").innerHTML = "";
   $("#collectionPageMore").hidden = true;
-  $("#deckHint").textContent = "点击搜索结果后加载作品详情";
   $("#quality").innerHTML = "";
   $("#format").innerHTML = "";
   $("#qualityText").textContent = "";
@@ -1379,7 +1373,6 @@ function updateSelectionBar() {
     : `当前页 ${items.length} 个作品`;
   $("#clearSelection").disabled = count === 0;
   if (document.body.classList.contains("batch-mode")) updateBatchDetailSummary();
-  renderCacheStatus();
   updateFloatingChrome();
   syncSearchScopedControls();
 }
@@ -1393,12 +1386,6 @@ function showSelectionLimitDialog(attemptedPages = 1) {
   $("#selectionLimitText").textContent = `采集篮最多保存 ${MAX_SELECTED_PAGES} 张图片的下载选择。当前还可加入 ${remaining} 张，本次尝试新增 ${attemptedPages} 张。请先取消部分图片。`;
   const dialog = $("#selectionLimitDialog");
   if (dialog?.showModal && !dialog.open) showAppDialog(dialog);
-}
-
-function renderCacheStatus() {
-  const status = $("#cacheStatus");
-  if (!status) return;
-  status.textContent = `第 ${currentPage} 页 · 采集篮 ${selection.size} 个作品、${selectedPageCount()}/${MAX_SELECTED_PAGES} 张已选。旧页可以返回重新加载。`;
 }
 
 function unarchivedSelectionIds() {
@@ -1521,7 +1508,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
   } else {
     renderPagination();
   }
-  $("#count").textContent = `正在加载第 ${page} 页${keepGrid ? " · 当前仍显示上一页" : ""}`;
+  $("#count").textContent = `正在加载第 ${page} 页…`;
 
   try {
     if(requestedContext.kind==="author"){
@@ -1604,13 +1591,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     searchHasMore = Boolean(data.hasMore);
     searchOrderingPending = Boolean(data.orderingPending);
     $("#tagTitle").textContent = data.label || (Array.isArray(data.tags) && data.tags.length ? data.tags.join(" + ") : (data.tag || cleanTag));
-    const preloadStatus = data.preloadedThrough > currentPage ? ` · 已预加载至第 ${data.preloadedThrough} 页` : "";
-    const historyStatus = currentPageNeedsMoreResults()
-      ? (searchOrderingPending ? " · 正在确认日期排序，可继续加载本页" : " · 当前页尚未满，可继续加载本页")
-      : (data.budgetExhausted ? " · 本次结果尚未加载完，可继续翻页" : (data.hasMore ? " · 可继续加载更早作品" : " · 已到最后一页"));
-    const fuzzyLabel = data.fuzzy ? " · 别名扩展已启用" : "";
-    const dateLabel = requestedFilters.startDate ? ` · ${requestedFilters.startDate} 至 ${requestedFilters.endDate}（日本时间）` : "";
-    $("#count").textContent = `已加载 ${data.total} 件 · 第 ${currentPage} 页 · 每页 ${data.perPage || 36} 件${dateLabel}${fuzzyLabel}${preloadStatus}${historyStatus}${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 个高密度日期受平台截断` : ""}`;
+    $("#count").textContent = `${data.total} 件${data.truncatedDates?.length ? ` · ${data.truncatedDates.length} 天的结果受 Pixiv 上限限制` : ""}`;
     resultSelectionEnabled = true;
     setGallerySort(order);
     render();
@@ -1781,7 +1762,7 @@ const cloudControls=createCloudControls({
     const syncButton=$("#accountSync");
     syncButton.disabled=lastKnownLoggedIn!==true || syncAction.disabled;
     syncButton.textContent=syncAction.busy?"正在同步…":"同步账号状态";
-    $("#accountSyncStatus").textContent=lastKnownLoggedIn===true?syncAction.status:"登录后可同步账号状态";
+    $("#accountSyncStatus").textContent=lastKnownLoggedIn===true && syncAction.status!=="等待首次同步"?syncAction.status:"";
     accountView.configure(prefs,loaded);
     discoveryView?.configure(prefs,loaded);
     if(loaded){mediaBudget.configure(prefs.mediaMemory);applyPreviewLayout(prefs.previewLayout);applyPreviewAction(prefs.previewAction);imageViewer.setSize(prefs.previewSize);applySensitiveMask(prefs.sensitiveMask);}
@@ -2004,7 +1985,7 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
     searchHasMore=false;searchOrderingPending=false;resultSelectionEnabled=true;
     activeSearchFilters={...filters,order:"popular",popularityIndex:result.index};activeSearchSnapshotId=`pop-${result.index}`;
     searchLoadedAt=Date.now();reconcileSelectedArtworkPreviews(items);
-    $("#count").textContent=`按收藏数排序 · ${author?"全部可见作品":"本次搜索候选池（最多 500 件）"} ${result.total} 件 · 第 ${currentPage}/${result.pages} 页`;
+    $("#count").textContent=`${result.total} 件`;
     render();renderPagination();setGallerySort("popular",`${author?"全部可见作品":"本次搜索候选池"} · ${result.total} 件`);
     void refreshDownloadedIndicators();if(!searchPending && !restoring)rememberGalleryView();queueNavigationRecord();return true;
   }catch(error){
@@ -2893,14 +2874,13 @@ globalThis.openListPreview=(item,image)=>{
   if(!item || !image?.naturalWidth){announceToast("预览图尚未加载完成，请稍后再试");return;}
   imageViewer.open({item,preview:image.currentSrc || image.src});
 };
-function detailView(prefix, deck, hint) {
+function detailView(prefix, deck, position) {
   const names = ["Title", "WorkType", "Desc", "Artist", "Size", "Bookmarks", "Date", "Tags"];
   return createArtworkDetailView({
-    deck: $(deck), hint: $(hint), detail: prefix === "d" ? normalDetail : basketDetail,
+    detail: prefix === "d" ? normalDetail : basketDetail,
     noticeBefore:prefix==="d"?$("#toast"):null,
-    isDownloaded:item=>prefix==="d" && detailDownloadProgress?.status==="success" && String(detailDownloadProgress.artworkId)===String(item.id),
     fields: Object.fromEntries(names.map(name => [name, $(`#${prefix}${name}`)])),
-    escape: esc, installImages: installImageFallbacks,
+    escape: esc,
     openOfficial:(id,event)=>{
       const api=window.pywebview?.api;
       if(!api?.pixiv_open_artwork)return;
@@ -2909,7 +2889,7 @@ function detailView(prefix, deck, hint) {
         .catch(()=>announceToast("官网链接打开失败，可右键复制链接"));
     },
     stage: createImageStage({
-      root: $(deck), hint: $(hint), viewer:imageViewer,
+      root: $(deck), hint: $(position), viewer:imageViewer,
       installImages: installImageFallbacks, report: announceToast,
       onViewChange: queueNavigationRecord,
     }),
@@ -2955,7 +2935,6 @@ function syncBasketArtworkMeta() {
   if (!basketDetail.item) return;
   const selectedPages = selection.get(basketDetail.item.id)?.pages;
   $("#batchSummary").textContent = `已选 ${selectedPages?.size || 0}/${basketDetail.item.pages} 张`;
-  $("#basketModeHint").textContent = `${basketDetail.item.artist} · 在作品详情中逐张勾选`;
 }
 
 function detailSelectionOrigin(item) {
@@ -3308,7 +3287,6 @@ function openBasketArtworkPicker() {
   if (!chosen.length) {
     showBasketPane("picker");
     $("#basketTitle").textContent = "采集篮";
-    $("#basketModeHint").textContent = "在预览页勾选作品后，可来这里挑选图片。";
     syncBasketHeader();
     $("#batchCollections").innerHTML = '<p class="empty-state basket-empty">采集篮为空</p>';
     syncSearchScopedControls();
@@ -3321,8 +3299,7 @@ function openBasketArtworkPicker() {
   ensureDownloadOptionDefaults();
   showBasketPane("picker");
   const selectedCount = chosen.filter((item) => selection.has(item.id)).length;
-  $("#basketTitle").textContent = "采集篮 · 选择要下载的作品";
-  $("#basketModeHint").textContent = "点击作品挑选图片；选好后点下载，进入下载设置。";
+  $("#basketTitle").textContent = "采集篮";
   $("#batchSummary").textContent = `${selectedCount}/${chosen.length} 个作品已勾选 · ${selectedPageCount()}/${MAX_SELECTED_PAGES} 张`;
   const navigation = chosen.length > BASKET_ARTWORK_WINDOW
     ? `<div class="pagination basket-window-pagination" style="grid-column:1/-1" aria-label="采集篮作品分页"><button type="button" data-basket-window="${Math.max(0, start - BASKET_ARTWORK_WINDOW)}" ${start === 0 ? "disabled" : ""}>← 前 ${BASKET_ARTWORK_WINDOW} 件</button><span>${start + 1}–${end} / ${chosen.length}</span><button type="button" data-basket-window="${Math.min(lastStart, start + BASKET_ARTWORK_WINDOW)}" ${end >= chosen.length ? "disabled" : ""}>后 ${BASKET_ARTWORK_WINDOW} 件 →</button></div>`
@@ -3740,7 +3717,6 @@ function renderDetailDownloadProgress() {
   $("#downloadProgressTrack").setAttribute("aria-valuetext",`${state.done} / ${state.total}${state.status==="success"?" · 完成":state.status==="error"?" · 失败":state.status==="paused"?" · 已暂停":""}`);
   $("#downloadProgressFill").style.width=`${state.total?state.done/state.total*100:0}%`;
   $("#downloadProgressCount").textContent=`${state.done} / ${state.total}`;
-  normalDetailView.refreshDownloadStatus();
   $("#batchDownloadPrompt").hidden=!batch || state.status!=="success";
 }
 
@@ -4193,10 +4169,11 @@ async function syncAuthStatus() {
       resumableBatchTask = null;
     }
     lastKnownLoggedIn = logged;
+    lastKnownAuthState = data.authState || (logged ? "authorized" : "unauthenticated");
     lastKnownAuthorizationGeneration = accountGeneration;
     lastKnownBrowsingGeneration = browsingGeneration;
     lastKnownBrowsingPolicyStatus = data.browsingPolicyStatus || "ready";
-    $("#mode").textContent = data.authMethod==="app"?(logged?"PIXIV · APP":"PIXIV · 待授权"):(logged?"PIXIV · WEB":"PIXIV PUBLIC");
+    $("#mode").textContent = data.authMethod==="app"?(logged?"PIXIV · APP":"PIXIV · 待授权"):(logged?(lastKnownAuthState==="unconfirmed"?"PIXIV · 待确认":"PIXIV · WEB"):"PIXIV PUBLIC");
     loginMethod=data.authMethod || "app";
     webLoginConfirmationPending=false;
     authMethodConfirmation=null;
@@ -4307,28 +4284,6 @@ $("#helpBtn").onclick = () => {
   showAppDialog(helpDialog);
   void refreshRequestPolicy();
 };
-const guideTabs = [...helpDialog.querySelectorAll("[data-guide-panel]")];
-function selectGuidePanel(tab) {
-  for (const button of guideTabs) {
-    const selected = button === tab;
-    button.setAttribute("aria-selected", String(selected));
-    button.tabIndex = selected ? 0 : -1;
-    $(`#${button.dataset.guidePanel}`).hidden = !selected;
-  }
-}
-for (const tab of guideTabs) {
-  tab.onclick = () => selectGuidePanel(tab);
-  tab.onkeydown = event => {
-    const index = guideTabs.indexOf(tab);
-    const next = event.key === "ArrowRight" ? (index + 1) % guideTabs.length
-      : event.key === "ArrowLeft" ? (index + guideTabs.length - 1) % guideTabs.length
-      : event.key === "Home" ? 0 : event.key === "End" ? guideTabs.length - 1 : null;
-    if (next === null) return;
-    event.preventDefault();
-    selectGuidePanel(guideTabs[next]);
-    guideTabs[next].focus();
-  };
-}
 helpDialog.addEventListener("close", () => {
   void fetchJson("/api/ui/guide", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({seen: true})})
     .catch(error => announceToast(error.message));
@@ -4401,8 +4356,8 @@ function syncAppConnection(value) {
   $("#authMethod").value=authMethodConfirmation?.saved ? authMethodConfirmation.method : authMethodNeedsRepair ? "" : loginMethod;
   $("#authMethod").disabled=authActionBusy || appConnectionBusy || authMethodConfirmation!==null;
   $("#rememberLoginRow").hidden=app || confirmingWebLogin;
-  $("#authStateTitle").textContent=waiting?"等待 Pixiv 授权":lastKnownLoggedIn?"已登录 · "+(app?"App 授权":"网页登录"):"尚未登录";
-  $("#authStateText").textContent=app && value?.authorization?.error || (waiting?"请在系统浏览器完成本次授权。":lastKnownLoggedIn?"当前方式已连接，可以继续浏览。":app?"在系统浏览器完成一次 App 授权即可使用。":"在应用内的 Pixiv 官方窗口完成登录。");
+  $("#authStateTitle").textContent=waiting?"等待 Pixiv 授权":!app && lastKnownAuthState==="unconfirmed"?"网页登录待确认":lastKnownLoggedIn?"已登录 · "+(app?"App 授权":"网页登录"):"尚未登录";
+  $("#authStateText").textContent=app && value?.authorization?.error || (waiting?"请在浏览器完成授权。":"");
   if (authMethodConfirmation) {
     $("#authStateTitle").textContent="登录方式待核对";
     $("#authStateText").textContent=authMethodConfirmation.saved
@@ -4578,8 +4533,7 @@ installHistoryInput({navigate:navigateHistory,canNavigate:()=>!contextNavigation
 
 clearDetail();
 renderRecentSearches();
-grid.innerHTML = '<div class="empty-state"><b>准备就绪</b><p>输入标签后点击“开始寻找”。登录后会在后台准备账号数据。</p></div>';
-$("#count").textContent = "等待搜索";
+grid.innerHTML = '<p class="empty-state">尚未搜索</p>';
 syncSearchScopedControls();
 
 checkpointNavigation();

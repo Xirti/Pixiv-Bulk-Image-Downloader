@@ -73,7 +73,6 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .hero{min-height:calc(100svh - var(--main-chrome-height));justify-content:flex-start;gap:24px;padding:clamp(72px,13vh,132px) 56px 56px}
 .home-intro h1{font-size:clamp(30px,3.5vw,42px);font-weight:500;letter-spacing:-.035em}
 .search-panel{border-radius:16px;background:var(--frost-fill);backdrop-filter:blur(20px) saturate(120%);padding:24px;border-color:var(--frost-edge);box-shadow:inset 0 1px var(--frost-highlight),0 2px 6px #00000003,0 12px 40px var(--shadow)}
-.search-label{font-size:12px;color:var(--muted)}
 .search-input-group{border-radius:10px;background:var(--frost-field);border-color:var(--frost-edge);box-shadow:inset 0 1px 3px #0000000a}
 .search-input-group #tag{min-height:54px;font-size:17px;border-radius:0 10px 10px 0}
 #searchKind{font-size:12px;border-radius:10px 0 0 10px;background:transparent}
@@ -81,7 +80,6 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .filters select,.date-filter select,.date-filter input{background:var(--field);border-color:var(--line);min-height:36px}
 .filters label,.date-filter label{font-size:11px}
 .date-filter{padding-top:16px;margin-top:16px}
-.search-help{color:var(--muted);line-height:1.6}
 .recent-searches button{border-color:transparent;background:var(--surface-2);padding:5px 11px;font-size:12px}
 .recent-searches button:hover{background:var(--selected);border-color:var(--line)}
 .recent-search-heading{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
@@ -122,7 +120,6 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .section-head h2{font-size:28px;font-weight:600;letter-spacing:-.025em}
 .gallery-tools #count{font-size:12px;color:var(--muted);margin-top:0}
 .page-selection-tools button{background:transparent;border-color:var(--line)}
-.cache-status{background:var(--surface);border-color:var(--line);padding:8px 12px;font-size:11px}
 .pagination-dock{background:var(--glass);backdrop-filter:blur(12px);border-color:var(--line);box-shadow:none}
 .pagination button{min-width:32px;min-height:32px;border-radius:7px;font-size:12px}
 .pagination button.active{background:var(--action-fill);color:var(--on-accent)}
@@ -247,15 +244,12 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .capacity-dialog h2,.app-dialog-heading h2{font-size:21px;font-weight:600}
 .capacity-dialog p{font-size:13px;line-height:1.7}
 .app-dialog::backdrop,.capacity-dialog::backdrop{background:#0005;backdrop-filter:blur(5px)}
-.guide-tabs button{font-size:12px}
-.guide-tabs button[aria-selected=true]{border-bottom-color:var(--ink)}
-.help-dialog,.desktop-window .help-dialog{inset:0;width:min(680px,calc(100vw - 32px));height:500px;max-height:calc(100dvh - 32px);margin:auto;padding:22px 24px;overflow:hidden;resize:none}
+.help-dialog,.desktop-window .help-dialog{inset:0;width:min(520px,calc(100vw - 32px));height:auto;max-height:calc(100dvh - 32px);margin:auto;padding:22px 24px;overflow:hidden;resize:none}
 .help-dialog>.guide-panel{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin}
 .help-dialog>.guide-panel::-webkit-scrollbar{display:block;width:6px}
 .help-dialog>.guide-panel::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
 .help-dialog>.dialog-close{width:28px;height:28px;min-height:28px;top:12px;right:12px;padding:0;border:0;background:transparent;box-shadow:none;font-size:22px;font-weight:400}
 .help-dialog>.dialog-close:hover{background:var(--selected)}
-.guide-steps b{font-weight:600}
 .task-dock,.workspace-notice,.floating-stack>.pending-downloads{background:var(--glass);border-color:var(--line);box-shadow:0 4px 20px var(--shadow);backdrop-filter:blur(12px)}
 .task-dock b{font-weight:600;letter-spacing:0;color:var(--ink)}
 .floating-chip{background:var(--glass);border-color:var(--line);box-shadow:0 3px 12px var(--shadow);font-weight:500;backdrop-filter:blur(10px)}
@@ -323,7 +317,6 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .account-settings .settings-item>:is(select,input[type=text],input[type=password]){flex:none;width:200px;max-width:45%;min-height:34px;height:34px;margin:0;font-size:12px;padding:5px 10px;border:1px solid var(--frost-edge);border-radius:8px;background:var(--frost-field);color:var(--ink)}
 .account-settings .settings-path .path-picker{width:46%;margin:0;flex:none}
 .account-settings .settings-path .path-picker input{width:0;font-size:12px}
-.settings-group-note{padding:12px 0;margin:0;font-size:11px;line-height:1.5;color:var(--muted)}
 .settings-empty{padding:24px 0;color:var(--muted);font-size:13px}
 .account-settings .settings-footer{display:flex;align-items:center;justify-content:flex-end;margin:20px 0 0;padding:0;min-height:36px}
 .account-settings .settings-footer [data-settings-status]{margin-right:auto;order:-1}
@@ -381,7 +374,5 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .project-notice-body details{margin-top:18px;color:var(--muted)}
 .project-notice-body summary{cursor:pointer}
 .project-notice-body pre{white-space:pre-wrap;font:11px/1.7 monospace;color:var(--ink)}
-.guide-project-note{flex:none;font-size:11px;color:var(--muted);margin:10px 0 0}
-.guide-project-note button,#about button{border:0;background:transparent;color:var(--muted);font:inherit;padding:0;min-height:0;text-decoration:underline;cursor:pointer}
-#about button{font-size:inherit}
+#about button{border:0;background:transparent;color:var(--muted);font:inherit;padding:0;min-height:0;text-decoration:underline;cursor:pointer}
 @media(max-width:650px){.account-management-heading{gap:10px;flex-wrap:wrap}.account-sync-action{margin-left:auto}.project-links{justify-content:flex-start}}

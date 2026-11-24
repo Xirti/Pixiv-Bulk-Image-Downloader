@@ -11,11 +11,12 @@ import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from pixiv_adapter import (ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, valid_pixiv_id, is_allowed_pixiv_url,
-    small_full_preview_url, publication_date, publication_timestamp, matches_tag_groups,
+    artwork_thumbnail, publication_date, publication_timestamp, matches_tag_groups,
     CONTENT_RESTRICTIONS, CONTENT_MODES, matches_content_mode)
 from search_service import (SearchInputError, SearchResultIndex, parse_search_query,
     parse_search_date_range, build_search_tag_groups)
 from request_coordinator import checked_lock
+from pixiv_read_trace import trace_artwork_rows
 
 
 def proxy_image(value):
@@ -33,7 +34,7 @@ def number(raw, key, *, minimum=0, optional=False):
     return value
 
 
-def validate_app_artwork(raw, allow_r18=False):
+def validate_app_artwork(raw, allow_r18=False, *, observe_audience=None):
     if not isinstance(raw, dict) or type(raw.get("visible")) is not bool:
         raise PixivPolicyError("App 作品可见性数据无效")
     if not raw["visible"] or number(raw, "restrict") != 0 or raw.get("is_muted") is True:
@@ -41,13 +42,16 @@ def validate_app_artwork(raw, allow_r18=False):
     restriction = number(raw, "x_restrict")
     if restriction not in CONTENT_RESTRICTIONS:
         raise PixivPolicyError("App 作品分级无效")
+    rating = CONTENT_RESTRICTIONS[restriction]
+    if observe_audience is not None:
+        observe_audience(rating, False)
     if restriction != 0 and not allow_r18:
         raise ArtworkRatingError("App 作品不在当前内容范围")
-    return CONTENT_RESTRICTIONS[restriction]
+    return rating
 
 
-def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True):
-    restriction = validate_app_artwork(raw, allow_r18)
+def normalize_work(raw, *, allow_r18=False, detail=False, observe_audience=None):
+    restriction = validate_app_artwork(raw, allow_r18, observe_audience=observe_audience)
     uid, artist = raw.get("user"), None
     if isinstance(uid, dict):
         artist = str(uid.get("id", ""))
@@ -59,11 +63,10 @@ def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True
         raise PixivPolicyError("App 作品类型不受支持")
     width, height, count = number(raw, "width", minimum=1), number(raw, "height", minimum=1), number(raw, "page_count", minimum=1)
     images, tags = raw.get("image_urls"), raw.get("tags")
-    if not isinstance(images, dict) or not isinstance(tags, list):
-        raise PixivPolicyError("App 图片或标签数据无效")
-    source = images.get("medium") or images.get("square_medium")
-    proxy_image(source)
-    thumb = proxy_image(small_full_preview_url(source))
+    if not isinstance(tags, list):
+        raise PixivPolicyError("App 标签数据无效")
+    images = images if isinstance(images, dict) else {}
+    thumb = artwork_thumbnail(images.get("medium")) or artwork_thumbnail(images.get("square_medium"))
     translated = []
     for tag in tags:
         if not isinstance(tag, dict) or not isinstance(tag.get("name"), str):
@@ -78,7 +81,7 @@ def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True
         "title": str(raw.get("title") or "未命名作品"), "artist": str(uid.get("name") or "未知画师"), "userId": artist,
         "pages": count, "width": width, "height": height, "tags": list(dict.fromkeys(translated)),
         "date": publication_date(raw.get("create_date")), "sortDate": publication_timestamp(raw.get("create_date")),
-        "bookmarks": number(raw, "total_bookmarks", optional=not require_bookmarks), "description": html.unescape(re.sub(r"<[^>]+>", " ", str(raw.get("caption") or ""))),
+        "bookmarks": number(raw, "total_bookmarks", optional=True), "description": html.unescape(re.sub(r"<[^>]+>", " ", str(raw.get("caption") or ""))),
         "workType": "illustration" if kind == "illust" else kind, "aiGenerated": ai == 2, "thumb": thumb,
         "qualities": [{"id":"original","label":"Pixiv 原图","width":width,"height":height},{"id":"regular","label":"Pixiv 常规预览","width":0,"height":0}],
         "formats": [{"id":"source","label":"保留源格式（推荐）"}]}
@@ -102,6 +105,7 @@ def normalize_work(raw, *, allow_r18=False, detail=False, require_bookmarks=True
             original = single.get("original_image_url")
             normalized = [{"regular":proxy_image(images.get("large") or images.get("medium")),"original":proxy_image(original) if kind != "ugoira" else "","width":width,"height":height}]
         item["pageImages"] = normalized
+        item["thumb"] = thumb or normalized[0]["regular"]
         if kind == "ugoira":
             item["formats"] = [{"id":"source","label":"ZIP 帧包 + 帧延迟 JSON"},{"id":"gif","label":"GIF 动图"},{"id":"mp4","label":"MP4 视频（需本机 FFmpeg）"}]
     return item
@@ -189,12 +193,12 @@ class AppGallery:
         self.check(generation,cancel_event)
         return raw
 
-    def detail(self, identifier, *, generation, allow_r18=False, cancel_event=None):
+    def detail(self, identifier, *, generation, allow_r18=False, cancel_event=None, observe_audience=None):
         raw = self.get('/v1/illust/detail?'+urlencode({'illust_id':identifier,'filter':'for_android'}),generation,cancel_event)
         item = raw.get("illust")
         if not isinstance(item, dict) or str(item.get("id")) != identifier:
             raise PixivPolicyError("App 返回的作品 ID 不匹配")
-        return normalize_work(item, allow_r18=allow_r18, detail=True)
+        return normalize_work(item, allow_r18=allow_r18, detail=True, observe_audience=observe_audience)
 
     def ugoira(self,identifier,*,generation,cancel_event=None):
         raw=self.get('/v1/ugoira/metadata?'+urlencode({'illust_id':identifier}),generation,cancel_event)
@@ -281,18 +285,8 @@ class AppGallery:
             candidates=self.artist('candidates',query.value,generation=generation,cancel_event=cancel_event)['candidates']
             if len(candidates)!=1:raise SearchInputError('请先选择具体作者')
             query=parse_search_query('uid:'+candidates[0]['userId'])
-        if query.kind=='pid':
-            rows = []
-            try:
-                item = self.detail(query.value, generation=generation, allow_r18=scope != "safe", cancel_event=cancel_event)
-            except ArtworkRatingError:
-                pass
-            else:
-                if (matches_content_mode(item["restriction"], scope) and (include_ai or not item["aiGenerated"])
-                        and (work_type == "all" or item["workType"] == work_type)
-                        and (not dates or dates.contains(item["date"]))):
-                    rows.append(item)
-            return {'items':rows if page==1 else [],'page':page,'total':len(rows),'perPage':36,'hasMore':False,'availablePages':[1],'preloadedThrough':1,'snapshotId':snapshot_id,'tag':tag}
+        if query.kind not in {"tags", "uid"}:
+            raise SearchInputError("App 列表搜索需要标签或画师 ID")
         key=(generation,query,scope,work_type,include_ai,groups,dates,snapshot_id)
         with self.lock:
             session=self.sessions.get(key)
@@ -348,6 +342,9 @@ class AppGallery:
                         if dates and not dates.contains(item['date']):continue
                         if groups and not matches_tag_groups(item['tags'],groups):continue
                         normalized.append(item)
+                    if query.kind == "uid":
+                        trace_artwork_rows("app-author", "upstream", rows, mode=scope, position=requests)
+                        trace_artwork_rows("app-author", "after-filter", normalized, mode=scope, position=requests)
                     self.check(generation,cancel_event)
                     if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
                     session.index.add(normalized)
@@ -359,6 +356,9 @@ class AppGallery:
                 self.check(generation,cancel_event)
                 total=session.index.emitted_count;more=bool(total>target or session.index.pending_count or any(s['next'] for s in session.sources))
                 rows=session.index.read_results((page-1)*36,page*36)
+                if query.kind == "uid":
+                    trace_artwork_rows("app-author", "result" if requests else "cached-result",
+                                       rows, mode=scope, position=page)
                 pages=list(range(1,max(1,(total+35)//36)+1))
                 if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
                 result = {'items':rows,'tag':tag,'page':page,'total':total,'perPage':36,'hasMore':more,'availablePages':pages,'preloadedThrough':max(pages),'snapshotId':snapshot_id,'budgetExhausted':more and len(rows)<36}

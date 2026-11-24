@@ -96,6 +96,7 @@ def resolve_web_path(root: Path, request_path: str) -> Path:
 
 def validate_web_artwork(
     raw: dict[str, Any], allow_r18: bool = False, *, detail: bool = False, logged_in: bool = False,
+    observe_audience: Callable[[str, bool], None] | None = None,
 ) -> str:
     if not isinstance(raw, dict):
         raise PixivPolicyError("invalid artwork data")
@@ -105,6 +106,10 @@ def validate_web_artwork(
     restriction = _integer_field(raw, "xRestrict")
     if restriction not in CONTENT_RESTRICTIONS:
         raise PixivPolicyError("invalid xRestrict")
+    rating = CONTENT_RESTRICTIONS[restriction]
+    login_only = bool(raw.get("isLoginOnly"))
+    if observe_audience is not None:
+        observe_audience(rating, login_only)
     if restriction != 0 and not allow_r18:
         raise ArtworkRatingError("restricted artwork")
     if raw["isUnlisted"]:
@@ -113,9 +118,9 @@ def validate_web_artwork(
         raise ArtworkVisibilityError("Pixiv 只返回了作品的遮罩内容，请在官网确认当前账号能否查看")
     if _integer_field(raw, "visibilityScope") != 0:
         raise ArtworkVisibilityError("该作品的公开范围受限，请在 Pixiv 官网确认当前账号能否查看")
-    if raw.get("isLoginOnly") and not logged_in:
+    if login_only and not logged_in:
         raise ArtworkVisibilityError("该作品仅对登录用户开放，请在 Pixiv 官网登录后查看")
-    return CONTENT_RESTRICTIONS[restriction]
+    return rating
 
 
 def is_allowed_pixiv_url(url: str, image_only: bool = False) -> bool:
@@ -149,7 +154,7 @@ def bookmark_count(raw: dict[str, Any]) -> int | None:
         return None
 
 
-def small_full_preview_url(url: str) -> str:
+def small_full_preview_url(url: str, *, optional: bool = False) -> str:
     """Use a bounded, uncropped CDN derivative, never an original or square crop."""
     parsed = urllib.parse.urlsplit(url)
     image = re.fullmatch(
@@ -159,11 +164,21 @@ def small_full_preview_url(url: str) -> str:
         parsed.path,
     )
     if image is None:
+        if optional:
+            return ""
         raise PixivPolicyError("Pixiv 完整预览地址格式异常")
     return parsed._replace(
         path=f"/c/540x540_70/img-master/{image.group(1)}_master1200.jpg",
         fragment="",
     ).geturl()
+
+
+def artwork_thumbnail(value: Any) -> str:
+    """An approved artwork summary may have no usable thumbnail."""
+    if not is_allowed_pixiv_url(value, image_only=True):
+        return ""
+    preview = small_full_preview_url(value, optional=True)
+    return "/api/pixiv/image?" + urllib.parse.urlencode({"url": preview}) if preview else ""
 
 
 def artwork_classification(raw: dict[str, Any]) -> tuple[str, bool]:
@@ -182,10 +197,7 @@ def normalize_search_item(
     artwork_id = str(raw.get("id") or "")
     if not valid_pixiv_id(artwork_id):
         raise PixivPolicyError("invalid artwork id")
-    source_thumb = str(raw.get("url") or "")
-    if not is_allowed_pixiv_url(source_thumb, image_only=True):
-        raise PixivPolicyError("invalid image host")
-    proxy = "/api/pixiv/image?" + urllib.parse.urlencode({"url": small_full_preview_url(source_thumb)})
+    proxy = artwork_thumbnail(raw.get("url"))
     raw_tags = raw.get("tags")
     if isinstance(raw_tags, dict):
         raw_tags = raw_tags.get("tags") or raw_tags.get("data") or []
@@ -331,8 +343,11 @@ def normalize_detail(
     allow_r18: bool = False,
     *,
     logged_in: bool = False,
+    observe_audience: Callable[[str, bool], None] | None = None,
 ) -> dict[str, Any]:
-    restriction = validate_web_artwork(raw, allow_r18, detail=True, logged_in=logged_in)
+    restriction = validate_web_artwork(
+        raw, allow_r18, detail=True, logged_in=logged_in, observe_audience=observe_audience,
+    )
     artwork_id = str(raw.get("illustId") or raw.get("id") or "")
     if not valid_pixiv_id(artwork_id):
         raise PixivPolicyError("invalid artwork id")

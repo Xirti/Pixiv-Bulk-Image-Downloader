@@ -153,6 +153,7 @@ CODE_GENERATION_FILES = (
     'pixiv_account.py',
     'auth_method.py',
     'pixiv_app_gallery.py',
+    'pixiv_read_trace.py',
     'pixiv_app_config.py',
     'account_pages.py',
     'discovery_service.py',

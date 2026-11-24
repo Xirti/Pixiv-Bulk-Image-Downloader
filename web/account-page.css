@@ -90,7 +90,6 @@
 
 .account-management button:disabled{opacity:.5;cursor:default}
 
-.account-management .guide-tip{font-size:11px;line-height:1.6;margin:18px 0 0;color:var(--muted)}
 
 @media(max-width:650px){.account-management{padding:20px}
 .account-login-grid{grid-template-columns:1fr;gap:22px}
@@ -103,6 +102,7 @@
 
 .account-management .auth-state{display:flex;align-items:center;justify-content:space-between;gap:20px;min-height:0}
 .auth-state-copy{display:grid;gap:6px;min-width:0}
+#authStateText:empty{display:none}
 .account-management #authDisconnect{flex-shrink:0;padding:5px 10px;min-height:30px;background:transparent;font-size:12px}
 @media(max-width:500px){.account-management .auth-state{gap:12px;align-items:flex-start}}
 

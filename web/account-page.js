@@ -327,7 +327,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     if(renderedHeader!==p){
     renderedHeader=p;avatars.park(header);
     header.innerHTML=p?.connected?`${p.background?`<img class="account-cover" data-gallery-src="${esc(p.background)}" data-preview-artwork="cover:${esc(p.uid)}" alt="">`:""}<div class="account-identity">${p.avatar?`<img class="account-avatar" data-gallery-src="${esc(p.avatar)}" data-preview-artwork="self:${esc(p.uid)}" alt="${esc(p.name)}">`:'<span class="account-avatar account-avatar-empty" aria-hidden="true">人</span>'}<h2>${esc(p.name)}</h2><p class="account-uid">UID <span>${esc(p.uid)}</span>${p.account?` · ${esc(p.account)}`:""}</p>${p.bio?`<p class="account-bio">${esc(p.bio)}</p>`:""}${p.region?`<p class="account-location">${esc(p.region)}</p>`:""}</div><div class="account-stats"><button type="button" data-shortcut="following"><strong>${p.following ?? "查看"}</strong><span>关注</span></button><button type="button" data-shortcut="followers"><strong class="account-stat-label">查看</strong><span>粉丝</span></button><button type="button" data-shortcut="bookmarks"><strong>${p.publicBookmarks ?? "查看"}</strong><span>公开收藏</span></button></div>`:
-      `<div class="account-connect"><span class="account-avatar account-avatar-empty" aria-hidden="true">人</span><h2>${pending?"正在读取账号":"我的 Pixiv 账号"}</h2><p>登录后浏览关注的作者、粉丝与云端收藏。</p></div>`;
+      `<div class="account-connect"><span class="account-avatar account-avatar-empty" aria-hidden="true">人</span><h2>${pending?"正在读取账号":"我的 Pixiv 账号"}</h2></div>`;
     avatars.mount(header,"account-self");installImages(header);
     header.querySelectorAll("[data-shortcut]").forEach(button=>button.onclick=()=>navigate(button.dataset.shortcut));
     }
@@ -413,12 +413,15 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     if(state.view==="bookmarks" && p?.connected && (renderedGrid!==data?.items || gridKey!==pageKey())){
       renderedGrid=data?.items;gridKey=pageKey();interaction.reset({immediate:true});worksCache.park(grid);
       grid.innerHTML=renderArtworkCards(data?.items || [],{escape:esc,selected});
-      if(!pending && !error && !data?.items?.length)grid.innerHTML='<p class="account-empty">这个范围内没有可显示的收藏作品。</p>';
+      if(!pending && !error && !data?.items?.length){
+        const empty = data?.unavailable ? "没有符合条件的收藏" : "暂无收藏";
+        grid.innerHTML=`<p class="account-empty">${empty}</p>`;
+      }
       worksCache.mount(grid,"account-works");installImages(grid);attachUgoira(grid);interaction.mount(data?.items || []);
       grid.querySelectorAll("[data-select]").forEach(box=>box.onchange=()=>{const item=data.items[Number(box.dataset.select)];if(!choose(item,box.checked,artworkContext(item)))box.checked=selected(item.id);});
     }
     pagination.hidden=["home","settings"].includes(state.view) || !p?.connected;
-    pagination.innerHTML=`<button type="button" data-account-prev ${!state.trail.length || pending?"disabled":""}>← 上一页</button><span>第 ${state.page} 页</span><button type="button" data-account-next ${data?.nextOffset==null || pending?"disabled":""}>下一页 →</button>${data?.unavailable?`<small>${data.unavailable} 件因当前安全范围或作品状态未显示</small>`:""}`;
+    pagination.innerHTML=`<button type="button" data-account-prev ${!state.trail.length || pending?"disabled":""}>← 上一页</button><span>第 ${state.page} 页</span><button type="button" data-account-next ${data?.nextOffset==null || pending?"disabled":""}>下一页 →</button>`;
     pagination.querySelector("[data-account-prev]")?.addEventListener("click",()=>{const trail=state.trail.slice(),offset=trail.pop();navigate(state.view,{offset,page:state.page-1,trail});});
     pagination.querySelector("[data-account-next]")?.addEventListener("click",()=>navigate(state.view,{offset:data.nextOffset,page:state.page+1,trail:[...state.trail,state.offset]}));
     },active?restoreTop:null);

@@ -98,7 +98,7 @@ globalThis.createGalleryInteraction = function ({grid, openArtwork, openArtist, 
     if(!allowed())return;
     if(active?.card===card){reset();return;}
     const image=card.querySelector(".poster img");
-    if(!image.complete || !image.naturalWidth || !image.naturalHeight){
+    if(!image?.complete || !image.naturalWidth || !image.naturalHeight){
       report("预览图尚未加载完成，请稍后再展开");return;
     }
     clicks.cancel();cancelLeave();clearTimeout(cleanupTimer);cleanupTimer=null;

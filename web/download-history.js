@@ -52,7 +52,7 @@ function createDownloadHistoryView({ fetchJson, showDialog }) {
           <h3 title="${escape(work)}">${escape(work)}</h3><p class="history-info">${escape(info)}</p>
           <span class="history-paths" title="${escape(row.files[0] || "")}">${escape(row.files[0] || "")}${row.files.length > 1 ? ` · +${row.files.length - 1}` : ""}</span>
           <div class="history-record-actions"><button type="button" data-open-history="${row.id}" title="打开保存文件夹">位置</button><button type="button" data-copy-history="${index}" title="复制全部保存路径">复制</button><button type="button" data-delete-history="${row.id}" title="只删除这条记录，不删除文件">删除</button></div></article>`;
-      }).join("") || `<p class="empty-state">${query ? "没有匹配记录。" : "还没有下载记录。之后成功下载的作品会显示在这里。"}</p>`;
+      }).join("") || `<p class="empty-state">${query ? "没有匹配记录" : "暂无下载记录"}</p>`;
       get("historyList").querySelectorAll("[data-select-history]").forEach(box => {
         box.onchange = () => {
           if (loading || deleting) return;

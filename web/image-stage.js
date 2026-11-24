@@ -32,7 +32,7 @@ globalThis.createImageStage = function ({root, hint, viewer, installImages, repo
     const stack=root.querySelector(".image-stack");stack.replaceChildren();
     for(let rank=0;rank<Math.min(3,item.pages);rank++)stack.append(card((page+rank)%item.pages,rank));
     sizeStack();installImages(root);
-    hint.textContent=`${page+1} / ${item.pages} · 点击主图放大`;
+    hint.textContent=item.pages>1?`${page+1} / ${item.pages}`:"";
     root.querySelectorAll(".stage-arrow").forEach(button=>{button.disabled=item.pages<2;});
     onViewChange();
   }
@@ -43,7 +43,7 @@ globalThis.createImageStage = function ({root, hint, viewer, installImages, repo
     animations.forEach(animation=>animation.cancel());animations.clear();
     if(viewer.owns(owner))viewer.close();
   }
-  function reset(){suspend();item=null;page=0;root.replaceChildren();}
+  function reset(){suspend();item=null;page=0;root.replaceChildren();hint.textContent="";}
   function render(next,{preserve=false}={}){
     const previous=preserve && item?.id===next.id?page:0;
     revision++;queued=0;busy=false;

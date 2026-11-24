@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from concurrent.futures import Future
 from contextlib import contextmanager
 import threading
@@ -65,6 +66,7 @@ def desktop_auth_request(
         return {"ok": False, "error": "桌面认证能力不可用"}
     route = {
         "session": "api/desktop/auth/session",
+        "cancel-login": "api/desktop/auth/cancel",
         "logout": "api/desktop/auth/logout",
         "context": "api/desktop/auth/context",
         "app-connect": "api/desktop/auth/app-connect",
@@ -88,7 +90,7 @@ def desktop_auth_request(
     uncertain = {"confirmationRequired": True} if action in {"session", "update-restart"} else {}
     try:
         try:
-            response = opener.open(request, timeout=120.0 if action == "update-restart" else 30.0 if action == "app-connect" else max(1.0, min(float(timeout), 15.0)))
+            response = opener.open(request, timeout=120.0 if action == "update-restart" else 30.0 if action in {"app-connect", "session"} else max(1.0, min(float(timeout), 15.0)))
         except urllib.error.HTTPError as error:
             response = error
         with response:
@@ -236,13 +238,15 @@ class DesktopApi:
         except Exception:
             pass
 
-    def _clear_shared_cookies(self) -> None:
+    def _clear_shared_cookies(self) -> bool:
         if self._window is None:
-            return
+            return True
         try:
             self._window.clear_cookies()
-        except Exception:
-            pass
+            return True
+        except Exception as error:
+            LOG.warning("Desktop cookie cleanup failed (%s)", type(error).__name__)
+            return False
 
     def _login_network_context(self) -> dict:
         context = self._auth_request("context", {})
@@ -260,10 +264,13 @@ class DesktopApi:
         if not self._login_lock.acquire(blocking=False):
             return {"ok": False, "error": "Pixiv 登录窗口已经打开"}
         login = None
+        cancel_login = None
+        login_committed = False
         last_cookie_summary = None
         try:
             context = self._login_network_context()
-            self._clear_shared_cookies()
+            if not self._clear_shared_cookies():
+                raise ValueError("无法清理登录窗口的旧会话，请重启 MOKU 后登录")
             self._notify("正在桌面登录窗口中监控 Pixiv 授权状态…")
             login = self._window_factory(
                 "MOKU — Pixiv 官方登录",
@@ -276,6 +283,14 @@ class DesktopApi:
             )
             if login is None:
                 raise RuntimeError("无法创建 Pixiv 桌面登录窗口")
+            request_id = secrets.token_urlsafe(24)
+
+            def cancel_login():
+                result = self._auth_request("cancel-login", {"requestId": request_id})
+                if not isinstance(result, dict) or not result.get("ok"):
+                    LOG.warning("Desktop login cancellation was not acknowledged")
+
+            login.events.closing += cancel_login
             deadline = time.monotonic() + self.timeout
             while time.monotonic() < deadline:
                 if login.events.closed.is_set():
@@ -311,11 +326,25 @@ class DesktopApi:
                 self._login_network_context()
                 browser_context = None
                 try:
-                    browser_context = login.evaluate_js("({userAgent:navigator.userAgent,languages:Array.from(navigator.languages)})")
+                    browser_context = login.evaluate_js("""(() => {
+                        const data = document.querySelector('#__NEXT_DATA__');
+                        let loggedIn = null;
+                        if (data) {
+                            try { loggedIn = JSON.parse(data.textContent)?.props?.pageProps?.isLoggedIn; }
+                            catch { /* The backend will verify an unfamiliar page. */ }
+                        }
+                        return {userAgent:navigator.userAgent, languages:Array.from(navigator.languages), loggedIn};
+                    })()""")
                 except Exception:
                     LOG.warning("Login browser metadata unavailable")
+                if isinstance(browser_context, dict) and browser_context.get("loggedIn") is False:
+                    self._notify("请在登录窗口完成 Pixiv 登录。")
+                    if self.poll_interval:
+                        time.sleep(self.poll_interval)
+                    continue
                 LOG.info("desktop auth candidate host=www.pixiv.net cookie_shape=eligible")
                 payload = {"session": value, "remember": bool(remember),
+                           "requestId": request_id,
                            "authorizationGeneration": context["authorizationGeneration"],
                            "browserContext": browser_context}
                 if login.events.closed.is_set():
@@ -332,6 +361,7 @@ class DesktopApi:
                         failure["confirmationRequired"] = True
                     return failure
                 self._notify("Pixiv 账户已连接。")
+                login_committed = True
                 return {"ok": True, "remembered": bool(remember)}
             return {"ok": False, "error": "Pixiv 桌面登录等待超时，请重试"}
         except (DesktopLoginCancelled, ValueError) as exc:
@@ -339,6 +369,10 @@ class DesktopApi:
         except Exception:
             return {"ok": False, "error": "Pixiv 桌面登录失败，请重试"}
         finally:
+            if login is not None and cancel_login is not None:
+                if not login_committed and not login.events.closed.is_set():
+                    cancel_login()
+                login.events.closing -= cancel_login
             if login is not None and not login.events.closed.is_set():
                 try:
                     login.destroy()

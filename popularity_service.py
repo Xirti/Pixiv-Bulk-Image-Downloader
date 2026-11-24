@@ -21,7 +21,7 @@ from search_service import SearchInputError, parse_search_date_range, parse_sear
 from request_coordinator import RequestBlockedError, checked_lock
 
 CARD_FIELDS = ("id", "source", "userId", "title", "artist", "thumb", "width", "height", "pages",
-               "bookmarks", "date", "sortDate", "workType", "restriction", "aiGenerated", "rank", "rankKind")
+               "bookmarks", "date", "sortDate", "workType", "restriction", "loginOnly", "aiGenerated", "rank", "rankKind")
 
 
 def _copy_job(job):
@@ -134,7 +134,7 @@ class PopularityService:
             normalized = []
             for row in rows:
                 try:
-                    normalized.append(normalize_work(row, allow_r18=job["mode"] != "safe", require_bookmarks=False))
+                    normalized.append(normalize_work(row, allow_r18=job["mode"] != "safe"))
                 except PixivPolicyError:
                     continue
             self._append(job, normalized)
@@ -281,13 +281,14 @@ class PopularityService:
                 cursor = next(candidates, None)
                 changes = []
                 unavailable_positions = set()
+                audience_changed = False
                 job.setdefault("retryOffset", -1)
                 try:
                     while cursor is not None and reads < 3 and time.monotonic() < deadline:
                         self._check(generation, epoch)
                         item = job["items"][cursor]
                         try:
-                            count = self.detail(item["id"], job["mode"], generation).get("bookmarks")
+                            metadata = self.detail(item["id"], job["mode"], generation)
                         except (ArtworkVisibilityError, ArtworkRatingError, HTTPError, AccountError, RequestBlockedError) as error:
                             unavailable = (
                                 isinstance(error, (ArtworkVisibilityError, ArtworkRatingError))
@@ -299,6 +300,11 @@ class PopularityService:
                             unavailable_positions.add(cursor)
                             missing.discard(cursor)
                         else:
+                            count = metadata.get("bookmarks")
+                            if "loginOnly" in metadata and metadata["loginOnly"] != item.get("loginOnly", False):
+                                item = {**item, "loginOnly": metadata["loginOnly"]}
+                                job["items"][cursor] = item
+                                audience_changed = True
                             if type(count) is not int or count < 0:
                                 missing.add(cursor)
                                 count = None
@@ -329,7 +335,7 @@ class PopularityService:
                         if cursor is not None or missing:
                             self._check(generation, epoch)
                             rowid = self._save(owner, method, job, epoch, generation, rowid, revision,
-                                check_cancel=check_cancel, changes=None if unavailable_positions else changes)
+                                check_cancel=check_cancel, changes=None if unavailable_positions or audience_changed else changes)
                 if cursor is None and not missing:
                     job["items"].sort(key=lambda item: (item["bookmarks"], item.get("sortDate", ""), int(item["id"])), reverse=True)
                     job["ready"] = True

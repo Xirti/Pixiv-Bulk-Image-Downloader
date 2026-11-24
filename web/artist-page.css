@@ -1,5 +1,5 @@
 .artist-mode #resultPrefix,.artist-mode #resultsEyebrow,.artist-candidates .section-head{display:none}
-.artist-mode .section-head h2,.artist-candidates #grid,.artist-candidates #cacheStatus,.artist-candidates .pagination-dock{display:none}
+.artist-mode .section-head h2,.artist-candidates #grid,.artist-candidates .pagination-dock{display:none}
 .artist-mode .section-head{justify-content:flex-end}
 #artistPanel[hidden]{display:none}
 #artistPanel{margin-bottom:34px}
@@ -19,6 +19,7 @@
 .artist-biography p{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
 .artist-website{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
 .artist-inline-status{text-align:center;font-size:13px;color:var(--muted);padding:14px}
+.artist-inline-status:empty{display:none}
 .artist-featured{margin:12px auto 32px;max-width:900px}
 .artist-featured h2{font-size:15px;font-weight:600;margin:0 0 14px}.artist-featured h2 small{font-weight:400;color:var(--muted);margin-left:6px}
 .artist-featured-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,220px));justify-content:center;gap:14px}

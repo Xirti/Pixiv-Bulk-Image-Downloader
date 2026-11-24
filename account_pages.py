@@ -24,6 +24,7 @@ from pixiv_app_config import CLIENT_CONFIG
 from pixiv_adapter import (PixivPolicyError, normalize_search_item, is_allowed_pixiv_url,
     build_user_profile_all_url,build_user_profile_works_url,valid_pixiv_id,CONTENT_MODES,matches_content_mode)
 from pixiv_app_gallery import normalize_work, artist_profile, continuation
+from pixiv_read_trace import trace_artwork_rows
 from artist_service import normalize_artist
 from request_coordinator import checked_lock
 from runtime_identity import named_mutex, process_presence
@@ -78,11 +79,18 @@ class HomepageIdentity(HTMLParser):
     def user_id(self):
         try:
             props = json.loads("".join(self.chunks))["props"]["pageProps"]
-            uid = str(props.get("gaUserData", {}).get("userId", ""))
         except (ValueError, KeyError, TypeError) as error:
             raise AccountError("web_identity", "暂时无法确认官网账号，请重试") from error
-        if props.get("isLoggedIn") is not True or not re.fullmatch(r"[0-9]{1,30}", uid):
-            raise AccountError("web_identity", "请先连接 Pixiv 网页账号")
+        if not isinstance(props, dict):
+            raise AccountError("web_identity", "暂时无法确认官网账号，请重试")
+        if props.get("isLoggedIn") is False:
+            raise AccountError("reauth", "网页登录已失效，请重新登录")
+        user = props.get("gaUserData")
+        if props.get("isLoggedIn") is not True or not isinstance(user, dict):
+            raise AccountError("web_identity", "暂时无法确认官网账号，请重试")
+        uid = str(user.get("userId", ""))
+        if not re.fullmatch(r"[0-9]{1,30}", uid):
+            raise AccountError("web_identity", "暂时无法确认官网账号，请重试")
         return uid
 
 
@@ -924,11 +932,12 @@ class AccountCache:
         AccountCache._advance_display_revision(db, owner, method)
 
     def refresh_web_audience_cache(self, owner):
-        # Earlier builds filtered login-only rows out before storing these pages.
+        # Persisted display pages predate the current Web card normalization.
         with self.lock, closing(self._connect()) as db, db:
-            inserted = db.execute("INSERT OR IGNORE INTO cached VALUES(?,?,?,?)",
-                (owner, "web", '["web-artwork-audience"]', "true"))
-            if inserted.rowcount:
+            updated = db.execute("INSERT INTO cached VALUES(?,?,?,?) ON CONFLICT(owner,method,key) "
+                "DO UPDATE SET payload=excluded.payload WHERE cached.payload<>excluded.payload",
+                (owner, "web", '["web-artwork-audience"]', "3"))
+            if updated.rowcount:
                 self._delete_display_pages(db, owner, "web")
 
     @staticmethod
@@ -1070,7 +1079,7 @@ class AccountPages:
     _RELATION_PATHS = {"bookmark": "/v1/user/bookmarks/illust", "follow": "/v1/user/following"}
     def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web",
                  commit_guard=None, stopped=lambda:False, credential_publication=nullcontext,
-                 login_publication=nullcontext, confirm_web_owner=None):
+                 login_publication=nullcontext, confirm_web_owner=None, invalidate_web_session=None):
         self.directory = Path(directory)
         self.request_json, self.request_homepage = request_json, request_homepage
         self.generation, self.coordinator, self.proxy = generation, coordinator, proxy
@@ -1081,6 +1090,7 @@ class AccountPages:
         self.credential_publication = credential_publication
         self.login_publication = login_publication
         self.confirm_web_owner = confirm_web_owner
+        self.invalidate_web_session = invalidate_web_session
         self._app_credentials_revoked = False
         self._account = None
         self._lock = threading.RLock()
@@ -1212,6 +1222,8 @@ class AccountPages:
                 if cache_revision != self._cache_revision:
                     raise AccountError("cache_cleared", "账号缓存已清除，请重新打开页面")
 
+        if cached and key[1] == "owner" and time.monotonic() - cached[0] >= 60:
+            cached = None
         if cached and not refresh:
             result = copy.deepcopy(cached[1])
             self.check(key[0])
@@ -1224,6 +1236,10 @@ class AccountPages:
                 check_read()
                 if web_relation_page:
                     self._check_web_relation_offset(key, cached)
+                if key[1] == "bookmarks":
+                    scope, offset, _tag, mode = key[3:]
+                    trace_artwork_rows(method + "-bookmarks", "cached-result", cached.get("items", ()),
+                                       mode=mode, scope=scope, position=offset)
                 return cached
         if ACCOUNT_CACHE_ONLY.get():
             raise AccountError("cache_miss", "账号数据尚未在本地准备好")
@@ -1293,7 +1309,7 @@ class AccountPages:
             self.saved_cache.discard_relations(owner, method, views, paths)
 
     @staticmethod
-    def relation_page(method, kind, rows, *, offset, next_offset, total=None, mode="safe"):
+    def relation_page(method, kind, rows, *, offset, next_offset, total=None, mode="safe", scope=None):
         """Normalize remote display rows once, shared by browsing and cloud scanning."""
         if kind == "bookmark":
             items=[];unavailable=0
@@ -1306,6 +1322,9 @@ class AccountPages:
                 except PixivPolicyError:
                     unavailable+=1;continue
                 if matches_content_mode(item["restriction"],mode):items.append(item)
+            if scope is not None:
+                trace_artwork_rows(method + "-bookmarks", "upstream", rows, mode=mode, scope=scope, position=offset)
+                trace_artwork_rows(method + "-bookmarks", "after-filter", items, mode=mode, scope=scope, position=offset)
             return {"items":items,"unavailable":unavailable,"total":total if total is not None else len(rows) if offset==0 and next_offset is None else None,"nextOffset":next_offset}
         people=[]
         for row in rows:
@@ -1454,14 +1473,26 @@ class AccountPages:
         def load():
             parser = HomepageIdentity()
             parser.feed(self.request_homepage())
-            owner = parser.user_id()
+            try:
+                owner = parser.user_id()
+            except AccountError as error:
+                if error.kind == "reauth" and self.invalidate_web_session is not None:
+                    self.invalidate_web_session(generation)
+                raise
             with self.cache_publication(generation, owner):
                 self.saved_cache.refresh_web_audience_cache(owner)
+            if self.confirm_web_owner is not None:
+                self.confirm_web_owner(generation, owner)
             return owner
-        owner = self._cached((generation, "owner"), load)
+        return self._cached((generation, "owner"), load)
+
+    def remember_web_owner(self, generation, owner):
+        """Publish an identity already verified with the candidate login cookie."""
+        with self.cache_publication(generation, owner), self._lock:
+            self.saved_cache.refresh_web_audience_cache(owner)
+            self._cache[(generation, "owner")] = (time.monotonic(), owner)
         if self.confirm_web_owner is not None:
             self.confirm_web_owner(generation, owner)
-        return owner
 
     def cached_web_owner(self, generation):
         with self._lock:
@@ -1691,7 +1722,7 @@ class AccountPages:
         params={"user_id":owner,"restrict":scope,"filter":"for_android"}
         if tag:params["tag"]=tag
         rows,next_offset,cursor=self._app_page("/v1/user/bookmarks/illust",params,offset,"illusts")
-        page = self.relation_page("app","bookmark",rows,offset=offset,next_offset=next_offset,mode=mode)
+        page = self.relation_page("app","bookmark",rows,offset=offset,next_offset=next_offset,mode=mode,scope=scope)
         return AppRelationPage(page, cursor)
 
     def _app_tags(self):
@@ -1758,7 +1789,7 @@ class AccountPages:
         if not isinstance(rows, list):
             raise AccountError("invalid_data", "收藏作品列表格式异常")
         total = source_total(body.get("total"))
-        return self.relation_page("web","bookmark",rows,offset=offset,next_offset=offset+len(rows) if rows and offset+len(rows)<total else None,total=total,mode=mode)
+        return self.relation_page("web","bookmark",rows,offset=offset,next_offset=offset+len(rows) if rows and offset+len(rows)<total else None,total=total,mode=mode,scope=scope)
 
     def _tags(self, owner):
         body = source_body(self.request_json(f"https://www.pixiv.net/ajax/user/{owner}/illusts/bookmark/tags?lang=zh"))

@@ -127,10 +127,21 @@
       if(options.allowed())options.openArtwork([...options.grid.querySelectorAll(".gallery-card")].indexOf(card));
     }});
     function mount(){
-      (current==="adaptive"?natural:regular).mount(rows);
-      if(action!=="popup")return;
-      options.grid.querySelectorAll(".gallery-card").forEach(card=>{
+      const layout=current==="adaptive"?natural:regular;
+      layout.mount(rows);
+      if(action!=="popup" && rows.every(item=>item.thumb))return;
+      options.grid.querySelectorAll(".gallery-card").forEach((card,index)=>{
         const poster=card.querySelector(".poster");
+        if(!rows[index].thumb){
+          poster.onclick=()=>{
+            if(!options.allowed())return;
+            popupClicks.cancel();
+            layout.reset({immediate:true});
+            options.openArtwork(index);
+          };
+          return;
+        }
+        if(action!=="popup")return;
         poster.onclick=e=>{
           if(!options.allowed())return;
           if(e.detail===0){popupClicks.cancel();globalThis.openListPreview(rows[[...options.grid.querySelectorAll(".gallery-card")].indexOf(card)],poster.querySelector("img"));}

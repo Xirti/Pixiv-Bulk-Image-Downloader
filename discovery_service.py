@@ -245,9 +245,10 @@ class DiscoveryService:
                     item = normalize_web_rank(row)
                 else:
                     item = normalize_search_item(row, allow_r18=feed["mode"] != "safe", logged_in=True)
-                source_url=parse_qs(urlsplit(item["thumb"]).query)["url"][0]
-                if not re.match(re.escape(item["id"])+r"(?:_|-)",urlsplit(source_url).path.rsplit("/",1)[-1]):
-                    raise PixivPolicyError("发现缩略图身份不符")
+                if item["thumb"]:
+                    source_url = parse_qs(urlsplit(item["thumb"]).query)["url"][0]
+                    if not re.match(re.escape(item["id"]) + r"(?:_|-)", urlsplit(source_url).path.rsplit("/", 1)[-1]):
+                        raise PixivPolicyError("发现缩略图身份不符")
             except PixivPolicyError:
                 feed["unavailable"] += 1
                 continue

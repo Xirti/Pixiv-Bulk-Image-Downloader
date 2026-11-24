@@ -3,6 +3,7 @@ from types import MappingProxyType
 
 
 DESKTOP_AUTH_PATHS = frozenset({
+    '/api/desktop/auth/cancel',
     '/api/desktop/auth/app-cancel',
     '/api/desktop/auth/app-connect',
     '/api/desktop/auth/context',
@@ -26,6 +27,7 @@ POST_ROUTES = MappingProxyType({
     '/api/auth/logout': (4096, '_post_logout'),
     '/api/auth/method': (1024, '_post_auth_method'),
     '/api/desktop/auth/session': (4096, '_post_desktop_session'),
+    '/api/desktop/auth/cancel': (1024, '_post_cancel_search'),
     '/api/desktop/auth/logout': (4096, '_post_desktop_logout'),
     '/api/desktop/auth/context': (1024, '_post_desktop_context'),
     '/api/desktop/auth/app-connect': (1024, '_post_desktop_app_connect'),
