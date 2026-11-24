@@ -60,7 +60,7 @@ def normalize_candidates(body, name, page):
     return {"query": name, "page": page, "candidates": candidates, "hasMore": len(ids) >= 20}
 
 
-def normalize_overview(body, user_id):
+def normalize_overview(body, user_id, *, logged_in=False):
     if not isinstance(body, dict):
         raise PixivPolicyError("Pixiv 作者作品索引格式异常")
     counts = {}
@@ -77,7 +77,7 @@ def normalize_overview(body, user_id):
         if not isinstance(raw, dict) or raw.get("type") not in {"illust", "manga"}:
             continue
         try:
-            item = normalize_search_item(raw)
+            item = normalize_search_item(raw, logged_in=logged_in)
         except PixivPolicyError:
             continue
         if item["userId"] == user_id:
@@ -97,7 +97,7 @@ class ArtistService:
             self._cache.clear()
             self._pending.clear()
 
-    def read(self, kind, target, *, generation, page=1, cancel_event=None, refresh=False):
+    def read(self, kind, target, *, generation, page=1, cancel_event=None, refresh=False, logged_in=False):
         if kind not in {"profile", "overview", "candidates"}:
             raise PixivPolicyError("不支持的作者读取")
         if kind == "candidates":
@@ -110,7 +110,7 @@ class ArtistService:
                 raise PixivPolicyError("作者 UID 无效")
             url = (f"https://www.pixiv.net/ajax/user/{target}?full=1&lang=zh" if kind == "profile"
                    else build_user_profile_all_url(target))
-        key = (generation, kind, target, page)
+        key = (generation, kind, target, page, logged_in)
         with self._lock:
             cached = self._cache.get(key)
             if not refresh and cached and cached[0] > time.monotonic():
@@ -121,7 +121,7 @@ class ArtistService:
             payload = self._fetch(url, cancel_event)
             body = payload.get("body")
             result = (normalize_artist(body, target) if kind == "profile" else
-                      normalize_overview(body, target) if kind == "overview" else
+                      normalize_overview(body, target, logged_in=logged_in) if kind == "overview" else
                       normalize_candidates(body, target, page))
             if cancel_event is not None and cancel_event.is_set():
                 raise PixivPolicyError("作者读取已取消")

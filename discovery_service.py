@@ -239,7 +239,12 @@ class DiscoveryService:
         for row in raw:
             feed["sourceCount"] += 1
             try:
-                item = normalize_work(row,allow_r18=feed["mode"]!="safe") if method=="app" else normalize_web_rank(row) if feed["kind"]=="ranking" else normalize_search_item(row,allow_r18=feed["mode"]!="safe")
+                if method == "app":
+                    item = normalize_work(row, allow_r18=feed["mode"] != "safe")
+                elif feed["kind"] == "ranking":
+                    item = normalize_web_rank(row)
+                else:
+                    item = normalize_search_item(row, allow_r18=feed["mode"] != "safe", logged_in=True)
                 source_url=parse_qs(urlsplit(item["thumb"]).query)["url"][0]
                 if not re.match(re.escape(item["id"])+r"(?:_|-)",urlsplit(source_url).path.rsplit("/",1)[-1]):
                     raise PixivPolicyError("发现缩略图身份不符")

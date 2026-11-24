@@ -166,7 +166,7 @@ class PopularityService:
         normalized = []
         for row in rows:
             try:
-                item = normalize_search_item(row, allow_r18=job["mode"] != "safe")
+                item = normalize_search_item(row, allow_r18=job["mode"] != "safe", logged_in=True)
             except PixivPolicyError:
                 continue
             if item["id"] not in ids:

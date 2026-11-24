@@ -923,6 +923,14 @@ class AccountCache:
         AccountCache._advance_page_epochs(db, owner, method, ("bookmarks", "works"))
         AccountCache._advance_display_revision(db, owner, method)
 
+    def refresh_web_audience_cache(self, owner):
+        # Earlier builds filtered login-only rows out before storing these pages.
+        with self.lock, closing(self._connect()) as db, db:
+            inserted = db.execute("INSERT OR IGNORE INTO cached VALUES(?,?,?,?)",
+                (owner, "web", '["web-artwork-audience"]', "true"))
+            if inserted.rowcount:
+                self._delete_display_pages(db, owner, "web")
+
     @staticmethod
     def _advance_display_revision(db, owner, method):
         db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)",
@@ -1291,7 +1299,10 @@ class AccountPages:
             items=[];unavailable=0
             for row in rows:
                 try:
-                    item = normalize_work(row,allow_r18=mode!="safe") if method=="app" else normalize_search_item(row,allow_r18=mode!="safe")
+                    if method == "app":
+                        item = normalize_work(row, allow_r18=mode != "safe")
+                    else:
+                        item = normalize_search_item(row, allow_r18=mode != "safe", logged_in=True)
                 except PixivPolicyError:
                     unavailable+=1;continue
                 if matches_content_mode(item["restriction"],mode):items.append(item)
@@ -1443,7 +1454,10 @@ class AccountPages:
         def load():
             parser = HomepageIdentity()
             parser.feed(self.request_homepage())
-            return parser.user_id()
+            owner = parser.user_id()
+            with self.cache_publication(generation, owner):
+                self.saved_cache.refresh_web_audience_cache(owner)
+            return owner
         owner = self._cached((generation, "owner"), load)
         if self.confirm_web_owner is not None:
             self.confirm_web_owner(generation, owner)
@@ -1636,7 +1650,7 @@ class AccountPages:
             if not isinstance(data,dict):raise AccountError("invalid_data","本人作品信息格式异常")
             rows=[]
             for value in data.values():
-                try:item=normalize_search_item(value,allow_r18=allow_r18)
+                try:item=normalize_search_item(value,allow_r18=allow_r18,logged_in=True)
                 except PixivPolicyError:continue
                 if item["userId"]==owner:rows.append(item)
         unique={item["id"]:item for item in rows if matches_content_mode(item["restriction"],mode)}

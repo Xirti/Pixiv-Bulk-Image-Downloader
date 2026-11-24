@@ -94,7 +94,9 @@ def resolve_web_path(root: Path, request_path: str) -> Path:
     return candidate
 
 
-def validate_web_artwork(raw: dict[str, Any], allow_r18: bool = False, *, detail: bool = False) -> str:
+def validate_web_artwork(
+    raw: dict[str, Any], allow_r18: bool = False, *, detail: bool = False, logged_in: bool = False,
+) -> str:
     if not isinstance(raw, dict):
         raise PixivPolicyError("invalid artwork data")
     required = ("xRestrict", "isUnlisted", "isLoginOnly") if detail else ("xRestrict", "isUnlisted")
@@ -111,7 +113,7 @@ def validate_web_artwork(raw: dict[str, Any], allow_r18: bool = False, *, detail
         raise ArtworkVisibilityError("Pixiv 只返回了作品的遮罩内容，请在官网确认当前账号能否查看")
     if _integer_field(raw, "visibilityScope") != 0:
         raise ArtworkVisibilityError("该作品的公开范围受限，请在 Pixiv 官网确认当前账号能否查看")
-    if raw.get("isLoginOnly"):
+    if raw.get("isLoginOnly") and not logged_in:
         raise ArtworkVisibilityError("该作品仅对登录用户开放，请在 Pixiv 官网登录后查看")
     return CONTENT_RESTRICTIONS[restriction]
 
@@ -173,8 +175,10 @@ def artwork_classification(raw: dict[str, Any]) -> tuple[str, bool]:
     return kinds[kind], ai == 2
 
 
-def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[str, Any]:
-    restriction = validate_web_artwork(raw, allow_r18)
+def normalize_search_item(
+    raw: dict[str, Any], allow_r18: bool = False, *, logged_in: bool = False,
+) -> dict[str, Any]:
+    restriction = validate_web_artwork(raw, allow_r18, logged_in=logged_in)
     artwork_id = str(raw.get("id") or "")
     if not valid_pixiv_id(artwork_id):
         raise PixivPolicyError("invalid artwork id")
@@ -199,6 +203,7 @@ def normalize_search_item(raw: dict[str, Any], allow_r18: bool = False) -> dict[
     return {
         "id": artwork_id,
         "restriction": restriction,
+        "loginOnly": bool(raw.get("isLoginOnly")),
         "source": "pixiv",
         "title": str(raw.get("title") or "未命名作品"),
         "artist": str(raw.get("userName") or "未知画师"),
@@ -324,8 +329,10 @@ def normalize_detail(
     raw: dict[str, Any],
     pages: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]],
     allow_r18: bool = False,
+    *,
+    logged_in: bool = False,
 ) -> dict[str, Any]:
-    restriction = validate_web_artwork(raw, allow_r18, detail=True)
+    restriction = validate_web_artwork(raw, allow_r18, detail=True, logged_in=logged_in)
     artwork_id = str(raw.get("illustId") or raw.get("id") or "")
     if not valid_pixiv_id(artwork_id):
         raise PixivPolicyError("invalid artwork id")
@@ -366,7 +373,7 @@ def normalize_detail(
     else:
         formats = [{"id": "source", "label": "保留源格式（推荐）"}]
     return {
-        "id": artwork_id, "restriction": restriction, "source": "pixiv",
+        "id": artwork_id, "restriction": restriction, "loginOnly": bool(raw["isLoginOnly"]), "source": "pixiv",
         "title": str(raw.get("title") or raw.get("illustTitle") or "未命名作品"),
         "artist": str(raw.get("userName") or "未知画师"), "userId": str(raw.get("userId") or ""),
         "tags": [str(row.get("tag")) for row in tag_rows if isinstance(row, dict) and row.get("tag")][:30],

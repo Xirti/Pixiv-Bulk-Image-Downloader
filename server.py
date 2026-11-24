@@ -589,9 +589,12 @@ class ArtworkDetail:
             if pending:
                 raise AccountError("settings_pending", "浏览设置正在核对，请稍后下载。")
             assert_authorization_generation(self.authorization_epoch)
-            if self.publication is not None:
-                owner, revision = self.publication
-                owner.check_visible(revision)
+            self.check_visibility()
+
+    def check_visibility(self) -> None:
+        if self.publication is not None:
+            owner, revision = self.publication
+            owner.check_visible(revision)
 
 
 @dataclass
@@ -599,6 +602,11 @@ class _DetailPublication:
     last_started: int = 0
     published: int = 0
     last_denial: int = 0
+    account_only: bool = False
+
+    def __deepcopy__(self, _memo):
+        # Copied detail snapshots still share the artwork's revocation state.
+        return self
 
     def check_visible(self, revision: int):
         if revision < self.last_denial:
@@ -616,12 +624,13 @@ def _claim_detail_publication(artwork_id: str):
         return owner, owner.last_started
 
 
-def _withdraw_detail(artwork_id: str, publication: tuple[_DetailPublication, int]):
+def _withdraw_detail(artwork_id: str, publication: tuple[_DetailPublication, int], *, account_only=False):
     owner, revision = publication
     with PIXIV_STATE_LOCK:
-        if revision < owner.published:
+        if revision < owner.published or (account_only and owner.account_only):
             return
         owner.published = owner.last_denial = revision
+        owner.account_only = account_only
         PIXIV_CACHE.pop(artwork_id, None)
         for token in [token for token, row in IMAGE_TOKENS.items() if row[1] == artwork_id]:
             del IMAGE_TOKENS[token]
@@ -643,6 +652,7 @@ def cache_pixiv_item(
             if revision < owner.published:
                 return detail
             owner.published = revision
+            owner.account_only = authorization_epoch is not None
         PIXIV_CACHE.pop(artwork_id, None)
         PIXIV_CACHE[artwork_id] = detail
         while len(PIXIV_CACHE) > MAX_PIXIV_CACHE_ITEMS:
@@ -650,10 +660,12 @@ def cache_pixiv_item(
     return detail
 
 
-def get_cached_pixiv_detail(artwork_id: str) -> ArtworkDetail | None:
+def get_cached_pixiv_detail(artwork_id: str, *, authorization_epoch: int | None = None) -> ArtworkDetail | None:
     with PIXIV_STATE_LOCK:
         detail = PIXIV_CACHE.get(artwork_id)
         if detail is not None:
+            if detail.authorization_epoch is not None and detail.authorization_epoch != authorization_epoch:
+                return None
             PIXIV_CACHE.move_to_end(artwork_id)
         return detail
 
@@ -704,17 +716,14 @@ def pixiv_item_for_download(
     refresh: bool = False,
 ) -> dict:
     raise_if_search_cancelled(cancel_event)
-    detail = None if refresh else get_cached_pixiv_detail(artwork_id)
+    detail = None if refresh else get_cached_pixiv_detail(artwork_id, authorization_epoch=authorization_epoch)
     cached = detail.item if detail is not None else None
     if cached is not None and _item_image_tokens_current(
         cached, require_thumb=require_thumb,
     ):
-        if cached.get("restriction") in RESTRICTED_CONTENT:
-            if not allow_r18:
-                raise ArtworkRatingError("restricted artwork")
-            if authorization_epoch is None:
-                raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新发起下载")
-            assert_authorization_generation(authorization_epoch)
+        if cached.get("restriction") in RESTRICTED_CONTENT and not allow_r18:
+            raise ArtworkRatingError("restricted artwork")
+        assert_authorization_generation(detail.authorization_epoch)
         raise_if_search_cancelled(cancel_event)
         return cached
     return pixiv_detail(artwork_id, allow_r18=allow_r18, authorization_epoch=authorization_epoch,
@@ -726,7 +735,7 @@ def read_pixiv_download_detail(
     cancel_event: threading.Event | None, network_timeout: float = 90,
 ) -> ArtworkDetail:
     raise_if_search_cancelled(cancel_event)
-    detail = get_cached_pixiv_detail(artwork_id)
+    detail = get_cached_pixiv_detail(artwork_id, authorization_epoch=authorization_epoch)
     if detail is None or not detail.download_urls or detail.expires_at < time.monotonic():
         detail = _read_pixiv_detail(
             artwork_id, allow_r18, authorization_epoch=authorization_epoch,
@@ -1096,7 +1105,7 @@ def _authorize_artwork_images(
     fields = []
     for item in items:
         artwork_id = str(item["id"])
-        restriction = "account" if account_bound else str(item.get("restriction") or "safe")
+        restriction = "account" if account_bound or item.get("loginOnly") else str(item.get("restriction") or "safe")
         if item.get("thumb"):
             fields.append((item, "thumb", (
                 item["thumb"], artwork_id, restriction, search_session, search_page, authorization_epoch,
@@ -1702,6 +1711,7 @@ def extend_history(
     need_count: int,
     allow_r18: bool = False,
     *,
+    logged_in: bool = False,
     work_type: str = "all",
     max_requests: int = MAX_HISTORY_REQUESTS,
     max_seconds: float = MAX_HISTORY_SECONDS,
@@ -1747,7 +1757,7 @@ def extend_history(
                 if mode == "r18" and total > 0:
                     for raw in first_data:
                         try:
-                            candidate = normalize_search_item(raw, allow_r18=allow_r18)
+                            candidate = normalize_search_item(raw, allow_r18=allow_r18, logged_in=logged_in)
                         except PixivPolicyError:
                             continue
                         if candidate["restriction"] in RESTRICTED_CONTENT:
@@ -1779,7 +1789,7 @@ def extend_history(
                 ), work_type)
                 rows = block.get("data") or []
             for raw in rows:
-                try: candidate = normalize_search_item(raw, allow_r18=allow_r18)
+                try: candidate = normalize_search_item(raw, allow_r18=allow_r18, logged_in=logged_in)
                 except PixivPolicyError: continue
                 artwork_id = candidate["id"]
                 if artwork_id in state["ids"]: continue
@@ -1854,7 +1864,7 @@ def popularity_bookmark_metadata(identifier, mode, generation):
         body = source_body(pixiv_json(f"https://www.pixiv.net/ajax/illust/{identifier}?lang=zh"))
         if str(body.get("id")) != identifier:
             raise AccountError("invalid_data", "收藏数摘要的作品身份不符")
-        restriction = validate_web_artwork(body, allow_r18=mode != "safe", detail=True)
+        restriction = validate_web_artwork(body, allow_r18=mode != "safe", detail=True, logged_in=True)
         count = bookmark_count(body)
     if not matches_content_mode(restriction, mode):
         raise ArtworkRatingError("作品分级已变化，请刷新当前列表")
@@ -2061,12 +2071,10 @@ def _touch_search_session(session_key: tuple) -> dict:
 def assert_search_commit_allowed(
     session_key: tuple,
     session: dict,
-    scope: str,
     authorization_epoch: int | None,
     cancel_event: threading.Event | None,
 ) -> None:
-    if scope in {"r18", "r18g", "all"}:
-        assert_authorization_generation(authorization_epoch)
+    assert_authorization_generation(authorization_epoch)
     raise_if_search_cancelled(cancel_event)
     if SEARCH_SESSIONS.get(session_key) is not session:
         raise SearchCancelledError("搜索缓存已重置")
@@ -2126,13 +2134,14 @@ def load_search_source(
     allow_r18: bool,
     budget: dict,
     *,
+    logged_in: bool = False,
     cancel_event: threading.Event | None = None,
     date_range: SearchDateRange | None = None,
 ) -> dict:
     state = extend_history(
         tag, mode, need_count, allow_r18=allow_r18, budget=budget,
         namespace=session_key, cancel_event=cancel_event, work_type=session_key[3],
-        date_range=date_range,
+        date_range=date_range, logged_in=logged_in,
     )
     source_key = (session_key, tag, mode)
     base = int(state.get("baseOffset", 0))
@@ -2363,6 +2372,8 @@ def search_user_results(
         "user", query_kind, target.casefold(), user_id,
         scope, work_type, bool(include_ai), bool(fuzzy),
     )
+    if authorization_epoch is not None:
+        session_key += (("account", authorization_epoch),)
     if date_range is not None:
         session_key += (date_range,)
     if snapshot_id:
@@ -2375,7 +2386,7 @@ def search_user_results(
         raise_if_search_cancelled(cancel_event)
         session = _touch_search_session(session_key)
         with SEARCH_SESSION_LOCKS_GUARD:
-            assert_search_commit_allowed(session_key, session, scope, authorization_epoch, cancel_event)
+            assert_search_commit_allowed(session_key, session, authorization_epoch, cancel_event)
             result_index = session.get("identityIndex")
             if result_index is None:
                 result_index = session["identityIndex"] = SearchResultIndex()
@@ -2394,7 +2405,7 @@ def search_user_results(
             )
             with SEARCH_SESSION_LOCKS_GUARD:
                 assert_search_commit_allowed(
-                    session_key, session, scope, authorization_epoch, cancel_event,
+                    session_key, session, authorization_epoch, cancel_event,
                 )
                 session["profileIds"] = profile_ids
                 session["profileOffset"] = 0
@@ -2426,7 +2437,9 @@ def search_user_results(
             incoming: list[dict] = []
             for raw in raw_rows:
                 try:
-                    candidate = normalize_search_item(raw, allow_r18=scope in {"r18", "r18g", "all"})
+                    candidate = normalize_search_item(
+                        raw, allow_r18=scope != "safe", logged_in=authorization_epoch is not None,
+                    )
                 except PixivPolicyError:
                     continue
                 if candidate["userId"] != user_id:
@@ -2443,7 +2456,7 @@ def search_user_results(
             incoming.sort(key=_search_sort_key, reverse=True)
             with SEARCH_SESSION_LOCKS_GUARD:
                 assert_search_commit_allowed(
-                    session_key, session, scope, authorization_epoch, cancel_event,
+                    session_key, session, authorization_epoch, cancel_event,
                 )
                 committed = result_index.append_results(incoming)
                 session["items"].extend(committed)
@@ -2476,16 +2489,15 @@ def search_user_results(
         )
         with SEARCH_SESSION_LOCKS_GUARD:
             assert_search_commit_allowed(
-                session_key, session, scope, authorization_epoch, cancel_event,
+                session_key, session, authorization_epoch, cancel_event,
             )
             authorized_items, available_pages, preloaded_through = _publish_search_pages(
                 session_key, session, page, page_rows, authorization_epoch, prefetch=prefetch,
             )
-        if scope in {"r18", "r18g", "all"}:
+        if authorization_epoch is not None:
             try:
                 assert_authorization_generation(authorization_epoch)
             except AuthorizationRevokedError:
-                prune_search_image_tokens(session_key)
                 _drop_search_session(session_key)
                 raise
         artist = str(session.get("artist") or resolved_name or f"Pixiv 用户 {user_id}")
@@ -2627,6 +2639,8 @@ def search_pixiv_results(
     )
     page = max(1, int(page))
     session_key = ("tags", tag_groups, scope, work_type, bool(include_ai), bool(fuzzy))
+    if authorization_epoch is not None:
+        session_key += (("account", authorization_epoch),)
     if date_range is not None:
         session_key += (date_range,)
     if snapshot_id:
@@ -2639,7 +2653,7 @@ def search_pixiv_results(
         raise_if_search_cancelled(cancel_event)
         session = _touch_search_session(session_key)
         with SEARCH_SESSION_LOCKS_GUARD:
-            assert_search_commit_allowed(session_key, session, scope, authorization_epoch, cancel_event)
+            assert_search_commit_allowed(session_key, session, authorization_epoch, cancel_event)
             first_retained_page = int(session["baseIndex"]) // SEARCH_PER_PAGE + 1
             result_index = session.get("identityIndex")
             if result_index is not None and result_index.emitted_count and (
@@ -2660,6 +2674,8 @@ def search_pixiv_results(
         source_tags = tuple(dict.fromkeys(alias for group in tag_groups for alias in group))
         sources = [(tag, mode) for tag in source_tags for mode in modes]
         source_options = {"date_range": date_range} if date_range is not None else {}
+        if authorization_epoch is not None:
+            source_options["logged_in"] = True
         initial_day = (date_range.end if date_range else datetime.now(timezone(timedelta(hours=9))).date()).isoformat()
         literal_and = not fuzzy and len(tag_groups) > 1
         session.setdefault("sourceBounds", {})
@@ -2671,7 +2687,7 @@ def search_pixiv_results(
         while absolute_loaded < desired_items and rounds < MAX_HISTORY_REQUESTS:
             raise_if_search_cancelled(cancel_event)
             with SEARCH_SESSION_LOCKS_GUARD:
-                assert_search_commit_allowed(session_key, session, scope, authorization_epoch, cancel_event)
+                assert_search_commit_allowed(session_key, session, authorization_epoch, cancel_event)
                 ready = session["identityIndex"].take_ready(
                     _newest_unread_bound(session, sources, initial_day),
                     max(60, desired_items - absolute_loaded),
@@ -2743,7 +2759,9 @@ def search_pixiv_results(
                 normalized_rows = []
                 for raw in source["rows"]:
                     try:
-                        candidate = normalize_search_item(raw, allow_r18=mode == "r18")
+                        candidate = normalize_search_item(
+                            raw, allow_r18=mode == "r18", logged_in=authorization_epoch is not None,
+                        )
                     except PixivPolicyError:
                         continue
                     normalized_rows.append(candidate)
@@ -2774,7 +2792,7 @@ def search_pixiv_results(
             incoming.sort(key=_search_sort_key, reverse=True)
             with SEARCH_SESSION_LOCKS_GUARD:
                 assert_search_commit_allowed(
-                    session_key, session, scope, authorization_epoch, cancel_event,
+                    session_key, session, authorization_epoch, cancel_event,
                 )
                 # The source can only advance after its rows are in the index.
                 session["identityIndex"].add(incoming)
@@ -2828,7 +2846,7 @@ def search_pixiv_results(
         )
         with SEARCH_SESSION_LOCKS_GUARD:
             assert_search_commit_allowed(
-                session_key, session, scope, authorization_epoch, cancel_event,
+                session_key, session, authorization_epoch, cancel_event,
             )
             has_more = (absolute_result_count > page * SEARCH_PER_PAGE
                         or any(not session["sourceDone"].get(source) for source in sources)
@@ -2837,11 +2855,10 @@ def search_pixiv_results(
                 session_key, session, page, page_rows, authorization_epoch,
                 prefetch=prefetch, authorize_images=authorize_images,
             )
-        if scope in {"r18", "r18g", "all"}:
+        if authorization_epoch is not None:
             try:
                 assert_authorization_generation(authorization_epoch)
             except AuthorizationRevokedError:
-                prune_search_image_tokens(session_key)
                 _drop_search_session(session_key)
                 raise
         return {
@@ -2901,7 +2918,7 @@ def _read_pixiv_detail(
             )
         except ArtworkVisibilityError:
             with SEARCH_SESSION_LOCKS_GUARD:
-                assert_read_current(event, generation)
+                assert_read_current(event, generation, authorization_epoch)
                 if browsing == BROWSING_GENERATION:
                     _withdraw_detail(artwork_id, publication)
             raise
@@ -2939,18 +2956,35 @@ def _fetch_pixiv_detail(
         detail_url = f"https://www.pixiv.net/ajax/illust/{artwork_id}?lang=zh"
         pages_url = f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages?lang=zh"
         detail = pixiv_json(detail_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or {}
-        assert_read_current(cancel_event, generation)
+        assert_read_current(cancel_event, generation, authorization_epoch)
         if not isinstance(detail, dict) or str(detail.get("illustId") or detail.get("id")) != artwork_id:
             raise PixivPolicyError("Pixiv 返回的作品 ID 不匹配")
-        normalized = normalize_detail(
-            detail, lambda: pixiv_json(pages_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or [],
-            allow_r18=allow_r18,
-        )
+
+        def withdraw_public_detail():
+            with SEARCH_SESSION_LOCKS_GUARD:
+                assert_read_current(cancel_event, generation, authorization_epoch)
+                if browsing == BROWSING_GENERATION:
+                    _withdraw_detail(artwork_id, publication, account_only=True)
+
+        def load_pages():
+            # The audience is already known, even if the image pages fail.
+            if detail["isLoginOnly"] or detail["xRestrict"]:
+                withdraw_public_detail()
+            return pixiv_json(pages_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or []
+
+        try:
+            normalized = normalize_detail(
+                detail, load_pages, allow_r18=allow_r18, logged_in=authorization_epoch is not None,
+            )
+        except ArtworkRatingError:
+            withdraw_public_detail()
+            raise
     raise_if_search_cancelled(cancel_event)
     restricted = normalized.get("restriction") in RESTRICTED_CONTENT
     if restricted and authorization_epoch is None:
         raise AuthorizationRevokedError("Pixiv 授权已撤销，请重新打开作品")
-    epoch = generation if method == "app" else authorization_epoch if restricted else None
+    login_only = normalized.get("loginOnly", False)
+    epoch = generation if method == "app" else authorization_epoch if restricted or login_only else None
     # The adapters already validate these addresses. Retain only the private
     # download sources before the same fields become browser capabilities.
     sources = tuple(
@@ -3768,25 +3802,29 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": str(exc)}, 400)
         try:
             def capture_artist_identity():
-                if AUTH_METHOD.get() == "app":
-                    connected, generation = validated_authorization()
-                    if not connected:
-                        raise AccountError("reauth", "请先在「我的账号」完成 App 授权")
-                    return connected, generation, generation
-                return False, None, authorization_generation()
+                connected, epoch, generation = read_authorization_snapshot()
+                if not connected and AUTH_METHOD.get() == "app":
+                    raise AccountError("reauth", "请先在「我的账号」完成 App 授权")
+                return connected, epoch, generation
 
             with READ_SCOPES.request(request_id, capture_identity=capture_artist_identity) as lease:
                 generation = lease.generation
                 cancel_event = lease.cancel_event
                 kind = "candidates" if match is None else "overview" if match.group(2) else "profile"
                 target = query.get("name", [""])[0] if match is None else match.group(1)
-                reader=APP_GALLERY.artist if AUTH_METHOD.get()=="app" else ARTISTS.read
-                result = reader(kind, target, generation=generation, page=page, cancel_event=cancel_event,
-                                      refresh=query.get("refresh", [""])[0] == "1")
+                options = dict(generation=generation, page=page, cancel_event=cancel_event,
+                               refresh=query.get("refresh", [""])[0] == "1")
+                if AUTH_METHOD.get() == "app":
+                    result = APP_GALLERY.artist(kind, target, **options)
+                else:
+                    result = ARTISTS.read(kind, target, logged_in=lease.authorization_epoch is not None, **options)
                 if authorization_generation() != generation:
                     raise AuthorizationRevokedError("作者读取期间账号已变更，请重试")
                 if kind == "overview":
-                    _authorize_artwork_images(result["featured"])
+                    _authorize_artwork_images(
+                        result["featured"], authorization_epoch=lease.authorization_epoch,
+                        account_bound=lease.authorization_epoch is not None,
+                    )
                 else:
                     profiles = result["candidates"] if kind == "candidates" else [result]
                     _authorize_profile_images(profiles, ("avatar", "background"), id_key="userId", id_prefix="artist:")
@@ -4228,13 +4266,10 @@ class Handler(SimpleHTTPRequestHandler):
                     capture_identity=lambda: (session_authorized, session_epoch, read_generation),
                     priority=2 if query.get("prefetch", ["false"])[0].lower() == "true" or query.get("warm", [""])[0] == "1" else 0) as lease:
                 cancel_event = lease.cancel_event
-                authorization_epoch = (
-                    session_epoch if search_scope in {"r18", "r18g", "all"} else None
-                )
                 kwargs = {
                     "authorized": session_authorized,
                     "fuzzy": fuzzy,
-                    "authorization_epoch": authorization_epoch,
+                    "authorization_epoch": session_epoch,
                 }
                 kwargs["cancel_event"] = cancel_event
                 kwargs["snapshot_id"] = snapshot_id
@@ -4322,24 +4357,24 @@ class Handler(SimpleHTTPRequestHandler):
         request_id = query.get("requestId", [""])[0].strip()
         try:
             with READ_SCOPES.request(request_id) as lease, self._watch_media_client(lease.cancel_event) as cancel_event:
-                authorized, authorization_epoch = lease.authorized, lease.authorization_epoch
-
-                def check():
-                    raise_if_search_cancelled(cancel_event)
-                    lease.check()
-
-                item = pixiv_item_for_download(
+                detail = read_pixiv_download_detail(
                     artwork_id,
-                    allow_r18=authorized,
-                    authorization_epoch=authorization_epoch,
+                    allow_r18=lease.authorized,
+                    authorization_epoch=lease.authorization_epoch,
                     cancel_event=cancel_event,
                 )
+                item, epoch = detail.item, detail.authorization_epoch
                 if item.get("workType") != "ugoira":
                     raise PixivPolicyError("该作品不是动图")
-                restricted = item.get("restriction") in RESTRICTED_CONTENT
-                if restricted and not authorized:
-                    raise PixivPolicyError("限制级动图预览需要有效账户授权")
-                epoch = authorization_epoch if restricted else None
+
+                @contextmanager
+                def publish():
+                    with SEARCH_SESSION_LOCKS_GUARD:
+                        raise_if_search_cancelled(cancel_event)
+                        lease.check()
+                        detail.check_visibility()
+                        yield
+
                 meta = pixiv_ugoira_meta(artwork_id, authorization_epoch=epoch, cancel_event=cancel_event)
                 version = hashlib.sha256(json.dumps(
                     (meta["src"], meta["mime"], meta["frames"]), sort_keys=True,
@@ -4348,7 +4383,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({
                         "frames": meta["frames"], "mime": meta["mime"], "version": version,
                         "width": item.get("width"), "height": item.get("height"),
-                    }, before_send=check)
+                    }, publication=publish)
                 if wanted and wanted != version:
                     raise UgoiraSourceChangedError("动图帧表已更新，请重试")
 
@@ -4363,12 +4398,8 @@ class Handler(SimpleHTTPRequestHandler):
                     ("zip", artwork_id, epoch, version),
                     fetch_zip, ttl=15, cancel_event=cancel_event,
                 )
-                # Mirror the download path: revoked authorization mid-flight must
-                # not publish restricted bytes.
-                if restricted and authorization_epoch is not None:
-                    assert_authorization_generation(authorization_epoch)
-                check()
-                return self.send_bytes(raw, "application/zip", "private, no-store")
+
+                return self.send_bytes(raw, "application/zip", "private, no-store", publication=publish)
         except SearchInputError as exc:
             return self.send_json({"error": str(exc)}, 400)
         except SearchRequestConflictError as exc:

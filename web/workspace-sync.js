@@ -3,13 +3,14 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
   getAuthorizationGeneration = () => null}) {
   const copy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
   const fields = ["context", "resultPage", "archived"];
-  const itemFields = ["source", "title", "artist", "pages", "workType", "restriction", "tags"];
+  const itemFields = ["source", "title", "artist", "pages", "workType", "restriction", "loginOnly", "tags"];
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
   const canonical = rows => rows.map(row => ({
     id: String(row.id), pages: [...row.pages].sort((a, b) => a - b),
     context: {...row.context}, resultPage: row.resultPage || 1, archived: Boolean(row.archived),
     item: {id: String(row.id), source: row.item.source || "pixiv", title: row.item.title, artist: row.item.artist,
-      pages: row.item.pages, workType: row.item.workType, restriction: row.item.restriction, tags: row.item.tags},
+      pages: row.item.pages, workType: row.item.workType, restriction: row.item.restriction,
+      loginOnly: row.item.loginOnly === true || undefined, tags: row.item.tags},
   }));
   let ready = false, loading = false, needsRestore = false, initialized = false;
   let scope = null, revision = 0, epoch = 0, readGeneration = 0, sequence = 0;

@@ -404,11 +404,14 @@ function restoreBasketView(rows) {
   const latestItem = item => item ? records.get(String(item.id))?.item || item : null;
   for (const row of records.values()) {
     const preview = previewItems.get(row.id);
+    const audienceChanged = Boolean(preview?.loginOnly) !== Boolean(row.item.loginOnly);
     if (["title", "artist", "pages", "workType", "restriction", "tags"].some(
       field => JSON.stringify(preview?.[field]) !== JSON.stringify(row.item[field]),
-    )) changedDetailIds.add(row.id);
+    ) || audienceChanged) changedDetailIds.add(row.id);
     if (!preview?.pageImages || preview.pages !== row.item.pages || preview.workType !== row.item.workType
-      || preview.restriction !== row.item.restriction) staleBasketPreviewIds.add(row.id);
+      || preview.restriction !== row.item.restriction || audienceChanged) {
+      staleBasketPreviewIds.add(row.id);
+    }
   }
   normalDetail.item = latestItem(normalDetail.item);
   basketDetail.item = latestItem(basketDetail.item);
@@ -1689,6 +1692,7 @@ function reconcileSelectedArtworkPreviews(freshItems) {
     if (!Array.isArray(fresh.pageImages)) {
       return {...fresh, ...existing, thumb: fresh.thumb || existing.thumb,
         bookmarks: existing.bookmarks ?? fresh.bookmarks ?? null,
+        loginOnly: Boolean(fresh.loginOnly || existing.loginOnly),
         restriction: ["r18","r18g"].includes(fresh.restriction) ? fresh.restriction : existing.restriction ?? fresh.restriction};
     }
     const merged = { ...existing, ...fresh };
@@ -1706,6 +1710,7 @@ function reconcileSelectedArtworkPreviews(freshItems) {
     const detail = selection.get(item.id)?.item;
     const sameFilters = detail?.pageImages?.length
       && ["workType","aiGenerated","restriction","date","userId"].every(key=>detail[key]===item[key])
+      && Boolean(detail.loginOnly) === Boolean(item.loginOnly)
       && JSON.stringify(detail.tags)===JSON.stringify(item.tags);
     if (sameFilters) freshItems[index] = detail;
   });
