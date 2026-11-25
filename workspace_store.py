@@ -229,12 +229,47 @@ class WorkspaceStore:
         try:
             with connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
+                initializing = version in {0, 1}
+                if version == 2:
+                    # Earlier v2 releases lack some later tables and triggers.
+                    required = {
+                        "basket", "tasks", "recent", "basket_page_checks", "task_removals",
+                        "task_chunks", "web_workspace_owners", "basket_receipts", "recent_writers",
+                        "recent_identity", "prune_basket_checks_INSERT", "prune_basket_checks_UPDATE",
+                        "recent_identity_INSERT", "recent_identity_UPDATE",
+                    }
+                    present = {row[0] for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')")}
+                    initializing = not required.issubset(present)
+                if initializing:
+                    connection.execute("BEGIN IMMEDIATE")
+                    version = connection.execute("PRAGMA user_version").fetchone()[0]
                 if version not in {0, 1, 2}:
                     raise ValueError("unsupported workspace schema")
                 if version == 1:
                     backup=self.path.with_name(self.path.stem+".v1-backup.sqlite3")
-                    if not backup.exists():
-                        with closing(sqlite3.connect(backup)) as destination:connection.backup(destination)
+                    if backup.exists():
+                        with closing(sqlite3.connect(backup.resolve().as_uri() + "?mode=ro", uri=True)) as saved:
+                            backup_version = saved.execute("PRAGMA user_version").fetchone()[0]
+                            backup_tables = {row[0] for row in saved.execute(
+                                "SELECT name FROM sqlite_master WHERE type='table'")}
+                            if (backup_version != 1 or not {"basket", "tasks", "recent"}.issubset(backup_tables)
+                                    or saved.execute("PRAGMA quick_check").fetchall() != [("ok",)]):
+                                raise sqlite3.DatabaseError("invalid workspace v1 backup")
+                    else:
+                        temporary = backup.with_name(backup.name + "." + secrets.token_hex(8) + ".tmp")
+                        temporary.touch(exist_ok=False)
+                        try:
+                            # A separate reader copies the committed v1 snapshot
+                            # while this connection reserves the migration writer.
+                            with (
+                                closing(sqlite3.connect(self.path)) as original,
+                                closing(sqlite3.connect(temporary)) as destination,
+                            ):
+                                original.backup(destination)
+                            temporary.replace(backup)
+                        finally:
+                            temporary.unlink(missing_ok=True)
                 if version == 0:
                     connection.execute("CREATE TABLE IF NOT EXISTS basket (singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL)")
                     connection.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, scope TEXT NOT NULL, payload TEXT NOT NULL)")
@@ -273,6 +308,8 @@ class WorkspaceStore:
                             INSERT OR REPLACE INTO recent_identity VALUES (1, lower(hex(randomblob(16))), NULL);
                         END""")
                 if version != 2:connection.execute("PRAGMA user_version=2")
+                if initializing:
+                    connection.commit()
                 yield connection
         finally:
             connection.close()
