@@ -1,6 +1,6 @@
 "use strict";
 
-globalThis.createAppUpdates=function({root,request,beforeRestart,report,openUpdates}){
+globalThis.createAppUpdates=function({root,request,beforeRestart,cancelRestart,report,openUpdates}){
   const notice=createUpdateNotice({open:openUpdates,report});
   const status=root.querySelector("[data-update-status]"),detail=root.querySelector("[data-update-detail]");
   const check=root.querySelector("[data-update-check]"),download=root.querySelector("[data-update-download]");
@@ -80,7 +80,7 @@ globalThis.createAppUpdates=function({root,request,beforeRestart,report,openUpda
     }catch(error){report(error.message);}
     finally{
       acting=false;
-      if(prepared && !closing)document.body.inert=false;
+      if(prepared && !closing)cancelRestart();
       render();
     }
   };

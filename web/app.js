@@ -1817,13 +1817,20 @@ async function prepareDesktopExit({update=false}={}) {
     if(settingsView.dirty)throw Error("请先保存设置改动");
     if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
   }catch(error){
-    document.body.inert=false;
-    selection.metadataPaused=false;
+    cancelDesktopExit();
     throw error;
   }
 }
 
-globalThis.mokuDesktopCloseUnavailable=()=>announceToast("无法确认本机记录已保存，请检查后重试关窗");
+function cancelDesktopExit() {
+  document.body.inert=false;
+  selection.metadataPaused=false;
+}
+
+globalThis.mokuDesktopCloseUnavailable=()=>{
+  cancelDesktopExit();
+  announceToast("无法确认本机记录已保存，请检查后重试关窗");
+};
 globalThis.mokuPrepareDesktopClose=async()=>{
   try{
     await prepareDesktopExit();
@@ -1838,7 +1845,7 @@ createAppUpdates({root:$("[data-account-settings]"),request:fetchJson,report:ann
   const category=$('[data-settings-category="updates"]');category.click();
   await openAccount("settings");
   if(activeWorkspace==="account"){$("#accountPage").scrollTop=0;category.focus({preventScroll:true});queueNavigationRecord();}
-},beforeRestart:()=>prepareDesktopExit({update:true})});
+},beforeRestart:()=>prepareDesktopExit({update:true}),cancelRestart:cancelDesktopExit});
 for(const id of ["saveRoot","createFolder"])$("#"+id).addEventListener("input",()=>{downloadDefaultsTouched=true;});
 $("#openRequestSettings").onclick=()=>{helpDialog.close();void openAccount("settings");};
 
