@@ -152,7 +152,7 @@ class AppTransport:
         self._pool = AsyncCurlPool(name="moku-app-network", impersonate="chrome152", max_clients=2,
             trust_env=False, allow_redirects=False, retry=0)
 
-    def request(self, method, path, *, bearer=None, form=None, check=lambda: None):
+    def request(self, method, path, *, bearer=None, form=None, check=lambda: None, on_send=None):
         token_request = path == "/auth/token"
         if method not in {"GET", "POST"} or not path.startswith("/") or path.startswith("//") or "#" in path:
             raise ValueError("unsupported_app_request")
@@ -184,6 +184,8 @@ class AppTransport:
         def send(session):
             if preflight is not None:
                 preflight()
+            if on_send is not None:
+                on_send()
             return session.request(method, url, headers=headers, data=form, proxy=proxy or None,
                                    timeout=20, allow_redirects=False, discard_cookies=True, content_callback=consume)
 
@@ -338,18 +340,50 @@ class AppAccount:
                     return tokens, epoch
                 if not force and tokens.expires - self.clock() > 300:
                     return tokens, epoch
+            sent = False
+            reader_failure = None
+            handoff_lock = threading.Lock()
+            def refresh_current():
+                nonlocal reader_failure
+                self._check(epoch)
+                with handoff_lock:
+                    owned = sent
+                if owned:
+                    return
+                try:
+                    check()
+                except Exception as error:
+                    with handoff_lock:
+                        if not sent:
+                            reader_failure = error
+                            raise
+                    # Sending won the handoff while this reader check ran.
+                    self._check(epoch)
+
+            def refresh_sent():
+                nonlocal sent
+                refresh_current()
+                with handoff_lock:
+                    if reader_failure is not None:
+                        raise reader_failure
+                    sent = True
+
             try:
                 raw = self.transport.request("POST", "/auth/token", form={**self.client_config,
                     "grant_type": "refresh_token", "refresh_token": tokens.refresh, "include_policy": "true"},
-                    check=current)
+                    check=refresh_current, on_send=refresh_sent)
                 updated = Tokens.from_response(raw, previous=tokens, now=self.clock())
-                current()
+                self._check(epoch)
                 self._commit(updated, epoch)
+                current()
                 return updated, epoch
             except Exception as error:
                 # The caller's check may acquire the outer authorization lock.
                 # Never call it while holding the account's internal lock.
-                current()
+                if sent and isinstance(error, AccountError) and error.kind == "reauth":
+                    self._check(epoch)
+                else:
+                    current()
                 with self._credential_publication(), self._lock:
                     self._check_persisted(epoch)
                     self._refresh_error = str(error) if isinstance(error, AccountError) else "刷新暂时失败，请稍后重试"
