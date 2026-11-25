@@ -29,7 +29,7 @@ ANIME_TAG_ALIASES: dict[str, tuple[str, ...]] = {
     "genshin": ("genshin", "原神", "原神イラスト"),
     "原神": ("原神",),
     "honkai star rail": ("honkai star rail", "崩坏：星穹铁道", "崩坏星穹铁道", "崩壊：スターレイル"),
-    "崩坏：星穹铁道": ("honkai star rail", "崩坏：星穹铁道", "崩坏星穹铁道", "崩壊：スターレイル"),
+    "崩坏:星穹铁道": ("honkai star rail", "崩坏：星穹铁道", "崩坏星穹铁道", "崩壊：スターレイル"),
     "崩坏星穹铁道": ("honkai star rail", "崩坏：星穹铁道", "崩坏星穹铁道", "崩壊：スターレイル"),
     "blue archive": ("blue archive", "碧蓝档案", "ブルーアーカイブ"),
     "碧蓝档案": ("blue archive", "碧蓝档案", "ブルーアーカイブ"),
