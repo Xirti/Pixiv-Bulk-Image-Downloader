@@ -1470,13 +1470,13 @@ class AccountPages:
             self.saved_cache.update_entries(owner, method, views, patch_entries)
 
     def check_web_owner(self, generation, owner, expected=None):
-        self.check(generation)
         if owner is None or expected is not None and owner != expected:
             if self.invalidate_web_session is not None:
                 self.invalidate_web_session(generation)
             if owner is None:
                 raise AccountError("reauth", "网页登录已失效，请重新登录")
             raise AccountError("revoked", "官网账号已改变，请重新登录")
+        self.check(generation)
         return owner
 
     def web_homepage(self, generation, expected=None):

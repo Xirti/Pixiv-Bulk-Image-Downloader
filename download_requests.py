@@ -177,14 +177,26 @@ class DownloadRequests:
         for key in ("pages", "skippedPages", "artworks"):
             if key in payload and (type(payload[key]) is not int or payload[key] < 0):
                 raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
-        if len(files) != len(set(paths)):
+        paths = list(dict.fromkeys(paths))
+        if len(files) != len(paths):
             raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
-        for file in files:
+        receipt_root = None
+        seen_paths = set()
+        for relative, file in zip(paths, files):
             if (not isinstance(file, list) or len(file) != 3
                     or not isinstance(file[0], str) or not file[0] or "\0" in file[0]
-                    or not Path(file[0]).is_absolute()
                     or type(file[1]) is not int or file[1] < 0 or type(file[2]) is not int):
                 raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
+            relative, path = Path(relative), Path(file[0])
+            if (relative.anchor or not relative.parts or ".." in relative.parts
+                    or not path.is_absolute() or ".." in path.parts
+                    or len(path.parts) <= len(relative.parts) or path in seen_paths):
+                raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
+            root = path.parents[len(relative.parts) - 1]
+            if root / relative != path or receipt_root is not None and root != receipt_root:
+                raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
+            receipt_root = root
+            seen_paths.add(path)
         if payload.get("skippedPages") and not payload.get("skippedFiles"):
             # Older receipts cannot prove skipped files; require explicit recovery.
             raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)

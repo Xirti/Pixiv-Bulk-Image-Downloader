@@ -998,12 +998,10 @@ function activeDetail() {
 
 async function readArtworkDetail(id, options={}, refresh=false) {
   if(selection.metadataPaused)throw Object.assign(new Error("正在准备退出"),{name:"AbortError"});
-  if(document.body.inert)throw Object.assign(new Error("应用正在准备退出"),{name:"AbortError"});
   const check=workspaceSync.pageCheck(id);
   const query=refresh || check ? "?refresh=1" : "";
   const item=await fetchJson(`/api/pixiv/artwork/${id}${query}`,options,ARTWORK_DETAIL_TIMEOUT_MS);
   if(selection.metadataPaused)throw Object.assign(new Error("正在准备退出"),{name:"AbortError"});
-  if(document.body.inert)throw Object.assign(new Error("应用正在准备退出"),{name:"AbortError"});
   if(check && item.id===String(id) && !options.signal?.aborted){
     await workspaceSync.confirmPages(String(id),check,item.pages);
     options.signal?.throwIfAborted();
