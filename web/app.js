@@ -1800,8 +1800,10 @@ document.querySelectorAll("a[data-project-external]").forEach(link=>{
       .catch(()=>showTaskDock("项目链接","链接打开失败，可右键复制链接",5000));
   };
 });
-async function prepareDesktopExit({update=false}={}) {
+async function prepareDesktopExit({update=false,requestId=null}={}) {
   if(document.body.inert)throw Error("正在准备退出，请稍候");
+  const preparation={requestId};
+  desktopExitPreparation=preparation;
   document.body.inert=true;
   selection.metadataPaused=true;
   try {
@@ -1816,25 +1818,32 @@ async function prepareDesktopExit({update=false}={}) {
     if(typeof sourceSearchView!=='undefined')await sourceSearchView.waitForSave();
     if(settingsView.dirty)throw Error("请先保存设置改动");
     if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
+    if(desktopExitPreparation!==preparation)throw Error("退出准备已取消，请重试");
+    return preparation;
   }catch(error){
-    cancelDesktopExit();
+    cancelDesktopExit(preparation);
     throw error;
   }
 }
 
-function cancelDesktopExit() {
+let desktopExitPreparation=null;
+
+function cancelDesktopExit(preparation=desktopExitPreparation) {
+  if(!preparation || preparation!==desktopExitPreparation)return;
+  desktopExitPreparation=null;
   document.body.inert=false;
   selection.metadataPaused=false;
 }
 
-globalThis.mokuDesktopCloseUnavailable=()=>{
+globalThis.mokuDesktopCloseUnavailable=(requestId=null)=>{
+  if(desktopExitPreparation && desktopExitPreparation.requestId!==requestId)return;
   cancelDesktopExit();
   announceToast("无法确认本机记录已保存，请检查后重试关窗");
 };
-globalThis.mokuPrepareDesktopClose=async()=>{
+globalThis.mokuPrepareDesktopClose=async(requestId=null)=>{
   try{
-    await prepareDesktopExit();
-    return true;
+    const preparation=await prepareDesktopExit({requestId});
+    return desktopExitPreparation===preparation;
   }catch(error){
     announceToast(error.message);
     return false;

@@ -207,10 +207,11 @@ class DesktopApi:
         return False
 
     def _confirm_close(self):
+        request_id = secrets.token_hex(16)
         confirmed = Future()
         try:
             self._window.evaluate_js(
-                "Promise.resolve(globalThis.mokuPrepareDesktopClose?.() ?? true)",
+                f"Promise.resolve(globalThis.mokuPrepareDesktopClose?.({json.dumps(request_id)}) ?? true)",
                 callback=confirmed.set_result,
             )
             if confirmed.result(timeout=120) is True:
@@ -222,7 +223,7 @@ class DesktopApi:
             LOG.exception("Desktop close could not verify the page save result")
             try:
                 self._window.evaluate_js(
-                    "document.body.inert=false; globalThis.mokuDesktopCloseUnavailable?.()"
+                    f"globalThis.mokuDesktopCloseUnavailable?.({json.dumps(request_id)})"
                 )
             except Exception:
                 LOG.exception("Could not show desktop close confirmation error")

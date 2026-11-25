@@ -64,12 +64,11 @@ globalThis.createAppUpdates=function({root,request,beforeRestart,cancelRestart,r
   automatic.onchange=()=>void act("configure",{options:{automatic:automatic.checked}});
   restart.onclick=async()=>{
     if(!beginAction())return;
-    let prepared=false, closing=false;
+    let preparation=null, closing=false;
     try{
       const desktop=window.pywebview?.api;
       if(!desktop?.restart_update || !desktop?.window_action)throw Error("请在 MOKU 桌面窗口中重启更新");
-      await beforeRestart();
-      prepared=true;
+      preparation=await beforeRestart();
       status.textContent="正在准备重启…";
       const result=await desktop.restart_update();
       if(!result.ok)throw Error(result.error || "无法重启更新");
@@ -80,7 +79,7 @@ globalThis.createAppUpdates=function({root,request,beforeRestart,cancelRestart,r
     }catch(error){report(error.message);}
     finally{
       acting=false;
-      if(prepared && !closing)cancelRestart();
+      if(preparation && !closing)cancelRestart(preparation);
       render();
     }
   };
