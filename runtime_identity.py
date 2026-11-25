@@ -29,6 +29,14 @@ def _process_kernel():
     return kernel
 
 
+def process_handle_identity(handle) -> int:
+    api = _process_kernel()
+    created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+    if not api.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return (created.dwHighDateTime << 32) | created.dwLowDateTime
+
+
 def process_identity(pid: int) -> int | None:
     """Creation time identifies PID reuse. Access denial retains the lease."""
     api = _process_kernel()
@@ -43,10 +51,7 @@ def process_identity(pid: int) -> int | None:
     try:
         if api.WaitForSingleObject(handle, 0) == 0:
             return None
-        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
-        if not api.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        return (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return process_handle_identity(handle)
     finally:
         api.CloseHandle(handle)
 

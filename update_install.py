@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -17,6 +18,7 @@ import time
 
 from update_package import MANAGED, UpdateError, verify_bundle, version_key
 from release_security import RELEASE_METADATA, RELEASE_SIGNATURE, read_bounded, verify_release
+from runtime_identity import process_handle_identity
 
 LOG = logging.getLogger("moku.updates")
 RECOVERY_ENTRY = "MOKU-Recover.lnk"
@@ -385,17 +387,26 @@ def confirm_startup(target, token):
     _remove_recovery_entry(target, record)
 
 
-def wait_for_exit(pid, timeout=90):
+def handoff_status_path(plan_path, token):
+    return Path(plan_path).with_name(f"handoff-{token}.json")
+
+
+def wait_for_exit(pid, timeout=90, *, expected_identity=None, ready=None):
     kernel=ctypes.WinDLL("kernel32",use_last_error=True)
     kernel.OpenProcess.argtypes=[ctypes.c_ulong,ctypes.c_int,ctypes.c_ulong];kernel.OpenProcess.restype=ctypes.c_void_p
     kernel.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_ulong];kernel.WaitForSingleObject.restype=ctypes.c_ulong
     kernel.CloseHandle.argtypes=[ctypes.c_void_p]
-    handle=kernel.OpenProcess(0x00100000,False,pid)
+    handle=kernel.OpenProcess(0x00100000 | (0x1000 if expected_identity is not None else 0),False,pid)
     if not handle:
         if ctypes.get_last_error()==87:return  # Process already exited.
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        if kernel.WaitForSingleObject(handle,int(timeout*1000))!=0:raise UpdateError("程序尚未退出，更新已停止")
+        if expected_identity is not None and process_handle_identity(handle)!=expected_identity:
+            raise UpdateError("更新父进程身份已变化，更新已停止")
+        if ready is not None:
+            ready()
+        if kernel.WaitForSingleObject(handle,0xffffffff if timeout is None else int(timeout*1000))!=0:
+            raise UpdateError("程序尚未退出，更新已停止")
     finally:kernel.CloseHandle(handle)
 
 
@@ -410,7 +421,24 @@ def _run(plan_path,plan,target):
     bundle=Path(plan["bundle"])
     if (plan_path!=bundle.parent/"plan.json" or bundle.parent.parent!=work_root(target)
             or type(plan["pid"]) is not int or plan["pid"]<=0):raise UpdateError("更新计划无效")
-    wait_for_exit(plan["pid"])
+    handoff=plan.get("handoff")
+    status=None
+    if handoff is not None:
+        if (not isinstance(handoff,str) or not re.fullmatch(r"[0-9a-f]{32}",handoff)
+                or type(plan.get("parentIdentity")) is not int or plan["parentIdentity"]<=0
+                or plan_path.parent.resolve()!=plan_path.parent):
+            raise UpdateError("更新交接计划无效")
+        status=handoff_status_path(plan_path,handoff)
+    try:
+        if status is None:
+            wait_for_exit(plan["pid"])
+        else:
+            wait_for_exit(plan["pid"],None,expected_identity=plan["parentIdentity"],
+                          ready=lambda:write_json(status,{"phase":"waiting"}))
+    except Exception:
+        if status is not None:
+            write_json(status,{"phase":"failed"})
+        raise
     journal=work_root(target)/"transaction.json"
     try:
         with _guard_replacement(target):

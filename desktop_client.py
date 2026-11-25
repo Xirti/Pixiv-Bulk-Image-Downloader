@@ -496,6 +496,9 @@ class DesktopApi:
 
             return self._window.native.Invoke(Func[Object](dispatch))
         except Exception:
+            if action == "close":
+                with self._exit_lock:
+                    self._exit_state = "open"
             LOG.exception("Desktop window action failed")
             return {"ok": False, "error": "窗口操作失败，请重试"}
 

@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import urllib.request
 from update_package import MANAGED, MAX_ARCHIVE, UpdateError, extract_package, verify_bundle, version_key
 from release_security import MAX_METADATA, RELEASE_METADATA, RELEASE_SIGNATURE, read_bounded, verify_release
 from runtime_identity import process_identity
-from update_install import work_root, write_json
+from update_install import work_root, write_json, handoff_status_path
 from version import __version__
 from edition_profile import PROJECT_REPOSITORY
 
@@ -90,6 +91,7 @@ class AppUpdates:
         self.state={"phase":"idle","current":__version__,"release":None,"received":0,"error":config_error,"checked":0}
         self.cancel=threading.Event();self.thread=None;self.restarting=False;self.active_downloads=0
         self.bundle=None;self.timer_stop=threading.Event();self.last_attempt=0;self.allow_restart=False
+        self.helper_process=None;self.helper_status=None
         self.attempt_path=self.path.with_suffix(".last-check")
         self.trust_path=self.path.with_suffix(".trust-state.json")
         self.next_check = time.monotonic()
@@ -250,7 +252,14 @@ class AppUpdates:
         with self.gate,self.lock:
             self._check_open()
             if self.restarting:
-                return {"ok":True}
+                try:
+                    waiting=self._helper_phase()=="waiting"
+                except Exception:
+                    self._retire_helper()
+                    raise
+                if waiting:
+                    return {"ok":True}
+                self._retire_helper()
             if not self.frozen:raise UpdateError("源码运行不替换文件，请使用便携版")
             if self.active_downloads:raise UpdateError("请等待下载任务完成或中断后再重启更新")
             if not self.allow_restart:raise UpdateError("请关闭共享后端并重新打开 MOKU 桌面窗口后更新")
@@ -269,11 +278,18 @@ class AppUpdates:
                 source=self.install_root/name
                 if source.is_dir():shutil.copytree(source,helper/name)
                 elif source.is_file():shutil.copy2(source,helper/name)
-            plan={"target":str(self.install_root),"bundle":str(self.bundle),"version":self.state["release"]["version"],"pid":os.getpid()}
+            parent_identity=process_identity(os.getpid())
+            if type(parent_identity) is not int or parent_identity<=0:
+                raise UpdateError("无法确认更新父进程身份，请重试")
+            token=secrets.token_hex(16)
+            plan={"target":str(self.install_root),"bundle":str(self.bundle),"version":self.state["release"]["version"],
+                  "pid":os.getpid(),"parentIdentity":parent_identity,"handoff":token}
             plan_path=helper.parent/"plan.json"
             write_json(plan_path, plan)
             process = subprocess.Popen([str(helper/"MOKU.exe"),"--apply-update",str(plan_path)],cwd=helper,
                 creationflags=subprocess.CREATE_NO_WINDOW,close_fds=True)
+            self.helper_process=process;self.helper_status=handoff_status_path(plan_path,token)
+            self.restarting=True;self.state["phase"]="restarting"
             try:
                 marker = helper.parent / "job.json"
                 ownership = json.loads(read_bounded(marker))
@@ -281,8 +297,42 @@ class AppUpdates:
                 write_json(marker, ownership)
             except (OSError, ValueError) as error:
                 LOG.warning("Update helper ownership could not be recorded: %s", error)
-            self.restarting=True;self.state["phase"]="restarting"
+            try:
+                deadline=time.monotonic()+30
+                while True:
+                    phase=self._helper_phase()
+                    if phase=="waiting":break
+                    if phase!="starting":raise UpdateError("更新助手未能接手，请重试")
+                    if time.monotonic()>=deadline:raise UpdateError("更新助手启动确认超时，请重试")
+                    time.sleep(.05)
+            except Exception:
+                self._retire_helper()
+                raise
             return {"ok":True}
+
+    def _helper_phase(self):
+        if self.helper_process.poll() is not None:return "stopped"
+        path=self.helper_status
+        if path.resolve()!=path:raise UpdateError("更新交接状态不能是链接")
+        try:
+            state=json.loads(read_bounded(path))
+        except FileNotFoundError:
+            return "starting"
+        except ValueError as error:
+            raise UpdateError("更新交接状态无效") from error
+        if (not isinstance(state,dict) or set(state)!={"phase"}
+                or not isinstance(state["phase"],str) or state["phase"] not in {"waiting","failed"}):
+            raise UpdateError("更新交接状态无效")
+        return state["phase"] if self.helper_process.poll() is None else "stopped"
+
+    def _retire_helper(self):
+        if self.helper_process.poll() is None:self.helper_process.kill()
+        try:
+            self.helper_process.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise UpdateError("更新助手尚未停止，请稍后重试") from error
+        self.helper_process=None;self.helper_status=None
+        self.restarting=False;self.state["phase"]="ready"
 
     def start_scheduler(self):
         def schedule():
