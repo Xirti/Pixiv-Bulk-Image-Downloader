@@ -57,6 +57,47 @@ def process_identity(pid: int) -> int | None:
 
 
 @cache
+def current_user_sid() -> str:
+    """Identify the process user independently of profile paths and logon sessions."""
+    kernel = _process_kernel()
+    kernel.GetCurrentProcess.argtypes = []
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel.LocalFree.restype = wintypes.HLOCAL
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    security.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    security.OpenProcessToken.restype = wintypes.BOOL
+    security.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID,
+                                             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    security.GetTokenInformation.restype = wintypes.BOOL
+    security.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    security.ConvertSidToStringSidW.restype = wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not security.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        required = wintypes.DWORD()
+        if not security.GetTokenInformation(token, 1, None, 0, ctypes.byref(required)):  # TokenUser
+            if ctypes.get_last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
+                raise ctypes.WinError(ctypes.get_last_error())
+        buffer = ctypes.create_string_buffer(required.value)
+        if not security.GetTokenInformation(token, 1, buffer, len(buffer), ctypes.byref(required)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        class TokenUser(ctypes.Structure):
+            _fields_ = [("sid", wintypes.LPVOID), ("attributes", wintypes.DWORD)]
+        user = ctypes.cast(buffer, ctypes.POINTER(TokenUser)).contents
+        sid = wintypes.LPWSTR()
+        if not security.ConvertSidToStringSidW(user.sid, ctypes.byref(sid)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return sid.value
+        finally:
+            kernel.LocalFree(ctypes.cast(sid, wintypes.HLOCAL))
+    finally:
+        kernel.CloseHandle(token)
+
+
+@cache
 def windows_boot() -> tuple[str | None, int]:
     """Return Windows' boot counter, when available, and a FILETIME bound."""
     import winreg
@@ -78,19 +119,28 @@ def windows_boot() -> tuple[str | None, int]:
 
 
 @contextmanager
-def named_mutex(name: str, timeout_seconds: float = 30.0):
+def named_mutex(name: str, timeout_seconds: float = 30.0, *, check=None):
     """Acquire a Windows mutex, including one abandoned by a terminated process."""
     api = _process_kernel()
     handle = api.CreateMutexW(None, False, name)
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        result = api.WaitForSingleObject(handle, max(0, int(timeout_seconds * 1000)))
-        if result == 0x102:  # WAIT_TIMEOUT
-            raise TimeoutError("MOKU process lock timeout")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if check is not None:
+                check()
+            remaining = max(0, int((deadline - time.monotonic()) * 1000))
+            result = api.WaitForSingleObject(handle, min(50, remaining) if check is not None else remaining)
+            if result != 0x102:  # WAIT_TIMEOUT
+                break
+            if check is None or time.monotonic() >= deadline:
+                raise TimeoutError("MOKU process lock timeout")
         if result not in {0, 0x80}:  # WAIT_OBJECT_0, WAIT_ABANDONED
             raise ctypes.WinError(ctypes.get_last_error())
         try:
+            if check is not None:
+                check()
             yield
         finally:
             api.ReleaseMutex(handle)

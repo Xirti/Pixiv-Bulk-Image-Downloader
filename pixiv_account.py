@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import ctypes
+import hashlib
 import json
 import math
 import os
@@ -17,6 +18,7 @@ from auth_store import CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHIN
 from request_coordinator import RequestCoordinator, REQUEST_PRIORITY, authentication_recovery, checked_lock
 from shared_request_budget import SharedRequestBudget
 from pixiv_adapter import PixivPolicyError
+from runtime_identity import current_user_sid, named_mutex
 
 
 ACCOUNT_REQUEST_CHECK=ContextVar("account_request_check",default=lambda:None)
@@ -66,6 +68,11 @@ class CredentialVault:
         self.target = target or os.environ.get("MOKU_APP_CREDENTIAL_TARGET") or self.TARGET
         self._legacy_tokens = None
         self.disabled = persistent_session_disabled() and target is None and not os.environ.get("MOKU_APP_CREDENTIAL_TARGET")
+
+    def refresh_guard(self, check):
+        scope = current_user_sid() + "\0" + self.target.casefold()
+        name = "Global\\MOKU.AppRefresh." + hashlib.sha256(scope.encode()).hexdigest()[:32]
+        return named_mutex(name, check=check)
 
     def read(self):
         if self.disabled:
@@ -241,7 +248,7 @@ class AppTransport:
 
 class AppAccount:
     def __init__(self, vault, transport, client_config, clock=time.time, *, credential_publication=nullcontext,
-                 login_publication=nullcontext, credentials_revoked=False):
+                 login_publication=nullcontext, credentials_revoked=False, refresh_guard=lambda check: nullcontext()):
         self.vault, self.transport, self.client_config, self.clock = vault, transport, client_config, clock
         self._lock = threading.RLock()
         self._refresh_lock = threading.Lock()
@@ -253,6 +260,7 @@ class AppAccount:
         self._reauth_required = False
         self._credential_publication = credential_publication
         self._login_publication = login_publication
+        self._refresh_guard = refresh_guard
 
     def snapshot(self):
         with self._lock:
@@ -331,9 +339,9 @@ class AppAccount:
             self._check(epoch)
             check()
 
-        with checked_lock(self._refresh_lock, current):
-            with self._lock:
-                self._check(epoch)
+        with checked_lock(self._refresh_lock, current), self._refresh_guard(current):
+            with self._credential_publication(), self._lock:
+                self._check_persisted(epoch)
                 tokens = self._tokens
                 # Another request may already have replaced the rejected token.
                 if rejected is not None and tokens is not rejected and tokens.expires > self.clock():
