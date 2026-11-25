@@ -352,16 +352,18 @@ class AppGallery:
                     source['next']=next_path
                     if rows:
                         tail=rows[-1];stamp=publication_timestamp(tail.get('create_date')) if isinstance(tail,dict) else ''
-                        source['bound']=(stamp,int(tail['id'])) if stamp and valid_pixiv_id(str(tail.get('id',''))) else None
+                        # date_desc does not order IDs within the final timestamp.
+                        source['bound']=(stamp,None) if stamp else None
                 self.check(generation,cancel_event)
                 total=session.index.emitted_count;more=bool(total>target or session.index.pending_count or any(s['next'] for s in session.sources))
                 rows=session.index.read_results((page-1)*36,page*36)
+                ordering_pending=bool(total<target and session.index.pending_count and any(s['next'] for s in session.sources))
                 if query.kind == "uid":
                     trace_artwork_rows("app-author", "result" if requests else "cached-result",
                                        rows, mode=scope, position=page)
                 pages=list(range(1,max(1,(total+35)//36)+1))
                 if session.invalid:raise PixivPolicyError('搜索快照已清理，请刷新')
-                result = {'items':rows,'tag':tag,'page':page,'total':total,'perPage':36,'hasMore':more,'availablePages':pages,'preloadedThrough':max(pages),'snapshotId':snapshot_id,'budgetExhausted':more and len(rows)<36}
+                result = {'items':rows,'tag':tag,'page':page,'total':total,'perPage':36,'hasMore':more,'availablePages':pages,'preloadedThrough':max(pages),'snapshotId':snapshot_id,'budgetExhausted':more and len(rows)<36,'orderingPending':ordering_pending}
                 if sort_source_generation is not None:
                     result["sourceGeneration"] = session.identity
                 return result
