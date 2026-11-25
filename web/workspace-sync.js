@@ -85,7 +85,10 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
         }
         row.item[field] = copy(action.value);
       }
-      row.pages = [...pages].filter(page => page < row.item.pages).sort((a, b) => a - b);
+      if ([...pages].some(page => page >= row.item.pages)) {
+        throw new Error("作品页数发生冲突，当前选择已保留。请打开作品核验详情后重试保存。");
+      }
+      row.pages = [...pages].sort((a, b) => a - b);
       if (row.pages.length) merged.set(id, row); else merged.delete(id);
     }
     return [...merged.values()];

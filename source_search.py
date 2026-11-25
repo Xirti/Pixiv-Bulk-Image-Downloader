@@ -25,6 +25,7 @@ import urllib.request
 
 from runtime_identity import named_mutex, presence_handle, process_presence
 from source_results import SourceSearchError, normalize_candidates, parse_api, pixiv_id, thumbnail_url
+from network_config import StrictLoopbackProxyHandler
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from auth_store import CREDENTIALW, CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHINE, ERROR_NOT_FOUND, advapi32, persistent_session_disabled
@@ -531,7 +532,7 @@ class SourceSearch:
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
         proxy = self.proxy()
-        handler = urllib.request.ProxyHandler({"https": proxy}) if proxy else urllib.request.ProxyHandler()
+        handler = StrictLoopbackProxyHandler({"https": proxy} if proxy else {})
         return urllib.request.build_opener(handler, NoRedirect())
 
     def _api_request(self, job, key):
@@ -747,7 +748,9 @@ class SourceSearch:
             elif action == "rate-limited":
                 self._fail(job, "官网限制了查询频率或额度，请稍后再试")
             elif action == "closed":
-                self._fail(job, "官网窗口已关闭，可重新查询")
+                possible = dispatch is not None and dispatch.possible
+                self._fail(job, "官网窗口已关闭；此前请求可能已发出并计入额度，请核对后重试"
+                           if possible else "官网窗口已关闭，可重新查询")
             elif action == "error":
                 self._fail(job, "官网暂未完成查询；请检查验证、额度或网络后重试")
             elif action == "connection-error":

@@ -72,7 +72,7 @@ from request_coordinator import REQUEST_PRIORITY, RequestCoordinator, RequestDef
 from browser_transport import BrowserTransport
 from browser_profile import load_browser_profile
 from shared_request_budget import SharedRequestBudget, priority_value
-from network_config import normalize_loopback_proxy
+from network_config import normalize_loopback_proxy, StrictLoopbackProxyHandler
 from network_transport import PooledOpener, classify_network_error
 from pixiv_adapter import ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status, valid_pixiv_id
 from search_service import SearchDateRange, SearchResultIndex, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
@@ -81,7 +81,7 @@ from version import __version__
 from runtime_identity import CODE_GENERATION_FILES, compute_code_generation
 from artist_service import ArtistService
 from account_pages import AccountPages, ACCOUNT_CACHE_ONLY, HomepageIdentity, source_body
-from pixiv_adapter import bookmark_count, validate_web_artwork, CONTENT_MODES, RESTRICTED_CONTENT, matches_content_mode
+from pixiv_adapter import bookmark_count, validate_web_artwork, CONTENT_MODES, RESTRICTED_CONTENT, matches_content_mode, web_detail_id, profile_work_rows
 from discovery_service import DiscoveryService, DiscoveryInputError, FilteredDiscoveryPage
 from popularity_service import PopularityService
 from account_authorization import AccountAuthorization
@@ -1011,21 +1011,6 @@ def validated_session(force: bool = False) -> bool:
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise PixivPolicyError("Pixiv 响应包含重定向，已按安全策略拒绝")
-
-
-class StrictLoopbackProxyHandler(urllib.request.ProxyHandler):
-    """Route through an explicitly selected local proxy without OS bypass rules."""
-
-    def proxy_open(self, request, proxy, target_type):
-        normalized = normalize_loopback_proxy(proxy)
-        if not normalized or normalized != proxy:
-            raise urllib.error.URLError("invalid loopback proxy")
-        original_type = request.type
-        parsed = urllib.parse.urlsplit(normalized)
-        request.set_proxy(parsed.netloc, parsed.scheme)
-        if original_type == parsed.scheme or original_type == "https":
-            return None
-        return self.parent.open(request, timeout=request.timeout)
 
 
 PIXIV_OPENER = PooledOpener(StrictLoopbackProxyHandler({}), NoRedirectHandler())
@@ -1968,7 +1953,7 @@ def popularity_bookmark_metadata(identifier, mode, generation):
         count = app_number(body, "total_bookmarks", optional=True)
     else:
         body = source_body(pixiv_json(f"https://www.pixiv.net/ajax/illust/{identifier}?lang=zh"))
-        if str(body.get("id")) != identifier:
+        if web_detail_id(body) != identifier:
             raise AccountError("invalid_data", "收藏数摘要的作品身份不符")
         restriction = validate_web_artwork(body, allow_r18=mode != "safe", detail=True, logged_in=True)
         count = bookmark_count(body)
@@ -2442,12 +2427,7 @@ def load_user_profile_works(
     works = body.get("works")
     if works is None:
         works = body
-    if isinstance(works, dict):
-        rows = list(works.values())
-    elif isinstance(works, list):
-        rows = works
-    else:
-        raise PixivPolicyError("Pixiv 画师作品结果格式异常")
+    rows = profile_work_rows(works, artwork_ids)
     # Keep response-container validation above, but isolate individual bad rows
     # before the normal per-artwork policy and field checks.
     return [row for row in rows if isinstance(row, dict)]
@@ -3079,7 +3059,7 @@ def _fetch_pixiv_detail(
         pages_url = f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages?lang=zh"
         detail = pixiv_json(detail_url, timeout=network_timeout, cancel_event=cancel_event).get("body") or {}
         assert_read_current(cancel_event, generation, authorization_epoch)
-        if not isinstance(detail, dict) or str(detail.get("illustId") or detail.get("id")) != artwork_id:
+        if not isinstance(detail, dict) or web_detail_id(detail) != artwork_id:
             raise PixivPolicyError("Pixiv 返回的作品 ID 不匹配")
 
         normalized = normalize_detail(

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from request_coordinator import REQUEST_PRIORITY
 from shared_request_budget import ReadPriority
+from pixiv_account import ACCOUNT_REQUEST_CHECK, ACCOUNT_SHARED_CHECK
 
 
 class PreviewCancelledError(RuntimeError):
@@ -101,6 +102,10 @@ class PreviewResources:
                         self._loads[key] = job
                         try:
                             context = copy_context()
+                            shared_check = ACCOUNT_SHARED_CHECK.get()
+                            if shared_check is not None:
+                                context.run(ACCOUNT_REQUEST_CHECK.set,
+                                    lambda check=shared_check, stop=job.stop: check(stop))
                             if job.priority is not None:
                                 context.run(REQUEST_PRIORITY.set, job.priority)
                             threading.Thread(target=context.run, args=(self._run, key, job, load, ttl),

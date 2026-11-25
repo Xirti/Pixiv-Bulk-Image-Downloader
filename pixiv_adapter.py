@@ -337,6 +337,26 @@ def valid_pixiv_id(value: str) -> bool:
     return 1 <= len(value) <= 30 and value.isascii() and value.isdigit()
 
 
+def web_detail_id(raw: dict[str, Any]) -> str:
+    identifier = str(raw.get("illustId") or raw.get("id") or "")
+    if not valid_pixiv_id(identifier):
+        raise PixivPolicyError("invalid artwork id")
+    return identifier
+
+
+def profile_work_rows(values, requested_ids) -> list[dict]:
+    """An omitted summary is unknown, not proof that the indexed ID is invisible."""
+    if not isinstance(values, (dict, list)):
+        raise PixivPolicyError("Pixiv 画师作品结果格式异常")
+    rows = list(values.values()) if isinstance(values, dict) else values
+    returned = {str(row.get("id", "")) for row in rows if isinstance(row, dict)}
+    if returned - set(requested_ids):
+        raise PixivPolicyError("作者作品摘要身份不符")
+    if set(requested_ids) - returned:
+        raise PixivPolicyError("作者作品摘要尚未完整返回，请重试；当前读取进度已保留")
+    return rows
+
+
 def normalize_detail(
     raw: dict[str, Any],
     pages: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]],
@@ -348,9 +368,7 @@ def normalize_detail(
     restriction = validate_web_artwork(
         raw, allow_r18, detail=True, logged_in=logged_in, observe_audience=observe_audience,
     )
-    artwork_id = str(raw.get("illustId") or raw.get("id") or "")
-    if not valid_pixiv_id(artwork_id):
-        raise PixivPolicyError("invalid artwork id")
+    artwork_id = web_detail_id(raw)
     if callable(pages):
         pages = pages()
     if (not isinstance(pages, list) or not pages

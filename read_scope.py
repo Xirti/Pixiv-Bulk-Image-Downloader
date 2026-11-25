@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import threading
 
 from account_pages import ACCOUNT_CACHE_ONLY
-from pixiv_account import ACCOUNT_REQUEST_CHECK, AccountError
+from pixiv_account import ACCOUNT_REQUEST_CHECK, ACCOUNT_SHARED_CHECK, AccountError
 from request_coordinator import REQUEST_PRIORITY, TrackedReadEvent
 
 
@@ -54,6 +54,9 @@ class ReadScopes:
             with ExitStack() as bindings:
                 token = ACCOUNT_REQUEST_CHECK.set(lease.check)
                 bindings.callback(ACCOUNT_REQUEST_CHECK.reset, token)
+                shared = lambda event: self._check_current(event, generation, epoch)
+                token = ACCOUNT_SHARED_CHECK.set(shared)
+                bindings.callback(ACCOUNT_SHARED_CHECK.reset, token)
                 if priority is not None:
                     bindings.enter_context(read_priority(priority, cancel_event))
                 if cache_only is not None:

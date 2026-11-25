@@ -1,9 +1,25 @@
 from __future__ import annotations
 
 import urllib.parse
+import urllib.request
 
 
 LOOPBACK_PROXY_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+class StrictLoopbackProxyHandler(urllib.request.ProxyHandler):
+    """Execute the selected route without environment or OS bypass rules."""
+
+    def proxy_open(self, request, proxy, target_type):
+        normalized = normalize_loopback_proxy(proxy)
+        if not normalized or normalized != proxy:
+            raise urllib.error.URLError("invalid loopback proxy")
+        original_type = request.type
+        parsed = urllib.parse.urlsplit(normalized)
+        request.set_proxy(parsed.netloc, parsed.scheme)
+        if original_type == parsed.scheme or original_type == "https":
+            return None
+        return self.parent.open(request, timeout=request.timeout)
 
 
 def normalize_loopback_proxy(value: str) -> str:

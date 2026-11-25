@@ -216,7 +216,7 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     clearTimeout(idleTimer);
     idleTimer = null;
     const requestId = `ugoira_${globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
-    const player = { host, requestId, loading: false, controller: new AbortController(), canvas: null, timer: null };
+    const player = { host, id, requestId, loading: false, controller: new AbortController(), canvas: null, timer: null };
     active = player;
     try {
       if (hoverDelay > 0 && !cache.has(id)) {
@@ -292,5 +292,17 @@ globalThis.createUgoiraPreview = function ({ fetchJson, fetchBytes, onError, can
     cachedBytes = 0;
   }
 
-  return { start, stop, clear };
+  function invalidate(ids) {
+    const selected = new Set(ids);
+    if (active && selected.has(active.id)) stop();
+    for (const id of selected) {
+      const entry = cache.get(id);
+      if (!entry) continue;
+      cache.delete(id);
+      cachedBytes -= entry.bytes;
+      release(entry);
+    }
+  }
+
+  return { start, stop, clear, invalidate };
 };

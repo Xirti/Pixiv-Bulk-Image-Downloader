@@ -131,7 +131,14 @@ class DownloadRequests:
             else:
                 if row is not None:
                     # A pending publication record belongs to the last attempt.
-                    return self._verify_receipt(row, fingerprints)
+                    try:
+                        return self._verify_receipt(row, fingerprints)
+                    except DownloadRequestError as error:
+                        if error.status != 503:
+                            raise
+                        # Another durable copy may still prove the same intent.
+                        # Corruption alone never permits executing it again.
+                        recovery_error = error
         if self._path is not None and receipt_journal_exists(self._path):
             connection = self._journal_connection()
             try:
@@ -153,36 +160,34 @@ class DownloadRequests:
             return None
         if row[0] not in fingerprints:
             raise DownloadRequestError("下载任务内容或账户已变更，请重新发起下载", 409)
-        # A receipt is an optional cache. A damaged row must fall back to the
-        # normal download/file-deduplication path, preserving the identity
-        # check above and allowing successful recovery to replace this row.
+        # Completion evidence must not authorize another execution when corrupt.
         try:
             payload, files = json.loads(row[1]), json.loads(row[2])
         except (TypeError, ValueError) as error:
             logging.getLogger("moku.http").warning("Download receipt could not be decoded: %s", error)
-            return None
+            raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
         if not isinstance(payload, dict) or not isinstance(files, list):
-            return None
+            raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
         paths = []
         for key in ("saved", "skippedFiles"):
             values = payload.get(key, [])
             if not isinstance(values, list) or any(not isinstance(value, str) or not value or "\0" in value for value in values):
-                return None
+                raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
             paths.extend(values)
         for key in ("pages", "skippedPages", "artworks"):
             if key in payload and (type(payload[key]) is not int or payload[key] < 0):
-                return None
+                raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
         if len(files) != len(set(paths)):
-            return None
+            raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
         for file in files:
             if (not isinstance(file, list) or len(file) != 3
                     or not isinstance(file[0], str) or not file[0] or "\0" in file[0]
                     or not Path(file[0]).is_absolute()
                     or type(file[1]) is not int or file[1] < 0 or type(file[2]) is not int):
-                return None
+                raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
         if payload.get("skippedPages") and not payload.get("skippedFiles"):
-            # Older receipts omitted skipped files; check the directory again.
-            return None
+            # Older receipts cannot prove skipped files; require explicit recovery.
+            raise DownloadRequestError("下载完成回执损坏，未重复执行；请核对成品后重新发起任务", 503)
         for path, size, mtime in files:
             try:
                 info = artifact_file_state(Path(path))

@@ -1,9 +1,10 @@
 """Bounded, single-attempt Web writes; shares the application's request budget."""
 import json
+import re
 import threading
 import time
 
-from account_pages import HomepageIdentity, source_body
+from account_pages import source_body
 from curl_cffi.requests import Session
 from curl_cffi.requests.exceptions import RequestException
 from pixiv_account import ACCOUNT_WRITE_PREFLIGHT, AccountError
@@ -91,10 +92,14 @@ class WebDisplaySettings:
 
     def _read_remote(self, owner, generation):
         user = source_body(self.pages.request_json("https://www.pixiv.net/ajax/settings/self")).get("user_status")
-        if not isinstance(user, dict) or user.get("is_logged_in") is not True:
-            raise AccountError("reauth", "网页登录已失效，请重新登录。")
-        if str(user.get("user_id")) != owner:
-            raise AccountError("revoked", "官网账号已改变，请重新打开设置。")
+        if not isinstance(user, dict) or type(user.get("is_logged_in")) is not bool:
+            raise AccountError("invalid_data", "Pixiv 登录状态格式异常，请重试。")
+        if user["is_logged_in"] is False:
+            self.pages.check_web_owner(generation, None)
+        identity = str(user.get("user_id", ""))
+        if not re.fullmatch(r"[0-9]{1,30}", identity):
+            raise AccountError("invalid_data", "Pixiv 账号身份格式异常，请重试。")
+        self.pages.check_web_owner(generation, identity, owner)
         restriction = user.get("user_x_restrict")
         sensitive = user.get("sensitive_view_setting")
         hide_ai = user.get("hide_ai_works")
@@ -147,10 +152,7 @@ class WebDisplaySettings:
                 return self._snapshot(generation, before)
             if key == "ageRestriction" and value and not before["canChangeAge"]:
                 raise AccountError("eligibility", "请先在 Pixiv 官网确认出生日期及年龄限制设置。")
-            parser = HomepageIdentity()
-            parser.feed(self.pages.request_homepage())
-            if parser.user_id() != owner:
-                raise AccountError("revoked", "官网账号已改变，请重新打开设置。")
+            _owner, parser = self.pages.web_homepage(generation, owner)
             try:
                 props = json.loads("".join(parser.chunks))["props"]["pageProps"]
                 state = json.loads(props["serverSerializedPreloadedState"])

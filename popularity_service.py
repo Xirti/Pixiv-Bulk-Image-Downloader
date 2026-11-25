@@ -14,7 +14,7 @@ from discovery_service import recommendation_size
 from urllib.error import HTTPError
 
 from pixiv_account import AccountError
-from pixiv_adapter import (ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, valid_pixiv_id, normalize_search_item,
+from pixiv_adapter import (profile_work_rows, ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, valid_pixiv_id, normalize_search_item,
     build_user_profile_all_url, build_user_profile_works_url,CONTENT_MODES,matches_content_mode)
 from pixiv_app_gallery import normalize_work, continuation
 from search_service import SearchInputError, parse_search_date_range, parse_search_query, parse_search_tags
@@ -160,9 +160,7 @@ class PopularityService:
         ids = job["webIds"][job["webOffset"]:job["webOffset"] + 48]
         body = source_body(self.web_get(build_user_profile_works_url(job["uid"], ids)))
         values = body.get("works", body)
-        if not isinstance(values, (dict, list)):
-            raise AccountError("invalid_data", "作者作品摘要格式异常")
-        rows = values.values() if isinstance(values, dict) else values
+        rows = profile_work_rows(values, ids)
         normalized = []
         for row in rows:
             try:

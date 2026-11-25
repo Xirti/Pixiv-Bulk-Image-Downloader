@@ -20,6 +20,7 @@ from pixiv_adapter import PixivPolicyError
 
 
 ACCOUNT_REQUEST_CHECK=ContextVar("account_request_check",default=lambda:None)
+ACCOUNT_SHARED_CHECK=ContextVar("account_shared_check",default=None)
 ACCOUNT_WRITE_PREFLIGHT = ContextVar("account_write_preflight", default=lambda **_: None)
 
 class AccountError(PixivPolicyError):

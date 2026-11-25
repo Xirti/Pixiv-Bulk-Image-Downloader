@@ -17,7 +17,6 @@ import time
 
 from update_package import MANAGED, UpdateError, verify_bundle, version_key
 from release_security import RELEASE_METADATA, RELEASE_SIGNATURE, read_bounded, verify_release
-from version import __version__
 
 LOG = logging.getLogger("moku.updates")
 RECOVERY_ENTRY = "MOKU-Recover.lnk"
@@ -326,7 +325,16 @@ def dispatch_recovery(arguments, *, helper=None):
 def apply_bundle(target, bundle, version, *, helper=None):
     target=checked_root(target);work=work_root(target)
     if bundle.parent.parent!=work or bundle.name!="MOKU" or bundle.resolve()!=bundle:raise UpdateError("更新暂存目录无效")
-    if version_key(version)<=version_key(__version__):raise UpdateError("拒绝安装当前或更旧的版本")
+    try:
+        current = json.loads(read_bounded(target / "BUILD_MANIFEST.json", 4 * 1024 * 1024))
+    except (OSError, ValueError) as error:
+        raise UpdateError("当前安装清单无法确认，请先恢复程序组件") from error
+    current_version = current.get("version") if isinstance(current, dict) else None
+    if not isinstance(current_version, str):
+        raise UpdateError("当前安装版本无法确认，请先恢复程序组件")
+    verify_bundle(target, current_version, installed=True)
+    if version_key(version) <= version_key(current_version):
+        raise UpdateError("拒绝安装当前或更旧的版本")
     metadata=verify_release(read_bounded(bundle.parent/RELEASE_METADATA),read_bounded(bundle.parent/RELEASE_SIGNATURE),version)
     verify_bundle(bundle,version,expected_manifest_sha256=metadata["manifestSha256"])
     work.mkdir(exist_ok=True);backup=work/"previous"

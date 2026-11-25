@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.error import HTTPError
 
 from cloud_state import relationship_stamp
-from account_pages import HomepageIdentity, source_body
+from account_pages import source_body
 from pixiv_account import ACCOUNT_WRITE_PREFLIGHT, AccountError
 from pixiv_app_gallery import continuation
 from pixiv_adapter import PixivPolicyError, valid_pixiv_id
@@ -298,10 +298,7 @@ class CloudActions:
             ACCOUNT_WRITE_PREFLIGHT.get()(dispatch=False)
             self._app(generation, "POST", path, form)
             return
-        parser = HomepageIdentity()
-        parser.feed(self.pages.request_homepage())
-        if parser.user_id() != owner:
-            raise AccountError("revoked", "官网账号已改变")
+        _owner, parser = self.pages.web_homepage(generation, owner)
         props = json.loads("".join(parser.chunks))["props"]["pageProps"]
         state = json.loads(props["serverSerializedPreloadedState"])
         token = state.get("api", {}).get("token")

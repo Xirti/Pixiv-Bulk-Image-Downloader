@@ -7,6 +7,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
   const metadata = new Map();
   let pageCount = 0;
   let locked = false;
+  let metadataPaused = false;
   const idOf = (item) => item?.id == null ? "" : String(item.id);
   const countOf = (item) => Number.isSafeInteger(Number(item?.pages)) && Number(item.pages) > 0 ? Number(item.pages) : null;
   const reject = (reason, additional = 0) => ({accepted: false, reason, additional});
@@ -55,6 +56,7 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
   }
 
   function remember(item) {
+    if (metadataPaused) return false;
     const latest = rememberMetadata(item, true);
     if (!latest) return false;
     const id = String(latest.id), row = records.get(id), count = Number(latest.pages);
@@ -67,6 +69,8 @@ globalThis.createSelectionStore = function ({maxPages = 1000, onChange = () => {
     get size() { return records.size; },
     get pageCount() { return pageCount; },
     get locked() { return locked; },
+    get metadataPaused() { return metadataPaused; },
+    set metadataPaused(value) { metadataPaused = Boolean(value); },
     get archivedCount() { return [...records.values()].filter(row => row.archived).length; },
     setLocked(value) { locked = Boolean(value); },
     has(id) { return records.has(String(id)); },

@@ -997,9 +997,13 @@ function activeDetail() {
 }
 
 async function readArtworkDetail(id, options={}, refresh=false) {
+  if(selection.metadataPaused)throw Object.assign(new Error("正在准备退出"),{name:"AbortError"});
+  if(document.body.inert)throw Object.assign(new Error("应用正在准备退出"),{name:"AbortError"});
   const check=workspaceSync.pageCheck(id);
   const query=refresh || check ? "?refresh=1" : "";
   const item=await fetchJson(`/api/pixiv/artwork/${id}${query}`,options,ARTWORK_DETAIL_TIMEOUT_MS);
+  if(selection.metadataPaused)throw Object.assign(new Error("正在准备退出"),{name:"AbortError"});
+  if(document.body.inert)throw Object.assign(new Error("应用正在准备退出"),{name:"AbortError"});
   if(check && item.id===String(id) && !options.signal?.aborted){
     await workspaceSync.confirmPages(String(id),check,item.pages);
     options.signal?.throwIfAborted();
@@ -1801,6 +1805,7 @@ document.querySelectorAll("a[data-project-external]").forEach(link=>{
 async function prepareDesktopExit({update=false}={}) {
   if(document.body.inert)throw Error("正在准备退出，请稍候");
   document.body.inert=true;
+  selection.metadataPaused=true;
   try {
     if(update && (activeDownload || singleDownloadPending || selection.locked)){
       throw Error("请等待下载任务完成或中断后再更新");
@@ -1815,6 +1820,7 @@ async function prepareDesktopExit({update=false}={}) {
     if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
   }catch(error){
     document.body.inert=false;
+    selection.metadataPaused=false;
     throw error;
   }
 }
@@ -2674,6 +2680,9 @@ async function refreshCurrentPage() {
   if(contextNavigationLocked() || pageRefreshPending || detailController || selection.locked || singleDownloadPending)return;
   checkpointNavigation();
   const state=capturePageState(),surface=activeScrollSurface();
+  const previewScope=surface===window?document:surface;
+  ugoiraPreview.invalidate([...previewScope.querySelectorAll("[data-ugoira-preview]")]
+    .filter(host=>host.offsetParent!==null).map(host=>host.dataset.ugoiraPreview));
   if(surface===$("#discoveryPage")){await discoveryView.refresh();return;}
   if(surface===window && galleryIntent){await startGalleryLoad();return;}
   if(surface===window && searchSurface==="gallery" && ["uid","tags"].includes(activeSearchContext.kind) && activeSearchFilters.order==="popular"){galleryPopularViews.delete(gallerySortKey());await loadGalleryPopularity(1,{refresh:true});return;}

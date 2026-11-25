@@ -1469,16 +1469,30 @@ class AccountPages:
         with self.publication(generation), self._lock:
             self.saved_cache.update_entries(owner, method, views, patch_entries)
 
+    def check_web_owner(self, generation, owner, expected=None):
+        self.check(generation)
+        if owner is None or expected is not None and owner != expected:
+            if self.invalidate_web_session is not None:
+                self.invalidate_web_session(generation)
+            if owner is None:
+                raise AccountError("reauth", "网页登录已失效，请重新登录")
+            raise AccountError("revoked", "官网账号已改变，请重新登录")
+        return owner
+
+    def web_homepage(self, generation, expected=None):
+        parser = HomepageIdentity()
+        parser.feed(self.request_homepage())
+        try:
+            owner = parser.user_id()
+        except AccountError as error:
+            if error.kind != "reauth":
+                raise
+            owner = None
+        return self.check_web_owner(generation, owner, expected), parser
+
     def web_owner(self, generation):
         def load():
-            parser = HomepageIdentity()
-            parser.feed(self.request_homepage())
-            try:
-                owner = parser.user_id()
-            except AccountError as error:
-                if error.kind == "reauth" and self.invalidate_web_session is not None:
-                    self.invalidate_web_session(generation)
-                raise
+            owner, _parser = self.web_homepage(generation)
             with self.cache_publication(generation, owner):
                 self.saved_cache.refresh_web_audience_cache(owner)
             if self.confirm_web_owner is not None:

@@ -236,6 +236,7 @@ class DiscoveryService:
         result = []
         # All streams share this index, including items still waiting to be merged.
         seen = feed["seen"]
+        source_progress = False
         for row in raw:
             feed["sourceCount"] += 1
             try:
@@ -252,8 +253,13 @@ class DiscoveryService:
             except PixivPolicyError:
                 feed["unavailable"] += 1
                 continue
-            if not matches_content_mode(item["restriction"],feed["mode"]):continue
             if item["id"] in seen:continue
+            if method == "web" and feed["kind"] == "recommended":
+                # This source has no continuation marker. Track progress before
+                # local rating filters, while keeping one persistent identity set.
+                seen.add(item["id"])
+                source_progress = True
+            if not matches_content_mode(item["restriction"],feed["mode"]):continue
             if feed["kind"]=="ranking" and method=="app":
                 item["rank"] = feed["sourceCount"]
                 item["rankKind"] = "position"
@@ -267,7 +273,7 @@ class DiscoveryService:
         if feed["kind"]=="following":result.sort(key=lambda item:(item["sortDate"],int(item["id"])),reverse=True)
         # App pagination has an explicit validated continuation. Only the Web
         # recommendation endpoint lacks an end marker when it repeats cards.
-        if method=="web" and not result and feed["kind"]=="recommended":
+        if method=="web" and not source_progress and feed["kind"]=="recommended":
             feed["stagnant"] += 1
             if feed["stagnant"]>=3:feed["paths"][stream]=None
         else:feed["stagnant"]=0

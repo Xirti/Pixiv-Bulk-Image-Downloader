@@ -314,7 +314,7 @@ def run():
         if auto_submit:
             submit()
 
-    def startup():
+    def browser_loop():
         nonlocal identity, secret, encoded, completed, last_kind, mode, automatic_submit, login_status
         nonlocal sequence, pending_correction, dispatch_target
         if not window.events.loaded.wait(25):
@@ -428,10 +428,19 @@ def run():
                 deadline = float("inf")
             if not completed:
                 observe()
+    def startup():
         try:
-            send("closed")
-        except OSError:
-            pass  # The owning backend may already be shut down.
+            browser_loop()
+        except Exception as error:
+            logging.getLogger("moku.source").warning("Source browser loop stopped: %s", type(error).__name__)
+        finally:
+            try:
+                send("closed")
+            except (OSError, ValueError):
+                pass  # The owning backend may already have stopped.
+            finally:
+                if not window.events.closed.is_set():
+                    window.destroy()
 
     window.events.loaded += lambda: schedule("observe")
     Path(profile).mkdir(parents=True, exist_ok=True)
