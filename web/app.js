@@ -1,6 +1,6 @@
 let items = [];
 const ARTWORK_DETAIL_TIMEOUT_MS = 60000;
-const normalDetail = {item: null, context: null, artworkId: null, pageOffset: 0, loadedAt: 0, needsRender: false};
+const normalDetail = {item: null, context: null, artworkId: null, pageOffset: 0, loadedAt: 0, needsRender: false, controller: null};
 const basketDetail = {...normalDetail, originWorkspace: null};
 let currentPage = 1;
 let pageNumbers = [1];
@@ -23,7 +23,6 @@ let requestPolicyRevision = 0;
 let requestPolicyReadSequence = 0;
 let requestPolicyRefresh = null;
 let requestCooldownUntil = 0;
-let detailController = null;
 let requestToken = null;
 let animationFormats = {gif: true, mp4: null};
 let requestTokenPromise = null;
@@ -917,7 +916,7 @@ function currentPageNeedsMoreResults() {
 }
 
 function searchPrefetchPaused() {
-  return !resultSelectionEnabled || searchPending || pageRefreshPending || detailController || detailRefreshes.size
+  return !resultSelectionEnabled || searchPending || pageRefreshPending || normalDetail.controller || basketDetail.controller || detailRefreshes.size
     || selection.locked || singleDownloadPending || workspaceSync.loading || activeDownload
     || requestBlockedKind || activeWorkspace || basketPageOpen() || document.hidden
     || Date.now() < requestCooldownUntil;
@@ -983,13 +982,17 @@ function abortDetailRefreshes() {
   stopBasketThumbnails();
 }
 
-function invalidateDetailView() {
+function invalidateDetailView({keepNormalRead=false}={}) {
   viewGeneration += 1;
   galleryInteraction.reset({immediate:true});
   normalDetailView.suspend();
   abortDetailRefreshes();
-  if (detailController) detailController.abort();
-  detailController = null;
+  basketDetail.controller?.abort();
+  basketDetail.controller = null;
+  if (!keepNormalRead) {
+    normalDetail.controller?.abort();
+    normalDetail.controller = null;
+  }
 }
 
 function activeDetail() {
@@ -1241,6 +1244,8 @@ function syncSearchScopedControls() {
 }
 
 function clearDetail(message = "选择一件作品查看详情") {
+  normalDetail.controller?.abort();
+  normalDetail.controller = null;
   closeBasketPage();
   document.body.classList.remove("batch-mode");
   normalDetailView.reset();
@@ -1260,8 +1265,6 @@ function clearDetail(message = "选择一件作品查看详情") {
   $("#collectionPageMore").hidden = true;
   $("#quality").innerHTML = "";
   $("#format").innerHTML = "";
-  $("#qualityText").textContent = "";
-  $("#formatText").textContent = "";
   $("#viewAll").hidden = true;
   $("#download").disabled = true;
   syncSearchScopedControls();
@@ -1845,10 +1848,34 @@ async function prepareDesktopExit({update=false,requestId=null}={}) {
     await cloudControls.settled();
     await workspaceSync.waitForSave();
     if(typeof pixivDisplayView!=='undefined')await pixivDisplayView?.waitForSave();
-    if(typeof sourceSearchView!=='undefined')await sourceSearchView.waitForSave();
-    if(settingsView.dirty)throw Error("请先保存设置改动");
-    if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
+    const forms=[settingsView];
+    if(typeof sourceSearchView!=='undefined'){
+      await sourceSearchView.waitForSave();
+      forms.push(sourceSearchView);
+    }
     if(desktopExitPreparation!==preparation)throw Error("退出准备已取消，请重试");
+    const dirtyForms=forms.filter(form=>form.dirty);
+    if(dirtyForms.length){
+      if(update)throw Error("请先保存设置改动");
+      const dialog=$("#desktopCloseDialog");
+      preparation.dialog=dialog;
+      dialog.returnValue="cancel";
+      const choice=await new Promise(resolve=>{
+        dialog.addEventListener("close",()=>resolve(dialog.returnValue),{once:true});
+        showAppDialog(dialog);
+      });
+      if(desktopExitPreparation!==preparation)return null;
+      if(choice!=="save" && choice!=="discard"){
+        cancelDesktopExit(preparation);
+        return null;
+      }
+      if(choice==="save")for(const form of dirtyForms){
+        if(desktopExitPreparation!==preparation)return null;
+        if(form.dirty && !await form.saveForExit())throw Error("有设置未保存，请检查设置后重试");
+      }
+    }
+    if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
+    if(desktopExitPreparation!==preparation)return null;
     return preparation;
   }catch(error){
     cancelDesktopExit(preparation);
@@ -1863,19 +1890,20 @@ function cancelDesktopExit(preparation=desktopExitPreparation) {
   desktopExitPreparation=null;
   document.body.inert=false;
   selection.metadataPaused=false;
+  if(preparation.dialog?.open)preparation.dialog.close("cancel");
 }
 
 globalThis.mokuDesktopCloseUnavailable=(requestId=null)=>{
   if(desktopExitPreparation && desktopExitPreparation.requestId!==requestId)return;
   cancelDesktopExit();
-  announceToast("无法确认本机记录已保存，请检查后重试关窗");
+  showTaskDock("暂时无法退出","无法确认本机记录已保存，请检查后重试关窗",5000);
 };
 globalThis.mokuPrepareDesktopClose=async(requestId=null)=>{
   try{
     const preparation=await prepareDesktopExit({requestId});
-    return desktopExitPreparation===preparation;
+    return preparation!==null && desktopExitPreparation===preparation;
   }catch(error){
-    announceToast(error.message);
+    showTaskDock("暂时无法退出",error.message,5000);
     return false;
   }
 };
@@ -2513,7 +2541,7 @@ function pruneNavigationCache(entries,cursor) {
   galleryPreviewCache.prune(new Set([...retained,...searchPageCache.warmKeys()]));
 }
 
-function preparePageNavigation({record=true}={}) {
+function preparePageNavigation({record=true,keepNormalRead=false}={}) {
   const recordOutgoing=record && pageHistory?.canRecord();
   cancelGalleryPopularity();
   navigationRevision++;
@@ -2531,7 +2559,7 @@ function preparePageNavigation({record=true}={}) {
     searchButton.textContent="开始寻找";cancelSearchButton.hidden=true;
   }
   if(recordOutgoing)checkpointNavigation();
-  invalidateDetailView();
+  invalidateDetailView({keepNormalRead});
   syncSearchScopedControls();
   return pageHistory?.current() || null;
 }
@@ -2562,12 +2590,12 @@ function capturePageState() {
     key,view,baseView,cachedAt:Date.now(),authorization:lastKnownAuthorizationGeneration,
     source:captureSearchState(),
     form,searchSurface,account:accountView.snapshot(),discovery:discoveryView.snapshot(),reverse:sourceSearchView.snapshot(),accountOrigin,contextReturns:{...contextReturns},batch:document.body.classList.contains("batch-mode"),workspaceReturn,artist:{...artistPage.snapshot(),...(galleryIntent && searchPending?{paused:true}:{})},
-    normal:normal?.item ? {item:normal.item,context:normal.context,page:normalDetailView.state().page,offset:normal.pageOffset,loadedAt:normalDetail.loadedAt} : null,
+    normal:normal.context ? {item:normal.item,context:normal.context,page:normalDetailView.state().page,offset:normal.pageOffset,loadedAt:normal.loadedAt} : null,
     normalId:normal?.artworkId || null,
     basket:basketPageOpen() ? {mode:basketReturnMode,id:basketDetail.item?.id || null,offset:basketDetail.pageOffset,artworkOffset:basketArtworkOffset,
       originWorkspace:basketDetail.originWorkspace,stagePage:basketDetailView.state().page} : null,
     quality:$("#quality").value,format:$("#format").value,viewerOffset:viewerPageOffset,
-    download:{saveRoot:$("#saveRoot").value,createFolder:$("#createFolder").checked,groupArtworks:$("#groupArtworks").checked,skipExisting:$("#skipExisting").checked},
+    download:{saveRoot:$("#saveRoot").value,createFolder:$("#createFolder").checked,groupArtworks:$("#groupArtworks").checked,skipExisting:$("#skipExisting").checked,namingPreset:$("#downloadNamingPreset").value},
     scroll:{window:{left:window.scrollX,top:window.scrollY},download:$("#downloadPage").scrollTop,basket:$("#basketPage").scrollTop,
       history:$("#historyPage").scrollTop,account:$("#accountPage").scrollTop,discovery:$("#discoveryPage").scrollTop,reverse:$("#reversePage").scrollTop,viewer:$("#allViewer").scrollTop},
   };
@@ -2706,6 +2734,10 @@ async function restorePageState(state,scope) {
   if(state.download){
     $("#saveRoot").value=state.download.saveRoot;
     for(const id of ["createFolder","groupArtworks","skipExisting"])$("#"+id).checked=state.download[id];
+    if(state.download.namingPreset){
+      $("#downloadNamingPreset").value=visibleNamingPresets.some(preset=>preset.id===state.download.namingPreset)
+        ? state.download.namingPreset : namingPreferences.defaultId;
+    }
     downloadDefaultsTouched=true;
   }
   updateFormatHint();syncSearchScopedControls();syncPreviewResources();
@@ -2721,7 +2753,7 @@ function applyPageScroll(state) {
 }
 
 async function refreshCurrentPage() {
-  if(contextNavigationLocked() || pageRefreshPending || detailController || selection.locked || singleDownloadPending)return;
+  if(contextNavigationLocked() || pageRefreshPending || normalDetail.controller || basketDetail.controller || selection.locked || singleDownloadPending)return;
   checkpointNavigation();
   const state=capturePageState(),surface=activeScrollSurface();
   const previewScope=surface===window?document:surface;
@@ -2779,7 +2811,7 @@ async function refreshCurrentPage() {
   finally{if(pageRefreshController===controller){pageRefreshController=null;pageRefreshPending=false;syncSearchScopedControls();queueNavigationRecord();}}
 }
 
-createPageContextMenu({refresh:refreshCurrentPage,allowed:()=>!contextNavigationLocked() && !pageHistory?.status().restoring && !detailController});
+createPageContextMenu({refresh:refreshCurrentPage,allowed:()=>!contextNavigationLocked() && !normalDetail.controller && !basketDetail.controller});
 
 function setWorkspace(view) {
   if(view!=="reverse")sourceSearchView.suspend();
@@ -2806,16 +2838,20 @@ function openDownloadPage() {
 }
 
 function navigatePrimary(hash) {
-  preparePageNavigation();
+  const returnToDownload = hash === "#detail" && basketPageOpen() && activeWorkspace === "download";
+  preparePageNavigation({keepNormalRead: returnToDownload});
+  if (returnToDownload) {
+    closeAllViewer();
+    closeBasketPage();
+    return;
+  }
   contextReturns={};
   accountOrigin=false;
   if (hash === "#home" || hash === "#gallery") searchSurface = hash.slice(1);
-  const fromBasket = basketPageOpen();
   closeAllViewer();
   closeBasketPage();
   if (hash === "#detail") {
-    if (fromBasket || (selection.size && !normalDetail.item && !document.body.classList.contains("batch-mode"))) showBatchDetail({fromSidebar:true});
-    else openDownloadPage();
+    openDownloadPage();
   } else {
     workspaceReturn = null;
     setWorkspace(null);
@@ -2847,13 +2883,15 @@ function closeLibrary({record=true}={}) {
 $("#navHistory").onclick = () => openLibrary("history");
 $("#navAccount").onclick=()=>openAccount();
 $("#navDiscovery").onclick=()=>openDiscovery();
-$("#navBasket").onclick = () => {
+function openBasketFromNavigation() {
   if (!selection.size) {
     showTaskDock("采集篮为空", "先在预览页勾选作品，再来选择图片。", 3000);
     return;
   }
   openSelectionBasket({fromSidebar:true});
-};
+}
+$("#navBasket").onclick = openBasketFromNavigation;
+$("#basketEntry").onclick = openBasketFromNavigation;
 $("#historyBack").onclick = closeLibrary;
 $("#downloadBack").onclick = () => navigatePrimary("#gallery");
 
@@ -2865,11 +2903,12 @@ async function select(index,suppliedItem=null,suppliedContext=null,{restoring=fa
   clearDetail("正在加载作品详情…");
   closeAllViewer();
   invalidateDetailView();
-  detailController = new AbortController();
-  const controller = detailController;
-  const generation = viewGeneration;
+  const controller = normalDetail.controller = new AbortController();
   const detailContext = { ...(suppliedContext || activeSearchContext) };
   normalDetail.artworkId = item.id;
+  normalDetail.context = detailContext;
+  normalDetail.pageOffset = 0;
+  normalDetail.loadedAt = 0;
 
   announceToast("");
   $("#dTitle").textContent = "正在加载作品详情…";
@@ -2879,10 +2918,10 @@ async function select(index,suppliedItem=null,suppliedContext=null,{restoring=fa
   try {
     if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)) || workspaceSync.pageCheck(item.id))) {
       item = await readArtworkDetail(item.id,{ signal: controller.signal });
-      if (controller !== detailController || generation !== viewGeneration) return;
+      if (controller.signal.aborted) return;
       rememberArtworkDetail(item);
     }
-    if (controller !== detailController || generation !== viewGeneration) return;
+    if (controller.signal.aborted) return;
     renderDetail(item, index, detailContext);
   } catch (error) {
     if (restoring) throw error;
@@ -2891,8 +2930,8 @@ async function select(index,suppliedItem=null,suppliedContext=null,{restoring=fa
     $("#deck").innerHTML = "";
     announceToast(error.message || "作品详情加载失败");
   } finally {
-    if (controller === detailController) {
-      detailController = null;
+    if (controller === normalDetail.controller) {
+      normalDetail.controller = null;
       scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
     }
   }
@@ -2932,6 +2971,7 @@ function detailView(prefix, deck, position) {
   return createArtworkDetailView({
     detail: prefix === "d" ? normalDetail : basketDetail,
     noticeBefore:prefix==="d"?$("#toast"):null,
+    isDownloaded: item => prefix === "d" && detailDownloadProgress?.status === "success" && String(detailDownloadProgress.artworkId) === String(item.id),
     fields: Object.fromEntries(names.map(name => [name, $(`#${prefix}${name}`)])),
     escape: esc,
     openOfficial:(id,event)=>{
@@ -3125,15 +3165,6 @@ $("#basketPageMore").onclick = () => {
 };
 $("#basketViewAll").onclick = openAllViewer;
 $("#backTop").onclick = () => activeScrollSurface().scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? "auto" : "smooth" });
-function openBatchHub() {
-  if (contextNavigationLocked()) return;
-  if (!selection.size) {
-    $("#pageSelectionStatus").textContent = "请先勾选至少一个作品";
-    return;
-  }
-  showBatchDetail();
-}
-$("#basketEntry").onclick = openBatchHub;
 $("#downloadReturnBasket").onclick = () => openSelectionBasket();
 
 function basketPageOpen() {
@@ -3152,15 +3183,14 @@ function openBasketPage() {
 }
 
 function updateBatchDetailSummary() {
-  $("#batchDetailSummary").textContent = `${selection.size} 个作品 · ${selectedPageCount()}/${MAX_SELECTED_PAGES} 张已选`;
   $("#batchArtworkCount").textContent=String(selection.size);
   $("#batchPageCount").textContent=String(selectedPageCount());
   renderDetailDownloadProgress();
 }
 
-function showBatchDetail({fromSidebar=false}={}) {
+function showBatchDetail() {
   const parent=preparePageNavigation();
-  contextReturns.detail=fromSidebar?null:{key:parent?.key ?? capturePageIdentity().key};
+  contextReturns.detail={key:parent?.key ?? capturePageIdentity().key};
   const quality = $("#quality").value;
   const format = $("#format").value;
   clearDetail();
@@ -3204,7 +3234,7 @@ function closeBasketPage() {
   $("#collectionPages").querySelectorAll("[data-collection-page]").forEach(box => {
     box.checked = selection.isPageSelected(normalDetail.item?.id, Number(box.dataset.collectionPage));
   });
-  invalidateDetailView();
+  invalidateDetailView({keepNormalRead: activeWorkspace === "download"});
   syncSearchScopedControls();
   updateFloatingChrome();
   syncPreviewResources();
@@ -3284,7 +3314,9 @@ function syncBasketHeader() {
 }
 
 function openSelectionBasket({fromSidebar=false,restoring=false}={}) {
-  const parent=restoring?null:preparePageNavigation();
+  if (!restoring && contextNavigationLocked()) return;
+  if (fromSidebar && !libraryWorkspaceOpen() && basketPageOpen() && basketReturnMode === "picker") return;
+  const parent=restoring?null:preparePageNavigation({keepNormalRead: activeWorkspace === "download"});
   if(fromSidebar){
     if(libraryWorkspaceOpen()) closeLibrary({record:false});
     closeAllViewer();
@@ -3294,8 +3326,8 @@ function openSelectionBasket({fromSidebar=false,restoring=false}={}) {
     $("#pageSelectionStatus").textContent = "请先勾选至少一个作品";
     return;
   }
-  contextReturns.basket=fromSidebar?null:{key:parent?.key ?? capturePageIdentity().key};
-  invalidateDetailView();
+  const fromDownload = parent?.baseView === "detail" || parent?.baseView === "batch";
+  contextReturns.basket = fromSidebar && !fromDownload ? null : {key:parent?.key ?? capturePageIdentity().key};
   batchCandidateItems = rows.map(row => row.item);
   batchCandidateContextByArtwork.clear();
   batchCandidateResultPageByArtwork.clear();
@@ -3774,6 +3806,7 @@ function renderDetailDownloadProgress() {
   $("#downloadProgressTrack").setAttribute("aria-valuetext",`${state.done} / ${state.total}${state.status==="success"?" · 完成":state.status==="error"?" · 失败":state.status==="paused"?" · 已暂停":""}`);
   $("#downloadProgressFill").style.width=`${state.total?state.done/state.total*100:0}%`;
   $("#downloadProgressCount").textContent=`${state.done} / ${state.total}`;
+  normalDetailView.refreshDownloadStatus();
   $("#batchDownloadPrompt").hidden=!batch || state.status!=="success";
 }
 
@@ -3938,22 +3971,19 @@ function renderBasketArtworkDetail(item) {
 }
 
 async function openBatchCollection(id,{restoring=false}={}) {
-  const parent=restoring?null:preparePageNavigation();
+  const parent=restoring?null:preparePageNavigation({keepNormalRead: activeWorkspace === "download"});
   let item = selection.get(id)?.item || batchCandidateItems.find((candidate) => candidate.id === id);
   if (!item) return;
   contextReturns.basket={key:parent?.key ?? capturePageIdentity().key};
-  invalidateDetailView();
-  detailController = new AbortController();
-  const controller = detailController;
-  const generation = viewGeneration;
+  const controller = basketDetail.controller = new AbortController();
   try {
     if (item.source === "pixiv" && (!item.pageImages || staleBasketPreviewIds.has(String(item.id)) || workspaceSync.pageCheck(item.id))) {
       $("#basketTitle").textContent = "正在加载合集详情…";
       item = await readArtworkDetail(item.id,{ signal: controller.signal });
-      if (controller !== detailController || generation !== viewGeneration) return;
+      if (controller.signal.aborted) return;
       rememberArtworkDetail(item);
     }
-    if (controller !== detailController || generation !== viewGeneration) return;
+    if (controller.signal.aborted) return;
     basketDetail.artworkId = item.id;
     basketDetail.item = item;
     basketDetail.context = {
@@ -3970,7 +4000,7 @@ async function openBatchCollection(id,{restoring=false}={}) {
     if (controller.signal.aborted) return;
     announceToast(error.message || "作品详情加载失败");
   } finally {
-    if (controller === detailController) detailController = null;
+    if (controller === basketDetail.controller) basketDetail.controller = null;
   }
 }
 
@@ -3997,21 +4027,6 @@ $("#basketClearConfirm").onclick = () => {
   openBasketArtworkPicker();
   syncResultSelectionControls();
   $("#basketPage").scrollTop = 0;
-};
-$("#basketBack").onclick = () => {
-  if (selection.locked || pageRefreshPending) return;
-  checkpointNavigation();
-  invalidateDetailView();
-  if (basketReturnMode === "detail") {
-    basketDetail.item = null;
-    basketDetailView.reset();
-    $("#basketDetailDeck").innerHTML = "";
-    $("#basketPages").innerHTML = "";
-    openBasketArtworkPicker();
-    $("#basketPage").scrollTop = 0;
-  }
-  else showBatchDetail();
-  queueNavigationRecord();
 };
 $("#selectAllPage").onclick = selectAllCurrentPage;
 $("#clearPageSelection").onclick = clearAllCurrentPage;
@@ -4089,17 +4104,10 @@ addEventListener("keydown", (event) => {
 });
 
 function updateFormatHint() {
-  const quality = $("#quality").selectedOptions[0]?.textContent || "";
-  const format = $("#format").selectedOptions[0]?.textContent || "";
-  $("#qualityText").textContent = $("#quality").value === "regular"
-    ? "标准：使用 Pixiv 缩小预览；动图为 600px 帧包，文件较小。"
-    : quality ? "原图：使用原始分辨率，不缩小图片。" : "";
-  $("#formatText").textContent = format;
   updateDownloadNamingPreview();
   if (normalDetail.item?.workType === "ugoira" && !singleDownloadPending) $("#download").textContent = downloadButtonLabel(normalDetail.item);
 }
 
-$("#quality").onchange = updateFormatHint;
 $("#format").onchange = updateFormatHint;
 $("#searchForm").onsubmit = async (event) => {
   event.preventDefault();preparePageNavigation();accountOrigin=false;

@@ -423,10 +423,18 @@ def should_retry_status(status: int) -> bool:
     return 500 <= int(status) <= 599
 
 
+_WINDOWS_DEVICE_NAME = re.compile(r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])", re.IGNORECASE | re.ASCII)
+
+
+def avoid_windows_device_name(name: str) -> str:
+    device = name.partition(".")[0].rstrip(" ")
+    return f"_{name}" if _WINDOWS_DEVICE_NAME.fullmatch(device) else name
+
+
 def safe_artwork_stem(title: str, artwork_id: str) -> str:
     clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', str(title)).strip(' ._')
     clean = re.sub(r'_+', '_', clean)[:100]
-    return f"{clean}_{artwork_id}" if clean else f"pixiv_{artwork_id}"
+    return avoid_windows_device_name(f"{clean or 'pixiv'}_{artwork_id}")
 
 
 def normalize_tag_for_match(value: str) -> str:

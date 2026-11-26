@@ -209,29 +209,31 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
       if(current===revision)status.textContent=error.message;
     }
   };
-  button.onclick=async()=>{
-    if(saving)return;
-    if(naming?.editing){status.textContent="请先应用或取消正在编辑的命名预设。";return;}
+  async function saveChanges(){
+    if(saving)return false;
+    if(naming?.editing){status.textContent="请先应用或取消正在编辑的命名预设。";return false;}
     const submitted=new Map(dirty);
     const changes=Object.fromEntries([...submitted].map(([key,edit])=>[key,edit.value]));
-    if(!Object.keys(changes).length){status.textContent="设置已保存";return;}
+    if(!Object.keys(changes).length){status.textContent="设置已保存";return true;}
     if(changes.syncMinutes!==undefined && (!/^[0-9]+$/.test(changes.syncMinutes) || BigInt(changes.syncMinutes)<3n)){
-      status.textContent="同步间隔至少为 3 分钟，请输入整数。";root.querySelector('[data-setting="syncMinutes"]').focus();return;
+      status.textContent="同步间隔至少为 3 分钟，请输入整数。";root.querySelector('[data-setting="syncMinutes"]').focus();return false;
     }
     const current=revision;
     saving=submitted;button.disabled=true;jump.disabled=true;fields.forEach(field=>field.disabled=true);
     try{
       const value=await save(changes);
-      if(current!==revision)return;
+      if(current!==revision)return false;
       for(const [key,edit] of submitted)if(dirty.get(key)===edit)dirty.delete(key);
       saving=null;
       update(value);
       status.textContent=dirty.size?"本次设置已保存，另有未保存的改动":"设置已保存";
+      return dirty.size===0;
     }catch(error){
       if(current===revision){
         status.textContent=error.message;
         report(error.message);
       }
+      return false;
     }finally{
       if(current===revision){
         saving=null;
@@ -241,7 +243,8 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
         syncDependencies();
       }
     }
-  };
+  }
+  button.onclick=saveChanges;
   function update(value,progress=null,loaded=true){
     preferencesLoaded=loaded;
     if(progress!==null)lastProgress=progress;
@@ -269,7 +272,12 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   }
   return {
     update,
-    get dirty(){return dirty.size>0 || Boolean(saving);},
+    get dirty(){return dirty.size>0 || Boolean(saving) || Boolean(naming?.dirty);},
+    saveForExit(){
+      if(naming?.dirty && !naming.applyDraft())return false;
+      naming?.reset();
+      return saveChanges();
+    },
     reset:()=>{
       revision++;
       dirty.clear();

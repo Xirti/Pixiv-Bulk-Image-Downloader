@@ -3,7 +3,7 @@
 import re
 from typing import TypedDict
 
-from pixiv_adapter import safe_artwork_stem, valid_pixiv_id
+from pixiv_adapter import avoid_windows_device_name, safe_artwork_stem, valid_pixiv_id
 
 
 class NamingRule(TypedDict):
@@ -24,7 +24,6 @@ NAMING_SEPARATORS = ("_", "-", " ", "")
 NAMING_DATE_FORMATS = ("YYYY-MM-DD", "YYYYMMDD", "YYYY/MM/DD")
 NAMING_PAGE_WIDTHS = (2, 3, 4)
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f\ud800-\udfff]+')
-_RESERVED_NAME = re.compile(r"(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])", re.IGNORECASE)
 
 
 def validate_naming_rule(raw: object) -> NamingRule:
@@ -101,7 +100,4 @@ def artwork_file_stem(item: dict, page: int | None, rule: NamingRule | None) -> 
     parts = [values[field] for field in fields]
     if "page" not in fields and (page is None or page_count > 1):
         parts.append(page_label)
-    stem = separator.join(parts)
-    if _RESERVED_NAME.fullmatch(stem.partition(".")[0].rstrip(" ")):
-        stem = "_" + stem
-    return stem
+    return avoid_windows_device_name(separator.join(parts))

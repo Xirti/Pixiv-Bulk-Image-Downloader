@@ -247,7 +247,7 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   }
 
   async function saveSettings(action){
-    if(settingsWrite)return;
+    if(settingsWrite)return false;
     settingsVersion++;
     const status=setting("[data-source-settings-message]"), controls=settingsRoot.querySelectorAll("button,input,select");
     controls.forEach(control=>control.disabled=true);status.textContent="正在保存…";
@@ -268,7 +268,8 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
       }
       render();changed();
       status.textContent=action==="clear"?"搜图结果缓存已清除":action==="reset-guest"?"游客会话已重置":action==="remove-key"?"API Key 已移除":"搜图设置已保存";
-    }catch(error){status.textContent=error.message;}
+      return true;
+    }catch(error){status.textContent=error.message;return false;}
     finally{
       settingsWrite=null;
       controls.forEach(control=>control.disabled=false);
@@ -396,10 +397,10 @@ globalThis.createSourceSearch = function ({root,settingsRoot,request,escape:esc,
   return {
     async waitForSave(){
       if(settingsWrite)await settingsWrite;
-      if(setting("[data-source-key]").value.trim() ||
-          settingsModeChosen && setting("[data-source-setting-mode]").value!==configuration.mode)
-        throw new Error("请先保存搜图设置改动");
     },
+    get dirty(){return Boolean(setting("[data-source-key]").value.trim()) ||
+      settingsModeChosen && setting("[data-source-setting-mode]").value!==configuration.mode;},
+    saveForExit:()=>saveSettings("save"),
     setMaskSensitive(enabled){if(maskSensitive===enabled)return;maskSensitive=enabled;revealed.clear();clearTimeout(clickTimer);render();},
     async open(){if(!settingsLoaded)await loadSettings();controls();},loadSettings,
     snapshot:()=>({job,imageUrl,name:find("[data-source-file-name]").textContent,epoch:cacheEpoch,submission:viewReceipt?.id ?? null}),

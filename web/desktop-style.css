@@ -308,15 +308,24 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .settings-card{padding:0 18px;border:1px solid var(--frost-edge);border-radius:13px;background:var(--frost-fill);box-shadow:inset 0 1px var(--frost-highlight)}
 .account-settings .settings-item{display:flex;align-items:center;justify-content:space-between;gap:24px;min-height:68px;margin:0;padding:14px 0;border:0;border-bottom:1px solid var(--line);font-size:13px}
 .account-settings .settings-card>.settings-item:last-child{border-bottom:0}
-.account-settings .naming-editor{display:grid;gap:12px;min-width:0}
-.naming-editor .settings-copy{min-width:0}
-.naming-preset-row,.naming-field-list,.naming-form-options,.naming-form-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
-.naming-preset-row{padding:5px 0}
-.naming-preset-row button,.naming-field-list button{min-height:28px;padding:4px 9px;border-radius:999px;font-size:12px}
-.naming-pill,.naming-field-pill{display:inline-flex;align-items:center;gap:4px;min-width:0;padding:4px 10px;border:1px solid var(--frost-edge);border-radius:999px;background:var(--frost-fill);overflow-wrap:anywhere}
-.naming-field-pill button{padding:3px 7px}
-.naming-form{display:grid;gap:10px;padding:12px;border:1px solid var(--frost-edge);border-radius:10px;background:var(--frost-field)}
-.naming-form label{display:grid;gap:4px}
+.account-settings .naming-editor{display:block;min-width:0;padding:0}
+.naming-setting-row,.naming-preset-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+.naming-presets-heading,.naming-preset-row:last-child{border-bottom:0}
+.naming-preset-row{padding:9px 0}
+.naming-preset-row .settings-copy{overflow-wrap:anywhere}
+.naming-preset-row input{flex:none;margin:0}
+.naming-editor :is(select,input[type=text]){min-height:34px;margin:0;padding:5px 10px;border:1px solid var(--frost-edge);border-radius:8px;background:var(--frost-field);color:var(--ink);font-size:12px}
+.naming-setting-row :is(select,input[type=text]){width:200px;max-width:60%}
+.naming-setting-row select[data-naming-default]{width:260px}
+.naming-form{margin:8px 0 14px;padding:0 14px 14px;border:1px solid var(--frost-edge);border-radius:10px}
+.naming-form-row{display:grid;gap:4px;padding:12px 0;border-bottom:1px solid var(--line)}
+.naming-fields{display:flex;flex-wrap:wrap;gap:8px;margin-top:5px}
+.naming-fields button{display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:4px 12px;border-radius:999px}
+.naming-fields button[aria-pressed=true]{border-color:var(--focus);background:var(--selected);color:var(--ink)}
+.naming-fields button span:empty{display:none}
+.naming-fields button span{font-size:11px;font-weight:650;color:var(--muted)}
+.naming-form-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.naming-form-actions [data-naming-remove]{margin-inline-start:auto}
 .naming-form output,#downloadNamingPreview{overflow-wrap:anywhere;color:var(--muted);font-weight:normal}
 .download label:has(#downloadNamingPreset){grid-column:1/-1}
 .naming-form small{color:var(--muted)}
