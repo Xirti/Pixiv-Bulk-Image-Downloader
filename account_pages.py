@@ -281,18 +281,23 @@ class AccountCache:
                 "FROM pragma_user_version").fetchone()
             if version not in (0, 1):
                 raise ValueError("Unsupported account cache schema")
-            if version == 0:
-                connection.executescript("""BEGIN IMMEDIATE;
-                    CREATE TABLE IF NOT EXISTS cached (owner TEXT, method TEXT, key TEXT, payload TEXT, PRIMARY KEY(owner,method,key));
-                    CREATE TABLE IF NOT EXISTS cursor_visits (owner TEXT, method TEXT, scan TEXT, path TEXT, position INTEGER,
-                        PRIMARY KEY(owner,method,scan,path));
-                    PRAGMA user_version=1;
-                    COMMIT;""")
-            if not display_storage:
+            if version == 0 or not display_storage:
                 with connection:
                     connection.execute("BEGIN IMMEDIATE")
+                    # The file may have been upgraded while writer admission waited.
+                    version = connection.execute("PRAGMA user_version").fetchone()[0]
+                    if version not in (0, 1):
+                        raise ValueError("Unsupported account cache schema")
+                    if version == 0:
+                        connection.execute("""CREATE TABLE IF NOT EXISTS cached (
+                            owner TEXT, method TEXT, key TEXT, payload TEXT, PRIMARY KEY(owner,method,key))""")
+                        connection.execute("""CREATE TABLE IF NOT EXISTS cursor_visits (
+                            owner TEXT, method TEXT, scan TEXT, path TEXT, position INTEGER,
+                            PRIMARY KEY(owner,method,scan,path))""")
                     if not self._display_storage_initialized(connection):
                         self._migrate_display_storage(connection)
+                    if version == 0:
+                        connection.execute("PRAGMA user_version=1")
             if not self._legacy_policy_imported:
                 self._adopt_legacy_policy(connection)
         except BaseException:
@@ -327,6 +332,8 @@ class AccountCache:
             if imports:
                 with db:
                     db.execute("BEGIN IMMEDIATE")
+                    if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+                        raise ValueError("Unsupported account cache schema")
                     for owner, key, signature, pending in imports:
                         imported = db.execute("SELECT payload FROM cached WHERE owner='' AND method='migration' AND key=?", (key,)).fetchone()
                         if imported is None or imported[0] != signature:
