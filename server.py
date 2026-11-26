@@ -43,6 +43,7 @@ from zipfile import BadZipFile, ZipFile
 
 from auth_store import (
     SessionRevision,
+    session_revision_path,
     adopt_persistent_session,
     delete_session,
     forget_local_session,
@@ -320,7 +321,7 @@ SEARCH_CANCELLED: OrderedDict[str, float] = OrderedDict()
 SEARCH_REQUESTS_LOCK = threading.Lock()
 PENDING_READ_PROMOTIONS: OrderedDict[str, float] = OrderedDict()
 AUTHORIZATION_GENERATION = 0
-SHARED_LOGOUT = SessionRevision(history_path().with_name("pixiv-logout-revision"))
+SHARED_LOGOUT = SessionRevision(session_revision_path())
 SHARED_WEB_SESSION = SessionRevision(SHARED_LOGOUT.path.with_name("pixiv-web-session-revision"),
                                     guard_path=SHARED_LOGOUT.path)
 SHARED_APP_SESSION = SessionRevision(SHARED_LOGOUT.path.with_name("pixiv-app-session-revision"),

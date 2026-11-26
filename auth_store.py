@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
@@ -9,8 +10,8 @@ import threading
 import uuid
 from ctypes import wintypes
 
-from edition_profile import CREDENTIAL_TARGET
-from runtime_identity import named_mutex
+from edition_profile import CREDENTIAL_TARGET, DATA_FOLDER
+from runtime_identity import current_user_sid, named_mutex
 
 TARGET = CREDENTIAL_TARGET
 CRED_TYPE_GENERIC = 1
@@ -22,16 +23,28 @@ _PERSISTENT_SESSION_CACHE: str | object = _SESSION_CACHE_UNSET
 _SESSION_LOCK = threading.RLock()
 
 
+def session_revision_path() -> Path:
+    # Credentials belong to the user, independently of the download library.
+    # Keep the default location so existing default-library writers still notify us.
+    return Path(os.environ["LOCALAPPDATA"]) / DATA_FOLDER / "library" / "pixiv-logout-revision"
+
+
 class SessionRevision:
     """A non-secret marker published under the shared credential mutex."""
     def __init__(self, path: Path, *, guard_path: Path | None = None):
         self.path = path
         scope = os.path.normcase(str((guard_path or path).resolve()))
         self._mutex = "Local\\MOKU.PixivSession." + hashlib.sha256(scope.encode()).hexdigest()[:32]
+        shared_scope = current_user_sid() + "\0" + scope
+        self._shared_mutex = "Global\\MOKU.PixivSession." + hashlib.sha256(shared_scope.encode()).hexdigest()[:32]
         self._observed = (None, "")
 
+    @contextmanager
     def guard(self):
-        return named_mutex(self._mutex, timeout_seconds=5)
+        # Global coordinates current peers across logon sessions; Local also
+        # excludes previous releases using this same persistent marker path.
+        with named_mutex(self._shared_mutex, timeout_seconds=5), named_mutex(self._mutex, timeout_seconds=5):
+            yield
 
     def read(self) -> str:
         observed, revision = self._observed
