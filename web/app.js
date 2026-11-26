@@ -2624,7 +2624,7 @@ async function restorePageState(state,scope) {
   syncSearchKind();syncDateInputs();
   const source=state.source;
   if(source.items===null && state.baseView==="gallery")restoreGalleryChoice(source);
-  if(source.items===null && state.baseView==="gallery" && source.filters.order==="popular" && !source.intent){
+  if(source.items===null && state.baseView==="gallery" && source.filters.order==="popular" && ["tags","uid"].includes(source.context.kind) && !source.intent){
     activeTagQuery=source.query;activeSearchContext={...source.context};activeSearchFilters={...source.filters};
     if(!await scope.read(signal=>loadGalleryPopularity(source.page,{signal,restoring:true})))throw new Error("原排序页面读取失败，请重新准备人气排序");
   }else if(source.items===null && state.baseView==="gallery" && !source.intent){
