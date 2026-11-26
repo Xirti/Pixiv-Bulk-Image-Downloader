@@ -308,6 +308,18 @@ body #backTop,.desktop-window body.viewer-open #backTop{top:calc(var(--chrome-he
 .settings-card{padding:0 18px;border:1px solid var(--frost-edge);border-radius:13px;background:var(--frost-fill);box-shadow:inset 0 1px var(--frost-highlight)}
 .account-settings .settings-item{display:flex;align-items:center;justify-content:space-between;gap:24px;min-height:68px;margin:0;padding:14px 0;border:0;border-bottom:1px solid var(--line);font-size:13px}
 .account-settings .settings-card>.settings-item:last-child{border-bottom:0}
+.account-settings .naming-editor{display:grid;gap:12px;min-width:0}
+.naming-editor .settings-copy{min-width:0}
+.naming-preset-row,.naming-field-list,.naming-form-options,.naming-form-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.naming-preset-row{padding:5px 0}
+.naming-preset-row button,.naming-field-list button{min-height:28px;padding:4px 9px;border-radius:999px;font-size:12px}
+.naming-pill,.naming-field-pill{display:inline-flex;align-items:center;gap:4px;min-width:0;padding:4px 10px;border:1px solid var(--frost-edge);border-radius:999px;background:var(--frost-fill);overflow-wrap:anywhere}
+.naming-field-pill button{padding:3px 7px}
+.naming-form{display:grid;gap:10px;padding:12px;border:1px solid var(--frost-edge);border-radius:10px;background:var(--frost-field)}
+.naming-form label{display:grid;gap:4px}
+.naming-form output,#downloadNamingPreview{overflow-wrap:anywhere;color:var(--muted);font-weight:normal}
+.download label:has(#downloadNamingPreset){grid-column:1/-1}
+.naming-form small{color:var(--muted)}
 .settings-copy{display:block;min-width:0;flex:1;line-height:1.5}
 .settings-copy b{display:block;font-size:13px;font-weight:550;color:var(--ink)}
 .settings-copy small,.settings-copy p{display:block;color:var(--muted);font-size:12px;font-weight:400;line-height:1.5;margin:4px 0 0}

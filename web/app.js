@@ -1233,6 +1233,7 @@ function syncSearchScopedControls() {
   if (detailReady && !singleDownloadPending) {
     $("#download").disabled ||= currentDownloadPages(normalDetail.item).length === 0;
     $("#download").textContent = downloadButtonLabel(normalDetail.item);
+    updateDownloadNamingPreview();
   }
   document.querySelectorAll("[data-select],[data-batch-select],[data-collection-page]").forEach(box=>{box.disabled=selection.locked || singleDownloadPending || workspaceSync.loading;});
   syncNavigationAvailability();
@@ -1704,6 +1705,7 @@ let pixivDisplayView=null;
 let discoveryView=null;
 let downloadDefaultsTouched=false;
 let initialDownloadDefaultsApplied=false;
+let namingPreferences=null,visibleNamingPresets=[];
 let sensitiveMaskScope="both";
 let recentlyRevealedPoster=null,searchMaskRevealedAt=-Infinity;
 const searchImageReveals=createSensitiveImageReveals({root:grid,onHide:id=>{
@@ -1744,6 +1746,24 @@ function applyDownloadDefaults(){
   const prefs=cloudControls.getPreferences();
   $("#saveRoot").value=prefs.saveRoot;$("#createFolder").checked=prefs.createFolder;downloadDefaultsTouched=false;
 }
+function configureDownloadNaming(config=downloadNaming.defaults){
+  if(JSON.stringify(namingPreferences)===JSON.stringify(config))return;
+  const select=$("#downloadNamingPreset");
+  const selected=namingPreferences?.defaultId===config.defaultId && config.visible.includes(select.value)
+    ? select.value : config.defaultId;
+  const presets=downloadNaming.presets(config);
+  visibleNamingPresets=config.visible.map(id=>presets.find(preset=>preset.id===id));
+  select.replaceChildren(...visibleNamingPresets.map(preset=>new Option(preset.label,preset.id)));
+  select.value=selected;
+  namingPreferences=config;
+  updateDownloadNamingPreview();
+}
+function updateDownloadNamingPreview(){
+  const preset=visibleNamingPresets.find(row=>row.id===$("#downloadNamingPreset").value);
+  const item=document.body.classList.contains("batch-mode") ? undefined : normalDetail.item || undefined;
+  const page=currentDownloadPages(item)[0] ?? 0;
+  $("#downloadNamingPreview").textContent=downloadNaming.preview(preset?.rule,item,page,$("#format").value || "source");
+}
 const browseOptions=createBrowseOptions({ready:async()=>{if(lastKnownLoggedIn===null)await syncAuthStatus();await cloudControls.ready();},save:patch=>cloudControls.savePreferences(patch),report:announceToast});
 const cloudControls=createCloudControls({
   request:fetchJson,session:()=>({logged:lastKnownLoggedIn===true,generation:lastKnownAuthorizationGeneration,method:loginMethod}),
@@ -1758,6 +1778,7 @@ const cloudControls=createCloudControls({
   checkUpdates:options=>accountView.checkUpdates(options),
   clearStarted:()=>Promise.all([accountView.stopBackground(),discoveryView?.stopBackground()]),
   preferencesChanged:(prefs,sync,loaded)=>{
+    if(loaded){mokuTheme.setMode(prefs.themeMode);configureDownloadNaming(prefs.downloadNaming);}
     browseOptions.configure(prefs,loaded);syncHomeSortControl();syncSearchSortControl();
     settingsView?.update(prefs,sync,loaded);
     const syncAction=accountSyncPresentation(prefs,sync,loaded);
@@ -1779,6 +1800,15 @@ settingsView=createAccountSettings({root:$("[data-account-settings]"),save:patch
   syncNow:()=>cloudControls.refresh(),clearCache:()=>cloudControls.clearCache(),
   browse:chooseSaveFolder,
   report:announceToast});
+mokuTheme.bindSave(async themeMode=>{
+  try{
+    if(lastKnownLoggedIn===null)await syncAuthStatus();
+    await cloudControls.savePreferences({themeMode});
+  }
+  catch(error){showTaskDock("界面主题",error.message,4500);}
+});
+configureDownloadNaming();
+$("#downloadNamingPreset").onchange=updateDownloadNamingPreview;
 pixivDisplayView=createPixivDisplaySettings({root:$("[data-pixiv-display]"),request:requestAccount,
   session:()=>({logged:lastKnownLoggedIn===true,method:loginMethod,generation:lastKnownAuthorizationGeneration,browsingGeneration:lastKnownBrowsingGeneration}),
   reconcile:async result=>{
@@ -3231,6 +3261,7 @@ function renderBatchDownloadOptions(quality = $("#quality").value, format = $("#
 }
 
 function readDownloadOptions() {
+  const namingRule=visibleNamingPresets.find(preset=>preset.id===$("#downloadNamingPreset").value)?.rule;
   return {
     quality: $("#quality").value || "original",
     ugoiraFormat: ["gif", "mp4"].includes($("#format").value) ? $("#format").value : "source",
@@ -3238,6 +3269,7 @@ function readDownloadOptions() {
     createFolder: $("#createFolder").checked,
     groupArtworks: Boolean($("#groupArtworks")?.checked),
     skipExisting: $("#skipExisting")?.checked ?? true,
+    ...(namingRule ? {namingRule} : {}),
   };
 }
 
@@ -3475,11 +3507,13 @@ function groupsForProgress(chunks) {
 }
 function prepareDownloadTask(chunks, taskOptions, previousTask) {
   const signature = JSON.stringify({ chunks, taskOptions });
-  if (
-    previousTask?.signature === signature
-    && previousTask.remainingChunks.length
-  ) {
-    return previousTask;
+  if (previousTask?.remainingChunks.length) {
+    // A retry owns its original naming rule, even after the preset is edited or hidden.
+    const withoutNaming = (key, value) => key === "namingRule" ? undefined : value;
+    if (JSON.stringify(JSON.parse(previousTask.signature), withoutNaming)
+        === JSON.stringify({ chunks, taskOptions }, withoutNaming)) {
+      return previousTask;
+    }
   }
   return {
     id: nextDownloadRequestId(),
@@ -4016,11 +4050,7 @@ $("#batchDownload").onclick = async () => {
   announceToast("");
   showTaskDock("批量下载", "任务已锁定，正在准备保存…", 0);
   try {
-    await executeDownloadTask(task, (chunk) => ({
-      endpoint: "/api/pixiv/batch-download",
-      body: { groups: chunk.groups, ...taskOptions, context: chunk.context },
-      timeout: 1800000,
-    }), () => {
+    await executeDownloadTask(task, chunk => savedTaskRequest(task, chunk), () => {
       setDownloadButtonState(button, "正在保存…", true);
       showTaskDock("批量下载", `已处理 ${task.savedCount} / ${task.savedCount+task.remainingChunks.reduce((sum,chunk)=>sum+chunk.pageCount,0)} 张`, 0);
     });
@@ -4065,6 +4095,7 @@ function updateFormatHint() {
     ? "标准：使用 Pixiv 缩小预览；动图为 600px 帧包，文件较小。"
     : quality ? "原图：使用原始分辨率，不缩小图片。" : "";
   $("#formatText").textContent = format;
+  updateDownloadNamingPreview();
   if (normalDetail.item?.workType === "ugoira" && !singleDownloadPending) $("#download").textContent = downloadButtonLabel(normalDetail.item);
 }
 
@@ -4135,10 +4166,7 @@ $("#download").onclick = async () => {
   showTaskDock("正在保存", "正在保存当前作品…", 0);
   syncSearchScopedControls();
   try {
-    await executeDownloadTask(task, (chunk) => ({
-      ...request,
-      body: { ...request.body, pages: chunk.groups[0].pages },
-    }), () => {
+    await executeDownloadTask(task, chunk => savedTaskRequest(task, chunk), () => {
       setDownloadButtonState(button, "正在保存…", true);
       showTaskDock("正在保存", `第 ${task.completedBatches + 1}/${task.totalBatches} 批 · 已保存 ${savedDownloadPages(task)} 页`, 0);
     });

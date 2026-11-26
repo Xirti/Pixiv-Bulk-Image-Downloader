@@ -9,6 +9,8 @@ import threading
 import time
 import uuid
 
+from download_naming import DEFAULT_DOWNLOAD_NAMING, validate_download_naming
+
 
 class ScanConflictError(ValueError):
     pass
@@ -17,7 +19,8 @@ class ScanConflictError(ValueError):
 DEFAULT_MACHINE = {"saveRoot": "", "createFolder": True, "previewLayout":"adaptive",
                    "previewAction":"expand", "previewSize":"large", "sensitiveMask":"both", "autoLoadPages":False,"showLoadButton":True,
                    "orderTags":"default", "orderAuthor":"default", "orderUid":"default", "orderPid":"default",
-                   "orderRecommended":"default", "orderRanking":"default", "mediaMemory":"normal"}
+                   "orderRecommended":"default", "orderRanking":"default", "mediaMemory":"normal",
+                   "themeMode": "system", "downloadNaming": DEFAULT_DOWNLOAD_NAMING}
 DEFAULT_ACCOUNT = {"bookmarkDefault": "ask", "followDefault": "ask", "bookmarkLast": "private",
                    "followLast": "private", "autoSync": True, "syncMinutes": "10",
                    "autoRanking": True, "autoFollowing": True, "autoRecommended": True,"updateDots":True}
@@ -28,6 +31,13 @@ def validate_preferences(raw):
         raise ValueError("设置项无效")
     result = dict(raw)
     for key, value in raw.items():
+        if key == "downloadNaming":
+            validate_download_naming(value)
+            continue
+        if key == "themeMode":
+            if value not in ("system", "light", "dark"):
+                raise ValueError("界面主题无效")
+            continue
         if key in {"orderTags","orderAuthor","orderUid","orderPid","orderRecommended","orderRanking"}:
             valid = isinstance(value,str) and value in {"default","popular"}
         elif key == "mediaMemory":
@@ -174,7 +184,7 @@ class CloudState:
     @staticmethod
     def _preferences_snapshot(db, scope):
         values = {}
-        for key in ("machine", scope):
+        for key in (("machine",) if scope is None else ("machine", scope)):
             row = db.execute("SELECT payload FROM preferences WHERE scope=?", (key,)).fetchone()
             if row:
                 values.update(validate_preferences(json.loads(row[0])))

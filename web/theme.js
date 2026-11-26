@@ -1,31 +1,52 @@
-/* Set the global palette before the stylesheet paints; storage is optional. */
+/* The initial preference comes from the local application, across HTTP ports. */
 (() => {
   const root = document.documentElement;
-  let saved;
-  try { saved = localStorage.getItem('moku-theme'); } catch { /* Private hosts may deny storage. */ }
-  const systemDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
-  root.dataset.theme = saved === 'light' || saved === 'dark' ? saved : (systemDark ? 'dark' : 'light');
+  const system = matchMedia('(prefers-color-scheme: dark)');
+  let mode = root.dataset.themeMode || 'system';
+  let save, button, state;
 
-  function bindToggle() {
-    const button = document.getElementById('themeToggle');
+  function apply() {
+    const dark = mode === 'dark' || (mode === 'system' && system.matches);
+    root.dataset.theme = dark ? 'dark' : 'light';
+    root.dataset.themeMode = mode;
     if (!button) return;
-    button.innerHTML = '<span class="theme-orb" aria-hidden="true"><span class="theme-sun">☀</span><span class="theme-moon">☾</span></span><span class="theme-state" aria-hidden="true"></span>';
-    const state = button.querySelector('.theme-state');
-    const label = () => {
-      const dark = root.dataset.theme === 'dark';
-      state.textContent = dark ? '夜' : '日';
-      button.setAttribute('aria-pressed', String(dark));
-      button.setAttribute('aria-label', dark ? '切换为日间界面' : '切换为夜间界面');
-      button.setAttribute('title', dark ? '切换为日间界面' : '切换为夜间界面');
-    };
-    button.onclick = () => {
-      root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark';
-      try { localStorage.setItem('moku-theme', root.dataset.theme); } catch { /* The current page still switches. */ }
-      label();
-    };
-    label();
+    state.textContent = dark ? '夜' : '日';
+    button.setAttribute('aria-pressed', String(dark));
+    const target = dark ? '切换为日间界面' : '切换为夜间界面';
+    const label = mode === 'system' ? target + '（当前跟随系统）' : target;
+    button.setAttribute('aria-label', label);
+    button.title = label;
   }
 
+  function bindToggle() {
+    button = document.getElementById('themeToggle');
+    if (!button) return;
+    button.innerHTML = '<span class="theme-orb" aria-hidden="true"><span class="theme-sun">☀</span><span class="theme-moon">☾</span></span><span class="theme-state" aria-hidden="true"></span>';
+    state = button.querySelector('.theme-state');
+    button.onclick = async () => {
+      if (!save || button.disabled) return;
+      button.disabled = true;
+      try {
+        await save(root.dataset.theme === 'dark' ? 'light' : 'dark');
+      } finally {
+        button.disabled = false;
+      }
+    };
+    apply();
+  }
+
+  globalThis.mokuTheme = {
+    get mode() { return mode; },
+    setMode(next) {
+      if (['system', 'light', 'dark'].includes(next)) {
+        mode = next;
+        apply();
+      }
+    },
+    bindSave(handler) { save = handler; },
+  };
+  apply();
+  system.addEventListener('change', apply);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindToggle, {once: true});
   else bindToggle();
 })();

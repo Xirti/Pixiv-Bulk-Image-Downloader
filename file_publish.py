@@ -292,6 +292,7 @@ class PublishedFileOwnership:
     staged_handle: int | None = None
     staged_snapshot: PublishedFileSnapshot | None = None
     published: bool = False
+    frames: PublishedFileOwnership | None = None
 
 
 class PublishedOwnershipError(PixivPolicyError):
@@ -684,9 +685,13 @@ def _publish_owned_staged_file(
     *,
     boundary_root: Path,
     prelocked_parent: Path | None = None,
+    claimed: set[Path] | None = None,
 ) -> None:
-    """Publish one exclusively owned staging file without reopening it by path."""
-    if ownership.staged_handle is None or ownership.staged_snapshot is None:
+    """Choose one destination stem for a file and its optional frames manifest."""
+    members = [(ownership, final.suffix)]
+    if ownership.frames is not None:
+        members.append((ownership.frames, ".frames.json"))
+    if any(member.staged_handle is None or member.staged_snapshot is None for member, _ in members):
         raise PublishedOwnershipError("暂存文件所有权缺失")
     parents = [final.parent]
     if prelocked_parent is not None:
@@ -697,57 +702,58 @@ def _publish_owned_staged_file(
         ]
     locks = _directory_lock_chain(boundary_root, parents)
     try:
-        try:
-            target_handle = _open_windows_handle(
-                final,
-                share_mode=0,
-                access=FILE_READ_DATA | FILE_READ_ATTRIBUTES,
-                flags=FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-        except FileNotFoundError:
-            # Register ownership before the kernel rename. If a competitor wins
-            # this name, fall through to the collision-safe sibling loop.
-            ownership.final = final
-            ownership.handle = ownership.staged_handle
-            ownership.snapshot = ownership.staged_snapshot
-            ownership.published = True
+        for collision in range(10_001):
+            stem = f"{final.stem} ({collision})" if collision else final.stem
+            candidates = [(member, final.with_name(stem + suffix)) for member, suffix in members]
+            if claimed and any(path in claimed for _, path in candidates):
+                continue
+            existing: dict[Path, tuple[int, PublishedFileSnapshot]] = {}
             try:
-                _rename_file_by_handle(ownership.staged_handle, final)
-                return
-            except FileExistsError:
-                ownership.published = False
-        else:
-            try:
-                current = _snapshot_windows_file_handle(target_handle)
-                if _same_file_content(current, ownership.staged_snapshot):
-                    # Idempotent download: retain the existing complete file and
-                    # leave the duplicate staging object for context cleanup.
-                    ownership.final = final
-                    ownership.handle = target_handle
-                    ownership.snapshot = current
-                    target_handle = None
+                if not collision or ownership.frames is not None:
+                    conflict = False
+                    for member, path in candidates:
+                        try:
+                            handle = _open_windows_handle(
+                                path,
+                                share_mode=0,
+                                access=FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+                                flags=FILE_FLAG_OPEN_REPARSE_POINT,
+                            )
+                        except FileNotFoundError:
+                            continue
+                        try:
+                            current = _snapshot_windows_file_handle(handle)
+                            if not _same_file_content(current, member.staged_snapshot):
+                                conflict = True
+                                break
+                            existing[path] = (handle, current)
+                        finally:
+                            if path not in existing:
+                                _close_windows_handle(handle)
+                    if conflict:
+                        continue
+                for member, path in candidates:
+                    member.final = path
+                    if path in existing:
+                        member.handle, member.snapshot = existing.pop(path)
+                        continue
+                    # Record ownership before the no-replace kernel rename so the
+                    # transaction can roll back even if the operation raises late.
+                    member.handle = member.staged_handle
+                    member.snapshot = member.staged_snapshot
+                    member.published = True
+                    try:
+                        _rename_file_by_handle(member.staged_handle, path)
+                    except FileExistsError:
+                        member.published = False
+                        if ownership.frames is not None:
+                            raise
+                        break
+                else:
                     return
             finally:
-                if target_handle is not None:
-                    _close_windows_handle(target_handle)
-
-        # Never overwrite a different existing file. Publish the verified
-        # staging object under a collision-safe sibling name using the same
-        # zero-share handle and a no-replace kernel rename.
-        for collision in range(1, 10_001):
-            candidate = final.with_name(
-                f"{final.stem} ({collision}){final.suffix}",
-            )
-            ownership.final = candidate
-            ownership.handle = ownership.staged_handle
-            ownership.snapshot = ownership.staged_snapshot
-            ownership.published = True
-            try:
-                _rename_file_by_handle(ownership.staged_handle, candidate)
-                return
-            except FileExistsError:
-                ownership.published = False
-                continue
+                for handle, _ in existing.values():
+                    _close_windows_handle(handle)
         raise PublishedOwnershipError("同名下载文件过多，无法分配安全文件名")
     finally:
         _close_directory_lock_chain(locks)
@@ -795,11 +801,15 @@ def _publish_staged_files_locked(
     ]
     created_dirs: list[Path] = []
     retained_parent_handles: list[int] = []
+    claimed: set[Path] = set()
+    published_companions: set[int] = set()
     try:
         if before_publish is not None:
             before_publish()
         for entry in staged:
             if isinstance(entry, PublishedFileOwnership):
+                if id(entry) in published_companions:
+                    continue
                 ownership = entry
                 final = ownership.final
             else:
@@ -828,12 +838,16 @@ def _publish_staged_files_locked(
                 final,
                 boundary_root=save_root,
                 prelocked_parent=staging_root if staging_locked else None,
+                claimed=claimed,
             )
-            if (
-                ownership.staged_handle is not None
-                and ownership.staged_handle != ownership.handle
-            ):
-                _delete_empty_directory_on_close(ownership.staged_handle)
+            members = [ownership]
+            if ownership.frames is not None:
+                members.append(ownership.frames)
+                published_companions.add(id(ownership.frames))
+            for member in members:
+                claimed.add(member.final)
+                if member.staged_handle is not None and member.staged_handle != member.handle:
+                    _delete_empty_directory_on_close(member.staged_handle)
         saved = [ownership.final for ownership in transactions]
         # Compute response values while every published file handle remains open.
         # No committed path is resolved after ownership is released.

@@ -119,6 +119,8 @@ globalThis.createPixivDisplaySettings = function ({root,request,session,reconcil
 
 globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,clearCache}) {
   const fields=[...root.querySelectorAll("[data-setting]")],dirty=new Map();
+  const namingField=fields.find(field=>field.dataset.setting==="downloadNaming");
+  const naming=namingField && downloadNaming.editor(namingField,()=>edited(namingField));
   const status=root.querySelector("[data-settings-status]"),sync=root.querySelector("[data-sync-status]");
   const button=root.querySelector("[data-settings-save]");
   const jump=root.querySelector("[data-settings-jump]");
@@ -157,10 +159,11 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     const automatic=root.querySelector('[data-setting="autoLoadPages"]'),visible=root.querySelector('[data-setting="showLoadButton"]');
     visible.disabled=automatic.disabled || !automatic.checked;
   }
-  const valueOf=field=>field.type==="checkbox"?field.checked:field.value.trim();
+  const valueOf=field=>field===namingField?naming.value():field.type==="checkbox"?field.checked:field.value.trim();
+  const sameValue=(field,a,b)=>field===namingField?JSON.stringify(a)===JSON.stringify(b):a===b;
   function edited(field){
     const key=field.dataset.setting,value=valueOf(field),submitted=saving?.get(key);
-    if(saved && value===saved[key] && (!submitted || submitted.value===value))dirty.delete(key);
+    if(saved && sameValue(field,value,saved[key]) && (!submitted || sameValue(field,submitted.value,value)))dirty.delete(key);
     else dirty.set(key,{value});
     status.textContent=dirty.size?"有未保存的设置":"";jump.hidden=dirty.size===0;
   }
@@ -188,7 +191,7 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
       }
     }
   };
-  fields.forEach(field=>field.addEventListener("input",()=>{
+  fields.filter(field=>field!==namingField).forEach(field=>field.addEventListener("input",()=>{
     if(field.dataset.setting==='autoLoadPages' && !field.checked){
       const visible=root.querySelector('[data-setting="showLoadButton"]');visible.checked=true;edited(visible);
     }
@@ -208,6 +211,7 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
   };
   button.onclick=async()=>{
     if(saving)return;
+    if(naming?.editing){status.textContent="请先应用或取消正在编辑的命名预设。";return;}
     const submitted=new Map(dirty);
     const changes=Object.fromEntries([...submitted].map(([key,edit])=>[key,edit.value]));
     if(!Object.keys(changes).length){status.textContent="设置已保存";return;}
@@ -247,12 +251,13 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     clearButton.disabled=!loaded || clearing;
     fields.forEach(field=>field.disabled=!loaded || Boolean(saving));
     if(loaded){
-      saved=value;
+      saved={themeMode:globalThis.mokuTheme?.mode,...(naming && {downloadNaming:downloadNaming.defaults}),...value};
       for(const field of fields){
-        const key=field.dataset.setting,next=value[key];
+        const key=field.dataset.setting,next=saved[key];
         // Keep drafts through intermediate preference notifications while a save is pending.
-        if(dirty.has(key)){if(!saving && valueOf(field)===next)dirty.delete(key);else continue;}
-        if(field.type==="checkbox")field.checked=next;
+        if(dirty.has(key)){if(!saving && sameValue(field,valueOf(field),next))dirty.delete(key);else continue;}
+        if(field===namingField)naming.update(next);
+        else if(field.type==="checkbox")field.checked=next;
         else if(field.value!==String(next))field.value=next;
       }
     }
@@ -268,6 +273,7 @@ globalThis.createAccountSettings = function ({root,save,browse,report,syncNow,cl
     reset:()=>{
       revision++;
       dirty.clear();
+      naming?.reset();
       saving=null;
       clearing=false;
       saved=null;

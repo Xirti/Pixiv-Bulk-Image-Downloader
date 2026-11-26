@@ -54,6 +54,7 @@ from auth_store import (
 from folder_picker import select_folder
 from login_context import load_login_context, parse_login_context, save_login_context
 from download_execution import DownloadExecutionBusy, begin_download_publication
+from download_naming import NamingRule, artwork_file_stem, validate_naming_rule
 from download_requests import DownloadRequestError, DownloadRequests, publication_receipt
 from download_admission import DownloadAdmission
 from http_routes import POST_ROUTES, DESKTOP_AUTH_PATHS
@@ -75,7 +76,7 @@ from browser_profile import load_browser_profile
 from shared_request_budget import SharedRequestBudget, priority_value
 from network_config import normalize_loopback_proxy, StrictLoopbackProxyHandler
 from network_transport import PooledOpener, classify_network_error
-from pixiv_adapter import ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, safe_artwork_stem, search_response_block, should_retry_status, valid_pixiv_id
+from pixiv_adapter import ArtworkRatingError, ArtworkVisibilityError, PixivPolicyError, build_download_context, build_search_url, build_ugoira_meta_url, build_user_profile_all_url, build_user_profile_works_url, build_user_search_url, is_allowed_pixiv_url, matches_tag_groups, normalize_detail, normalize_search_item, publication_date, publication_day_upper_bound, publication_timestamp, resolve_download_target, resolve_web_path, search_response_block, should_retry_status, valid_pixiv_id
 from search_service import SearchDateRange, SearchResultIndex, SearchInputError, SearchPageCache, build_result_page_rows, build_search_tag_groups, parse_search_date_range, parse_search_query, parse_search_tags, plan_download_chunks, prefetch_item_count, resolve_source_modes, result_window_trim_count
 from version import __version__
 
@@ -3349,10 +3350,10 @@ def _download_ugoira_source(
 def _stage_ugoira_source(
     item: dict, folder: Path, staging_root: Path, source: BinaryIO, meta: dict, zip_url: str,
     *, authorization_epoch: int | None, ugoira_format: str,
-    cancel_event: threading.Event | None,
+    cancel_event: threading.Event | None, naming_rule: NamingRule | None = None,
 ) -> list[PublishedFileOwnership]:
     artwork_id = str(item.get("id") or "")
-    stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
+    stem = artwork_file_stem(item, None, naming_rule)
     if ugoira_format != "source":
         raise_if_search_cancelled(cancel_event)
         HTTP_LOG.info("download artwork=%s stage=convert format=%s frames=%d", artwork_id, ugoira_format, len(meta["frames"]))
@@ -3370,15 +3371,17 @@ def _stage_ugoira_source(
                 assert_authorization_generation(authorization_epoch)
             converted.seek(0)
             with owned_staging_batch() as staged:
-                staged.append(create_staged_file(staging_root, folder / f"{stem}_ugoira.{ugoira_format}", converted))
+                staged.append(create_staged_file(staging_root, folder / f"{stem}.{ugoira_format}", converted))
                 return staged
     manifest = json.dumps(
         {"mime": meta["mime"], "frames": meta["frames"], "source": zip_url},
         ensure_ascii=False, indent=2,
     ).encode("utf-8")
     with owned_staging_batch() as staged:
-        staged.append(create_staged_file(staging_root, folder / f"{stem}_ugoira.zip", source))
-        staged.append(create_staged_file(staging_root, folder / f"{stem}_ugoira.frames.json", manifest))
+        archive = create_staged_file(staging_root, folder / f"{stem}.zip", source)
+        staged.append(archive)
+        archive.frames = create_staged_file(staging_root, folder / f"{stem}.frames.json", manifest)
+        staged.append(archive.frames)
         return staged
 
 
@@ -3404,13 +3407,14 @@ def stage_artwork_pages(
     group_artwork: bool = False,
     ugoira_format: str = "source",
     cancel_event: threading.Event | None = None,
+    naming_rule: NamingRule | None = None,
 ) -> list[PublishedFileOwnership]:
     with owned_staging_batch() as staged:
         stage_artwork_groups(
             [(detail, selected_pages)], quality, save_root,
             create_folder, staging_root, staged, download_context=download_context,
             group_artwork=group_artwork, ugoira_format=ugoira_format,
-            cancel_event=cancel_event,
+            cancel_event=cancel_event, naming_rule=naming_rule,
         )
         return staged
 
@@ -3421,6 +3425,7 @@ def stage_artwork_groups(
     staged: list[PublishedFileOwnership], *, download_context: dict | None,
     group_artwork: bool, ugoira_format: str,
     cancel_event: threading.Event | None,
+    naming_rule: NamingRule | None = None,
     lookahead: Callable[[], None] | None = None,
     resolve: Callable | None = None,
     select: Callable | None = None,
@@ -3491,12 +3496,12 @@ def stage_artwork_groups(
             files = _stage_ugoira_source(
                 item, folder, staging_root, source, meta, zip_url,
                 authorization_epoch=detail.authorization_epoch, ugoira_format=ugoira_format,
-                cancel_event=stop,
+                cancel_event=stop, naming_rule=naming_rule,
             )
         else:
             source, extension = source_data
-            stem = safe_artwork_stem(str(item.get("title") or ""), artwork_id)
-            files = [create_staged_file(staging_root, folder / f"{stem}_p{page}.{extension}", source)]
+            stem = artwork_file_stem(item, page, naming_rule)
+            files = [create_staged_file(staging_root, folder / f"{stem}.{extension}", source)]
         completed.extend(files)
         files_by_order[job.order] = files
         counts[artwork_id] = counts.get(artwork_id, 0) + len(files)
@@ -3734,6 +3739,15 @@ class Handler(SimpleHTTPRequestHandler):
         request = urllib.parse.urlparse(self.path)
         if self._reject_untrusted_api_get(request.path):
             return
+        if request.path in {"/", "/index.html"}:
+            page = (WEB / "index.html").read_bytes()
+            try:
+                theme = CLOUD_STATE.preferences(None)["themeMode"]
+            except (OSError, sqlite3.Error, ValueError):
+                HTTP_LOG.warning("Unable to load startup theme", exc_info=True)
+                theme = "system"
+            page = page.replace(b'data-theme-mode="system"', f'data-theme-mode="{theme}"'.encode("ascii"), 1)
+            return self.send_bytes(page, "text/html; charset=utf-8", "no-store")
         if request.path.startswith("/api/source-search/"):
             try:
                 query = urllib.parse.parse_qs(request.query)
@@ -5157,7 +5171,7 @@ class Handler(SimpleHTTPRequestHandler):
         return candidate
 
     @staticmethod
-    def _download_options(data: dict) -> tuple[str, bool]:
+    def _download_options(data: dict) -> tuple[str, bool, NamingRule | None]:
         quality = str(data.get("quality") or "original")
         create_folder = data.get("createFolder", True)
         if quality not in {"original", "regular"}:
@@ -5166,7 +5180,11 @@ class Handler(SimpleHTTPRequestHandler):
             raise RequestInputError(400, "createFolder 必须是布尔值")
         if not isinstance(data.get("skipExisting", True), bool):
             raise RequestInputError(400, "skipExisting 必须是布尔值")
-        return quality, create_folder
+        try:
+            naming_rule = validate_naming_rule(data["namingRule"]) if "namingRule" in data else None
+        except ValueError as exc:
+            raise RequestInputError(400, str(exc)) from exc
+        return quality, create_folder, naming_rule
 
     @staticmethod
     def _ugoira_format(data: dict) -> str:
@@ -5319,7 +5337,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _post_pixiv_batch_download(self, data: dict) -> tuple[dict, int]:
         cancel_event = getattr(self, "_download_cancel", None)
         try:
-            quality, create_folder = self._download_options(data)
+            quality, create_folder, naming_rule = self._download_options(data)
             ugoira_format = self._ugoira_format(data)
             save_root = self._save_root(data)
             download_context = self._download_context(data, required=create_folder)
@@ -5400,7 +5418,7 @@ class Handler(SimpleHTTPRequestHandler):
                 counts = stage_artwork_groups(
                     normalized.items(), quality, save_root, create_folder, staging_root, staged,
                     download_context=download_context, group_artwork=group_artworks,
-                    ugoira_format=ugoira_format, cancel_event=cancel_event,
+                    ugoira_format=ugoira_format, cancel_event=cancel_event, naming_rule=naming_rule,
                     lookahead=(lambda: self._start_animation_lookahead(cancel_event))
                               if len(normalized) == 1 else None,
                     resolve=prepare_detail, select=select_detail,
@@ -5449,7 +5467,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not artwork_id.isdigit():
             return {"error": "作品 ID 无效"}, 400
         try:
-            quality, create_folder = self._download_options(data)
+            quality, create_folder, naming_rule = self._download_options(data)
             ugoira_format = self._ugoira_format(data)
             save_root = self._save_root(data)
             download_context = self._download_context(data, required=False)
@@ -5496,6 +5514,7 @@ class Handler(SimpleHTTPRequestHandler):
                     group_artwork=group_artworks,
                     cancel_event=cancel_event,
                     ugoira_format=ugoira_format,
+                    naming_rule=naming_rule,
                 ))
 
             public_saved, cleanup_pending = _stage_and_publish_download(

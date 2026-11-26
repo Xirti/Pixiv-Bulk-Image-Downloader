@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager, closing
 from pathlib import Path
+from download_naming import validate_naming_rule
 from pixiv_adapter import CONTENT_MODES, CONTENT_RESTRICTIONS, RESTRICTED_CONTENT
 
 
@@ -76,7 +77,7 @@ def _pages(value, maximum=1000) -> list[int]:
 
 
 def _options(value, *, single=False) -> dict:
-    keys = {"quality", "ugoiraFormat", "saveRoot", "createFolder", "groupArtworks", "skipExisting"}
+    keys = {"quality", "ugoiraFormat", "saveRoot", "createFolder", "groupArtworks", "skipExisting", "namingRule"}
     if single:
         keys |= {"id", "pages", "context"}
     if not isinstance(value, dict) or set(value) - keys:
@@ -89,6 +90,8 @@ def _options(value, *, single=False) -> dict:
     if not isinstance(root, str) or len(root) > 32768:
         raise ValueError("invalid queue directory")
     result = dict(value)
+    if "namingRule" in value:
+        result["namingRule"] = validate_naming_rule(value["namingRule"])
     if single:
         result["id"] = _id(value.get("id"))
         result["pages"] = _pages(value.get("pages"))
