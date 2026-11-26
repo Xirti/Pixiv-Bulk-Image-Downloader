@@ -4122,7 +4122,8 @@ class Handler(SimpleHTTPRequestHandler):
         except SearchCancelledError:
             return self.send_json({"cancelled": True}, 499)
         except PIXIV_OPERATION_ERRORS as error:
-            if cache_owned and isinstance(error, AccountError) and error.kind == "cache_cleared":
+            if isinstance(error, AccountError) and (cache_owned and error.kind == "cache_cleared"
+                    or account_cache and error.kind == "page_changed"):
                 return self.send_json(pixiv_error_payload(action + "读取", error), 409)
             return self.send_json(pixiv_error_payload(action + "读取", error), 502)
         except sqlite3.Error:
@@ -4200,8 +4201,11 @@ class Handler(SimpleHTTPRequestHandler):
             scope = query.get("scope", ["public"])[0]
             tag = query.get("tag", [""])[0]
             mode = query.get("mode", ["safe"])[0]
+            page_revision = query.get("pageRevision", [None])[0]
             if not 0 <= offset <= 100000 or scope not in {"public", "private"} or len(tag) > 100 or mode not in CONTENT_MODES:
                 raise ValueError("invalid_account_query")
+            if page_revision is not None and not re.fullmatch(r"legacy|[a-f0-9]{32}", page_revision):
+                raise ValueError("invalid_account_page_revision")
         except ValueError:
             return self.send_json({"error": "账号列表参数无效"}, 400)
         def read(generation, _cancel_event):
@@ -4210,7 +4214,8 @@ class Handler(SimpleHTTPRequestHandler):
                 pass
             result = ACCOUNTS.read(kind, scope=scope, offset=offset, tag=tag, generation=generation,
                 mode=mode, refresh=query.get("refresh", [""])[0] == "1",
-                check_updates=CLOUD_STATE.preferences(workspace_scope())["autoFollowing"], clear_revision=clear_revision)
+                check_updates=CLOUD_STATE.preferences(workspace_scope())["autoFollowing"], clear_revision=clear_revision,
+                page_revision=page_revision)
             with CLOUD.publication(generation, owner, method, revision=clear_revision):
                 if kind=="updates" and result.get("authors"):
                     states=CLOUD_STATE.many(owner, method, [], list(result["authors"]))["follow"]

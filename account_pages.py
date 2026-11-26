@@ -481,7 +481,7 @@ class AccountCache:
                 self._policy_connection = None
                 self._policy_observed = None
 
-    def read(self, owner, method, key, *, clear_revision=None):
+    def read(self, owner, method, key, *, clear_revision=None, include_page_revision=False):
         with self.lock, closing(self._connect()) as db:
             if self._is_display_key(key):
                 self._begin_display_cache(db, owner, method)
@@ -489,7 +489,7 @@ class AccountCache:
                 db.execute("BEGIN")
                 if self._display_update_pending(db, owner, method):
                     return None
-            elif clear_revision is not None:
+            elif clear_revision is not None or include_page_revision:
                 db.execute("BEGIN")
             self._check_clear_revision(db, owner, clear_revision)
             if method == "web" and key[0] == "data" and key[1] in {"bookmarks", "following"}:
@@ -499,7 +499,11 @@ class AccountCache:
                     return None
             row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
                              (owner, method, _snapshot_record(key) if key[0] in _SNAPSHOT_KINDS else json.dumps(key))).fetchone()
-            return json.loads(row[0]) if row else None
+            result = json.loads(row[0]) if row else None
+            if result is not None and include_page_revision:
+                epoch = self._page_version(db, owner, method, key)[0]
+                result["pageRevision"] = json.loads(epoch) if epoch is not None else "legacy"
+            return result
 
     def bind_default_snapshot(self, owner, method, pointer, held, *, revision):
         """Select and pin under the same SQLite writer reservation used by retirement."""
@@ -1285,15 +1289,15 @@ class AccountPages:
         if account is not None:
             account.transport.close()
 
-    def _cached(self, key, load, refresh=False, *, clear_revision=None):
+    def _cached(self, key, load, refresh=False, *, clear_revision=None, include_page_revision=False):
         if len(key) > 2 and clear_revision is None:
             clear_revision = self.saved_cache.clear_revision(key[2])
         if ACCOUNT_CACHE_ONLY.get():
-            return self._load_cached(key, load, refresh, clear_revision=clear_revision)
+            return self._load_cached(key, load, refresh, clear_revision=clear_revision, include_page_revision=include_page_revision)
         if not refresh:
             token=ACCOUNT_CACHE_ONLY.set(True)
             try:
-                return self._load_cached(key, load, clear_revision=clear_revision)
+                return self._load_cached(key, load, clear_revision=clear_revision, include_page_revision=include_page_revision)
             except AccountError as error:
                 if error.kind not in {"cache_miss","cache_changed"}:raise
             finally:
@@ -1303,18 +1307,18 @@ class AccountPages:
         try:
             with checked_lock(pending[0],lambda:self.check(key[0])):
                 try:
-                    return self._load_cached(key, load, refresh, clear_revision=clear_revision)
+                    return self._load_cached(key, load, refresh, clear_revision=clear_revision, include_page_revision=include_page_revision)
                 except AccountError as error:
                     if error.kind!="cache_changed":raise
                     # A write overlapped this first read, so no repaired page
                     # exists yet. Replace that obsolete response once.
-                    return self._load_cached(key, load, clear_revision=clear_revision)
+                    return self._load_cached(key, load, clear_revision=clear_revision, include_page_revision=include_page_revision)
         finally:
             with self._lock:
                 pending[1]-=1
                 if not pending[1] and self._loads.get(key) is pending:del self._loads[key]
 
-    def _load_cached(self, key, load, refresh=False, *, clear_revision):
+    def _load_cached(self, key, load, refresh=False, *, clear_revision, include_page_revision=False):
         persistent = len(key) > 2
         method = self.method()
         durable_key = ["data", *key[1:]] if persistent else None
@@ -1339,7 +1343,8 @@ class AccountPages:
             check_read()
             return result
         if persistent and not refresh:
-            cached = self.saved_cache.read(key[2], method, durable_key, clear_revision=clear_revision)
+            cached = self.saved_cache.read(key[2], method, durable_key, clear_revision=clear_revision,
+                include_page_revision=include_page_revision)
             if cached is not None:
                 self.check(key[0])
                 check_read()
@@ -1372,6 +1377,9 @@ class AccountPages:
                     cursor, result = result.cursor, result.data
                 self.saved_cache.save_account_page(key[2], method, durable_key, result, stamp, cursor,
                     clear_revision=clear_revision, display_revision=revision)
+                if include_page_revision:
+                    epoch = self.saved_cache.relation_revision(key[2], method, key[1])
+                    result["pageRevision"] = json.loads(epoch) if epoch is not None else "legacy"
             else:
                 # Only the verified session owner is process-local.
                 self._cache[key] = (time.monotonic(), copy.deepcopy(result))
@@ -1742,7 +1750,7 @@ class AccountPages:
         return self._cached((generation, "updates", owner, feed_scope), load, refresh, clear_revision=clear_revision)
 
     def read(self, kind, *, scope="public", offset=0, tag="", generation, allow_r18=False, refresh=False,
-             mode=None, check_updates=True, clear_revision=None):
+             mode=None, check_updates=True, clear_revision=None, page_revision=None):
         mode = mode or ("all" if allow_r18 else "safe")
         if mode not in CONTENT_MODES:raise AccountError("invalid_request", "内容范围无效")
         allow_r18 = mode != "safe"
@@ -1753,7 +1761,7 @@ class AccountPages:
         if clear_revision is None:
             clear_revision = self.saved_cache.clear_revision(owner)
         if kind == "following":
-            result = self._cached((generation, kind, owner, scope, offset), lambda: self._app_people(owner,scope,offset,generation) if self.method()=="app" else self._people(owner, scope, offset), refresh, clear_revision=clear_revision)
+            result = self._cached((generation, kind, owner, scope, offset), lambda: self._app_people(owner,scope,offset,generation) if self.method()=="app" else self._people(owner, scope, offset), refresh, clear_revision=clear_revision, include_page_revision=True)
             markers = self.visits.status(owner, scope if self.method() == "app" else None,
                                        authors=[person["id"] for person in result["people"]]) if check_updates else {}
             for person in result["people"]:
@@ -1763,7 +1771,7 @@ class AccountPages:
                 raise AccountError("capability","网页登录暂不提供粉丝列表，可在资料中选择 App 授权。")
             result = self._cached((generation, kind, owner, offset), lambda: self._followers(owner, offset), refresh, clear_revision=clear_revision)
         elif kind == "bookmarks":
-            result = self._cached((generation, kind, owner, scope, offset, tag, mode), lambda: self._app_bookmarks(owner,scope,offset,tag,mode,generation) if self.method()=="app" else self._bookmarks(owner, scope, offset, tag, mode), refresh, clear_revision=clear_revision)
+            result = self._cached((generation, kind, owner, scope, offset, tag, mode), lambda: self._app_bookmarks(owner,scope,offset,tag,mode,generation) if self.method()=="app" else self._bookmarks(owner, scope, offset, tag, mode), refresh, clear_revision=clear_revision, include_page_revision=True)
         elif kind == "tags":
             result = self._cached((generation, kind, owner), lambda: self._app_tags() if self.method()=="app" else self._tags(owner), refresh, clear_revision=clear_revision)
         elif kind == "updates":
@@ -1776,6 +1784,8 @@ class AccountPages:
             result=self._cached((generation,kind,owner,mode),lambda:self._own_works(owner,profile["workCount"],allow_r18,mode),refresh,clear_revision=clear_revision)
         else:
             raise AccountError("invalid_request", "账户页面不存在")
+        if kind in RELATION_VIEWS and page_revision is not None and result["pageRevision"] != page_revision:
+            raise AccountError("page_changed", "账号列表已在另一窗口更新，请从第一页继续")
         if "items" in result:
             result["items"]=[item for item in result["items"] if matches_content_mode(item["restriction"],mode)]
         self.check(generation)

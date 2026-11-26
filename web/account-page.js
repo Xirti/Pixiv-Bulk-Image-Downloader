@@ -25,6 +25,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   const retiredByScan=(before,latest,{scope,tag,offset})=>
     offset>0 && latest && latest!==before && obsoletePage(latest,scope,tag,Number(offset));
   let relationVersion=0;
+  const relationRevisions=new Map();
   let scrollFrame=null,restoringScroll=false,restoreTop=null;
   function remember(){
     if(!active)return;
@@ -34,11 +35,14 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
   const pageKey=()=>JSON.stringify([state.view,state.scope,state.tag,state.offset,mode()]);
   function cachePage(key,value){
     cache.delete(key);cache.set(key,value);
+    const [view,scope,tag]=JSON.parse(key);
+    if(["following","bookmarks"].includes(view) && value.pageRevision)relationRevisions.set(JSON.stringify([view,scope,tag]),value.pageRevision);
     const current=pageKey();
     while(cache.size>128){const old=[...cache.keys()].find(identity=>identity!==current);cache.delete(old);}
   }
   function restartRelationPages({view,scope,tag=""}){
     relationVersion++;
+    relationRevisions.delete(JSON.stringify([view,scope,tag]));
     for(const pages of [cache,nextReads])for(const key of pages.keys()){
       const [type,privacy,category]=JSON.parse(key);
       if(type===view && privacy===scope && category===tag)pages.delete(key);
@@ -51,7 +55,9 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     let current=params;
     for(let attempt=0;attempt<2;attempt++){
       const version=relationVersion,scan=completedScans.get(view);
-      const value=await reads.read(`/api/account/${view}?${new URLSearchParams(current)}`,{signal});
+      const relation=["following","bookmarks"].includes(view),key=JSON.stringify([view,params.scope || "public",params.tag || ""]);
+      const pageRevision=relation && !current.refresh?relationRevisions.get(key):null;
+      const value=await reads.read(`/api/account/${view}?${new URLSearchParams({...current,...(pageRevision?{pageRevision}:{})})}`,{signal});
       signal?.throwIfAborted();
       const latest=completedScans.get(view);
       if(retiredByScan(scan,latest,params)){
@@ -453,7 +459,8 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     const pageRetired=()=>retiredByScan(scan,completedScans.get(state.view),state);
     error="";data=cache.get(key) || null;
     if(data)cachePage(key,data);
-    if(!refreshPage && profile?.connected && (state.view==="home"?own && ownMode===mode():state.view!=="settings" && data && (state.view!=="bookmarks" || tags))){
+    const validateRelationPage=["following","bookmarks"].includes(state.view) && Boolean(data?.pageRevision);
+    if(!refreshPage && !validateRelationPage && profile?.connected && (state.view==="home"?own && ownMode===mode():state.view!=="settings" && data && (state.view!=="bookmarks" || tags))){
       controller=null;pending=false;render();prepareNext();return;
     }
     pending=!data;
@@ -484,7 +491,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
           }
         }
       }
-      if(state.view!=="home" && (!data || refreshPage)){
+      if(state.view!=="home" && (!data || refreshPage || validateRelationPage)){
         const query=new URLSearchParams({scope:state.scope,offset:String(state.offset),tag:state.tag,mode:mode(),...(refreshPage?{refresh:"1"}:{})});
         await read(state.view,Object.fromEntries(query),{signal,accept(value){
           if(version!==revision)return;
@@ -501,6 +508,10 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       if(profile.authorization?.error)error=profile.authorization.error;
     }catch(problem){
       if(version!==revision || signal.aborted)return;
+      if(problem.errorKind==="page_changed"){
+        restartRelationPages(state);
+        return returnToFirstPage();
+      }
       if(state.offset>0 && problem.errorKind==="page_rebased"){
         for(const pages of [cache,nextReads])for(const key of pages.keys()){
           const [view,scope,tag,,contentMode]=JSON.parse(key);
@@ -535,7 +546,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     bioReads.clear();
     controller?.abort();controller=null;reads.clear();revision++;profile=null;tags=null;data=null;own=null;ownMode=null;
     state=keepView?{...state,offset:0,page:1,trail:[],scroll:keepScroll?state.scroll:0}:empty();restoreTop=state.scroll;positions.clear();
-    updates={public:{},private:{}};acknowledged.clear();pendingUpdateScopes.clear();completedScans.clear();
+    updates={public:{},private:{}};acknowledged.clear();pendingUpdateScopes.clear();completedScans.clear();relationRevisions.clear();
     interaction.clear();ownInteraction.clear();
     cache.clear();worksCache.clear();ownCache.clear();avatars.clear();
     for(const node of [header,ownGrid,peopleRoot,grid])node.innerHTML="";
