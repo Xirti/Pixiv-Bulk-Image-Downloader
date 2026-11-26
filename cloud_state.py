@@ -80,53 +80,64 @@ class CloudState:
         db.row_factory = sqlite3.Row
         try:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version == 1:
-                if not self._clear_table_ready:
-                    db.execute("BEGIN IMMEDIATE")
-                    db.execute("CREATE TABLE IF NOT EXISTS cache_clear_pending(owner TEXT PRIMARY KEY)")
-                    self._install_relation_clock(db)
-                    db.commit()
-                    self._clear_table_ready = True
-                return db
-            if version != 0:
+            if version not in (0, 1):
                 raise ValueError("Unsupported cloud state schema")
-            db.executescript("""
-          BEGIN IMMEDIATE;
-          CREATE TABLE IF NOT EXISTS preferences(scope TEXT PRIMARY KEY, payload TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS preference_revision (
-            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>=0));
-          CREATE TABLE IF NOT EXISTS relation_revision (
-            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-            version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>=0));
-          CREATE TABLE IF NOT EXISTS relations(owner TEXT, method TEXT, kind TEXT, target TEXT,
-            active INTEGER NOT NULL, privacy TEXT, tags TEXT, bookmark_id TEXT, touched REAL,
-            version INTEGER NOT NULL, PRIMARY KEY(owner,method,kind,target));
-          CREATE TABLE IF NOT EXISTS scans(owner TEXT, method TEXT, kind TEXT, payload TEXT NOT NULL,
-            PRIMARY KEY(owner,method,kind));
-          CREATE TABLE IF NOT EXISTS scan_seen(owner TEXT, method TEXT, kind TEXT, target TEXT,
-            PRIMARY KEY(owner,method,kind,target));
-          CREATE TABLE IF NOT EXISTS operations(owner TEXT, method TEXT, request_id TEXT, signature TEXT,
-            result TEXT, touched REAL, PRIMARY KEY(owner,method,request_id));
-          CREATE INDEX IF NOT EXISTS relations_version ON relations(version);
-          CREATE TABLE IF NOT EXISTS page_repairs(owner TEXT, method TEXT, token TEXT,
-            PRIMARY KEY(owner,method,token));
-          CREATE TABLE IF NOT EXISTS cache_clear_pending(owner TEXT PRIMARY KEY);
-            """)
-            # Triggers also version writes made by an older running backend.
-            for table, revision_table, prefix in (
-                ("preferences", "preference_revision", "preference"),
-                ("relations", "relation_revision", "relation"),
-                ("scans", "relation_revision", "scan"),
-            ):
-                for action in ("INSERT", "UPDATE", "DELETE"):
-                    db.execute(f"""CREATE TRIGGER IF NOT EXISTS {prefix}_{action.lower()}_revision
-                        AFTER {action} ON {table} BEGIN
-                          INSERT INTO {revision_table} VALUES(1,1)
-                            ON CONFLICT(singleton) DO UPDATE SET version=version+1;
-                        END""")
+            if version == 1:
+                if self._clear_table_ready:
+                    return db
+                objects = db.execute("""SELECT COUNT(*) FROM sqlite_master WHERE
+                    (type='table' AND name='cache_clear_pending') OR
+                    (type='trigger' AND name='retain_relation_version')""").fetchone()[0]
+                clock = db.execute("""SELECT version>=COALESCE(
+                    (SELECT MAX(json_extract(payload,'$.version')) FROM scans),0)
+                    FROM relations WHERE owner='' AND method='' AND kind='' AND target=''""").fetchone()
+                if objects == 2 and clock is not None and clock[0]:
+                    self._clear_table_ready = True
+                    return db
+            db.execute("BEGIN IMMEDIATE")
+            # Another process may have upgraded the file while we waited.
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, 1):
+                raise ValueError("Unsupported cloud state schema")
+            if version == 0:
+                for statement in (
+                    "CREATE TABLE IF NOT EXISTS preferences(scope TEXT PRIMARY KEY, payload TEXT NOT NULL)",
+                    """CREATE TABLE IF NOT EXISTS preference_revision (
+                        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                        version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>=0))""",
+                    """CREATE TABLE IF NOT EXISTS relation_revision (
+                        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                        version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>=0))""",
+                    """CREATE TABLE IF NOT EXISTS relations(owner TEXT, method TEXT, kind TEXT, target TEXT,
+                        active INTEGER NOT NULL, privacy TEXT, tags TEXT, bookmark_id TEXT, touched REAL,
+                        version INTEGER NOT NULL, PRIMARY KEY(owner,method,kind,target))""",
+                    """CREATE TABLE IF NOT EXISTS scans(owner TEXT, method TEXT, kind TEXT, payload TEXT NOT NULL,
+                        PRIMARY KEY(owner,method,kind))""",
+                    """CREATE TABLE IF NOT EXISTS scan_seen(owner TEXT, method TEXT, kind TEXT, target TEXT,
+                        PRIMARY KEY(owner,method,kind,target))""",
+                    """CREATE TABLE IF NOT EXISTS operations(owner TEXT, method TEXT, request_id TEXT, signature TEXT,
+                        result TEXT, touched REAL, PRIMARY KEY(owner,method,request_id))""",
+                    "CREATE INDEX IF NOT EXISTS relations_version ON relations(version)",
+                    """CREATE TABLE IF NOT EXISTS page_repairs(owner TEXT, method TEXT, token TEXT,
+                        PRIMARY KEY(owner,method,token))""",
+                ):
+                    db.execute(statement)
+                # Triggers also version writes made by an older running backend.
+                for table, revision_table, prefix in (
+                    ("preferences", "preference_revision", "preference"),
+                    ("relations", "relation_revision", "relation"),
+                    ("scans", "relation_revision", "scan"),
+                ):
+                    for action in ("INSERT", "UPDATE", "DELETE"):
+                        db.execute(f"""CREATE TRIGGER IF NOT EXISTS {prefix}_{action.lower()}_revision
+                            AFTER {action} ON {table} BEGIN
+                              INSERT INTO {revision_table} VALUES(1,1)
+                                ON CONFLICT(singleton) DO UPDATE SET version=version+1;
+                            END""")
+            db.execute("CREATE TABLE IF NOT EXISTS cache_clear_pending(owner TEXT PRIMARY KEY)")
             self._install_relation_clock(db)
-            db.execute("PRAGMA user_version=1")
+            if version == 0:
+                db.execute("PRAGMA user_version=1")
             db.commit()
             self._clear_table_ready = True
         except BaseException:
