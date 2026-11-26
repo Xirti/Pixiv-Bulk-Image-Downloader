@@ -1905,7 +1905,8 @@ def extend_history(
 
 
 ARTISTS = ArtistService(search_pixiv_json)
-ACCOUNTS = AccountPages(directory=history_path().parent, request_json=pixiv_json,
+ACCOUNTS = AccountPages(directory=history_path().parent,
+    cache_path=session_revision_path().with_name("account-cache.sqlite3"), request_json=pixiv_json,
     request_homepage=lambda: pixiv_request("https://www.pixiv.net/", max_bytes=8*1024*1024)[0].decode("utf-8"),
     generation=authorization_generation, coordinator=REQUEST_COORDINATOR, proxy=ensure_network_opener_current,method=AUTH_METHOD.get,
     commit_guard=SEARCH_SESSION_LOCKS_GUARD, stopped=lambda:BACKEND_STOP.is_set(),

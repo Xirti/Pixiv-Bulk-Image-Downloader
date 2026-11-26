@@ -27,7 +27,7 @@ from pixiv_app_gallery import normalize_work, artist_profile, continuation
 from pixiv_read_trace import trace_artwork_rows
 from artist_service import normalize_artist
 from request_coordinator import checked_lock
-from runtime_identity import named_mutex, process_presence
+from runtime_identity import current_user_sid, named_mutex, process_presence
 
 ACCOUNT_CACHE_ONLY = ContextVar("account_cache_only", default=False)
 RELATION_VIEWS = frozenset({"bookmarks", "following"})
@@ -219,8 +219,10 @@ class AppRelationPage:
 
 class AccountCache:
     """Account metadata survives navigation/restarts; image capabilities are added only at response time."""
-    def __init__(self, path):
+    def __init__(self, path, *, legacy_policy_path=None):
         self.path = Path(path)
+        self._legacy_policy_path = Path(legacy_policy_path) if legacy_policy_path is not None else None
+        self._legacy_policy_imported = legacy_policy_path is None
         self.lock = threading.RLock()
         self._policy_lock = threading.Lock()
         self._policy_connection = None
@@ -240,6 +242,9 @@ class AccountCache:
     def web_settings_mutex(self, owner):
         with ExitStack() as locks:
             try:
+                scope = current_user_sid() + "\0" + os.path.normcase(str(self.path.resolve()))
+                shared = "Global\\MOKU.WebSettings." + hashlib.sha256(scope.encode()).hexdigest()[:32]
+                locks.enter_context(named_mutex(f"{shared}.{owner}", timeout_seconds=0))
                 locks.enter_context(named_mutex(f"{self._mutex_prefix}.{owner}.web-settings", timeout_seconds=0))
             except TimeoutError as error:
                 raise AccountError("settings_pending", "另一个窗口正在核对浏览设置，请稍后重试。") from error
@@ -288,10 +293,50 @@ class AccountCache:
                     connection.execute("BEGIN IMMEDIATE")
                     if not self._display_storage_initialized(connection):
                         self._migrate_display_storage(connection)
+            if not self._legacy_policy_imported:
+                self._adopt_legacy_policy(connection)
         except BaseException:
             connection.close()
             raise
         return connection
+
+    def _adopt_legacy_policy(self, db):
+        path = self._legacy_policy_path
+        try:
+            if not path.exists():
+                self._legacy_policy_imported = True
+                return
+            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as legacy:
+                legacy.execute("BEGIN")
+                if legacy.execute("PRAGMA user_version").fetchone()[0] != 1:
+                    raise ValueError("Unsupported legacy account cache schema")
+                rows = legacy.execute("SELECT owner,key,payload FROM cached WHERE method='web' AND key=?",
+                    (_DISPLAY_PENDING_KEY,)).fetchall()
+            stamps = self._decode_web_policy(rows)
+            imports = []
+            for owner, value in stamps.items():
+                pending = value[1]
+                if pending is None:
+                    continue
+                # Each UID has its own receipt, retained outside account clears.
+                key = json.dumps(["legacy-display-policy", os.path.normcase(str(path.resolve())), owner])
+                signature = json.dumps(hashlib.sha256(json.dumps(pending, sort_keys=True).encode()).hexdigest())
+                imported = db.execute("SELECT payload FROM cached WHERE owner='' AND method='migration' AND key=?", (key,)).fetchone()
+                if imported is None or imported[0] != signature:
+                    imports.append((owner, key, signature, pending))
+            if imports:
+                with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    for owner, key, signature, pending in imports:
+                        imported = db.execute("SELECT payload FROM cached WHERE owner='' AND method='migration' AND key=?", (key,)).fetchone()
+                        if imported is None or imported[0] != signature:
+                            # Do not replace another unresolved before-image.
+                            db.execute("INSERT OR IGNORE INTO cached VALUES(?,?,?,?)",
+                                (owner, "web", _DISPLAY_PENDING_KEY, json.dumps(pending)))
+                            db.execute("INSERT OR REPLACE INTO cached VALUES(?,?,?,?)", ("", "migration", key, signature))
+        except (OSError, sqlite3.Error, ValueError, TypeError, RecursionError) as error:
+            raise AccountError("settings_unavailable", "暂时无法读取浏览设置，请重试。") from error
+        self._legacy_policy_imported = True
 
     @staticmethod
     def _display_storage_initialized(db):
@@ -378,6 +423,31 @@ class AccountCache:
             if cls._can_publish_display_snapshot(db, owner, method, pointer, (incoming.usable, incoming.order)):
                 cls._save_rows(db, owner, method, [(pointer, batch)])
 
+    @staticmethod
+    def _decode_web_policy(rows):
+        by_owner = {}
+        for uid, key, payload in rows:
+            by_owner.setdefault(uid, {})[key] = payload
+        stamps = {}
+        for uid, values in by_owner.items():
+            settings = json.loads(values[_DISPLAY_SETTINGS_KEY]) if _DISPLAY_SETTINGS_KEY in values else None
+            if settings is not None and not isinstance(settings, dict):
+                raise ValueError("invalid stored display settings")
+            flags = _web_display_flags(settings) if settings is not None else None
+            pending = json.loads(values[_DISPLAY_PENDING_KEY]) if _DISPLAY_PENDING_KEY in values else None
+            if _DISPLAY_PENDING_KEY in values and not isinstance(pending, dict):
+                raise ValueError("invalid stored display update")
+            before = pending.get("before") if pending is not None and "before" in pending else None
+            if pending is not None and "before" in pending and not isinstance(before, list):
+                raise ValueError("invalid stored display before-image")
+            for candidate in (flags, before):
+                if candidate is not None and (len(candidate) != 3
+                        or type(candidate[0]) is not int or candidate[0] not in (0, 1, 2)
+                        or type(candidate[1]) is not bool or type(candidate[2]) is not bool):
+                    raise ValueError("invalid stored display flags")
+            stamps[uid] = values.get(_WEB_POLICY_KEY), pending, flags
+        return stamps
+
     def web_policy_stamps(self, owner):
         """Read policy for one UID, or for all known UIDs while a session is unresolved."""
         try:
@@ -391,28 +461,7 @@ class AccountCache:
                     keys = (_WEB_POLICY_KEY, _DISPLAY_PENDING_KEY, _DISPLAY_SETTINGS_KEY)
                     rows = db.execute(query if owner is None else query + " AND owner=?",
                                       keys if owner is None else (*keys, owner))
-                    by_owner = {}
-                    for uid, key, payload in rows:
-                        by_owner.setdefault(uid, {})[key] = payload
-                    stamps = {}
-                    for uid, values in by_owner.items():
-                        settings = json.loads(values[_DISPLAY_SETTINGS_KEY]) if _DISPLAY_SETTINGS_KEY in values else None
-                        if settings is not None and not isinstance(settings, dict):
-                            raise ValueError("invalid stored display settings")
-                        flags = _web_display_flags(settings) if settings is not None else None
-                        pending = json.loads(values[_DISPLAY_PENDING_KEY]) if _DISPLAY_PENDING_KEY in values else None
-                        if _DISPLAY_PENDING_KEY in values and not isinstance(pending, dict):
-                            raise ValueError("invalid stored display update")
-                        before = pending.get("before") if pending is not None and "before" in pending else None
-                        if pending is not None and "before" in pending and not isinstance(before, list):
-                            raise ValueError("invalid stored display before-image")
-                        for candidate in (flags, before):
-                            if candidate is not None and (len(candidate) != 3
-                                    or type(candidate[0]) is not int or candidate[0] not in (0, 1, 2)
-                                    or type(candidate[1]) is not bool or type(candidate[2]) is not bool):
-                                raise ValueError("invalid stored display flags")
-                        stamps[uid] = values.get(_WEB_POLICY_KEY), pending, flags
-                    self._policy_stamp = stamps
+                    self._policy_stamp = self._decode_web_policy(rows)
                     self._policy_observed = current
                 return self._policy_stamp
         except (sqlite3.Error, ValueError, TypeError, RecursionError) as error:
@@ -1095,7 +1144,7 @@ class AccountPages:
     _RELATION_PATHS = {"bookmark": "/v1/user/bookmarks/illust", "follow": "/v1/user/following"}
     def __init__(self, *, directory, request_json, request_homepage, generation, coordinator, proxy, method=lambda:"web",
                  commit_guard=None, stopped=lambda:False, credential_publication=nullcontext,
-                 login_publication=nullcontext, confirm_web_owner=None, invalidate_web_session=None):
+                 login_publication=nullcontext, confirm_web_owner=None, invalidate_web_session=None, cache_path=None):
         self.directory = Path(directory)
         self.request_json, self.request_homepage = request_json, request_homepage
         self.generation, self.coordinator, self.proxy = generation, coordinator, proxy
@@ -1114,7 +1163,10 @@ class AccountPages:
         self._cache_revision = 0
         self._loads = {}
         self.visits = VisitStore(self.directory / "account-browse.sqlite3")
-        self.saved_cache = AccountCache(self.directory / "account-cache.sqlite3")
+        previous_cache = self.directory / "account-cache.sqlite3"
+        cache_path = Path(cache_path) if cache_path is not None else previous_cache
+        legacy = previous_cache if cache_path.resolve() != previous_cache.resolve() else None
+        self.saved_cache = AccountCache(cache_path, legacy_policy_path=legacy)
         self.auth_status = {"pending": False, "error": ""}
 
     def account(self):
