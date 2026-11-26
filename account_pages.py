@@ -380,27 +380,43 @@ class AccountCache:
 
     def web_policy_stamps(self, owner):
         """Read policy for one UID, or for all known UIDs while a session is unresolved."""
-        with self._policy_lock:
-            if self._policy_connection is None:
-                self._policy_connection = self._connect(shared_reader=True)
-            db = self._policy_connection
-            current = owner, db.execute("PRAGMA data_version").fetchone()[0]
-            if current != self._policy_observed:
-                query = "SELECT owner,key,payload FROM cached WHERE method='web' AND key IN (?,?,?)"
-                keys = (_WEB_POLICY_KEY, _DISPLAY_PENDING_KEY, _DISPLAY_SETTINGS_KEY)
-                rows = db.execute(query if owner is None else query + " AND owner=?",
-                                  keys if owner is None else (*keys, owner))
-                by_owner = {}
-                for uid, key, payload in rows:
-                    by_owner.setdefault(uid, {})[key] = payload
-                stamps = {}
-                for uid, values in by_owner.items():
-                    settings = json.loads(values[_DISPLAY_SETTINGS_KEY]) if _DISPLAY_SETTINGS_KEY in values else None
-                    flags = _web_display_flags(settings) if settings else None
-                    stamps[uid] = values.get(_WEB_POLICY_KEY), values.get(_DISPLAY_PENDING_KEY), flags
-                self._policy_stamp = stamps
-                self._policy_observed = current
-            return self._policy_stamp
+        try:
+            with self._policy_lock:
+                if self._policy_connection is None:
+                    self._policy_connection = self._connect(shared_reader=True)
+                db = self._policy_connection
+                current = owner, db.execute("PRAGMA data_version").fetchone()[0]
+                if current != self._policy_observed:
+                    query = "SELECT owner,key,payload FROM cached WHERE method='web' AND key IN (?,?,?)"
+                    keys = (_WEB_POLICY_KEY, _DISPLAY_PENDING_KEY, _DISPLAY_SETTINGS_KEY)
+                    rows = db.execute(query if owner is None else query + " AND owner=?",
+                                      keys if owner is None else (*keys, owner))
+                    by_owner = {}
+                    for uid, key, payload in rows:
+                        by_owner.setdefault(uid, {})[key] = payload
+                    stamps = {}
+                    for uid, values in by_owner.items():
+                        settings = json.loads(values[_DISPLAY_SETTINGS_KEY]) if _DISPLAY_SETTINGS_KEY in values else None
+                        if settings is not None and not isinstance(settings, dict):
+                            raise ValueError("invalid stored display settings")
+                        flags = _web_display_flags(settings) if settings is not None else None
+                        pending = json.loads(values[_DISPLAY_PENDING_KEY]) if _DISPLAY_PENDING_KEY in values else None
+                        if _DISPLAY_PENDING_KEY in values and not isinstance(pending, dict):
+                            raise ValueError("invalid stored display update")
+                        before = pending.get("before") if pending is not None and "before" in pending else None
+                        if pending is not None and "before" in pending and not isinstance(before, list):
+                            raise ValueError("invalid stored display before-image")
+                        for candidate in (flags, before):
+                            if candidate is not None and (len(candidate) != 3
+                                    or type(candidate[0]) is not int or candidate[0] not in (0, 1, 2)
+                                    or type(candidate[1]) is not bool or type(candidate[2]) is not bool):
+                                raise ValueError("invalid stored display flags")
+                        stamps[uid] = values.get(_WEB_POLICY_KEY), pending, flags
+                    self._policy_stamp = stamps
+                    self._policy_observed = current
+                return self._policy_stamp
+        except (sqlite3.Error, ValueError, TypeError, RecursionError) as error:
+            raise AccountError("settings_unavailable", "暂时无法读取浏览设置，请重试。") from error
 
     def close_policy_reader(self):
         with self._policy_lock:

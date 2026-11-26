@@ -2007,10 +2007,7 @@ def _observe_web_policy(owner=None):
             return False
         match = re.match(r"PHPSESSID=([0-9]{1,30})_", cookie)
         owner = match[1] if match else ACCOUNTS.cached_web_owner(AUTHORIZATION_GENERATION)
-    try:
-        current = ACCOUNTS.saved_cache.web_policy_stamps(owner)
-    except sqlite3.OperationalError as error:
-        raise AccountError("settings_unavailable", "暂时无法读取浏览设置，请重试。") from error
+    current = ACCOUNTS.saved_cache.web_policy_stamps(owner)
     generation = AUTHORIZATION_GENERATION
     previous = OBSERVED_WEB_POLICY[1] if OBSERVED_WEB_POLICY and OBSERVED_WEB_POLICY[0] == generation else None
     if previous is None:
@@ -2032,7 +2029,7 @@ def _observe_web_policy(owner=None):
         # A pending write blocks publication until readback. Legacy writers
         # provided no before-image, so keep their conservative revocation.
         legacy_write = (pending != old_pending and any(
-            raw is not None and "before" not in json.loads(raw) for raw in (old_pending, pending)))
+            value is not None and "before" not in value for value in (old_pending, pending)))
         changed |= (revision != old_revision or old_flags is not None and flags != old_flags or legacy_write)
         resolved[uid] = revision, pending, flags
     if changed:
