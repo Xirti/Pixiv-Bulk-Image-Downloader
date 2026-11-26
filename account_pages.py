@@ -710,7 +710,33 @@ class AccountCache:
         with self.lock, closing(self._connect()) as db, db:
             if any(self._is_display_key(key) for key, _ in pages):
                 self._begin_display_cache(db, owner, method, write=True, revision=revision)
+            for key, _ in pages:
+                self._restart_relation_pages(db, owner, method, key)
             self._save_rows(db,owner,method,pages)
+
+    def _restart_relation_pages(self, db, owner, method, key):
+        if key[0] != "data" or key[1] not in RELATION_VIEWS or key[4] != 0:
+            return
+        view, scope = key[1], key[3]
+        tag = key[5] if view == "bookmarks" else ""
+        # A newly fetched head starts a new list. Content modes share the same
+        # App continuation, so none may keep pages from the previous head.
+        db.execute("DELETE FROM cached WHERE owner=? AND method=? AND json_extract(key,'$[0]')='data' "
+            "AND json_extract(key,'$[1]')=? AND json_extract(key,'$[3]')=?" +
+            (" AND json_extract(key,'$[5]')=?" if view == "bookmarks" else ""),
+            (owner, method, view, scope, tag) if view == "bookmarks" else (owner, method, view, scope))
+        if method == "app":
+            path = "/v1/user/bookmarks/illust" if view == "bookmarks" else "/v1/user/following"
+            params = {"user_id": owner, "restrict": scope, "filter": "for_android"}
+            if tag:
+                params["tag"] = tag
+            db.execute("DELETE FROM cached WHERE owner=? AND method=? "
+                "AND json_extract(key,'$[0]') IN ('cursor','cursor-state') "
+                "AND json_extract(key,'$[1]')=? AND json_extract(key,'$[2]')=json(?)",
+                (owner, method, path, json.dumps(sorted(params.items()))))
+        # Also fence a tail fetched before this head when that tail was not
+        # cached yet. Its rowid alone cannot reveal the overlap.
+        self._advance_page_epochs(db, owner, method, (view,))
 
     def read_popularity(self, owner, method, key, *, revision, warm=None):
         with self.lock, closing(self._connect()) as db:
@@ -808,6 +834,12 @@ class AccountCache:
                 raise AccountError("page_rebased", "账号列表发生变化，请从第一页继续")
             return self._page_version(db, owner, method, key)
 
+    def relation_revision(self, owner, method, view):
+        with self.lock, closing(self._connect()) as db:
+            row = db.execute("SELECT payload FROM cached WHERE owner=? AND method=? AND key=?",
+                (owner, method, json.dumps(["relation-cache-epoch", view]))).fetchone()
+            return row[0] if row else None
+
     @staticmethod
     def web_relation_group(key):
         return ("web-relation-rebase", key[1], key[3], *key[5:])
@@ -848,6 +880,7 @@ class AccountCache:
                                "(key=? OR json_remove(key,'$[4]')=json(?))",
                                (owner, json.dumps(group), json.dumps([*key[:4], *key[5:]])))
                     self._advance_page_epochs(db, owner, method, (key[1],))
+            self._restart_relation_pages(db, owner, method, key)
             self._save_rows(db, owner, method, [(key, result)])
             if cursor is not None:
                 self._save_cursor(db, owner, method, ["cursor", cursor.path, cursor.params, result["nextOffset"]],
@@ -1329,7 +1362,9 @@ class AccountPages:
             ACCOUNT_REQUEST_CHECK.reset(token)
         if web_relation_page:
             self._check_web_relation_offset(key, result)
-        with self.publication(key[0]), self._lock:
+        publication = (self.cache_publication(key[0], key[2], clear_revision=clear_revision)
+                       if persistent else self.publication(key[0]))
+        with publication, self._lock:
             check_read()
             if persistent:
                 cursor = None
@@ -1374,7 +1409,7 @@ class AccountPages:
             stored.append((["cursor",path,sorted(params.items()),next_offset],next_cursor))
             cursor_scan = uuid.uuid4().hex
             stored.append((["cursor-state",path,sorted(params.items()),next_offset],{"path":next_cursor,"scan":cursor_scan}))
-        with self.publication(generation), self._lock:
+        with self.cache_publication(generation, owner), self._lock:
             self.saved_cache.save_many(owner, method, stored, revision=revision)
 
     def discard_relation_pages(self, owner, method, generation, kinds):

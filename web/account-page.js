@@ -37,6 +37,16 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
     const current=pageKey();
     while(cache.size>128){const old=[...cache.keys()].find(identity=>identity!==current);cache.delete(old);}
   }
+  function restartRelationPages({view,scope,tag=""}){
+    relationVersion++;
+    for(const pages of [cache,nextReads])for(const key of pages.keys()){
+      const [type,privacy,category]=JSON.parse(key);
+      if(type===view && privacy===scope && category===tag)pages.delete(key);
+    }
+    const saved=positions.get(view);
+    if(saved?.scope===scope && saved.tag===tag)positions.delete(view);
+    return state.view===view && state.scope===scope && state.tag===tag && state.offset>0;
+  }
   async function read(view,params={}, {signal,accept=value=>value}={}){
     let current=params;
     for(let attempt=0;attempt<2;attempt++){
@@ -96,6 +106,9 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
       }
       if(!valid())return;
       let retired=null;
+      if(page && page.offset===0 && restartRelationPages({view:page.kind==="bookmark"?"bookmarks":"following",scope:page.scope})){
+        retired={revision,data};
+      }
       if(completed){
         const view=page.kind==="bookmark"?"bookmarks":"following";
         completedScans.set(view,completed);
@@ -475,6 +488,7 @@ globalThis.createAccountPage = function ({root,request,escape:esc,allowed,change
         const query=new URLSearchParams({scope:state.scope,offset:String(state.offset),tag:state.tag,mode:mode(),...(refreshPage?{refresh:"1"}:{})});
         await read(state.view,Object.fromEntries(query),{signal,accept(value){
           if(version!==revision)return;
+          if(refreshPage && !state.offset && ["following","bookmarks"].includes(state.view))restartRelationPages(state);
           data=value;cachePage(key,value);pending=false;render();
         }});
         if(version!==revision)return;

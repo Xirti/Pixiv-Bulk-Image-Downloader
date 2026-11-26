@@ -445,10 +445,13 @@ class CloudActions:
     def sync(self, generation, kind, force=False):
         with checked_lock(self._scan_lock, lambda: self.pages.check(generation)):
             owner, method = self.context(generation)
+            view = "bookmarks" if kind == "bookmark" else "following"
             with self.publication(generation, owner, method) as revision:
                 display_revision = self.pages.saved_cache.display_revision(owner, method)
+                page_revision = self.pages.saved_cache.relation_revision(owner, method, view)
                 scan = self.store.sync_status(owner, method).get(kind)
-                if force or not scan or not scan["running"] or scan.get("displayRevision") != display_revision:
+                if (force or not scan or not scan["running"] or scan.get("displayRevision") != display_revision
+                        or scan.get("pageOffsets") and ("pageRevision" not in scan or scan["pageRevision"] != page_revision)):
                     scan = self.store.begin_scan(owner, method, kind, display_revision=display_revision)
                 checking = len(scan["finished"]) == 2
                 if checking:
@@ -486,6 +489,8 @@ class CloudActions:
             with self.publication(generation, owner, method, revision=revision):
                 if display_revision != self.pages.saved_cache.display_revision(owner, method):
                     raise AccountError("cache_cleared", "浏览设置已更新，请重新同步")
+                if page_revision != self.pages.saved_cache.relation_revision(owner, method, view):
+                    raise AccountError("cache_changed", "账号列表已更新，请重新同步")
                 if checking:
                     result = self.store.verify_scan_targets(owner, method, kind, scan, outcomes)
                     page = None if result["running"] else {"kind":kind, "scope":scope, "offset":offset}
@@ -499,5 +504,6 @@ class CloudActions:
                 # A local write made during this sweep wins over older list responses.
                 for target, state in self.store.newer_relations(owner, method, kind, scan["version"]):
                     self.pages.note_relation(owner, method, kind, target, state, state, repair=True)
-                result = self.store.publish_scan_page(owner, method, kind, repair_id)
+                result = self.store.publish_scan_page(owner, method, kind, repair_id,
+                    page_revision=self.pages.saved_cache.relation_revision(owner, method, view))
             return {**result, "page":{"kind":kind, "scope":scope, "offset":offset}}

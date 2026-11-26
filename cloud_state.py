@@ -480,13 +480,14 @@ class CloudState:
             db.execute("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)", (owner, method, kind, json.dumps(updated)))
             return updated
 
-    def publish_scan_page(self, owner, method, kind, repair_id):
+    def publish_scan_page(self, owner, method, kind, repair_id, *, page_revision=None):
         with self._write() as db:
             key = owner, method, kind
             row = db.execute("SELECT payload FROM scans WHERE owner=? AND method=? AND kind=?", key).fetchone()
             state = json.loads(row[0]) if row else {}
             if state.pop("pendingPage", None) != repair_id:
                 raise ScanConflictError("同步页已更新，请重新同步")
+            state["pageRevision"] = page_revision
             if len(state["finished"]) == 2:
                 self._complete_scan(db, *key, state)
             db.execute("UPDATE scans SET payload=? WHERE owner=? AND method=? AND kind=?", (json.dumps(state), *key))
