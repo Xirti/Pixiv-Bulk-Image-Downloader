@@ -1518,7 +1518,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
       const candidateRequestId=nextSearchRequestId();
       const candidates=await task.read(candidateRequestId, signal => fetchJson(`/api/pixiv/artists?${new URLSearchParams({name:requestedContext.value,page:String(page),requestId:candidateRequestId,...(manualRefresh?{refresh:"1"}:{})})}`,{signal},60000));
       if(task!==searchLifecycle.active)return;
-      if(candidates.candidates.length!==1 || candidates.hasMore){
+      if(page!==1 || candidates.candidates.length!==1 || candidates.hasMore){
         activeTagQuery=cleanTag;activeSearchContext=requestedContext;activeSearchFilters=requestedFilters;
         activeSearchSnapshotId=requestedSnapshotId;searchLoadedAt=Date.now();searchSurface="gallery";
         items=[];currentPage=page;pageNumbers=[page];firstAvailablePage=page;preloadedThrough=page;searchHasMore=false;searchOrderingPending=false;

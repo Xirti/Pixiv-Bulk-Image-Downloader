@@ -30,9 +30,9 @@ globalThis.createArtistPage = function ({root,fetchJson,nextRequestId,cancelRequ
     if(root.hidden){root.replaceChildren();changed();return;}
     if(state.kind==="candidates"){
       root.innerHTML=`<div class="artist-candidate-heading"><p class="eyebrow">FIND THE ARTIST</p><h2>选择你要找的作者</h2><p>${esc(state.query)} · 根据头像、UID 和简介确认</p></div><div class="artist-candidate-grid">${state.candidates.slice(0,state.visible).map(profile=>`<article class="artist-candidate">${avatar(profile)}<div><a class="artist-name-link" href="#artist/${esc(profile.userId)}" data-artist-id="${esc(profile.userId)}">${esc(profile.name)}</a><span class="artist-uid">UID ${esc(profile.userId)}</span></div><p>${esc(profile.description || profile.descriptionStatus || "简介加载中…")}</p></article>`).join("")}</div>${!state.candidates.length?'<p class="artist-inline-status">'+(state.loading?'正在寻找作者…':state.error?esc(state.error):'没有找到同名作者，可试试 UID。')+'</p>':""}${state.error?'<button class="artist-more" data-artist-name-retry type="button">重试作者搜索</button>':""}${state.visible<state.candidates.length?'<button class="artist-more" data-artist-more type="button">显示更多作者</button>':""}${state.hasMore?'<button class="artist-more" data-artist-next type="button">下一页候选 →</button>':""}`;
-      root.querySelector("[data-artist-name-retry]")?.addEventListener("click",()=>openArtist(null,{name:state.query,page:state.page}));
+      root.querySelector("[data-artist-name-retry]")?.addEventListener("click",()=>openArtist(null,{name:state.query,page:state.page,start:true}));
       root.querySelector("[data-artist-more]")?.addEventListener("click",()=>{state.visible+=6;render();void hydrateCandidates();});
-      root.querySelector("[data-artist-next]")?.addEventListener("click",()=>openArtist(null,{name:state.query,page:state.page+1}));
+      root.querySelector("[data-artist-next]")?.addEventListener("click",()=>openArtist(null,{name:state.query,page:state.page+1,start:true}));
     }else{
       const profile=state.profile || {name:`Pixiv 用户 ${state.userId}`,userId:state.userId,avatar:"",description:"",background:"",region:"",webpage:""};
       const overview=state.overview;
