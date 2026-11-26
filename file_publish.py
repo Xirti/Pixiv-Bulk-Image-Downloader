@@ -138,6 +138,7 @@ FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
 FILE_SHARE_DELETE = 0x00000004
 FILE_SHARE_ALL = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+ERROR_SHARING_VIOLATION = 32
 CREATE_NEW = 1
 OPEN_EXISTING = 3
 FILE_ATTRIBUTE_NORMAL = 0x00000080
@@ -721,7 +722,15 @@ def _publish_owned_staged_file(
                             )
                         except FileNotFoundError:
                             continue
+                        except OSError as error:
+                            if ownership.frames is None or getattr(error, "winerror", None) != ERROR_SHARING_VIOLATION:
+                                raise
+                            conflict = True
+                            break
                         try:
+                            if collision:
+                                conflict = True
+                                break
                             current = _snapshot_windows_file_handle(handle)
                             if not _same_file_content(current, member.staged_snapshot):
                                 conflict = True
@@ -733,12 +742,11 @@ def _publish_owned_staged_file(
                     if conflict:
                         continue
                 for member, path in candidates:
-                    member.final = path
                     if path in existing:
-                        member.handle, member.snapshot = existing.pop(path)
                         continue
                     # Record ownership before the no-replace kernel rename so the
                     # transaction can roll back even if the operation raises late.
+                    member.final = path
                     member.handle = member.staged_handle
                     member.snapshot = member.staged_snapshot
                     member.published = True
@@ -746,10 +754,14 @@ def _publish_owned_staged_file(
                         _rename_file_by_handle(member.staged_handle, path)
                     except FileExistsError:
                         member.published = False
-                        if ownership.frames is not None:
+                        if any(previous.published for previous, _ in candidates):
                             raise
                         break
                 else:
+                    for member, path in candidates:
+                        if path in existing:
+                            member.final = path
+                            member.handle, member.snapshot = existing.pop(path)
                     return
             finally:
                 for handle, _ in existing.values():
