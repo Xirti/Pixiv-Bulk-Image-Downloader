@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from runtime_identity import named_mutex, presence_handle, process_presence
+from runtime_identity import current_user_sid, named_mutex, presence_handle, process_presence
 from source_results import SourceSearchError, normalize_candidates, parse_api, pixiv_id, thumbnail_url
 from network_config import StrictLoopbackProxyHandler
 
@@ -74,12 +74,12 @@ class SourceKey:
                 return ""
             raise ctypes.WinError()
         try:
-            value = ctypes.string_at(pointer.contents.CredentialBlob, pointer.contents.CredentialBlobSize).decode("ascii")
+            value = ctypes.string_at(pointer.contents.CredentialBlob, pointer.contents.CredentialBlobSize)
         finally:
             advapi32.CredFree(pointer)
-        if not re.fullmatch(r"[A-Za-z0-9]{20,128}", value):
+        if not re.fullmatch(rb"[A-Za-z0-9]{20,128}", value):
             raise SourceSearchError("已保存的 SauceNAO Key 无法读取，请重新配置")
-        return value
+        return value.decode("ascii")
 
     def save(self, value):
         if self.disabled:
@@ -144,18 +144,24 @@ class SourceSearch:
         self.requests: list[_SourceDispatch] = []
         self.short_limit = 4
         self.settings_path = directory / "settings.json"
+        credential_scope = current_user_sid() + "\0" + self.vault.target.casefold()
+        self._credential_mutex = "Global\\MOKU.SourceKey." + hashlib.sha256(credential_scope.encode()).hexdigest()
         self._settings_mutex = "Local\\MOKU.SourceSettings." + hashlib.sha256(
             os.path.normcase(str(self.settings_path.resolve())).encode("utf-8")).hexdigest()
         self.mode = "guest"
         self.settings_error = ""
         self._settings_revision = None
+        self._key_signature = None
         with self._configuration():
             pass
 
     @contextmanager
-    def _configuration(self):
+    def _configuration(self, *, read_key=False):
         # Decisions made inside this scope cannot overlap a credential commit.
-        with named_mutex(self._settings_mutex, timeout_seconds=5):
+        with named_mutex(self._credential_mutex, timeout_seconds=5), named_mutex(self._settings_mutex, timeout_seconds=5):
+            for job in self.jobs.values():
+                if job["mode"] == "key":
+                    self._job(job["id"])
             if self._profile_identity is not None and self._profile_stamp() != self._profile_identity:
                 self._forget_guest_profile()
             previous_error = self.settings_error
@@ -175,12 +181,26 @@ class SourceSearch:
                     error = "搜图设置损坏，暂用游客方式；请重新保存搜图设置"
                 else:
                     mode, revision = settings["mode"], settings.get("credentialRevision")
-            self._adopt_configuration(mode, revision, error)
-            yield
+            needs_key = read_key or any(job["mode"] == "key" and (
+                job["state"] in {"queued", "searching", "verification"} or job["browserFallback"])
+                for job in self.jobs.values())
+            try:
+                key = self.vault.read() if needs_key else None
+            except (OSError, SourceSearchError) as cause:
+                for job in self.jobs.values():
+                    if job["mode"] == "key" and (job["state"] in {"queued", "searching", "verification"} or job["browserFallback"]):
+                        self._fail(job, "搜图凭据暂时无法核对，请检查系统凭据后重试")
+                raise SourceSearchError("搜图凭据暂时无法核对，请检查系统凭据后重试", 503) from cause
+            self._adopt_configuration(mode, revision, error, key=key)
+            yield key
 
-    def _adopt_configuration(self, mode, revision, error=""):
+    def _adopt_configuration(self, mode, revision, error="", *, key=None):
         self.mode, self.settings_error = mode, error
-        if revision == self._settings_revision:
+        signature = hashlib.sha256(key.encode()).digest() if key is not None else self._key_signature
+        changed = revision != self._settings_revision or (
+            self._key_signature is not None and signature != self._key_signature)
+        self._key_signature = signature
+        if not changed:
             return
         self._settings_revision = revision
         self.epoch += 1
@@ -221,8 +241,8 @@ class SourceSearch:
                 "error": self.settings_error, "cacheEpoch": self.cache_epoch}
 
     def settings(self):
-        with self.lock, self._configuration():
-            return self._settings_response(self.vault.read())
+        with self.lock, self._configuration(read_key=True) as key:
+            return self._settings_response(key)
 
     def cache_state(self):
         with self.lock:
@@ -249,7 +269,7 @@ class SourceSearch:
                 self.cache_epoch = self.epoch
                 return self.cache_state()
             if data.get("action") == "reset-guest":
-                with self._configuration(), process_presence(self._settings_mutex + ".browser") as occupied:
+                with self._configuration(read_key=True) as key, process_presence(self._settings_mutex + ".browser") as occupied:
                     if occupied or self.process is not None and self.process.poll() is None:
                         raise SourceSearchError("请先关闭官网窗口，再重置会话", 409)
                     profile = self.guest_profile.absolute()
@@ -258,12 +278,11 @@ class SourceSearch:
                     if self._profile_stamp() is not None:
                         shutil.rmtree(profile)
                     self._forget_guest_profile()
-                    return self._settings_response(self.vault.read())
-            with self._configuration():
+                    return self._settings_response(key)
+            with self._configuration(read_key=True) as old_key:
                 mode = data.get("mode", self.mode)
                 if not isinstance(mode, str) or mode not in {"guest", "key"}:
                     raise SourceSearchError("搜图方式无效")
-                old_key = self.vault.read()
                 key = "" if action == "remove-key" else data.get("key", old_key)
                 key_changed = key != old_key
                 revision = secrets.token_hex(16) if key_changed else self._settings_revision
@@ -288,7 +307,7 @@ class SourceSearch:
                             causes = ExceptionGroup("Source configuration commit and rollback failed", [error, rollback])
                             raise SourceSearchError("搜图配置未保存，原凭据恢复失败，请重新配置", 500) from causes
                     raise
-                self._adopt_configuration(mode, revision)
+                self._adopt_configuration(mode, revision, key=key)
                 return self._settings_response(key)
 
     def _job(self, identity):
@@ -374,7 +393,7 @@ class SourceSearch:
             raise SourceSearchError("搜图方式无效")
         image, (width, height) = prepare_image(raw)
         digest = hashlib.sha256(image).hexdigest()
-        with self.lock, self._configuration():
+        with self.lock, self._configuration(read_key=mode == "key") as key:
             self._check_open()
             fingerprint = (mode, digest)
             if request_id is not None:
@@ -395,7 +414,6 @@ class SourceSearch:
                         raise SourceSearchError("已有搜图进行中，请先完成当前查询", 409)
                     self._remember_receipt(request_id, job_id=old["id"], fingerprint=fingerprint)
                 return self.snapshot(old["id"])
-            key = self.vault.read() if mode == "key" else None
             identity = secrets.token_urlsafe(18)
             job = {"id": identity, "hash": digest, "mode": mode, "state": "queued", "message": "正在准备查询…",
                    "candidates": [], "quota": {}, "cached": False, "browserFallback": False, "secret": secrets.token_urlsafe(32),
@@ -594,8 +612,9 @@ class SourceSearch:
         return True
 
     def _fail_query(self, job, message, *, browser_fallback=False):
-        with self.lock, self._configuration():
-            if self._current_query(job):
+        # Reporting a failed read must not require another credential read.
+        with self.lock:
+            if self._job(job["id"]) is job and job["state"] in {"queued", "searching", "verification"}:
                 self._fail(job, message, browser_fallback=browser_fallback)
 
     def _fail(self, job, message, *, browser_fallback=False):
@@ -674,7 +693,7 @@ class SourceSearch:
         return {"state": "searching", "attempt": number}
 
     def browser(self, identity, secret, data):
-        with self.lock, self._configuration():
+        with self.lock, self._configuration() as key:
             self._check_open()
             job = self._job(identity)
             if job is None or not secret.isascii() or not secrets.compare_digest(job["secret"], secret) or not job["browser"]:
@@ -711,7 +730,6 @@ class SourceSearch:
                     raise SourceSearchError("API 设置已修改", 409)
                 if dispatch is not None and dispatch.phase == "awaiting":
                     raise SourceSearchError("API 请求正在等待响应，请勿重复提交", 409)
-                key = self.vault.read()
                 if not key:
                     self._fail(job, "请重新配置 API Key")
                     raise SourceSearchError("请重新配置 API Key", 401)
