@@ -368,9 +368,12 @@ const workspaceSync = createWorkspaceSync({
     } else if (pendingTasks.size) showTaskDock("有未完成的下载", `${pendingTasks.size} 项任务已暂停，可在下载页继续。`, 8000);
   },
   onStatus: state => {
-    $("#workspaceNotice").hidden = !state.error;
-    $("#workspaceNoticeText").textContent = state.error
-      ? (state.error.basketCapacity ? `选择尚未保存：${state.error.message}` : `本机记录暂未同步：${state.error.message}。当前选择已保留。`) : "";
+    $("#workspaceNotice").hidden = !state.basketError || state.basketError===dismissedWorkspaceError;
+    workspaceNoticeError=state.basketError;
+    $("#workspaceNoticeText").textContent = state.basketError?.basketCapacity
+      ? "采集篮超过容量，当前选择仍保留在窗口中。" : "本机采集篮暂未同步。";
+    $("#recentSearchStatus").textContent=state.recentError ? "最近搜索暂未保存" : "";
+    $("#recentSearchRetry").disabled=state.loading;
     $("#workspaceRetry").disabled = state.loading || selection.locked || singleDownloadPending;
     syncSearchScopedControls();
     if (state.ready && !state.loading) scheduleSearchPrefetch(activeTagQuery, currentPage, activeSearchFilters, searchGeneration);
@@ -382,7 +385,13 @@ const workspaceSync = createWorkspaceSync({
   },
 });
 
+let workspaceNoticeError=null, dismissedWorkspaceError=null;
 $("#workspaceRetry").onclick = () => workspaceSync.retry();
+$("#recentSearchRetry").onclick = () => workspaceSync.retry();
+$("#workspaceNoticeDismiss").onclick=()=>{
+  dismissedWorkspaceError=workspaceNoticeError;
+  $("#workspaceNotice").hidden=true;
+};
 
 function restoreWorkspace() { return workspaceSync.restore(); }
 
@@ -703,18 +712,19 @@ function announceToast(message) {
 }
 
 let taskDockTimer = null;
+function dismissTaskDock() {
+  clearTimeout(taskDockTimer);
+  taskDockTimer=null;
+  $("#taskDock").classList.remove("is-visible");
+}
+$("#taskDockDismiss").onclick=dismissTaskDock;
 function showTaskDock(title, text, holdMs = 3200) {
   $("#taskDockTitle").textContent = title;
   $("#taskDockText").textContent = text;
   $("#taskDockText").title = text;
   $("#taskDock").classList.add("is-visible");
   if (taskDockTimer) clearTimeout(taskDockTimer);
-  taskDockTimer = holdMs > 0
-    ? setTimeout(() => {
-        taskDockTimer = null;
-        $("#taskDock").classList.remove("is-visible");
-      }, holdMs)
-    : null;
+  taskDockTimer = holdMs > 0 ? setTimeout(dismissTaskDock, holdMs) : null;
 }
 
 async function getRequestToken() {
@@ -841,7 +851,8 @@ async function fetchJson(url, options = {}, timeoutMs = 12000) {
     return data;
   } catch (error) {
     if (timedOut) {
-      const timeout = new Error("请求超时，请检查 VPN / 系统代理后重试");
+      const local = /^\/api\/(?:workspace|settings(?:[?/#]|$)|health(?:[?/#]|$))/.test(url) && !url.startsWith("/api/settings/pixiv");
+      const timeout = new Error(local ? "MOKU 本机服务响应超时" : "请求超时，请稍后重试");
       timeout.timedOut = true;
       throw timeout;
     }
@@ -1455,7 +1466,7 @@ function clearAllCurrentPage() {
   render();
 }
 
-async function search(tag, page = 1, filters = readSearchFilters(), snapshotId = null, {manualRefresh=false,continuePage=false,returnTarget=undefined,order=filters.order || "default",preferenceKind=null}={}) {
+async function search(tag, page = 1, filters = readSearchFilters(), snapshotId = null, {manualRefresh=false,continuePage=false,returnTarget=undefined,order=filters.order || "default",preferenceKind=null,recordRecent=page===1 && !snapshotId && !manualRefresh}={}) {
   cancelGalleryPopularity();
   if (selection.locked || singleDownloadPending || workspaceSync.loading || (pageRefreshPending && !manualRefresh)) return;
   checkpointNavigation();
@@ -1498,6 +1509,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
   let committed = false;
 
   searchPending = true;
+  $("#searchFailure").replaceChildren();
   galleryStopRequested=false;
   resultSelectionEnabled = false;
   searchButton.disabled = true;
@@ -1528,7 +1540,8 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
         items=[];currentPage=page;pageNumbers=[page];firstAvailablePage=page;preloadedThrough=page;searchHasMore=false;searchOrderingPending=false;
         artistPage.showName(requestedContext.value,candidates);grid.innerHTML="";$("#pagination").innerHTML="";
         $("#tagTitle").textContent=requestedContext.value;$("#count").textContent="";
-        rememberSearch(cleanTag,requestedFilters);clearDetail();committed=true;return true;
+        if(recordRecent)rememberSearch(cleanTag,requestedFilters);
+        clearDetail();committed=true;return true;
       }
       resultTag=`uid:${candidates.candidates[0].userId}`;
       resultContext={kind:"uid",value:candidates.candidates[0].userId};
@@ -1538,11 +1551,12 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     artistPage.setLoading(galleryLinkedEntry,galleryLinkedEntry,browseOptions.buttonVisible());
     if(order==="popular" && resultContext.kind!=="pid"){
       activeTagQuery=resultTag;activeSearchContext=resultContext;activeSearchFilters=requestedFilters;
-      activeSearchSnapshotId=requestedSnapshotId;searchSurface="gallery";items=[];
-      $("#tagTitle").textContent=resultContext.value;rememberSearch(cleanTag,requestedFilters);
-      committed=await loadGalleryPopularity(1,{refresh:manualRefresh,signal:task.signal});
+      activeSearchSnapshotId=requestedSnapshotId;searchSurface="gallery";
+      $("#tagTitle").textContent=resultContext.value;
+      committed=await loadGalleryPopularity(1,{refresh:manualRefresh,signal:task.signal,throwOnFailure:true});
       task.signal.throwIfAborted();
       if(!committed)throw new Error($("#searchSortStatus").textContent || artistPage.snapshot().sortMessage || "排序准备失败，请重试");
+      if(recordRecent)rememberSearch(cleanTag,requestedFilters);
       return committed;
     }
     const query = new URLSearchParams({
@@ -1573,7 +1587,7 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     if (task !== searchLifecycle.active) return;
     task.page = null;
 
-    rememberSearch(cleanTag, requestedFilters);
+    if(recordRecent)rememberSearch(cleanTag, requestedFilters);
     activeTagQuery = resultTag;
     searchLoadedAt = Date.now();
     searchSurface = "gallery";
@@ -1625,24 +1639,24 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
       return;
     }
     if (task !== searchLifecycle.active) return;
-    if(requestedContext.kind==="author"){
+    const retry=()=>search(cleanTag,page,requestedFilters,requestedSnapshotId,{manualRefresh,continuePage,returnTarget,order,preferenceKind,recordRecent});
+    if(previousView.hadCommittedResults || previousView.artist.kind==="candidates"){
+      contextReturns={...previousView.contextReturns};
+      artistPage.restore(previousView.artist);
+      restoreResultPage(previousView.source);
+      showSearchFailure(keepGrid ? `第 ${page} 页未能加载` : "搜索未完成",error,retry);
+    }else if(requestedContext.kind==="author"){
       activeTagQuery=cleanTag;activeSearchContext=requestedContext;activeSearchFilters=requestedFilters;
       activeSearchSnapshotId=requestedSnapshotId;searchLoadedAt=Date.now();searchSurface="gallery";
       items=[];currentPage=page;pageNumbers=[page];firstAvailablePage=page;preloadedThrough=page;searchHasMore=false;searchOrderingPending=false;
       artistPage.showName(requestedContext.value,{query:requestedContext.value,page,candidates:[],hasMore:false,error:`${error.message || "作者搜索失败"}。也可输入 UID 直接打开作者页。`});
       grid.innerHTML="";$("#pagination").innerHTML="";$("#count").textContent="";$("#tagTitle").textContent=requestedContext.value;
-    }else if (keepGrid) {
-      restoreInterruptedSearch(previousView);
-      renderPagination();
-      $("#count").textContent = `第 ${page} 页加载失败：${error.message || "连接未完成"} · 仍显示第 ${currentPage} 页，可再次翻页重试`;
     } else {
       const visibilityDenied = error.errorKind === "artwork_visibility";
-      const title = visibilityDenied ? "作品无法显示" : "加载失败";
-      const retry = visibilityDenied ? "" : '<button id="retrySearch" type="button">重试当前搜索</button>';
-      grid.innerHTML = `<div class="error-state"><b>${title}</b><p>${esc(error.message || "Pixiv 搜索失败")}</p>${retry}</div>`;
-      $("#count").textContent = visibilityDenied ? title : "连接未完成";
+      grid.replaceChildren();
+      $("#count").textContent = "";
+      showSearchFailure(visibilityDenied ? "作品无法显示" : "搜索未完成",error,retry);
     }
-    $("#retrySearch")?.addEventListener("click", () => search(cleanTag, page, requestedFilters, requestedSnapshotId,{order,preferenceKind:galleryPreferenceKind}));
   } finally {
     if (searchLifecycle.finish(task)) {
       searchPending = false;
@@ -1658,6 +1672,18 @@ async function search(tag, page = 1, filters = readSearchFilters(), snapshotId =
     }
   }
   return committed;
+}
+
+function showSearchFailure(title,error,retry){
+  const notice=$("#searchFailure"),message=document.createElement("span");
+  message.textContent=`${title}：${error.message || "Pixiv 搜索失败"}`;
+  notice.replaceChildren(message);
+  notice.dataset.navigationRevision=String(navigationRevision);
+  if(error.status===400 || error.errorKind==="artwork_visibility")return;
+  const button=document.createElement("button");
+  button.id="retrySearch";button.type="button";button.textContent="重试搜索";
+  button.onclick=()=>{if(notice.dataset.navigationRevision===String(navigationRevision))void retry();};
+  notice.append(button);
 }
 
 function syncResultSelectionControls() {
@@ -1843,22 +1869,37 @@ async function prepareDesktopExit({update=false,requestId=null}={}) {
     if(update && (activeDownload || singleDownloadPending || selection.locked)){
       throw Error("请等待下载任务完成或中断后再更新");
     }
-    if(searchPending)throw Error("请等待当前搜索完成或取消后退出");
+    if(searchPending){
+      if(update)throw Error("请等待当前搜索完成或取消后更新");
+      cancelActiveSearch();
+    }
     if(cloudControls.busy)throw Error("请等待收藏或关注操作完成");
-    await cloudControls.settled();
-    await workspaceSync.waitForSave();
-    if(typeof pixivDisplayView!=='undefined')await pixivDisplayView?.waitForSave();
+    const issues=[];
+    async function drain(wait, message){
+      try{await wait();}
+      catch(error){
+        if(update)throw error;
+        console.warn("Could not confirm a save before closing",error);
+        issues.push(message || error.message);
+      }
+    }
+    await drain(()=>cloudControls.settled(),"未能确认程序设置已保存。");
+    await drain(()=>workspaceSync.waitForSave({retryOnce:!update,requireRead:update}));
+    if(typeof pixivDisplayView!=='undefined')await drain(()=>pixivDisplayView?.waitForSave(),"未能确认 Pixiv 浏览设置已保存。");
     const forms=[settingsView];
     if(typeof sourceSearchView!=='undefined'){
-      await sourceSearchView.waitForSave();
+      await drain(()=>sourceSearchView.waitForSave(),"未能确认搜图设置已保存。");
       forms.push(sourceSearchView);
     }
     if(desktopExitPreparation!==preparation)throw Error("退出准备已取消，请重试");
     const dirtyForms=forms.filter(form=>form.dirty);
-    if(dirtyForms.length){
+    if(dirtyForms.length || issues.length){
       if(update)throw Error("请先保存设置改动");
       const dialog=$("#desktopCloseDialog");
       preparation.dialog=dialog;
+      $("#desktopCloseTitle").textContent=issues.length ? "有改动尚未确认保存" : "保存设置改动？";
+      $("#desktopCloseDescription").textContent=issues.length ? `${issues.join("")}直接退出可能丢失这些改动。` : "直接退出会放弃本次修改。";
+      dialog.querySelector('[value="save"]').hidden=Boolean(issues.length);
       dialog.returnValue="cancel";
       const choice=await new Promise(resolve=>{
         dialog.addEventListener("close",()=>resolve(dialog.returnValue),{once:true});
@@ -2021,8 +2062,9 @@ function restoreSortedView(saved){
   preserveViewport(window,()=>{artistPage.restore(saved.artist);restoreResultPage(saved.source);});
   void refreshDownloadedIndicators();
 }
-async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=false}={}){
+async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=false,throwOnFailure=false}={}){
   cancelGalleryPopularity();cancelSearchPrefetch();
+  $("#searchFailure").replaceChildren();
   const task=searchLifecycle.beginSort(signal);
   galleryStopRequested=false;
   const account=lastKnownAuthorizationGeneration,uid=activeSearchContext.value,filters={...activeSearchFilters};
@@ -2033,6 +2075,7 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
   }
   if(refresh)galleryPopularityJobs.set(key,{index:"",refresh:true});
   const queued=restoring?null:galleryPopularityJobs.get(key);
+  if(queued?.refresh)page=1;
   let requestedIndex=queued?queued.index:filters.popularityIndex || "";
   setGallerySort("popular",author?"正在准备作者作品元数据…":"正在准备搜索候选池 · 最多 500 件…");
   try{
@@ -2049,11 +2092,12 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
     try{
       result=await readPopularityPage(requestAccount,parameters,events);
     }catch(error){
-      if(restoring || page!==1 || !requestedIndex || error.errorKind!=="cache_miss" ||
+      if(restoring || !requestedIndex || !["cache_miss","source_changed"].includes(error.errorKind) ||
         task.signal.aborted || !task.isCurrent() || account!==lastKnownAuthorizationGeneration)throw error;
       galleryPopularViews.delete(key);
       galleryPopularityJobs.set(key,{index:"",refresh:true});
-      result=await readPopularityPage(requestAccount,{...parameters,index:"",refresh:"1"},events);
+      page=1;
+      result=await readPopularityPage(requestAccount,{...parameters,index:"",page:"1",refresh:"1"},events);
     }
     if(!task.isCurrent() || account!==lastKnownAuthorizationGeneration)return false;
     task.page = null;
@@ -2067,7 +2111,11 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
     render();renderPagination();setGallerySort("popular",`${author?"全部可见作品":"本次搜索候选池"} · ${result.total} 件`);
     void refreshDownloadedIndicators();if(!searchPending && !restoring)rememberGalleryView();queueNavigationRecord();return true;
   }catch(error){
-    if(!task.signal.aborted && task.isCurrent())setGallerySort(activeSearchFilters.order==="popular"?"popular":"default",`${error.message} · 点击滑块右侧重试`);
+    if(throwOnFailure)throw error;
+    if(!task.signal.aborted && task.isCurrent()){
+      setGallerySort(activeSearchFilters.order==="popular"?"popular":"default");
+      if(!restoring)showSearchFailure("排序未完成",error,()=>loadGalleryPopularity(page));
+    }
     return false;
   } finally {
     if (task.finish()) {
@@ -2080,7 +2128,9 @@ async function loadGalleryPopularity(page,{refresh=false,signal=null,restoring=f
 async function openLinkedSearch(tag,returnTarget,options={}){
   const revision=navigationRevision;
   try{
-    await browseOptions.ready();if(revision!==navigationRevision)return;
+    try{await browseOptions.ready();}
+    catch(error){console.warn("Linked search will use the last available browsing preferences",error);}
+    if(revision!==navigationRevision)return;
     const match=tag.match(/^\s*(pid|uid|author)\s*[:：]\s*(.+)$/i);
     const context=match?{kind:match[1].toLowerCase(),value:match[2].trim()}:{kind:"tags",value:tag};
     const filters=readSearchFilters(),order=options.order || browseOptions.order(context.kind);
@@ -2304,10 +2354,10 @@ function markAuthorWorksViewed(){
       searchSurface!=="gallery" || activeSearchContext.kind!=="uid" || activeSearchContext.value!==shown.author ||
       activeScrollSurface()!==window || !lastKnownLoggedIn || shown.generation!==lastKnownAuthorizationGeneration)return;
   shown.acknowledged=true;
-  void accountView.seenWorks(shown.items.filter(work=>work.userId===shown.author)).catch(()=>{
+  void accountView.seenWorks(shown.items.filter(work=>work.userId===shown.author)).catch(error=>{
     if(renderedAuthorWorks!==shown || shown.generation!==lastKnownAuthorizationGeneration)return;
     shown.acknowledged=false;
-    showTaskDock("账户","作者作品查看状态暂未保存",4000);
+    console.warn("Unable to save the viewed artist works",error);
   });
 }
 
@@ -2545,6 +2595,7 @@ function preparePageNavigation({record=true,keepNormalRead=false}={}) {
   const recordOutgoing=record && pageHistory?.canRecord();
   cancelGalleryPopularity();
   navigationRevision++;
+  $("#searchFailure").replaceChildren();
   pageHistory?.cancelRestore();
   pageRefreshController?.abort();pageRefreshController=null;pageRefreshPending=false;
   if(searchPending){
@@ -2686,7 +2737,7 @@ async function restorePageState(state,scope) {
     activeTagQuery=source.query;activeSearchContext={...source.context};activeSearchFilters={...source.filters};
     if(!await scope.read(signal=>loadGalleryPopularity(source.page,{signal,restoring:true})))throw new Error("原排序页面读取失败，请重新准备人气排序");
   }else if(source.items===null && state.baseView==="gallery" && !source.intent){
-    if(!await scope.read(()=>search(source.query,source.page,source.filters,source.snapshot,{preferenceKind:source.preferenceKind})))throw new Error("原页面缓存已清理，读取失败，请重试");
+    if(!await scope.read(()=>search(source.query,source.page,source.filters,source.snapshot,{preferenceKind:source.preferenceKind,recordRecent:false})))throw new Error("原页面缓存已清理，读取失败，请重试");
   }else{
     restoreResultPage(source);
   }
@@ -2773,9 +2824,7 @@ async function refreshCurrentPage() {
     if(surface===$("#accountPage"))await accountView.refresh();
     else if(surface===$("#historyPage"))await historyView.refresh();
     else if(surface===window && (resultSelectionEnabled || (state.artist && state.artist.kind!=="none"))){
-      const refreshed=await search(activeTagQuery,currentPage,activeSearchFilters,null,{manualRefresh:true,preferenceKind:galleryPreferenceKind});
-      current();
-      if(!refreshed){await pageHistory.restore(state);throw new Error("未能读取新内容，原页面已保留");}
+      await search(activeTagQuery,currentPage,activeSearchFilters,null,{manualRefresh:true,preferenceKind:galleryPreferenceKind});
     }else if(surface===$("#basketPage") || !normalDetail.item || document.body.classList.contains("batch-mode")){
       const failed=new Set([...$("#batchCollections").querySelectorAll("img.image-unavailable[data-basket-artwork]")].map(image=>image.dataset.basketArtwork));
       await workspaceSync.settled();current();await workspaceSync.restore();current();
@@ -4113,11 +4162,13 @@ $("#searchForm").onsubmit = async (event) => {
   event.preventDefault();preparePageNavigation();accountOrigin=false;
   const revision=navigationRevision,tag=$("#tag").value,filters=readSearchFilters(),kind=searchKind.value;
   scrollToResults();
+  try{await browseOptions.ready();}
+  catch(error){console.warn("Search will use the last available browsing preferences",error);}
+  if(revision!==navigationRevision)return;
   try{
-    await browseOptions.ready();if(revision!==navigationRevision)return;
     galleryLinkedEntry=false;galleryIntent=null;
     await search(tag,1,filters,null,{returnTarget:null,order:browseOptions.order(kind),preferenceKind:kind});
-  }catch(error){if(revision===navigationRevision)announceToast(error.message);}
+  }catch(error){if(revision===navigationRevision)showSearchFailure("搜索未完成",error,()=>$("#searchForm").requestSubmit());}
 };
 
 cancelSearchButton.onclick = () => {

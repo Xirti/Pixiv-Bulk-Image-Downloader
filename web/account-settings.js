@@ -5,9 +5,9 @@ globalThis.accountSyncPresentation = function (value,progress,loaded,clearing=fa
   const rows=[progress.bookmark,progress.follow].filter(Boolean);
   const busy=Boolean(progress.manual || progress.preparing || progress.requesting || !progress.error && value.autoSync && rows.some(row=>row.running));
   const complete=rows.length===2 && rows.every(row=>row.completed);
-  const status=busy?"正在同步…":progress.error?`同步失败：${progress.error}`:complete?
+  const status=busy?"正在同步…":progress.error?`同步失败：${progress.error}`:progress.preparationNotice || (complete?
     `最近同步：${new Date(Math.min(...rows.map(row=>row.completed))*1000).toLocaleString()}`:
-    value.autoSync?"等待首次同步":"自动同步已关闭";
+    value.autoSync?"等待首次同步":"自动同步已关闭");
   return {busy,disabled:!loaded || clearing || Boolean(progress.clearing) || busy,status};
 };
 

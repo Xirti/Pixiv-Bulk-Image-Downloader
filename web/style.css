@@ -86,8 +86,13 @@ body.batch-mode #detail .batch-only{display:block}
 .floating-chip.is-visible{opacity:1;visibility:visible;transform:none}
 .task-dock{max-width:min(360px,80vw);display:grid;gap:3px;border:1px solid var(--line);border-radius:12px;padding:11px 14px;background:var(--surface-2);box-shadow:inset 0 1px 0 transparent,0 10px 30px rgba(0,0,0,.28);opacity:0;visibility:hidden;transform:translateY(10px);transition:opacity .25s ease,transform .25s ease,visibility .25s}
 .task-dock.is-visible{opacity:1;visibility:visible;transform:none}
-.task-dock b{font-size:12px;letter-spacing:1px;color:var(--moon)}
+.task-dock b{display:block;font-size:12px;letter-spacing:1px;color:var(--moon)}
 .task-dock span{font-size:12px;color:var(--ink)}
+.workspace-notice,.task-dock{position:relative;padding-inline-end:42px}
+.floating-stack .notice-dismiss{position:absolute;right:6px;top:5px;min-width:28px;min-height:28px;padding:0;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--muted);font-size:18px;line-height:1}
+.floating-stack .notice-dismiss:hover,.floating-stack .notice-dismiss:focus-visible{background:var(--hover);color:var(--ink)}
+.recent-search-save{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--muted)}
+.recent-search-save:has(span:empty){display:none}
 .batch-actions{display:flex!important;grid-template-columns:none!important;gap:9px}.batch-actions button,#batchDownload{min-height:44px;padding:11px 16px;font-weight:800;white-space:nowrap;border:1px solid var(--line);background:var(--action-fill);color:var(--on-accent)}
 .batch-detail-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,160px));justify-content:start;gap:10px}
 #batchCollections[hidden]{display:none}

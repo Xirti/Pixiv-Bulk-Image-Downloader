@@ -63,7 +63,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     popup.style.left=`${Math.max(8,Math.min(innerWidth-box.width-8,rect.right-box.width))}px`;
     popup.style.top=`${Math.max(8,Math.min(innerHeight-box.height-8,rect.bottom+8))}px`;
   }
-  function notifySettings(){preferencesChanged({...prefs},{...structuredClone(syncState),error:syncError || [...scanFailures.values()][0]?.message || auxiliaryError,manual:manual.size>0,preparing:auxiliaryBusy,prepared:auxiliaryCompleted,clearing,requesting:syncBusy},prefsLoaded);}
+  function notifySettings(){preferencesChanged({...prefs},{...structuredClone(syncState),error:syncError || [...scanFailures.values()][0]?.message,preparationNotice:auxiliaryError,manual:manual.size>0,preparing:auxiliaryBusy,prepared:auxiliaryCompleted,clearing,requesting:syncBusy},prefsLoaded);}
   async function prepareAccountData(options){
     const revision=epoch,generation=session().generation;
     if(auxiliaryBusy || clearing || !session().logged)return;
@@ -72,7 +72,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       await prepareAccount(options);
       if(!sameEpoch(revision,generation))return;
       accountPrepared=true;auxiliaryCompleted=Date.now()/1000;auxiliaryError="";
-    }catch(error){if(sameEpoch(revision,generation)){accountPrepared=true;auxiliaryError=`账号页面准备未完成：${error.message}`;auxiliaryCompleted=Date.now()/1000;}}
+    }catch(error){if(sameEpoch(revision,generation)){
+      console.warn("Account page preparation failed",error);
+      accountPrepared=true;auxiliaryError="部分账号页面未能预加载，打开时会重新读取。";auxiliaryCompleted=Date.now()/1000;
+    }}
     finally{if(sameEpoch(revision,generation)){auxiliaryBusy=false;notifySettings();}}
   }
 
@@ -327,7 +330,7 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
     if(prefs.autoFollowing && Date.now()>=autoNotBefore && !updatesBusy && Date.now()-lastUpdateCheck>=(updatesRemaining?30000:Number(prefs.syncMinutes)*60000)){
       updatesBusy=true;lastUpdateCheck=Date.now();const revision=epoch,generation=session().generation;
       void checkUpdates({continuing:updatesRemaining}).then(result=>{if(sameEpoch(revision,generation))updatesRemaining=Boolean(result.hasMore);})
-        .catch(error=>{if(sameEpoch(revision,generation))report(`新作检查未完成：${error.message}`);})
+        .catch(error=>{if(sameEpoch(revision,generation))console.warn("Followed author update check failed",error);})
         .finally(()=>{if(sameEpoch(revision,generation))updatesBusy=false;});
     }
     if(syncBusy || !manual.size && Date.now()-lastSyncAttempt<1000)return;
@@ -348,7 +351,10 @@ globalThis.createCloudControls = function ({request,session,login,report,changed
       restart.delete(due);scanFailures.delete(due);syncState[due]=data.sync;syncVersion++;syncError="";
       const preparePage=prefs.autoSync || manual.has(due);
       if(!data.sync.running)manual.delete(due);
-      if(preparePage && data.sync.page)await prepareAccount({page:data.sync.page,completed:data.sync.running?null:data.sync.pageOffsets});
+      if(preparePage && data.sync.page){
+        try{await prepareAccount({page:data.sync.page,completed:data.sync.running?null:data.sync.pageOffsets});}
+        catch(error){if(sameEpoch(revision,generation))console.warn("Account page cache could not adopt a synchronized page",error);}
+      }
       if(!sameEpoch(revision,generation))return;
       await hydrate(true);notifySettings();
     }catch(error){

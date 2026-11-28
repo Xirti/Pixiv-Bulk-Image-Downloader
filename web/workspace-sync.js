@@ -21,7 +21,7 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
   let tail = Promise.resolve();
   let observed = new Map(), pageChecks = new Map();
   const edits = new Map(), controllers = new Set();
-  const notify = () => onStatus({ready, loading, needsRestore, scope, revision, error: error || recentError});
+  const notify = () => onStatus({ready, loading, needsRestore, scope, revision, error: error || recentError, basketError:error, recentError});
 
   async function send(url, options = {}) {
     const controller = new AbortController();
@@ -299,6 +299,12 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
     });
   }
 
+  function retry() {
+    const basket = recovery || !initialized ? restore() : scheduleSave();
+    if (!recentError && !pendingRecent.length) return basket;
+    return enqueue(async token => { if (ready) await flushRecent(token); }, true).catch(()=>{});
+  }
+
   return {
     get ready() { return ready; }, get loading() { return loading; }, get scope() { return scope; },
     get needsRestore() { return needsRestore; },
@@ -317,23 +323,27 @@ globalThis.createWorkspaceSync = function ({request, readBasket, applyWorkspace,
         if (await load(token) && edits.size) await save(token);
       });
     },
-    restore, changeRecent,
-    retry() {
-      const basket = recovery || !initialized ? restore() : scheduleSave();
-      if (!recentError && !pendingRecent.length) return basket;
-      return enqueue(async token => { if (ready) await flushRecent(token); }, true).catch(()=>{});
-    },
+    restore, changeRecent, retry,
     reset,
     settled() { return tail; },
-    async waitForSave() {
+    async waitForSave({retryOnce=false,requireRead=true}={}) {
       let current;
+      let retried=false;
       do {
         current = tail;
         await current;
+        if (current===tail && retryOnce && !retried && ((edits.size && !error?.basketCapacity) || pendingRecent.length)) {
+          retried=true;
+          await retry();
+        }
       } while (current !== tail);
-      if (recentError || pendingRecent.length) throw recentError || new Error("最近搜索尚未保存");
-      if (edits.size || pendingBasket !== null || error) {
-        throw error || new Error("本机记录尚未保存，请重试保存");
+      const unsaved=[];
+      if (recentError || pendingRecent.length) unsaved.push("最近搜索");
+      if (edits.size || pendingBasket !== null) unsaved.push("采集篮");
+      if (unsaved.length || requireRead && error) {
+        // Strict callers also use the original cause to report or test a failed save.
+        if (requireRead) throw error || recentError || new Error("本机记录尚未保存");
+        throw new Error(`未能确认${unsaved.join("和")}已保存到本机。`, {cause:error || recentError});
       }
     },
   };

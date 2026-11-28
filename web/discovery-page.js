@@ -1,7 +1,7 @@
 "use strict";
 
 globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,signedIn,generation,changed,openArtwork,openArtist,choose,selected,canChoose,installImages,attachUgoira,report,autoPrepare,browse,viewed=()=>{},backgroundAllowed=()=>true}) {
-  const grid=root.querySelector('[data-discovery-grid]'),message=root.querySelector('[data-discovery-message]');
+  const grid=root.querySelector('[data-discovery-grid]'),message=root.querySelector('[data-discovery-message]'),retryButton=root.querySelector('[data-discovery-retry]');
   const next=root.querySelector('[data-discovery-next]'),previous=root.querySelector('[data-discovery-prev]');
   const update=root.querySelector('[data-discovery-update]');
   const cache=new Map(),positions=new Map(),staged=new Map(),nextReads=new Map();
@@ -14,12 +14,15 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   let background=new AbortController(),preparing=null,warming=null,networkQueued=false,sessionGeneration=null,preferences=null;
   const reads=createPageReads(request);
   let restoreTop=null,sorting=false,sortProgress="";
-  let settingsRetry=null,updateController=null;
+  let settingsRetry=null,updateController=null,retryLoad=null;
   let viewedData=null,followingVersion=0;
   function markViewed(){
     if(!active || document.hidden || pending || !signedIn() || sessionGeneration!==generation() || state.kind!=='following' || !data?.items.length || viewedData===data)return;
     const shown=data;viewedData=shown;
-    void Promise.resolve(viewed(shown.items)).catch(()=>{if(viewedData===shown)viewedData=null;report('新作查看状态暂未保存');});
+    void Promise.resolve(viewed(shown.items)).catch(problem=>{
+      if(viewedData===shown)viewedData=null;
+      console.warn('Unable to save the viewed artworks',problem);
+    });
   }
   const sortControl=root.querySelector("[data-discovery-sort-control]");
   sortControl.innerHTML=popularitySortMarkup("data-discovery-sort");
@@ -40,9 +43,15 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     let destination=target,parameters=extra;
     for(let attempt=0;attempt<2;attempt++){
       const version=followingVersion;
-      const result=await reads.read(query(destination,parameters),{signal});
+      const url=query(destination,parameters);
+      let result;
+      try{result=await reads.read(url,{signal});}
+      catch(problem){
+        if(signal?.aborted || problem.errorKind!=='cache_changed')throw problem;
+        result=await reads.read(url,{signal});
+      }
       signal?.throwIfAborted();
-      if(result.cached===false && attempt)throw new Error('关注新作缓存已清理，请刷新');
+      if(result.cached===false && attempt)throw Object.assign(new Error('关注新作批次已更新'),{errorKind:'cache_miss'});
       if(target.kind!=='following' || version===followingVersion || result.cached===false)return accept(result);
       // Re-filter the same snapshot against the newly synchronized relations.
       destination={...target,batch:result.batch,offset:result.offset};
@@ -133,6 +142,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     root.querySelector('[data-discovery-mode]').value=state.mode;root.querySelector('[data-discovery-mode]').hidden=state.kind==='ranking';
     message.textContent=error || (pending?'正在加载…':!signedIn()?'登录 Pixiv 后查看发现':'');
     message.classList.toggle('is-error',Boolean(error));
+    retryButton.hidden=!retryLoad || pending || sorting;
     const edition=root.querySelector('[data-discovery-edition]');
     const date=data?.edition;
     edition.textContent=state.kind==='ranking' && date?`${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`:'';
@@ -175,7 +185,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     controller?.abort();controller=new AbortController();
     const signal=controller.signal,version=++revision,auth=generation(),key=sourceKey(destination);
     if(refresh && !checkpoint)beginSourceRefresh(key);
-    const followAtStart=followingVersion;error='';
+    const followAtStart=followingVersion;error='';retryLoad=null;
     const local=cache.get(pageKey(destination));
     if(local && !refresh){
       state=destination;data=local;pending=false;
@@ -201,25 +211,33 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       if(checkpoint && staleHistory(problem))refreshRequired.set(key,'');
       if(restoreExpired && staleHistory(problem))return rebuildHistory(destination,problem.errorKind==='cache_cleared');
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
-      if(pageTarget && !staleHistory(problem)){
-        error=`${problem.message || '发现读取失败'} · 可再次翻页重试`;
+      if(pageTarget && staleHistory(problem)){
+        const ready=staged.get(key);
+        if(!ready)return load({refresh:true});
+        state={...structuredClone(ready.state),choice:destination.choice,waiting:false};
+        data=ready.data;staged.delete(key);refreshRequired.delete(key);restoreTop=0;
+        remember(0);return;
+      }
+      if(pageTarget){
+        error=problem.message || '这一页暂未读取';
+        retryLoad=()=>load({pageTarget});
         return;
       }
-      error=problem.message || '发现读取失败，请右键刷新重试';
+      error=problem.message || '发现暂未读取';
       state.waiting=true;
+      retryLoad=()=>startLoad({refresh:refresh && !refreshRequired.has(key)});
     }finally{if(version===revision && !signal.aborted){pending=false;render();if(!error)prepareNext();}}
   }
   function prepareNext(){
     if(state.waiting || state.order==='popular' || !active || document.hidden || !autoPrepare() || !data || data.nextOffset==null)return;
     const target={...state,offset:data.nextOffset},key=pageKey(target),signal=background.signal,auth=generation();
-    const visit=revision;
     if(cache.has(key) || nextReads.has(key))return;
     const reading=readPage(target,{background:'1'},{signal,async accept(result){
       if(auth!==generation() || nextReads.get(key)!==reading)return;
       savePage(target,result);await previews.prepare(key,result.items,signal,{warm:'account'});
     }}).catch(problem=>{
-      if(!signal.aborted && auth===generation() && nextReads.get(key)===reading && ownsIdleView(visit) && !document.hidden)
-        report(`下一页暂未准备好：${problem.message}`);
+      if(!signal.aborted && auth===generation() && nextReads.get(key)===reading)
+        console.warn('Discovery next page prefetch failed',problem);
     }).finally(()=>{if(nextReads.get(key)===reading)nextReads.delete(key);});
     nextReads.set(key,reading);
   }
@@ -227,7 +245,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(sessionGeneration!==generation()){clear();sessionGeneration=generation();}
     const {kind,scope,mode,rank}=options.restore || {...state,...options};
     const target={kind,scope:kind==='following'?scope:'all',mode:kind==='ranking'?'safe':mode,rank:kind==='ranking'?rank:'day'};
-    settingsRetry=null;
+    settingsRetry=null;retryLoad=null;
     remember();controller?.abort();const visit=++revision;pending=true;sorting=false;active=true;
     try {
       await browse.ready();
@@ -235,7 +253,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       if(visit!==revision)return;
       settingsRetry=options.restore?options:{...target,refresh:options.refresh};
       if(sourceKey(state)!==sourceKey(target)){state={...initial(),...target,waiting:true};data=null;restoreTop=0;}
-      pending=false;error=problem.message || '发现设置读取失败，请重试';render();return;
+      pending=false;error=problem.message || '发现设置暂未读取';retryLoad=()=>open(settingsRetry,true);render();return;
     }
     if(visit!==revision)return;
     pending=false;
@@ -256,7 +274,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     void prepare({network:true});
   }
   function cancelLoad(){
-    controller?.abort();revision++;pending=false;sorting=false;
+    controller?.abort();revision++;pending=false;sorting=false;retryLoad=null;
     if(updateController && updateController===controller){
       error='加载已中断，可再次应用更新';render();return;
     }
@@ -271,7 +289,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     const key=sourceKey(state);
     const checkpoint=refresh?'':refreshRequired.get(key) || '';
     refresh ||= refreshRequired.has(key);
-    state.waiting=false;error='';startedSources.add(key);pausedSources.delete(key);
+    state.waiting=false;error='';retryLoad=null;startedSources.add(key);pausedSources.delete(key);
     const choice=state.choice || 'default';
     if(choice==='default' || state.kind==='following'){
       if(!refresh && data && state.order==='popular'){await applySort('default');return;}
@@ -299,7 +317,8 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
       if(!refresh && destination.batch && staleHistory(problem)){
         pending=false;return startLoad({refresh:true,restoring});
       }
-      error=problem.message || '元数据准备失败，请重试';state.waiting=true;
+      error=problem.message || '作品元数据暂未读取';state.waiting=true;
+      retryLoad=()=>startLoad();
     }
     finally{if(version===revision && !signal.aborted){pending=false;render();}}
   }
@@ -347,7 +366,13 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
         if(same)continue;
         savePage(target,result);
         if(replacePageReferences(page,result) && ownsIdleView(viewRevision))render();
-      }catch(problem){if(signal.aborted || auth!==generation())return;report(`关注新作状态核对失败：${problem.message}`);return;}
+      }catch(problem){
+        if(signal.aborted || auth!==generation())return;
+        console.warn('Unable to reconcile cached following works',problem);
+        if(sourceVersion(descriptor)===version && cache.get(key)===page){
+          cache.delete(key);reload=replacePageReferences(page,null) || reload;
+        }
+      }
     }
     if(reload && ownsIdleView(viewRevision) && state.kind==='following')await load({refresh:true});
   }
@@ -391,8 +416,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
             const imageKey=pageKey({...target,batch:result.batch});
             const warm=waitForMediaDecode(imageSignal=>previews.prepare(imageKey,result.items,imageSignal,{warm:'account'}),signal)
               .catch(problem=>{
-                if(!signal.aborted && ownsIdleView(viewRevision) && sourceKey(state)===key && !document.hidden)
-                  report(`预览暂未准备好：${problem.message}`);
+                if(!signal.aborted)console.warn('Discovery thumbnail prefetch failed',problem);
               }).finally(()=>{if(warming===warm)warming=null;});
             warming=warm;
           }
@@ -401,7 +425,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
           if(version!==sourceVersion(key))continue;
           if(problem.errorKind==='filtered' && problem.batch)backgroundBatches.set(key,problem.batch);
           else if(staleHistory(problem))backgroundBatches.delete(key);
-          if(ownsIdleView(viewRevision) && sourceKey(state)===key && !error){error=problem.message;render();}
+          console.warn('Discovery background preparation failed',problem);
         }
       }
       if(signal.aborted || auth!==generation() || !active)return;
@@ -435,7 +459,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     controller?.abort();const operation=controller=new AbortController();
     const signal=operation.signal,version=++revision,auth=generation(),destination=structuredClone(candidate?.state || state);
     if(candidate)updateController=operation;
-    sorting=true;sortProgress='正在准备作品元数据…';error='';render();
+    sorting=true;sortProgress='正在准备作品元数据…';error='';retryLoad=null;render();
     const parameters={kind:destination.kind,batch:destination.batch,mode:destination.mode,
       index:(candidate?candidate.index:destination.popularityIndex) || '',page:String(page)};
     const progress=value=>{
@@ -467,14 +491,16 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     }catch(problem){if(version===revision && !signal.aborted){
       if(restoreExpired && staleHistory(problem))return rebuildHistory(destination,problem.errorKind==='cache_cleared');
       if(problem.errorKind==='cache_cleared')return retireClearedView(destination,problem.message);
-      if(recoverSource && staleHistory(problem)){sorting=false;return startLoad({refresh:true});}
+      if((recoverSource || pagination) && staleHistory(problem)){sorting=false;return startLoad({refresh:true});}
       if(candidate){
         if(staleHistory(problem))candidate.index='';
-        error=`${problem.message || '更新排序失败'} · 可再次应用更新`;
+        error=problem.message || '新内容暂未完成排序';
+        retryLoad=()=>loadPopularity(1,{candidate});
         return;
       }
-      if(pagination && !staleHistory(problem)){
-        error=`${problem.message || '排序读取失败'} · 可再次翻页重试`;
+      if(pagination){
+        error=problem.message || '排序页暂未读取';
+        retryLoad=()=>loadPopularity(page,{pagination:true});
         return;
       }
       error=`${problem.message} · 可重新开启排序重试`;
@@ -488,7 +514,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
           data=normal.data;
         }
       }
-      state.waiting=true;
+      state.waiting=true;retryLoad=()=>startLoad();
     }}
     finally{
       if(updateController===operation)updateController=null;
@@ -502,11 +528,11 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(order==='default'){
       const normal=staged.get(key) || positions.get(key);
       if(!normal)return;
-      state={...structuredClone(normal.state),choice:order,waiting:false};data=normal.data;restoreTop=top;staged.delete(key);error='';render();return;
+      state={...structuredClone(normal.state),choice:order,waiting:false};data=normal.data;restoreTop=top;staged.delete(key);error='';retryLoad=null;render();return;
     }
     const saved=popularViews.get(key);
     if(reusableSort(saved,state)){
-      state={...structuredClone(saved.state),choice:order,waiting:false};data=saved.data;restoreTop=top;error='';render();
+      state={...structuredClone(saved.state),choice:order,waiting:false};data=saved.data;restoreTop=top;error='';retryLoad=null;render();
       if(data.popularityIndex!==state.popularityIndex)await loadPopularity(state.page,{recoverSource:true});
       return;
     }
@@ -517,7 +543,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(!allowed() || state.kind==='following')return;
     if(pending || sorting)cancelLoad();
     state.choice=order;browse.choose(state.kind,order);
-    if(manual()){state.waiting=true;error='';render();return;}
+    if(manual()){state.waiting=true;error='';retryLoad=null;render();return;}
     await startLoad();
   }
   async function refresh(){
@@ -537,7 +563,7 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
     if(active)render();
     if(loaded)void prepare({network:true});
   }
-  const staleHistory=problem=>['cache_miss','cache_cleared','source_changed','ranking_changed'].includes(problem.errorKind);
+  const staleHistory=problem=>['cache_miss','cache_cleared','source_changed','ranking_changed','page_missing'].includes(problem.errorKind);
   function rebuildHistory(destination,cleared){
     if(cleared)clear(false);
     else{
@@ -553,17 +579,18 @@ globalThis.createDiscoveryPage = function ({root,request,escape:esc,allowed,sign
   function retireClearedView(destination,message){
     clear(false);
     state={...destination,offset:0,page:1,trail:[],batch:'',order:'default',popularityIndex:'',waiting:true};
-    error=message;
+    error=message;retryLoad=()=>startLoad({refresh:true});
     render();
   }
   function clear(redraw=true){
-    controller?.abort();revision++;settingsRetry=null;void stopBackground();reads.clear();interaction.clear();previews.clear();cache.clear();positions.clear();staged.clear();latest.clear();attempts.clear();sourceVersions.clear();followingDirty.clear();
+    controller?.abort();revision++;settingsRetry=null;retryLoad=null;void stopBackground();reads.clear();interaction.clear();previews.clear();cache.clear();positions.clear();staged.clear();latest.clear();attempts.clear();sourceVersions.clear();followingDirty.clear();
     popularViews.clear();recommendationSizes.clear();startedSources.clear();pausedSources.clear();refreshRequired.clear();backgroundBatches.clear();viewedData=null;sorting=false;state=initial();data=null;rendered=undefined;pending=false;error='';restoreTop=0;grid.replaceChildren();if(active && redraw)render();
   }
   root.querySelectorAll('[data-discovery-tab]').forEach(button=>button.onclick=()=>void open({kind:button.dataset.discoveryTab}));
   root.querySelector('[data-discovery-scope]').onchange=e=>void open({scope:e.target.value});
   root.querySelectorAll('[data-discovery-rank]').forEach(button=>button.onclick=()=>void open({rank:button.dataset.discoveryRank}));
   root.querySelector('[data-discovery-mode]').onchange=e=>void open({mode:e.target.value});
+  retryButton.onclick=()=>{if(!retryButton.hidden && allowed())void retryLoad?.();};
   update.onclick=()=>{
     if(pending || sorting || settingsRetry)return;
     const fresh=staged.get(sourceKey(state));if(!fresh)return;

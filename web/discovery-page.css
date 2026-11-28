@@ -17,6 +17,9 @@
 [data-discovery-update][hidden]{display:none}
 [data-discovery-message]{min-height:20px;color:var(--muted);font-size:12px;margin:0 0 12px}
 [data-discovery-message].is-error{color:var(--danger)}
+.list-feedback{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.list-feedback button{min-height:26px;padding:3px 10px;font-size:12px}
+.list-feedback button[hidden]{display:none}
 [data-discovery-grid]{grid-template-columns:repeat(5,minmax(0,1fr))}
 .discovery-pagination{display:flex;justify-content:center;align-items:center;gap:18px;padding:28px 0 4px;color:var(--muted);font-size:12px}
 .discovery-pagination button{padding:6px 13px;min-height:32px;border-radius:8px;font-size:12px}

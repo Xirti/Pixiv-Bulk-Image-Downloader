@@ -24,6 +24,8 @@ DEFAULT_MACHINE = {"saveRoot": "", "createFolder": True, "previewLayout":"adapti
 DEFAULT_ACCOUNT = {"bookmarkDefault": "ask", "followDefault": "ask", "bookmarkLast": "private",
                    "followLast": "private", "autoSync": True, "syncMinutes": "10",
                    "autoRanking": True, "autoFollowing": True, "autoRecommended": True,"updateDots":True}
+_APPEARANCE_SCOPE = "machine:appearance-v224"
+_APPEARANCE_KEYS = frozenset({"themeMode", "downloadNaming"})
 
 
 def validate_preferences(raw):
@@ -182,12 +184,29 @@ class CloudState:
             yield db
 
     @staticmethod
-    def _preferences_snapshot(db, scope):
-        values = {}
-        for key in (("machine",) if scope is None else ("machine", scope)):
-            row = db.execute("SELECT payload FROM preferences WHERE scope=?", (key,)).fetchone()
-            if row:
-                values.update(validate_preferences(json.loads(row[0])))
+    def _preference_row(db, scope):
+        row = db.execute("SELECT payload FROM preferences WHERE scope=?", (scope,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    @staticmethod
+    def _store_preference_row(db, scope, value):
+        db.execute("INSERT OR REPLACE INTO preferences VALUES(?,?)", (scope, json.dumps(value)))
+
+    @classmethod
+    def _move_appearance_preferences(cls, db):
+        machine = cls._preference_row(db, "machine")
+        appearance = {key: machine.pop(key) for key in _APPEARANCE_KEYS if key in machine}
+        if appearance:
+            cls._store_preference_row(db, _APPEARANCE_SCOPE, {**cls._preference_row(db, _APPEARANCE_SCOPE), **appearance})
+            cls._store_preference_row(db, "machine", machine)
+
+    @classmethod
+    def _preferences_snapshot(cls, db, scope, machine):
+        """Combine common and newer settings without exposing the newer fields to older MOKU."""
+        values = validate_preferences(machine)
+        values.update(validate_preferences(cls._preference_row(db, _APPEARANCE_SCOPE)))
+        if scope is not None:
+            values.update(validate_preferences(cls._preference_row(db, scope)))
         row = db.execute("SELECT version FROM preference_revision WHERE singleton=1").fetchone()
         return {"settings": {**DEFAULT_MACHINE, **DEFAULT_ACCOUNT, **values},
                 "settingsRevision": row[0] if row else 0}
@@ -195,21 +214,26 @@ class CloudState:
     def preferences_snapshot(self, scope):
         with self.lock, closing(self._connect()) as db:
             db.execute("BEGIN")
-            return self._preferences_snapshot(db, scope)
+            machine = self._preference_row(db, "machine")
+            if not (machine.keys() & _APPEARANCE_KEYS):
+                return self._preferences_snapshot(db, scope, machine)
+        with self._write() as db:
+            # Re-read under the writer lock. A concurrent process may have updated either row.
+            self._move_appearance_preferences(db)
+            return self._preferences_snapshot(db, scope, self._preference_row(db, "machine"))
 
     def preferences(self, scope):
         return self.preferences_snapshot(scope)["settings"]
 
-    @staticmethod
-    def _save_preferences(db, scope, changes):
-        for key, fields in (("machine", DEFAULT_MACHINE), (scope, DEFAULT_ACCOUNT)):
+    @classmethod
+    def _save_preferences(cls, db, scope, changes):
+        cls._move_appearance_preferences(db)
+        for key, fields in (("machine", DEFAULT_MACHINE.keys() - _APPEARANCE_KEYS),
+                            (_APPEARANCE_SCOPE, _APPEARANCE_KEYS), (scope, DEFAULT_ACCOUNT)):
             patch = {k: v for k, v in changes.items() if k in fields}
             if not patch:
                 continue
-            row = db.execute("SELECT payload FROM preferences WHERE scope=?", (key,)).fetchone()
-            value = json.loads(row[0]) if row else {}
-            value.update(patch)
-            db.execute("INSERT OR REPLACE INTO preferences VALUES(?,?)", (key, json.dumps(value)))
+            cls._store_preference_row(db, key, {**cls._preference_row(db, key), **patch})
 
     def save_preferences(self, scope, changes):
         return self.save_preferences_snapshot(scope, changes)["settings"]
@@ -218,7 +242,7 @@ class CloudState:
         # Caller has validated the external patch once.
         with self._write() as db:
             self._save_preferences(db, scope, changes)
-            return self._preferences_snapshot(db, scope)
+            return self._preferences_snapshot(db, scope, self._preference_row(db, "machine"))
 
     @staticmethod
     def _decode(row, revision):
@@ -372,7 +396,7 @@ class CloudState:
                 raise ValueError("云端操作回执无法确认，请刷新核对")
             if preferences is not None:
                 self._save_preferences(db, *preferences)
-                return self._preferences_snapshot(db, preferences[0])
+                return self._preferences_snapshot(db, preferences[0], self._preference_row(db, "machine"))
 
     def sync_status(self, owner, method):
         with self.lock, closing(self._connect()) as db:

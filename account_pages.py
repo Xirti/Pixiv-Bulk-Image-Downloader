@@ -1289,11 +1289,13 @@ class AccountPages:
         if account is not None:
             account.transport.close()
 
-    def _cached(self, key, load, refresh=False, *, clear_revision=None, include_page_revision=False):
+    def _cached(self, key, load, refresh=False, *, clear_revision=None, include_page_revision=False,
+                page_revision=None):
         if len(key) > 2 and clear_revision is None:
             clear_revision = self.saved_cache.clear_revision(key[2])
         if ACCOUNT_CACHE_ONLY.get():
-            return self._load_cached(key, load, refresh, clear_revision=clear_revision, include_page_revision=include_page_revision)
+            return self._load_cached(key, load, refresh, clear_revision=clear_revision,
+                                     include_page_revision=include_page_revision, page_revision=page_revision)
         if not refresh:
             token=ACCOUNT_CACHE_ONLY.set(True)
             try:
@@ -1307,18 +1309,21 @@ class AccountPages:
         try:
             with checked_lock(pending[0],lambda:self.check(key[0])):
                 try:
-                    return self._load_cached(key, load, refresh, clear_revision=clear_revision, include_page_revision=include_page_revision)
+                    return self._load_cached(key, load, refresh, clear_revision=clear_revision,
+                                             include_page_revision=include_page_revision, page_revision=page_revision)
                 except AccountError as error:
                     if error.kind!="cache_changed":raise
                     # A write overlapped this first read, so no repaired page
                     # exists yet. Replace that obsolete response once.
-                    return self._load_cached(key, load, clear_revision=clear_revision, include_page_revision=include_page_revision)
+                    return self._load_cached(key, load, clear_revision=clear_revision,
+                                             include_page_revision=include_page_revision, page_revision=page_revision)
         finally:
             with self._lock:
                 pending[1]-=1
                 if not pending[1] and self._loads.get(key) is pending:del self._loads[key]
 
-    def _load_cached(self, key, load, refresh=False, *, clear_revision, include_page_revision=False):
+    def _load_cached(self, key, load, refresh=False, *, clear_revision, include_page_revision=False,
+                     page_revision=None):
         persistent = len(key) > 2
         method = self.method()
         durable_key = ["data", *key[1:]] if persistent else None
@@ -1360,6 +1365,8 @@ class AccountPages:
         revision = self.saved_cache.display_revision(key[2], method) if persistent and key[1] in {"bookmarks", "works"} else None
         if persistent:
             stamp = self.saved_cache.page_version(key[2], method, durable_key, clear_revision=clear_revision)
+            if page_revision is not None and page_revision != (json.loads(stamp[0]) if stamp[0] is not None else "legacy"):
+                raise AccountError("page_changed", "账号列表已在另一窗口更新，请从第一页继续")
         token = ACCOUNT_REQUEST_CHECK.set(check_read)
         try:
             result = load()
@@ -1761,7 +1768,8 @@ class AccountPages:
         if clear_revision is None:
             clear_revision = self.saved_cache.clear_revision(owner)
         if kind == "following":
-            result = self._cached((generation, kind, owner, scope, offset), lambda: self._app_people(owner,scope,offset,generation) if self.method()=="app" else self._people(owner, scope, offset), refresh, clear_revision=clear_revision, include_page_revision=True)
+            result = self._cached((generation, kind, owner, scope, offset), lambda: self._app_people(owner,scope,offset,generation) if self.method()=="app" else self._people(owner, scope, offset), refresh,
+                                  clear_revision=clear_revision, include_page_revision=True, page_revision=page_revision if offset else None)
             markers = self.visits.status(owner, scope if self.method() == "app" else None,
                                        authors=[person["id"] for person in result["people"]]) if check_updates else {}
             for person in result["people"]:
@@ -1771,7 +1779,8 @@ class AccountPages:
                 raise AccountError("capability","网页登录暂不提供粉丝列表，可在资料中选择 App 授权。")
             result = self._cached((generation, kind, owner, offset), lambda: self._followers(owner, offset), refresh, clear_revision=clear_revision)
         elif kind == "bookmarks":
-            result = self._cached((generation, kind, owner, scope, offset, tag, mode), lambda: self._app_bookmarks(owner,scope,offset,tag,mode,generation) if self.method()=="app" else self._bookmarks(owner, scope, offset, tag, mode), refresh, clear_revision=clear_revision, include_page_revision=True)
+            result = self._cached((generation, kind, owner, scope, offset, tag, mode), lambda: self._app_bookmarks(owner,scope,offset,tag,mode,generation) if self.method()=="app" else self._bookmarks(owner, scope, offset, tag, mode), refresh,
+                                  clear_revision=clear_revision, include_page_revision=True, page_revision=page_revision if offset else None)
         elif kind == "tags":
             result = self._cached((generation, kind, owner), lambda: self._app_tags() if self.method()=="app" else self._tags(owner), refresh, clear_revision=clear_revision)
         elif kind == "updates":
